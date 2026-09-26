@@ -2,7 +2,12 @@
 
 Obeys Astra Architecture Blueprint 2026-09-25:
 - Compiled immutable RuntimePlan with explicit source tracking;
+- plan_hash captures the entire effective configuration content
+  (compilation time excluded);
+- Distinguishes runtime_generation, fencing_epoch, declared_schema_compatibility,
+  and observed_database_revision;
 - Secrets stored by reference only; never enumerable in hash or payload;
+- Deep immutability enforced on mappings;
 - Prohibits runtime execution paths from reading dynamic environment variables;
 - Pinned hashes for strategy, execution policy, risk policy, and deployment.
 """
@@ -11,9 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_engine import EffectivePolicy
@@ -37,8 +44,13 @@ class RuntimePlan:
     deployment_hash: str
     schema_compatibility_version: str
     effective_policy: EffectivePolicy
-    options_source_chain: dict[str, str] = field(default_factory=dict)
-    secret_references: dict[str, str] = field(default_factory=dict)
+    plan_hash: str = ""
+    runtime_generation: str = ""
+    fencing_epoch: int = 1
+    declared_schema_compatibility: str = ""
+    observed_database_revision: str | None = None
+    options_source_chain: Mapping[str, str] = field(default_factory=dict)
+    secret_references: Mapping[str, str] = field(default_factory=dict)
     compiled_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -52,6 +64,58 @@ class RuntimePlan:
             raise ValueError("strategy_hash must not be empty")
         if not self.deployment_hash.strip():
             raise ValueError("deployment_hash must not be empty")
+        if self.fencing_epoch < 1:
+            raise ValueError("fencing_epoch must be positive (>= 1)")
+
+        if not self.declared_schema_compatibility:
+            object.__setattr__(
+                self, "declared_schema_compatibility", self.schema_compatibility_version
+            )
+
+        if not self.runtime_generation:
+            default_gen = f"gen_{self.account_label}_{self.deployment_hash[:8]}"
+            object.__setattr__(self, "runtime_generation", default_gen)
+
+        if not self.plan_hash:
+            content_payload = {
+                "environment": self.environment,
+                "account_label": self.account_label,
+                "strategy_hash": self.strategy_hash,
+                "execution_policy_hash": self.execution_policy_hash,
+                "risk_policy_hash": self.risk_policy_hash,
+                "deployment_hash": self.deployment_hash,
+                "schema_compatibility_version": self.declared_schema_compatibility,
+            }
+            computed_plan_hash = hashlib.sha256(
+                json.dumps(content_payload, sort_keys=True).encode()
+            ).hexdigest()
+            object.__setattr__(self, "plan_hash", computed_plan_hash)
+
+        # Enforce deep immutability on options and secret references
+        if isinstance(self.options_source_chain, dict):
+            object.__setattr__(
+                self,
+                "options_source_chain",
+                MappingProxyType(dict(self.options_source_chain)),
+            )
+        if isinstance(self.secret_references, dict):
+            object.__setattr__(
+                self,
+                "secret_references",
+                MappingProxyType(dict(self.secret_references)),
+            )
+
+    def with_observed_db_revision(self, revision: str | None) -> RuntimePlan:
+        """Returns an immutable copy with the observed database revision set."""
+        return replace(self, observed_database_revision=revision)
+
+    def with_fencing_epoch(self, epoch: int) -> RuntimePlan:
+        """Returns an immutable copy with an updated writer fencing epoch."""
+        if epoch < self.fencing_epoch:
+            raise ValueError(
+                f"fencing_epoch must not decrease: {epoch} < {self.fencing_epoch}"
+            )
+        return replace(self, fencing_epoch=epoch)
 
 
 class RuntimePlanCompiler:
@@ -68,6 +132,9 @@ class RuntimePlanCompiler:
         schema_version: str = "20260925_0042",
         overrides: dict[str, Any] | None = None,
         secret_keys: tuple[str, ...] = ("BINANCE_API_KEY", "BINANCE_API_SECRET"),
+        runtime_generation: str | None = None,
+        fencing_epoch: int = 1,
+        observed_database_revision: str | None = None,
     ) -> RuntimePlan:
         """Statically compiles configuration options into an immutable RuntimePlan."""
         user_overrides = overrides or {}
@@ -128,7 +195,9 @@ class RuntimePlanCompiler:
             f"{environment}:{git_commit}:{schema_version}".encode()
         ).hexdigest()
 
-        plan_id = f"plan_{environment}_{account_label}_{strat_hash[:8]}_{exec_hash[:8]}"
+        plan_id = (
+            f"plan_{environment}_{account_label}_{strat_hash[:8]}_{exec_hash[:8]}"
+        )
 
         policy = EffectivePolicy(
             policy_id=strat_hash[:16],
@@ -143,6 +212,12 @@ class RuntimePlanCompiler:
         # Secrets recorded by reference only
         secret_refs = {k: f"env_ref:{k}" for k in secret_keys}
 
+        gen = (
+            runtime_generation
+            if runtime_generation
+            else f"gen_{account_label}_{deployment_hash[:8]}"
+        )
+
         return RuntimePlan(
             plan_id=plan_id,
             environment=environment,
@@ -153,6 +228,10 @@ class RuntimePlanCompiler:
             deployment_hash=deployment_hash,
             schema_compatibility_version=schema_version,
             effective_policy=policy,
+            runtime_generation=gen,
+            fencing_epoch=fencing_epoch,
+            declared_schema_compatibility=schema_version,
+            observed_database_revision=observed_database_revision,
             options_source_chain=sources,
             secret_references=secret_refs,
             compiled_at=datetime.now(UTC),

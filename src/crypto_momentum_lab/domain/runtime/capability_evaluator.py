@@ -4,9 +4,12 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 - evaluate(action, versioned_evidence, runtime_plan) -> CapabilityDecision
 - Actions: ENTER, NORMAL_EXIT, CANCEL, RECONCILE, EMERGENCY_REDUCE
 - Never maps both 'stale market' and 'batch attribution conflict' to 'allow all exits'.
-- NORMAL_EXIT requires trustworthy batch attribution (is_account_concordant=True).
+- NORMAL_EXIT requires trustworthy batch attribution (is_account_concordant=True),
+  but is never blocked by expired live entry approvals or entry lane state.
 - CANCEL is never blocked by lagging research archives or stale market data.
-- EMERGENCY_REDUCE requires active writer lease and account identity verification.
+- RECONCILE is always permitted (read-only visibility and idempotent state recovery).
+- EMERGENCY_REDUCE requires active writer lease and explicit emergency authorization.
+- Binds scope, plan_hash, runtime_generation, fencing_epoch, and source_as_of.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionScope
 from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
 
 
@@ -42,6 +46,13 @@ class CapabilityEvidence:
     is_emergency_authorized: bool = False
     is_universe_ready: bool = True
     is_collector_healthy: bool = True
+    scope: ExecutionScope | None = None
+    plan_hash: str | None = None
+    runtime_generation: str | None = None
+    fencing_epoch: int | None = None
+    declared_schema_compatibility: str | None = None
+    observed_database_revision: str | None = None
+    source_as_of: datetime | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -55,6 +66,11 @@ class CapabilityDecision:
     evidence_version: str
     plan_id: str
     valid_until: datetime
+    scope: ExecutionScope | None = None
+    plan_hash: str = ""
+    runtime_generation: str = ""
+    fencing_epoch: int = 1
+    source_as_of: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class CapabilityEvaluator:
@@ -79,170 +95,99 @@ class CapabilityEvaluator:
     ) -> CapabilityDecision:
         """Evaluates action safety against versioned evidence and RuntimePlan."""
         valid_until = evidence.observed_at + self._ttl
+        source_as_of = (
+            evidence.source_as_of
+            if evidence.source_as_of is not None
+            else evidence.observed_at
+        )
+
+        def _decision(allowed: bool, reason: str) -> CapabilityDecision:
+            return CapabilityDecision(
+                action=action,
+                allowed=allowed,
+                reason=reason,
+                evidence_version=evidence.evidence_version,
+                plan_id=plan.plan_id,
+                valid_until=valid_until,
+                scope=evidence.scope,
+                plan_hash=plan.plan_hash,
+                runtime_generation=plan.runtime_generation,
+                fencing_epoch=plan.fencing_epoch,
+                source_as_of=source_as_of,
+            )
 
         # 1. RECONCILE is always allowed to restore system visibility
         if action == SystemAction.RECONCILE:
-            return CapabilityDecision(
-                action=action,
-                allowed=True,
-                reason="reconcile_always_permitted",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+            return _decision(True, "reconcile_always_permitted")
 
         # Mutating exchange actions require an active writer lease and verified identity
         if not evidence.is_lease_active:
-            return CapabilityDecision(
-                action=action,
-                allowed=False,
-                reason="writer_lease_inactive",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+            return _decision(False, "writer_lease_inactive")
 
         if not evidence.is_account_identity_verified:
-            return CapabilityDecision(
-                action=action,
-                allowed=False,
-                reason="account_identity_unverified",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+            return _decision(False, "account_identity_unverified")
+
+        # Check fencing epoch alignment if supplied in evidence
+        if (
+            evidence.fencing_epoch is not None
+            and evidence.fencing_epoch != plan.fencing_epoch
+        ):
+            return _decision(False, "fencing_epoch_mismatch")
+
+        # Check plan hash alignment if supplied in evidence
+        if (
+            evidence.plan_hash is not None
+            and evidence.plan_hash != plan.plan_hash
+        ):
+            return _decision(False, "plan_hash_mismatch")
 
         # 2. CANCEL: Allowed as long as lease and identity are valid
         # Never blocked by stale market data, discordant batches, or collector lag!
         if action == SystemAction.CANCEL:
-            return CapabilityDecision(
-                action=action,
-                allowed=True,
-                reason="cancel_permitted_under_active_lease",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+            return _decision(True, "cancel_permitted_under_active_lease")
 
         # 3. EMERGENCY_REDUCE: Requires explicit emergency authorization
         if action == SystemAction.EMERGENCY_REDUCE:
             if not evidence.is_emergency_authorized:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="emergency_reduce_not_authorized",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
-            return CapabilityDecision(
-                action=action,
-                allowed=True,
-                reason="emergency_reduce_authorized",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+                return _decision(False, "emergency_reduce_not_authorized")
+            return _decision(True, "emergency_reduce_authorized")
 
         # 4. NORMAL_EXIT: Requires trustworthy batch attribution and no inflight orders
         if action == SystemAction.NORMAL_EXIT:
             if not evidence.is_account_concordant:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="batch_attribution_conflict_or_gap",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
+                return _decision(False, "batch_attribution_conflict_or_gap")
             if evidence.unresolved_inflight_orders_count > 0:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="unresolved_inflight_orders_present",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
+                return _decision(False, "unresolved_inflight_orders_present")
             if evidence.market_freshness_seconds > self._max_exit_age:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="market_data_too_stale_for_normal_exit",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
+                return _decision(
+                    False, "market_data_too_stale_for_normal_exit"
                 )
-            return CapabilityDecision(
-                action=action,
-                allowed=True,
-                reason="normal_exit_prerequisites_satisfied",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+            return _decision(True, "normal_exit_prerequisites_satisfied")
 
         # 5. ENTER: Strictest prerequisites
         if action == SystemAction.ENTER:
-            if not evidence.is_approval_valid:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="live_approval_invalid_or_expired",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
+            # Check database schema compatibility
+            if evidence.observed_database_revision is not None:
+                expected_rev = (
+                    evidence.declared_schema_compatibility
+                    or plan.declared_schema_compatibility
                 )
-            if not evidence.is_account_concordant:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="account_ledger_not_concordant",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
-            if evidence.unresolved_inflight_orders_count > 0:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="unresolved_inflight_orders_present",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
-            if not evidence.is_universe_ready:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="universe_or_warmup_not_ready",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
-            if evidence.market_freshness_seconds > self._max_entry_age:
-                return CapabilityDecision(
-                    action=action,
-                    allowed=False,
-                    reason="market_data_stale_for_entry",
-                    evidence_version=evidence.evidence_version,
-                    plan_id=plan.plan_id,
-                    valid_until=valid_until,
-                )
-            return CapabilityDecision(
-                action=action,
-                allowed=True,
-                reason="entry_prerequisites_satisfied",
-                evidence_version=evidence.evidence_version,
-                plan_id=plan.plan_id,
-                valid_until=valid_until,
-            )
+                if (
+                    expected_rev
+                    and evidence.observed_database_revision != expected_rev
+                ):
+                    return _decision(False, "schema_compatibility_mismatch")
 
-        return CapabilityDecision(
-            action=action,
-            allowed=False,
-            reason="unknown_action",
-            evidence_version=evidence.evidence_version,
-            plan_id=plan.plan_id,
-            valid_until=valid_until,
-        )
+            if not evidence.is_approval_valid:
+                return _decision(False, "live_approval_invalid_or_expired")
+            if not evidence.is_account_concordant:
+                return _decision(False, "account_ledger_not_concordant")
+            if evidence.unresolved_inflight_orders_count > 0:
+                return _decision(False, "unresolved_inflight_orders_present")
+            if not evidence.is_universe_ready:
+                return _decision(False, "universe_or_warmup_not_ready")
+            if evidence.market_freshness_seconds > self._max_entry_age:
+                return _decision(False, "market_data_stale_for_entry")
+            return _decision(True, "entry_prerequisites_satisfied")
+
+        return _decision(False, "unknown_action")

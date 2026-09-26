@@ -582,6 +582,18 @@ class LiveReadinessPublisher:
         if not published:
             self.publish()
 
+    def compute_market_state_age_seconds(
+        self, now: datetime | None = None
+    ) -> float | None:
+        """Compute the dynamic market state age as of reader observation time."""
+        if self._latest_market_state_at is None:
+            return None
+        current_time = now if now is not None else datetime.now(tz=UTC)
+        return max(
+            0.0,
+            (current_time - self._latest_market_state_at).total_seconds(),
+        )
+
     def publish(self) -> None:
         """Best-effort atomic publication of the current JSON snapshot."""
 
@@ -589,9 +601,11 @@ class LiveReadinessPublisher:
             return
         tradeability = self.current_tradeability()
         streams = self.current_stream_readiness()
+        now_utc = datetime.now(tz=UTC)
         payload: Mapping[str, object] = {
             "schema_version": self.schema_version,
-            "observed_at": datetime.now(tz=UTC).isoformat(),
+            "observed_at": now_utc.isoformat(),
+            "published_at": now_utc.isoformat(),
             "account_label": self._account_label,
             "session_id": self._session_id,
             "strategy": self._strategy,

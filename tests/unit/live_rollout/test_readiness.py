@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from crypto_momentum_lab.health import LocalHealthWriter
@@ -351,4 +352,39 @@ def test_readiness_publisher_layered_tradeability_and_stream_readiness(
     payload3 = json.loads(health.readiness_path.read_text())
     assert payload3["tradeability"]["mode"] == "DEGRADED"
     assert payload3["tradeability"]["unmanaged_risk_clear"] is False
+
+
+def test_readiness_compute_dynamic_market_age_and_published_at(
+    tmp_path: Path,
+) -> None:
+    """Reader computes current age from latest_market_state_at
+    rather than stale published age.
+    """
+    health, publisher = _publisher(tmp_path)
+
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    state = SimpleNamespace(
+        bucket_start=t0 - timedelta(seconds=15),
+        bucket_end=t0,
+    )
+    publisher.observe_market_state(
+        state,  # type: ignore[arg-type]
+        strategy=SimpleNamespace(warmup_buckets_by_symbol={}),  # type: ignore[arg-type]
+        entry_universe_count=10,
+    )
+
+    # 1. compute_market_state_age_seconds evaluated 5 seconds later
+    t_reader = t0 + timedelta(seconds=5)
+    age_5s = publisher.compute_market_state_age_seconds(now=t_reader)
+    assert age_5s == 5.0
+
+    # 2. compute_market_state_age_seconds evaluated 75 seconds later
+    t_reader_stale = t0 + timedelta(seconds=75)
+    age_75s = publisher.compute_market_state_age_seconds(now=t_reader_stale)
+    assert age_75s == 75.0
+
+    # 3. Payload has published_at and latest_market_state_at timestamps
+    payload = json.loads(health.readiness_path.read_text())
+    assert "published_at" in payload
+    assert payload["latest_market_state_at"] == t0.isoformat()
 

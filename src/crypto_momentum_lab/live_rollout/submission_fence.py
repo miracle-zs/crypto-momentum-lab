@@ -69,7 +69,39 @@ class LiveSubmissionFence:
     ) -> None:
         """Raise ``OrderPreSubmissionError`` if an entry fence is stale."""
 
+        client_order_id = getattr(plan, "client_order_id", None)
+        if client_order_id is not None and not str(client_order_id).strip():
+            raise OrderPreSubmissionError("client_order_id must not be empty")
+
         if plan.reduce_only:
+            # Reduce-risk priority: bypass entry_enabled, is_draining, and active halts.
+            # Still verify writer lease so a stale/zombie executor cannot issue
+            # rogue exits.
+            current_lease = await self._risk_state.load_active_lease(
+                self._environment,
+                self._account_label,
+                checked_at,
+            )
+            if current_lease is None:
+                raise OrderPreSubmissionError("active lease disappeared")
+            if current_lease.owner != self._lease_owner:
+                raise OrderPreSubmissionError("active lease owner changed")
+            if current_lease.strategy_name != self._strategy_name:
+                raise OrderPreSubmissionError("active lease strategy changed")
+            if current_lease.code_generation != self._code_generation:
+                raise OrderPreSubmissionError(
+                    "active lease code generation changed"
+                )
+            expected_lease = (
+                None if self._active_lease is None else self._active_lease()
+            )
+            if (
+                expected_lease is not None
+                and current_lease.lease_id != expected_lease.lease_id
+            ):
+                raise OrderPreSubmissionError(
+                    "active lease fencing token changed"
+                )
             return
         if self._entry_enabled is not None and not self._entry_enabled():
             raise OrderPreSubmissionError("live entry lane is disabled")
