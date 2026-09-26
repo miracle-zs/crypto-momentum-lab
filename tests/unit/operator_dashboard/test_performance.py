@@ -188,9 +188,11 @@ async def test_performance_queries_uses_market_state_progress_delay() -> None:
 
 def test_assess_coverage_hardened_validation() -> None:
     from dataclasses import dataclass
+    from decimal import Decimal
 
     from crypto_momentum_lab.operator_dashboard.performance_builder import (
         _assess_coverage,
+        compute_cash_flow_evidence_hash,
     )
 
     @dataclass
@@ -200,12 +202,35 @@ def test_assess_coverage_hardened_validation() -> None:
         approval_ref: str
         effective_at: datetime
 
+    @dataclass
+    class FullCF:
+        correction_id: str
+        account_label: str
+        amount: Decimal
+        cash_flow_type: str
+        effective_at: datetime
+        reason: str
+        approval_ref: str
+        evidence_hash: str
+
     start = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
     end = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
     valid_eff = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    good_hash = compute_cash_flow_evidence_hash(
+        correction_id="cf1",
+        account_label="primary",
+        amount=Decimal("10"),
+        cash_flow_type="deposit",
+        effective_at=valid_eff,
+        reason="wire",
+        approval_ref="appr_1",
+    )
 
-    # 1. Valid hex hash and interval
-    valid_cf = DummyCF("cf1", "a" * 64, "appr_1", valid_eff)
+    # 1. Content hash matches the canonical record
+    valid_cf = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", valid_eff, "wire", "appr_1",
+        good_hash,
+    )
     ok, status, proof = _assess_coverage([valid_cf], start, end)
     assert ok is True
     assert status == "confirmed"
@@ -238,3 +263,123 @@ def test_assess_coverage_hardened_validation() -> None:
     assert ok is False
     assert status == "uncertified"
     assert "cash_flow_out_of_interval" in proof
+
+
+def test_assess_coverage_requires_content_hash_match_and_effective_at() -> None:
+    from dataclasses import dataclass
+    from decimal import Decimal
+
+    from crypto_momentum_lab.operator_dashboard.performance_builder import (
+        _assess_coverage,
+        compute_cash_flow_evidence_hash,
+    )
+
+    @dataclass
+    class FullCF:
+        correction_id: str
+        account_label: str
+        amount: Decimal
+        cash_flow_type: str
+        effective_at: datetime
+        reason: str
+        approval_ref: str
+        evidence_hash: str
+
+    start = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+    eff = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    good_hash = compute_cash_flow_evidence_hash(
+        correction_id="cf1",
+        account_label="primary",
+        amount=Decimal("10"),
+        cash_flow_type="deposit",
+        effective_at=eff,
+        reason="wire",
+        approval_ref="appr_42",
+    )
+
+    ok_row = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", eff, "wire", "appr_42", good_hash
+    )
+    ok, status, proof = _assess_coverage([ok_row], start, end)
+    assert ok is True
+    assert status == "confirmed"
+
+    bad_hash = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", eff, "wire", "appr_42", "a" * 64
+    )
+    ok, _, proof = _assess_coverage([bad_hash], start, end)
+    assert ok is False
+    assert "content_mismatch" in proof
+
+    missing_eff = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", None, "wire", "appr_42", good_hash
+    )
+    ok, _, proof = _assess_coverage([missing_eff], start, end)
+    assert ok is False
+    assert "missing_effective_at" in proof
+
+    placeholder = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", eff, "wire", "system", good_hash
+    )
+    ok, _, proof = _assess_coverage([placeholder], start, end)
+    assert ok is False
+    assert "missing_approval_ref" in proof
+
+
+def test_assess_coverage_requires_equity_window_bracket() -> None:
+    from dataclasses import dataclass
+    from decimal import Decimal
+
+    from crypto_momentum_lab.operator_dashboard.performance_builder import (
+        _assess_coverage,
+        compute_cash_flow_evidence_hash,
+    )
+
+    @dataclass
+    class FullCF:
+        correction_id: str
+        account_label: str
+        amount: Decimal
+        cash_flow_type: str
+        effective_at: datetime
+        reason: str
+        approval_ref: str
+        evidence_hash: str
+
+    @dataclass
+    class Eq:
+        observed_at: datetime
+        wallet_balance: Decimal
+
+    start = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+    eff = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    good_hash = compute_cash_flow_evidence_hash(
+        correction_id="cf1",
+        account_label="primary",
+        amount=Decimal("10"),
+        cash_flow_type="deposit",
+        effective_at=eff,
+        reason="wire",
+        approval_ref="appr_42",
+    )
+    cf = FullCF(
+        "cf1", "primary", Decimal("10"), "deposit", eff, "wire", "appr_42", good_hash
+    )
+
+    short = [
+        Eq(datetime(2026, 9, 20, 6, 0, tzinfo=UTC), Decimal("1")),
+        Eq(datetime(2026, 9, 20, 18, 0, tzinfo=UTC), Decimal("2")),
+    ]
+    ok, _, proof = _assess_coverage([cf], start, end, equity_rows=short)
+    assert ok is False
+    assert "equity_window_incomplete" in proof
+
+    brackets = [
+        Eq(start, Decimal("1")),
+        Eq(end, Decimal("2")),
+    ]
+    ok, status, _ = _assess_coverage([cf], start, end, equity_rows=brackets)
+    assert ok is True
+    assert status == "confirmed"

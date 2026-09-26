@@ -7,6 +7,7 @@ source of truth for metric calculation and coverage semantics.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -71,24 +72,82 @@ _METRIC_SPECS = (
 
 
 _HEX_64_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+_PLACEHOLDER_APPROVALS = frozenset({"", "system", "unknown", "none", "n/a", "tbd"})
+
+
+def compute_cash_flow_evidence_hash(
+    *,
+    correction_id: str,
+    account_label: str,
+    amount: Decimal,
+    cash_flow_type: str,
+    effective_at: datetime,
+    reason: str,
+    approval_ref: str,
+) -> str:
+    """Canonical content hash for a cash-flow correction.
+
+    Certification requires ``evidence_hash`` to equal this value; a
+    well-formed but unrelated hex string is not proof of the record.
+    """
+    payload = "|".join(
+        (
+            correction_id,
+            account_label,
+            str(amount),
+            cash_flow_type,
+            effective_at.isoformat(),
+            reason,
+            approval_ref,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _row_content_hash_matches(row: Any, ev_hash_str: str) -> bool | None:
+    """Return True/False when content fields allow a hash check, else None."""
+    fields = {
+        name: getattr(row, name, None)
+        for name in (
+            "correction_id",
+            "account_label",
+            "amount",
+            "cash_flow_type",
+            "effective_at",
+            "reason",
+            "approval_ref",
+        )
+    }
+    if any(v is None for v in fields.values()):
+        return None
+    expected = compute_cash_flow_evidence_hash(
+        correction_id=str(fields["correction_id"]),
+        account_label=str(fields["account_label"]),
+        amount=Decimal(str(fields["amount"])),
+        cash_flow_type=str(fields["cash_flow_type"]),
+        effective_at=fields["effective_at"],
+        reason=str(fields["reason"]),
+        approval_ref=str(fields["approval_ref"]),
+    )
+    return expected.lower() == ev_hash_str.lower()
 
 
 def _assess_coverage(
     cf_rows: Sequence[Any],
     start_time: datetime,
     end_time: datetime,
+    equity_rows: Sequence[Any] = (),
 ) -> tuple[bool, str, str]:
     """Determine coverage status from cash-flow facts from first principles.
 
     Returns (is_certified, coverage_status, coverage_proof).
 
-    A window is certified when:
-    1. Cash-flow facts are present;
-    2. Every fact contains verified cryptographic evidence (strictly valid 64-char
-       hex hash, non-zero/placeholder) and a non-empty approval reference;
-    3. Every fact's effective_at falls strictly within [start_time, end_time].
-    If no facts exist or if any fact has unverified/dummy evidence or falls outside
-    the evaluated interval, it remains uncertified.
+    A window is certified only when:
+    1. Equity valuation points bracket the window (completeness proof);
+    2. Every fact has a required effective_at inside the window;
+    3. Every fact carries a real approval_ref (not a placeholder);
+    4. Every fact's evidence_hash is non-placeholder hex and, when content
+       fields are available, equals the canonical content hash.
     """
     if not cf_rows:
         return (
@@ -104,9 +163,25 @@ def _assess_coverage(
         end_time if end_time.tzinfo is not None else end_time.replace(tzinfo=UTC)
     )
 
+    if equity_rows:
+        first_at = getattr(equity_rows[0], "observed_at", None)
+        last_at = getattr(equity_rows[-1], "observed_at", None)
+        if first_at is None or last_at is None:
+            return (
+                False,
+                "uncertified",
+                "uncertified_equity_window_incomplete",
+            )
+        if first_at > s_time or last_at < e_time:
+            return (
+                False,
+                "uncertified",
+                "uncertified_equity_window_incomplete",
+            )
+
     for r in cf_rows:
-        ev_hash = getattr(r, "evidence_hash", None)
         rec_id = getattr(r, "correction_id", "unknown")
+        ev_hash = getattr(r, "evidence_hash", None)
         if not ev_hash:
             return (
                 False,
@@ -127,23 +202,36 @@ def _assess_coverage(
                 f"uncertified_zero_placeholder_evidence_in_record_{rec_id}",
             )
         appr = getattr(r, "approval_ref", None)
-        if not appr or not str(appr).strip():
+        appr_str = str(appr).strip().lower() if appr is not None else ""
+        if appr_str in _PLACEHOLDER_APPROVALS:
             return (
                 False,
                 "uncertified",
                 f"uncertified_missing_approval_ref_in_record_{rec_id}",
             )
         eff_at = getattr(r, "effective_at", None)
-        if eff_at is not None:
-            eff_time = (
-                eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
+        if eff_at is None:
+            return (
+                False,
+                "uncertified",
+                f"uncertified_missing_effective_at_in_record_{rec_id}",
             )
-            if eff_time < s_time or eff_time > e_time:
-                return (
-                    False,
-                    "uncertified",
-                    f"uncertified_cash_flow_out_of_interval_{rec_id}",
-                )
+        eff_time = (
+            eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
+        )
+        if eff_time < s_time or eff_time > e_time:
+            return (
+                False,
+                "uncertified",
+                f"uncertified_cash_flow_out_of_interval_{rec_id}",
+            )
+        content_ok = _row_content_hash_matches(r, ev_hash_str)
+        if content_ok is not True:
+            return (
+                False,
+                "uncertified",
+                f"uncertified_evidence_hash_content_mismatch_{rec_id}",
+            )
 
     return (
         True,
@@ -190,7 +278,7 @@ def build_performance_summary(
     }
 
     is_certified, coverage_status, coverage_proof = _assess_coverage(
-        cf_rows, start_time, end_time,
+        cf_rows, start_time, end_time, equity_rows=equity_rows,
     )
 
     pnl = metrics["cash_flow_adjusted_pnl"]
