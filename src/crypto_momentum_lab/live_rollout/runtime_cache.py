@@ -104,7 +104,7 @@ class LiveRuntimeCacheMaintenance:
                 inactive_after=_STRATEGY_CACHE_INACTIVE_AFTER,
             )
 
-        evicted_telemetry_series = 0
+        _evicted_telemetry_series = 0
         self._last_maintenance_at = now
         volume_metrics: dict[str, object] = {}
         if self._volume_metrics_provider is not None:

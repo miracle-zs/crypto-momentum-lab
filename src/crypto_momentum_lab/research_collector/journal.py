@@ -65,7 +65,10 @@ def _clean_temporary_files(root: Path) -> None:
 
 
 def _require_sequence(value: object, name: str = "sequence") -> int:
-    """Validate that value is strictly a non-negative integer (not float, bool, or string)."""
+    """
+    Validate that value is strictly a non-negative integer (not float, bool, or
+    string).
+    """
     if isinstance(value, bool) or not isinstance(value, int):
         raise CollectorStateConflict(
             f"{name} must be an integer, got {type(value).__name__} ({value!r})"
@@ -298,9 +301,7 @@ class ArchiveJournal:
         if not committed_receipts:
             return
 
-        committed_record_ids = {
-            r.record_id for r in committed_receipts if r.record_id
-        }
+        committed_record_ids = {r.record_id for r in committed_receipts if r.record_id}
         legacy_receipt_keys = {
             (r.source_kind, r.stream_id, r.sequence)
             for r in committed_receipts
@@ -318,7 +319,8 @@ class ArchiveJournal:
             ):
                 paths_to_remove.append(path)
 
-        # Recalculate materialized_sequence as the contiguous covered prefix of remaining records
+        # Recalculate materialized_sequence as the contiguous covered prefix of
+        # remaining records
         hub_committed = [
             r.sequence
             for r in committed_receipts
@@ -380,7 +382,8 @@ class ArchiveJournal:
                     or None
                 )
 
-        # 1. WRITE-AHEAD AUDIT: Persist durable resolution audit log BEFORE deleting any journal files
+        # 1. WRITE-AHEAD AUDIT: Persist durable resolution audit log BEFORE deleting any
+        # journal files
         if resolutions:
             res_path = self._root / "resolutions.jsonl"
             existing_rec_ids: set[str] = set()
@@ -405,7 +408,11 @@ class ArchiveJournal:
                 sk = res_dict.get("source_kind")
                 sid = res_dict.get("stream_id")
                 seq = res_dict.get("sequence")
-                parsed_seq = _require_sequence(seq, "resolution sequence") if seq is not None else None
+                parsed_seq = (
+                    _require_sequence(seq, "resolution sequence")
+                    if seq is not None
+                    else None
+                )
                 res_key = (
                     (str(sk), str(sid), parsed_seq)
                     if (sk is not None and sid is not None and parsed_seq is not None)
@@ -429,7 +436,8 @@ class ArchiveJournal:
                     os.fsync(f.fileno())
                 _fsync_directory(self._root)
 
-        # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal files
+        # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal
+        # files
         manifest_data = {
             "environment": self._environment,
             "accepted_sequence": self._accepted_sequence,
@@ -451,7 +459,8 @@ class ArchiveJournal:
         temp_manifest.replace(self._manifest_path)
         _fsync_directory(self._root)
 
-        # 3. ONLY AFTER audit trail and manifest are safely fsynced, remove committed journal files
+        # 3. ONLY AFTER audit trail and manifest are safely fsynced, remove committed
+        # journal files
         for path in paths_to_remove:
             dropped: Any = (
                 self._pending_records.pop(path)
@@ -487,15 +496,20 @@ class ArchiveJournal:
                         record = json.loads(line)
                     except json.JSONDecodeError as error:
                         raise CollectorStateConflict(
-                            f"corrupted materialization resolution in {res_path} at line {line_no}: {error}"
+                            f"corrupted materialization resolution in "
+                            f"{res_path} at line {line_no}: {error}"
                         ) from error
                     if not isinstance(record, dict):
                         raise CollectorStateConflict(
-                            f"corrupted materialization resolution in {res_path} at line {line_no}: expected dict, got {type(record).__name__}"
+                            f"corrupted materialization resolution in "
+                            f"{res_path} at line {line_no}: expected dict, "
+                            f"got {type(record).__name__}"
                         )
                     seq = record.get("sequence")
                     if seq is not None:
-                        _require_sequence(seq, f"sequence in {res_path} at line {line_no}")
+                        _require_sequence(
+                            seq, f"sequence in {res_path} at line {line_no}"
+                        )
                     records.append(record)
         except OSError as error:
             raise CollectorStateConflict(
@@ -513,7 +527,8 @@ class ArchiveJournal:
         self._pending_records.clear()
         self._pending_bytes = 0
 
-        # Read manifest if available to restore highest_committed_sequence and materialized_sequence
+        # Read manifest if available to restore highest_committed_sequence and
+        # materialized_sequence
         if self._manifest_path.exists():
             try:
                 manifest_content = self._manifest_path.read_text(encoding="utf-8")
@@ -524,12 +539,16 @@ class ArchiveJournal:
                 ) from error
             if not isinstance(mdata, dict):
                 raise CollectorStateConflict(
-                    f"corrupted collector manifest in {self._manifest_path}: expected dict, got {type(mdata).__name__}"
+                    f"corrupted collector manifest in "
+                    f"{self._manifest_path}: expected dict, "
+                    f"got {type(mdata).__name__}"
                 )
             env = mdata.get("environment")
             if env is not None and str(env).strip() != self._environment:
                 raise CollectorStateConflict(
-                    f"collector manifest environment mismatch in {self._manifest_path}: expected {self._environment}, got {env}"
+                    f"collector manifest environment mismatch in "
+                    f"{self._manifest_path}: expected {self._environment}, "
+                    f"got {env}"
                 )
             try:
                 hcs = mdata.get("highest_committed_sequence")
@@ -569,7 +588,8 @@ class ArchiveJournal:
                 raise
             except (ValueError, TypeError) as error:
                 raise CollectorStateConflict(
-                    f"corrupted sequence values in manifest {self._manifest_path}: {error}"
+                    f"corrupted sequence values in manifest "
+                    f"{self._manifest_path}: {error}"
                 ) from error
 
         existing_resolutions = self.read_resolutions()
@@ -606,7 +626,11 @@ class ArchiveJournal:
                     str(rec.stream_id),
                     _require_sequence(rec.sequence, "receipt sequence"),
                 )
-                if (rec.source_kind and rec.stream_id is not None and rec.sequence is not None)
+                if (
+                    rec.source_kind
+                    and rec.stream_id is not None
+                    and rec.sequence is not None
+                )
                 else None
             )
             is_already_committed = (

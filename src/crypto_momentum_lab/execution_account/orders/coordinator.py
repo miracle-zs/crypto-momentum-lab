@@ -116,8 +116,7 @@ class _KeyCommandScheduler:
         self._worker = asyncio.create_task(
             self._run(),
             name=(
-                "live-order-key-"
-                f"{key.symbol.lower()}-{key.position_side.value.lower()}"
+                f"live-order-key-{key.symbol.lower()}-{key.position_side.value.lower()}"
             ),
         )
 
@@ -141,31 +140,39 @@ class _KeyCommandScheduler:
             if self._closed:
                 raise RuntimeError("order command scheduler is closed")
 
-            is_exit = (priority <= OrderExecutionCoordinator._EXIT_PRIORITY)
+            is_exit = priority <= OrderExecutionCoordinator._EXIT_PRIORITY
             current_depth = self._queue.qsize()
 
             if is_exit:
                 if current_depth >= self._max_queue_depth:
                     raise OrderPreSubmissionError(
-                        f"order scheduler queue full ({current_depth}/{self._max_queue_depth}) "
-                        f"for key {self._key.symbol}:{self._key.position_side.value}"
+                        f"order scheduler queue full "
+                        f"({current_depth}/{self._max_queue_depth}) "
+                        f"for key {self._key.symbol}:"
+                        f"{self._key.position_side.value}"
                     )
             else:
                 entry_limit = max(1, self._max_queue_depth - self._exit_headroom)
                 if current_depth >= entry_limit:
                     raise OrderPreSubmissionError(
-                        f"order scheduler entry capacity exceeded ({current_depth}/{entry_limit}, "
-                        f"headroom={self._exit_headroom}) for key {self._key.symbol}:{self._key.position_side.value}"
+                        f"order scheduler entry capacity exceeded "
+                        f"({current_depth}/{entry_limit}, "
+                        f"headroom={self._exit_headroom}) for key "
+                        f"{self._key.symbol}:"
+                        f"{self._key.position_side.value}"
                     )
 
             sequence = self._sequence
             self._sequence += 1
             enqueued_at = time.monotonic()
             try:
-                self._queue.put_nowait((priority, sequence, operation, future, enqueued_at, started))
+                self._queue.put_nowait(
+                    (priority, sequence, operation, future, enqueued_at, started)
+                )
             except asyncio.QueueFull as err:
                 raise OrderPreSubmissionError(
-                    f"order scheduler queue full for key {self._key.symbol}:{self._key.position_side.value}"
+                    f"order scheduler queue full for key "
+                    f"{self._key.symbol}:{self._key.position_side.value}"
                 ) from err
         if not is_exit and self._max_queue_wait_seconds > 0:
             waiter = asyncio.create_task(started.wait())
@@ -178,7 +185,10 @@ class _KeyCommandScheduler:
                 if not done:
                     future.cancel()
                     raise OrderPreSubmissionError(
-                        f"order command waited {self._max_queue_wait_seconds:.2f}s in queue exceeding limit {self._max_queue_wait_seconds:.2f}s"
+                        f"order command waited "
+                        f"{self._max_queue_wait_seconds:.2f}s in queue "
+                        f"exceeding limit "
+                        f"{self._max_queue_wait_seconds:.2f}s"
                     )
             finally:
                 if not waiter.done():
@@ -208,7 +218,9 @@ class _KeyCommandScheduler:
                             RuntimeError("order command scheduler is closed")
                         )
                 try:
-                    self._queue.put_nowait((2**31 - 1, self._sequence, None, None, 0.0, None))
+                    self._queue.put_nowait(
+                        (2**31 - 1, self._sequence, None, None, 0.0, None)
+                    )
                 except asyncio.QueueFull:
                     pass
         if not self._worker.done():
@@ -247,7 +259,7 @@ class _KeyCommandScheduler:
                     continue
 
                 waited = time.monotonic() - enqueued_at
-                is_exit = (_priority <= OrderExecutionCoordinator._EXIT_PRIORITY)
+                is_exit = _priority <= OrderExecutionCoordinator._EXIT_PRIORITY
                 if (
                     not is_exit
                     and self._max_queue_wait_seconds > 0
@@ -256,7 +268,9 @@ class _KeyCommandScheduler:
                     if not future.done():
                         future.set_exception(
                             OrderPreSubmissionError(
-                                f"order command waited {waited:.2f}s in queue exceeding limit {self._max_queue_wait_seconds:.2f}s"
+                                f"order command waited {waited:.2f}s in "
+                                f"queue exceeding limit "
+                                f"{self._max_queue_wait_seconds:.2f}s"
                             )
                         )
                     continue
@@ -311,7 +325,9 @@ class OrderExecutionCoordinator:
         if max_queue_depth <= 0:
             raise ValueError("max_queue_depth must be positive")
         if exit_headroom < 0 or exit_headroom >= max_queue_depth:
-            raise ValueError("exit_headroom must be non-negative and less than max_queue_depth")
+            raise ValueError(
+                "exit_headroom must be non-negative and less than max_queue_depth"
+            )
         self._backend = backend
         self._account_label = account_label.strip()
         self._max_queue_depth = max_queue_depth
@@ -450,15 +466,12 @@ class OrderExecutionCoordinator:
 
             # Identify which reservations still need to be persisted
             needed = [
-                r for r in target_reservations
-                if r.reservation_id not in existing_by_id
+                r for r in target_reservations if r.reservation_id not in existing_by_id
             ]
 
             saved_new: list[PositionReservation] = []
             try:
-                saver = getattr(
-                    self._reservation_repository, "save_reservations", None
-                )
+                saver = getattr(self._reservation_repository, "save_reservations", None)
                 if callable(saver) and needed:
                     await _maybe_await(
                         saver(
@@ -486,17 +499,14 @@ class OrderExecutionCoordinator:
                                     res.reservation_id
                                 )
                             )
-                            if loaded is None or loaded.active_quantity <= Decimal(
-                                "0"
-                            ):
+                            if loaded is None or loaded.active_quantity <= Decimal("0"):
                                 raise
                             if (
                                 loaded.position_key.canonical_id
                                 != res.position_key.canonical_id
                                 or loaded.command_id != res.command_id
                                 or loaded.batch_id != res.batch_id
-                                or loaded.reserved_quantity
-                                != res.reserved_quantity
+                                or loaded.reserved_quantity != res.reserved_quantity
                             ):
                                 raise
                             res = loaded
@@ -552,9 +562,8 @@ class OrderExecutionCoordinator:
                 self._reservation_repository.load_active_reservations(key)
             )
             for r in active_res:
-                if (
-                    r.command_id == plan.client_order_id
-                    and r.active_quantity > Decimal("0")
+                if r.command_id == plan.client_order_id and r.active_quantity > Decimal(
+                    "0"
                 ):
                     released = r.release(r.active_quantity)
                     await _maybe_await(
@@ -657,9 +666,7 @@ class OrderExecutionCoordinator:
         *,
         prepared_submission: PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
-        priority = (
-            self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
-        )
+        priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
 
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
@@ -693,9 +700,7 @@ class OrderExecutionCoordinator:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepare_submission: Callable[
-            [], Awaitable[PreparedOrderSubmission | None]
-        ],
+        prepare_submission: Callable[[], Awaitable[PreparedOrderSubmission | None]],
     ) -> OrderExecutionResult | None:
         """Prepare and submit one plan inside the same per-key scheduler.
 
@@ -706,9 +711,7 @@ class OrderExecutionCoordinator:
         cancel operations for this key cannot interleave the two steps.
         """
 
-        priority = (
-            self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
-        )
+        priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
 
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:

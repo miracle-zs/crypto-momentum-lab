@@ -41,7 +41,6 @@ async def _await_void_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
         await result
 
 
-
 class RetentionRepository(Protocol):
     """Protocol for storage of consumer dependencies, prune plans, and receipts."""
 
@@ -142,9 +141,7 @@ class RetentionAuthority:
                 d.recovery_spec.earliest_needed_watermark.isoformat().encode()
             )
             if d.recovery_spec.earliest_checkpoint_id:
-                hasher.update(
-                    d.recovery_spec.earliest_checkpoint_id.encode()
-                )
+                hasher.update(d.recovery_spec.earliest_checkpoint_id.encode())
         return f"dep_{hasher.hexdigest()[:16]}"
 
     def compute_dependency_version(self, dataset_name: str) -> str:
@@ -316,9 +313,7 @@ class RetentionAuthority:
         self._repo.update_plan(bound_plan)
         return bound_plan
 
-    async def compute_dependency_version_async(
-        self, dataset_name: str
-    ) -> str:
+    async def compute_dependency_version_async(self, dataset_name: str) -> str:
         """Async: compute current version hash of active dependencies."""
         deps = await _maybe_await(self._repo.get_dependencies(dataset_name))
         return self._compute_version_hash_pure(deps)
@@ -331,14 +326,15 @@ class RetentionAuthority:
         manifest_hash: str | None = None,
         cascade_target_tables: tuple[str, ...] = (),
     ) -> PrunePlan:
-        """Asynchronously creates an immutable PrunePlan bounded by active consumer dependencies."""
+        """
+        Asynchronously creates an immutable PrunePlan bounded by active consumer
+        dependencies.
+        """
         if requested_cutoff.tzinfo is None:
             raise ValueError("requested_cutoff must be timezone-aware")
 
         deps = await _maybe_await(self._repo.get_dependencies(dataset_name))
-        current_dep_version = await self.compute_dependency_version_async(
-            dataset_name
-        )
+        current_dep_version = await self.compute_dependency_version_async(dataset_name)
 
         if not deps:
             plan = PrunePlan(
@@ -357,9 +353,7 @@ class RetentionAuthority:
             await _await_void_call(self._repo.save_plan, plan)
             return plan
 
-        binding_dep = min(
-            deps, key=lambda d: d.recovery_spec.earliest_needed_watermark
-        )
+        binding_dep = min(deps, key=lambda d: d.recovery_spec.earliest_needed_watermark)
         watermark = binding_dep.recovery_spec.earliest_needed_watermark
 
         if watermark < requested_cutoff:
@@ -556,7 +550,8 @@ class RetentionAuthority:
         """
         current_dep_version = self.compute_dependency_version(plan.dataset_name)
 
-        # 1. Verify dependency version epoch fencing against both plan and caller expectations
+        # 1. Verify dependency version epoch fencing against both plan and caller
+        # expectations
         if (
             current_dep_version != plan.expected_dependency_version
             or current_dep_version != expected_dependency_version
@@ -700,9 +695,10 @@ def create_authority_from_repository(
     # Detect test mocks — production code should not run real DB ops
     # against a mock session factory.
     sf_type_name = type(session_factory).__name__
-    if (
-        hasattr(session_factory, "_mock_return_value")
-        or sf_type_name in ("AsyncMock", "MagicMock", "Mock")
+    if hasattr(session_factory, "_mock_return_value") or sf_type_name in (
+        "AsyncMock",
+        "MagicMock",
+        "Mock",
     ):
         return RetentionAuthority()
 

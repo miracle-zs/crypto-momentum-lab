@@ -219,7 +219,9 @@ class AccountPerformanceCalculator:
                     "subinterval_count": len(cut.valuation_points),
                     "coverage_status": "confirmed",
                     "is_certified": True,
-                    "cash_flow_coverage_proof": f"audited_records_count_{len(cut.cash_flows)}",
+                    "cash_flow_coverage_proof": (
+                        f"audited_records_count_{len(cut.cash_flows)}"
+                    ),
                 },
             )
 
@@ -389,9 +391,7 @@ class AccountPerformanceCalculator:
                 (
                     float(cf.amount),
                     float(
-                        Decimal(
-                            str((cf.effective_at - cut.start_time).total_seconds())
-                        )
+                        Decimal(str((cf.effective_at - cut.start_time).total_seconds()))
                         / total_seconds
                     ),
                 )

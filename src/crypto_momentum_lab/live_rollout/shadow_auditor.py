@@ -19,12 +19,10 @@ import structlog
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionLedgerProjection,
-)
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionEpisode,
     PositionKey,
     PositionLedgerBatch,
+    PositionLedgerProjection,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocator,

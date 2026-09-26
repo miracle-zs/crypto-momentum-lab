@@ -71,7 +71,11 @@ class PositionLedger:
                 deduped_fills[fill.trade_id] = fill
 
         has_synthetic_fills = getattr(facts, "has_synthetic_fills", False) or any(
-            bool((getattr(f, "raw_payload", None) or {}).get("synthetic_from_order", False))
+            bool(
+                (getattr(f, "raw_payload", None) or {}).get(
+                    "synthetic_from_order", False
+                )
+            )
             for f in facts.fills
         )
 
@@ -520,7 +524,8 @@ class PositionLedger:
             obs_amt = abs(latest_snapshot.position_amt)
 
             if high_watermark is not None and snap_time < high_watermark:
-                # Fills stream has advanced past snapshot observed_at (mixed cut / in-flight gap).
+                # Fills stream has advanced past snapshot observed_at (mixed cut /
+                # in-flight gap).
                 # Replay and verify cut consistency at snap_time.
                 fills_at_cut = tuple(f for f in facts.fills if f.trade_at <= snap_time)
                 cut_facts = replace(
@@ -535,14 +540,17 @@ class PositionLedger:
                 cut_qty = cut_projection.total_active_quantity
 
                 if cut_qty == obs_amt:
-                    # Verified consistent at snapshot cut; delta is in-flight recent fills
+                    # Verified consistent at snapshot cut; delta is in-flight recent
+                    # fills
                     reconciliation_gap = Decimal("0")
                     health_status = PositionHealthStatus.CATCHING_UP
                     is_comparable = False
                     diagnostics.append(
-                        f"Consistent historical cut verified at {snap_time.isoformat()}: "
+                        f"Consistent historical cut verified at "
+                        f"{snap_time.isoformat()}:"
                         f"cut_qty={cut_qty}, obs_amt={obs_amt}. "
-                        f"Recent fills active up to {high_watermark.isoformat()} (status=CATCHING_UP)."
+                        f"Recent fills active up to {high_watermark.isoformat()}"
+                        "(status=CATCHING_UP)."
                     )
                 else:
                     # True divergence even at historical snapshot cut
@@ -551,7 +559,8 @@ class PositionLedger:
                     is_comparable = True
                     diagnostics.append(
                         f"Reconciliation gap at cut {snap_time.isoformat()}: "
-                        f"snapshot={obs_amt}, cut_qty={cut_qty}, gap={reconciliation_gap}"
+                        f"snapshot={obs_amt}, cut_qty={cut_qty},"
+                        "gap={reconciliation_gap}"
                     )
             else:
                 # Snapshot is at or ahead of all fills
@@ -561,27 +570,34 @@ class PositionLedger:
                     is_comparable = True
                 else:
                     # Check if snapshot is slightly ahead within in-flight stream window
-                    is_transient = (
-                        high_watermark is not None
-                        and (snap_time - high_watermark) <= timedelta(seconds=3.0)
-                    )
+                    is_transient = high_watermark is not None and (
+                        snap_time - high_watermark
+                    ) <= timedelta(seconds=3.0)
                     if is_transient:
                         health_status = PositionHealthStatus.CATCHING_UP
                         is_comparable = False
                         diagnostics.append(
                             f"Transient snapshot lead: snapshot={obs_amt} ahead of "
-                            f"fills_qty={total_active_qty} by {reconciliation_gap} within flight window."
+                            f"fills_qty={total_active_qty} by {reconciliation_gap}"
+                            "within flight window."
                         )
                     else:
                         health_status = PositionHealthStatus.CONFLICT
                         is_comparable = True
                         diagnostics.append(
                             f"Reconciliation gap detected: snapshot={obs_amt}, "
-                            f"ledger_active={total_active_qty}, gap={reconciliation_gap}"
+                            f"ledger_active={total_active_qty},"
+                            "gap={reconciliation_gap}"
                         )
 
-            if health_status in {PositionHealthStatus.CONFLICT, PositionHealthStatus.INCOMPLETE}:
-                raw_hash = f"{self._position_key.canonical_id}:{snap_time.isoformat()}:{reconciliation_gap}"
+            if health_status in {
+                PositionHealthStatus.CONFLICT,
+                PositionHealthStatus.INCOMPLETE,
+            }:
+                raw_hash = (
+                    f"{self._position_key.canonical_id}:"
+                    f"{snap_time.isoformat()}:{reconciliation_gap}"
+                )
                 disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
                 discrepancy = PositionDiscrepancy(
                     discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
@@ -600,7 +616,10 @@ class PositionLedger:
                     snapshot_at=snap_time,
                 )
 
-        if unallocated_quantity > Decimal("0") and health_status == PositionHealthStatus.READY:
+        if (
+            unallocated_quantity > Decimal("0")
+            and health_status == PositionHealthStatus.READY
+        ):
             health_status = PositionHealthStatus.INCOMPLETE
 
         if conflicting_fills:
@@ -613,7 +632,9 @@ class PositionLedger:
             diagnostics.append(diag_msg)
             if discrepancy is None:
                 first_conf = conflicting_fills[0]
-                raw_hash = f"{self._position_key.canonical_id}:conflict:{first_conf.trade_id}"
+                raw_hash = (
+                    f"{self._position_key.canonical_id}:conflict:{first_conf.trade_id}"
+                )
                 disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
                 discrepancy = PositionDiscrepancy(
                     discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
@@ -681,8 +702,9 @@ class PositionLedger:
             ):
                 health_status = PositionHealthStatus.INCOMPLETE
                 diag_msg = (
-                    f"Fact coverage start ({facts.coverage.start_at.isoformat()}) does not "
-                    f"cover active episode opened_at ({final_active_episode.opened_at.isoformat()})"
+                    f"Fact coverage start ({facts.coverage.start_at.isoformat()}) "
+                    "does not cover active episode opened_at("
+                    f"{final_active_episode.opened_at.isoformat()})"
                 )
                 diagnostics.append(diag_msg)
                 if discrepancy is None:
@@ -700,7 +722,6 @@ class PositionLedger:
                         event_cut=high_watermark,
                     )
 
-
         return PositionLedgerProjection(
             position_key=self._position_key,
             active_episode=final_active_episode,
@@ -716,4 +737,3 @@ class PositionLedger:
             discrepancy=discrepancy,
             is_comparable=is_comparable,
         )
-

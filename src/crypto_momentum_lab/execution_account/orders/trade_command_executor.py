@@ -1,4 +1,7 @@
-"""Trade command executor translating domain TradeCommand into exchange execution plans."""
+"""
+Trade command executor translating domain TradeCommand into exchange execution
+plans.
+"""
 
 from __future__ import annotations
 

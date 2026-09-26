@@ -162,9 +162,7 @@ def rebuild_position_batches(
             and not _opening_order_matches_side(order.side, observation.side)
             and order.state in _EXIT_SUBMITTED_STATES
         ):
-            events.append(
-                (order.created_at, 1, index, "exit", order)
-            )
+            events.append((order.created_at, 1, index, "exit", order))
 
     events.sort(key=lambda event: event[:3])
     accumulators: list[_PositionBatchAccumulator] = []
@@ -187,9 +185,7 @@ def rebuild_position_batches(
                     entry_notional=entry_quantity * entry_price,
                     entry_order_count=1,
                     entry_client_order_ids=(
-                        {order.client_order_id}
-                        if order.client_order_id
-                        else set()
+                        {order.client_order_id} if order.client_order_id else set()
                     ),
                     entry_orders=[order],
                 )
@@ -208,7 +204,8 @@ def rebuild_position_batches(
         if order.exit_batch_id is not None:
             target = next(
                 (
-                    batch for batch in accumulators
+                    batch
+                    for batch in accumulators
                     if batch.batch_id == order.exit_batch_id
                 ),
                 None,
@@ -347,9 +344,7 @@ def rebuild_position_batches(
                     else recovery_order.plan.client_order_id
                 ),
                 recovery_order_plan=(
-                    None
-                    if recovery_order is None
-                    else recovery_order.plan
+                    None if recovery_order is None else recovery_order.plan
                 ),
                 recovery_order_remaining_quantity=recovery_remaining,
                 closing_order_filled=active_market_order,
@@ -378,13 +373,9 @@ def _reconcile_batch_quantities(
         return ()
     if not batches:
         return ()
-    has_legacy_attribution = any(
-        batch.legacy_attribution for batch in batches
-    )
+    has_legacy_attribution = any(batch.legacy_attribution for batch in batches)
     if has_legacy_attribution:
-        batches = [
-            batch for batch in batches if not batch.legacy_attribution
-        ]
+        batches = [batch for batch in batches if not batch.legacy_attribution]
         if not batches:
             return ()
         clean_quantity = sum(
@@ -431,7 +422,8 @@ def _is_entry_fill_observed(
     fill_times: Mapping[str, datetime],
 ) -> bool:
     return (
-        order.state in {
+        order.state
+        in {
             ExchangeOrderState.PARTIALLY_FILLED,
             ExchangeOrderState.FILLED,
         }
@@ -501,9 +493,7 @@ def _entry_price(
 def _batch_id_for_entry(order: PositionOrderFact) -> str:
     identifier = order.client_order_id or order.exchange_order_id
     if identifier is None:
-        identifier = (
-            f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
-        )
+        identifier = f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
     return f"{order.symbol}:{order.position_side.value}:{identifier}"
 
 
@@ -527,8 +517,9 @@ def count_active_symbol_batch_concurrency(
     - If a batch has submitted an exit order (exit_order_submitted_at is not None,
       even if not filled yet), that batch is ended and does NOT count towards the
       active entry batch.
-    - If there is an active batch (exit_order_submitted_at is None and not closing_order_filled),
-      its entry_order_count represents how many entry orders were merged into this batch.
+    - If there is an active batch (exit_order_submitted_at is None
+      and not closing_order_filled), its entry_order_count represents
+      how many entry orders were merged into this batch.
     - Unresolved (pending) non-reduce-only entry orders for this symbol add to the
       concurrency count (excluding any client_order_id already recorded in the batch).
     - Different batches and different symbols are independent.
@@ -545,24 +536,14 @@ def count_active_symbol_batch_concurrency(
                 has_exit_submitted = (
                     getattr(b, "exit_order_submitted_at", None) is not None
                 )
-                is_closing_filled = bool(
-                    getattr(b, "closing_order_filled", False)
-                )
+                is_closing_filled = bool(getattr(b, "closing_order_filled", False))
                 if not has_exit_submitted and not is_closing_filled:
-                    active_batch_orders += int(
-                        getattr(b, "entry_order_count", 1)
-                    )
-                    entry_ids = (
-                        getattr(b, "entry_client_order_ids", ()) or ()
-                    )
+                    active_batch_orders += int(getattr(b, "entry_order_count", 1))
+                    entry_ids = getattr(b, "entry_client_order_ids", ()) or ()
                     known_entry_order_ids.update(entry_ids)
         else:
-            has_exit_started = (
-                getattr(p, "recovery_exit_started_at", None) is not None
-            )
-            is_closing_filled = bool(
-                getattr(p, "closing_order_filled", False)
-            )
+            has_exit_started = getattr(p, "recovery_exit_started_at", None) is not None
+            is_closing_filled = bool(getattr(p, "closing_order_filled", False))
             if not has_exit_started and not is_closing_filled:
                 active_batch_orders += 1
 

@@ -1,17 +1,20 @@
 """Domain models for authoritative position ledger and immutable facts.
 
 Provides strict identity types:
-- ``PositionKey``: Fully qualified identity across environment, account, symbol, and side;
+- ``PositionKey``: Fully qualified identity across environment,
+  account, symbol, and side;
 - ``FactCoverageInterval``: Watermark and coverage boundaries of observed facts;
 - ``AccountFacts``: Normalized container of immutable account-level facts;
 - ``PositionLedgerBatch``: An entry lot within a specific position episode;
-- ``PositionEpisode``: A continuous non-zero holding lifecycle bounded by zero-crossings;
-- ``PositionLedgerProjection``: Point-in-time materialized ledger state with unallocated lots.
+- ``PositionEpisode``: A continuous non-zero holding lifecycle
+  bounded by zero-crossings;
+- ``PositionLedgerProjection``: Point-in-time materialized ledger
+  state with unallocated lots.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -97,16 +100,17 @@ def compose_fact_coverage(
     return FactCoverageInterval(
         start_at=start,
         end_at=end,
-        source_cursor=(
-            evidence.fill_cursor_id if evidence is not None else None
-        ),
+        source_cursor=(evidence.fill_cursor_id if evidence is not None else None),
         status=FactCoverageStatus.PENDING,
         confirmed_revision=None,
     )
 
 
 class PositionHealthStatus(StrEnum):
-    """Authoritative trading health status for a PositionKey per architecture RFC 2026-09-25."""
+    """
+    Authoritative trading health status for a PositionKey per architecture RFC
+    2026-09-25.
+    """
 
     READY = "READY"
     CATCHING_UP = "CATCHING_UP"
@@ -334,7 +338,10 @@ class PositionLedgerBatch:
             raise ValueError("entry_price must be positive")
         if self.opened_at.tzinfo is None:
             raise ValueError("opened_at must be timezone-aware")
-        if self.exit_order_submitted_at is not None and self.exit_order_submitted_at.tzinfo is None:
+        if (
+            self.exit_order_submitted_at is not None
+            and self.exit_order_submitted_at.tzinfo is None
+        ):
             raise ValueError("exit_order_submitted_at must be timezone-aware")
 
 
@@ -401,7 +408,10 @@ class FreshnessRequirement:
 
 @dataclass(frozen=True, slots=True)
 class PositionView:
-    """Authoritative, immutable point-in-time view consumed by strategy and execution coordinators."""
+    """
+    Authoritative, immutable point-in-time view consumed by strategy and execution
+    coordinators.
+    """
 
     key: PositionKey
     projection_version: str
@@ -431,7 +441,9 @@ class PositionView:
         return (
             self.health_status == PositionHealthStatus.READY
             and self.is_comparable
-            and (self.reconciliation_gap is None or self.reconciliation_gap == Decimal("0"))
+            and (
+                self.reconciliation_gap is None
+                or self.reconciliation_gap == Decimal("0")
+            )
             and self.unallocated_quantity == Decimal("0")
         )
-

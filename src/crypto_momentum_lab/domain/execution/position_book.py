@@ -10,7 +10,6 @@ Obays RFC 2026-09-25:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
@@ -71,17 +70,23 @@ class PositionBook:
                 ):
                     health_status = PositionHealthStatus.CATCHING_UP
                     diagnostics.append(
-                        f"Event cut ({projection.event_cut}) is behind minimum required cut "
+                        f"Event cut ({projection.event_cut}) is behind minimum required"
+                        "cut"
                         f"({requirement.min_event_cut})"
                     )
 
             if projection.event_cut is not None:
                 staleness = now_dt - projection.event_cut
-                if staleness > requirement.max_staleness and health_status == PositionHealthStatus.READY:
+                if (
+                    staleness > requirement.max_staleness
+                    and health_status == PositionHealthStatus.READY
+                ):
                     health_status = PositionHealthStatus.CATCHING_UP
                     diagnostics.append(
-                        f"Projection staleness ({staleness.total_seconds():.1f}s) exceeds "
-                        f"max allowed ({requirement.max_staleness.total_seconds():.1f}s)"
+                        f"Projection staleness ({staleness.total_seconds():.1f}s)"
+                        "exceeds"
+                        f"max allowed"
+                        "({requirement.max_staleness.total_seconds():.1f}s)"
                     )
 
             if requirement.require_comparable and not is_comparable:
@@ -89,9 +94,7 @@ class PositionBook:
                     health_status = PositionHealthStatus.CATCHING_UP
 
         reconciliation_status = (
-            "OK"
-            if health_status == PositionHealthStatus.READY
-            else health_status.value
+            "OK" if health_status == PositionHealthStatus.READY else health_status.value
         )
 
         return PositionView(

@@ -639,7 +639,7 @@ class WebSocketMarketStateSource:
 
     async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
         self._notify_connection_change(False, "connecting")
-        unavailable_since: float | None = time.monotonic()
+        _unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:

@@ -267,8 +267,7 @@ def _services(value: Any, prefix: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise RuntimeManifestError(f"{prefix}.services must be a non-empty list")
     services = tuple(
-        _text(item, f"{prefix}.services[{index}]")
-        for index, item in enumerate(value)
+        _text(item, f"{prefix}.services[{index}]") for index, item in enumerate(value)
     )
     if len(set(services)) != len(services):
         raise RuntimeManifestError(f"{prefix}.services must not contain duplicates")
@@ -283,9 +282,7 @@ def _computed_strategy_config_hash(
         return _live_strategy_config_hash(
             strategy,
             profile=inputs.profile,
-            entry_positive_gainer_top_count=(
-                inputs.entry_positive_gainer_top_count
-            ),
+            entry_positive_gainer_top_count=(inputs.entry_positive_gainer_top_count),
             require_price_above_ema5=inputs.require_price_above_ema5,
             require_price_above_ema10=inputs.require_price_above_ema10,
             entry_policy_enforce=inputs.entry_policy_enforce,
@@ -457,7 +454,9 @@ def _execution_inputs(
             else _integer(raw_concurrency, f"{field}.max_concurrency_per_symbol")
         )
         if max_concurrency_per_symbol is not None and max_concurrency_per_symbol <= 0:
-            raise RuntimeManifestError(f"{field}.max_concurrency_per_symbol must be positive")
+            raise RuntimeManifestError(
+                f"{field}.max_concurrency_per_symbol must be positive"
+            )
         return LiveRuntimeExecutionInputs(
             hedge_mode=hedge_mode,
             entry_long_only=entry_long_only,

@@ -137,7 +137,6 @@ class PerformanceQueries:
                 ).all()
             )
 
-
             # 3. Market data status
             latest_market_state = await session.scalar(
                 select(RuntimeMarketState15sRow)
@@ -309,7 +308,8 @@ class PerformanceQueries:
             and latest_market_progress.details.get("market_delay_ms") is not None
         ):
             market_delay_ms = round(
-                _as_float(latest_market_progress.details.get("market_delay_ms")) or 0.0, 1
+                _as_float(latest_market_progress.details.get("market_delay_ms")) or 0.0,
+                1,
             )
         elif (
             latest_market_state is not None

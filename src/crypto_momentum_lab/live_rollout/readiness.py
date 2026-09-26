@@ -9,11 +9,11 @@ entry gate currently admits new orders.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-import time
 from typing import Any, Protocol
 
 import structlog
@@ -112,7 +112,8 @@ class TradeabilityAlertManager:
     1. Mode change (edge trigger)
     2. Reason change (edge trigger)
     3. Severity change (edge trigger)
-    4. Fallback heartbeat interval for non-healthy states to prevent silent stale states.
+    4. Fallback heartbeat interval for non-healthy states to prevent
+       silent stale states.
     5. Clear recovery logging when transitioning back to FULLY_TRADEABLE.
     """
 
@@ -239,9 +240,7 @@ class TradeabilityAlertManager:
         **details: Any,
     ) -> None:
         log_event = (
-            "tradeability_heartbeat"
-            if is_heartbeat
-            else "tradeability_state_changed"
+            "tradeability_heartbeat" if is_heartbeat else "tradeability_state_changed"
         )
         if severity.upper() == "CRITICAL":
             log.critical(
@@ -296,15 +295,10 @@ class LiveWarmupStatus:
     def __post_init__(self) -> None:
         if self.required_buckets <= 0:
             raise ValueError("required_buckets must be positive")
-        if (
-            self.cutover_at.tzinfo is None
-            or self.cutover_at.utcoffset() is None
-        ):
+        if self.cutover_at.tzinfo is None or self.cutover_at.utcoffset() is None:
             raise ValueError("cutover_at must be timezone-aware")
         if not self.complete_symbols <= self.expected_symbols:
-            raise ValueError(
-                "complete_symbols must be a subset of expected_symbols"
-            )
+            raise ValueError("complete_symbols must be a subset of expected_symbols")
 
     @property
     def deferred_symbols(self) -> frozenset[str]:
@@ -344,10 +338,7 @@ class LiveReadinessPublisher:
         ):
             if not value.strip():
                 raise ValueError(f"{field_name} must not be empty")
-        if (
-            entry_universe_target_count is not None
-            and entry_universe_target_count <= 0
-        ):
+        if entry_universe_target_count is not None and entry_universe_target_count <= 0:
             raise ValueError("entry_universe_target_count must be positive")
         if warmup_required_buckets <= 0:
             raise ValueError("warmup_required_buckets must be positive")
@@ -403,17 +394,13 @@ class LiveReadinessPublisher:
         try:
             requirement = strategy.required_data()
             required_buckets = int(requirement.warmup_buckets)
-            checkpoint = strategy.checkpoint(
-                include_market_state_buffers=False
-            )
+            checkpoint = strategy.checkpoint(include_market_state_buffers=False)
             if expected_symbols is not None:
                 normalized_expected = _normalized_symbols(expected_symbols)
             elif self._warmup_expected_symbols:
                 normalized_expected = self._warmup_expected_symbols
             else:
-                normalized_expected = frozenset(
-                    checkpoint.warmup_buckets_by_symbol
-                )
+                normalized_expected = frozenset(checkpoint.warmup_buckets_by_symbol)
             warmup_by_symbol = checkpoint.warmup_buckets_by_symbol
             complete = frozenset(
                 symbol
@@ -463,9 +450,7 @@ class LiveReadinessPublisher:
 
         tradeability = self.current_tradeability()
         severity = (
-            "CRITICAL"
-            if self._halt_active or not self._exit_gate_open
-            else "WARNING"
+            "CRITICAL" if self._halt_active or not self._exit_gate_open else "WARNING"
         )
         self._alert_manager.observe(
             mode=tradeability.mode,
@@ -520,10 +505,7 @@ class LiveReadinessPublisher:
         if entry_enabled is not None and entry_enabled != self._entry_enabled:
             self._entry_enabled = entry_enabled
             changed = True
-        if (
-            entry_reason is not None
-            and entry_reason != self._entry_enabled_reason
-        ):
+        if entry_reason is not None and entry_reason != self._entry_enabled_reason:
             self._entry_enabled_reason = entry_reason
             changed = True
         if exit_enabled is not None and exit_enabled != self._exit_gate_open:
@@ -622,9 +604,7 @@ class LiveReadinessPublisher:
             ),
             "warmup_cutover_at": _isoformat(self._warmup_cutover_at),
             "latest_market_state_at": _isoformat(self._latest_market_state_at),
-            "latest_market_state_age_seconds": (
-                self._latest_market_state_age_seconds
-            ),
+            "latest_market_state_age_seconds": (self._latest_market_state_age_seconds),
             "entry_enabled": self._entry_enabled,
             "entry_enabled_reason": self._entry_enabled_reason,
             "tradeability": {
@@ -651,9 +631,7 @@ class LiveReadinessPublisher:
 
 
 def _normalized_symbols(symbols: Collection[str]) -> frozenset[str]:
-    return frozenset(
-        symbol.strip().upper() for symbol in symbols if symbol.strip()
-    )
+    return frozenset(symbol.strip().upper() for symbol in symbols if symbol.strip())
 
 
 def _isoformat(value: datetime | None) -> str | None:

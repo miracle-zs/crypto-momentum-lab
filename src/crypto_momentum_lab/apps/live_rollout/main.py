@@ -1329,7 +1329,11 @@ def run_command(
     ] = None,
     max_concurrency_per_symbol: Annotated[
         int | None,
-        typer.Option("--max-concurrency-per-symbol", min=1, help="Max concurrent active positions per symbol."),
+        typer.Option(
+            "--max-concurrency-per-symbol",
+            min=1,
+            help="Max concurrent active positions per symbol.",
+        ),
     ] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
     api_key_env: Annotated[

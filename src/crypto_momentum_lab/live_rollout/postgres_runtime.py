@@ -25,14 +25,15 @@ from crypto_momentum_lab.domain.execution import (
     PositionOrderFact,
     rebuild_position_batches,
 )
+from crypto_momentum_lab.domain.execution.position_batches import (
+    ManagedLivePositionBatch,
+)
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    FactCoverageInterval,
-    FactCoverageStatus,
     CoverageEvidence,
-    compose_fact_coverage,
     PositionHealthStatus,
     PositionKey,
+    compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -52,9 +53,6 @@ from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidationReason,
     LiveContextReader,
     LiveDaemonRuntimeContext,
-)
-from crypto_momentum_lab.domain.execution.position_batches import (
-    ManagedLivePositionBatch,
 )
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
@@ -1358,9 +1356,7 @@ def _resolve_symbol_fill_horizon(
     return None
 
 
-def _fill_raw_payload(
-    raw: object, *, is_system: bool
-) -> dict[str, Any]:
+def _fill_raw_payload(raw: object, *, is_system: bool) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if isinstance(raw, dict):
         payload.update(raw)
@@ -1723,9 +1719,7 @@ def _classify_live_positions_detailed(
             ),
             start=Decimal("0"),
         )
-        closing_filled_strict = (
-            closing_filled_quantity == abs(position.position_amt)
-        )
+        closing_filled_strict = closing_filled_quantity == abs(position.position_amt)
         # Also handle residual snapshot lag during exit settlement (e.g. partial
         # snapshot updates arriving as the position drains from full quantity to zero).
         closing_filled_draining = False
@@ -1762,9 +1756,7 @@ def _classify_live_positions_detailed(
             fill_prices=fill_prices,
             account_fills=account_fills,
             since_time=resolved_since,
-            coverage_evidence=(
-                (coverage_by_symbol or {}).get(position.symbol)
-            ),
+            coverage_evidence=((coverage_by_symbol or {}).get(position.symbol)),
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
@@ -2337,7 +2329,10 @@ def _coverage_evidence_from_sources(
         checked_through = getattr(fill_cursor, "last_checked_at", None)
     checkpoint_id: str | None = None
     checkpoint_cut: datetime | None = None
-    if reconciliation is not None and getattr(reconciliation, "status", None) == "ready":
+    if (
+        reconciliation is not None
+        and getattr(reconciliation, "status", None) == "ready"
+    ):
         checkpoint_id = getattr(reconciliation, "reconciliation_id", None)
         checkpoint_cut = getattr(reconciliation, "observed_at", None)
     return CoverageEvidence(
@@ -2454,24 +2449,34 @@ def _build_position_batches(
         if is_primary_enabled:
             ledger_is_ready = (
                 shadow_projection.health_status == PositionHealthStatus.READY
-                and shadow_projection.total_active_quantity == abs(position.position_amt)
+                and shadow_projection.total_active_quantity
+                == abs(position.position_amt)
                 and shadow_projection.reconciliation_gap == Decimal("0")
                 and shadow_projection.unallocated_quantity == Decimal("0")
             )
-            # Prevent toxic fallback when legacy lot reconstruction is contaminated by pre-zero orders,
-            # but ledger is strictly consistent and matches exchange observation entry price.
+            # Prevent toxic fallback when legacy lot reconstruction is contaminated by
+            # pre-zero orders,
+            # but ledger is strictly consistent and matches exchange observation entry
+            # price.
             legacy_price_contaminated = (
                 not diff_report.is_concordant
                 and diff_report.category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
                 and position.entry_price > Decimal("0")
                 and len(shadow_projection.active_batches) > 0
-                and abs(shadow_projection.active_batches[0].entry_price - position.entry_price) < Decimal("0.0001")
+                and abs(
+                    shadow_projection.active_batches[0].entry_price
+                    - position.entry_price
+                )
+                < Decimal("0.0001")
                 and (
                     not result.batches
-                    or abs(result.batches[0].entry_price - position.entry_price) > Decimal("0.001")
+                    or abs(result.batches[0].entry_price - position.entry_price)
+                    > Decimal("0.001")
                 )
             )
-            if ledger_is_ready and (diff_report.is_concordant or legacy_price_contaminated):
+            if ledger_is_ready and (
+                diff_report.is_concordant or legacy_price_contaminated
+            ):
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
                         batch_id=(
@@ -2551,9 +2556,7 @@ def _build_position_batches(
                 abs_position_amt=str(abs(position.position_amt)),
                 ledger_total=str(shadow_projection.total_active_quantity),
                 reconciliation_gap=str(shadow_projection.reconciliation_gap),
-                unallocated_quantity=str(
-                    shadow_projection.unallocated_quantity
-                ),
+                unallocated_quantity=str(shadow_projection.unallocated_quantity),
             )
     except Exception as exc:
         log.warning(

@@ -48,7 +48,10 @@ def compute_trading_rules_hash(rules: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeMetadataSnapshot:
-    """Immutable snapshot of effective operational runtime metadata and configuration hashes."""
+    """
+    Immutable snapshot of effective operational runtime metadata and configuration
+    hashes.
+    """
 
     environment: str
     account_label: str
@@ -129,7 +132,10 @@ class RuntimeMetadataSnapshot:
         trading_rules_hash: str | None = None,
         started_at: datetime | None = None,
     ) -> RuntimeMetadataSnapshot:
-        """Factory method to construct snapshot, computing hashes if configs are provided."""
+        """
+        Factory method to construct snapshot, computing hashes if configs are
+        provided.
+        """
         if python_version is None:
             python_version = sys.version.split()[0]
         if code_generation is None:

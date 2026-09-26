@@ -21,7 +21,6 @@ from crypto_momentum_lab.domain.execution import (
     ExecutionReadiness,
     count_active_symbol_batch_concurrency,
 )
-
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryPolicyComparison,

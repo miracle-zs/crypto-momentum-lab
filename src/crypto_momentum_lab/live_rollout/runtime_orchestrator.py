@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_decision_filter,
 )
-from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -78,6 +77,7 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonResult,
     LiveStrategyDaemon,
 )
+from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
 )

@@ -125,11 +125,15 @@ def account_equity_statement(
         seconds=interval_seconds * (max_points - 1)
     )
     series_start = max(earliest_bucket, latest_window_start)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="equity_buckets")
+    bucket_series = (
+        func.generate_series(
+            series_start,
+            end_bucket,
+            bucket_interval,
+        )
+        .table_valued("bucket")
+        .render_derived(name="equity_buckets")
+    )
     snapshot = aliased(AccountBalanceSnapshotRow)
     bucket_start_at = bucket_series.c.bucket
     latest_equity = (
@@ -191,11 +195,15 @@ def account_margin_statement(
         seconds=interval_seconds * (max_points - 1)
     )
     series_start = max(earliest_bucket, latest_window_start)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="margin_buckets")
+    bucket_series = (
+        func.generate_series(
+            series_start,
+            end_bucket,
+            bucket_interval,
+        )
+        .table_valued("bucket")
+        .render_derived(name="margin_buckets")
+    )
     config = aliased(AccountConfigSnapshotRow)
     reconciliation = aliased(AccountReconciliationRunRow)
     bucket_start_at = bucket_series.c.bucket
@@ -269,9 +277,7 @@ def live_account_metric_points(
         if baseline is None:
             baseline = equity
         peak = equity if peak is None else max(peak, equity)
-        equity_change_ratio = (
-            None if baseline == 0 else (equity - baseline) / baseline
-        )
+        equity_change_ratio = None if baseline == 0 else (equity - baseline) / baseline
         margin_occupancy_ratio = None if equity <= 0 else latest_margin / equity
         drawdown = equity - peak
         drawdown_ratio = None if peak <= 0 else drawdown / peak
@@ -280,9 +286,7 @@ def live_account_metric_points(
                 observed_at=row.observed_at,
                 equity=str(equity),
                 equity_change_ratio=(
-                    None
-                    if equity_change_ratio is None
-                    else str(equity_change_ratio)
+                    None if equity_change_ratio is None else str(equity_change_ratio)
                 ),
                 margin_used=str(latest_margin),
                 margin_occupancy_ratio=(
@@ -390,7 +394,8 @@ class LiveAccountMetricsQueries:
                     await session.scalars(
                         select(CashFlowCorrectionRow)
                         .where(
-                            CashFlowCorrectionRow.account_label == account.account_label,
+                            CashFlowCorrectionRow.account_label
+                            == account.account_label,
                             CashFlowCorrectionRow.effective_at >= equity_window_start,
                             CashFlowCorrectionRow.effective_at <= equity_window_end,
                         )

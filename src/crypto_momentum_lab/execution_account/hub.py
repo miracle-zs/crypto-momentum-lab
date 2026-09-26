@@ -44,8 +44,6 @@ from crypto_momentum_lab.execution_account.sync import (
 from crypto_momentum_lab.health.stream_availability import (
     StreamAvailabilityClock,
     StreamAvailabilityConfig,
-    StreamAvailabilityState,
-    StreamAvailabilityTimeoutError,
 )
 
 log = structlog.get_logger()

@@ -103,7 +103,7 @@ async def prune_account_snapshots_once(
         total_deleted = sum(deleted_counts.values())
         return (total_deleted, 0)
 
-    receipt = await authority.execute_prune_async(
+    await authority.execute_prune_async(
         plan=plan,
         expected_dependency_version=plan.expected_dependency_version,
         executor_fn=executor,

@@ -105,21 +105,26 @@ class SimulationExecutionAdapter:
         base_price = state.last_ask_price or state.close_price
         if base_price is None or base_price <= Decimal("0"):
             raise ValueError(
-                f"Cannot execute entry for {intent.symbol}: missing valid ask or close price"
+                f"Cannot execute entry for {intent.symbol}: missing valid ask or close"
+                "price"
             )
 
         exec_price, unit_slip = model.compute_executed_price(base_price, "BUY")
         notional = intent.desired_notional
         if notional is None or notional <= Decimal("0"):
             raise ValueError(
-                f"Cannot execute entry for {intent.symbol}: desired_notional must be positive"
+                f"Cannot execute entry for {intent.symbol}: desired_notional must be"
+                "positive"
             )
         quantity = (notional / exec_price).quantize(Decimal("0.0001"))
         fee = quantity * exec_price * model.fee_rate
         slippage_cost = quantity * unit_slip
 
         fill_time = state.bucket_end
-        seed = f"entry:{intent.candidate_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        seed = (
+            f"entry:{intent.candidate_id}:"
+            f"{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        )
         trade_id = f"sim_tr_{hashlib.sha256(seed.encode()).hexdigest()[:12]}"
         order_id = f"sim_ord_{intent.candidate_id[-12:]}"
 
@@ -190,11 +195,17 @@ class SimulationExecutionAdapter:
         model = fill_model or self._fill_model
         state = envelope.state
 
-        # Determine exit direction: exiting SHORT requires BUY; exiting LONG requires SELL
+        # Determine exit direction: exiting SHORT requires BUY; exiting LONG requires
+        # SELL
         pos_side_str = getattr(
-            command.position_key.position_side, "value", str(command.position_key.position_side)
+            command.position_key.position_side,
+            "value",
+            str(command.position_key.position_side),
         ).upper()
-        is_short = command.side in (StrategySide.SHORT, "SHORT") or pos_side_str.endswith("SHORT")
+        is_short = command.side in (
+            StrategySide.SHORT,
+            "SHORT",
+        ) or pos_side_str.endswith("SHORT")
         exchange_side = "BUY" if is_short else "SELL"
 
         if is_short:
@@ -204,7 +215,8 @@ class SimulationExecutionAdapter:
 
         if base_price is None or base_price <= Decimal("0"):
             raise ValueError(
-                f"Cannot execute exit for {command.position_key.symbol}: missing valid price"
+                f"Cannot execute exit for {command.position_key.symbol}: missing valid"
+                "price"
             )
 
         exec_price, unit_slip = model.compute_executed_price(base_price, exchange_side)
@@ -237,7 +249,8 @@ class SimulationExecutionAdapter:
 
         fill_time = state.bucket_end
         seed = (
-            f"exit:{command.command_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+            f"exit:{command.command_id}:"
+            f"{envelope.ref.content_hash}:{fill_time.isoformat()}"
         )
         trade_id = f"sim_tr_{hashlib.sha256(seed.encode()).hexdigest()[:12]}"
         order_id = f"sim_exit_{command.command_id[-12:]}"

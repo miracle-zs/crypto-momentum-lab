@@ -17,7 +17,6 @@ from typing import Any
 
 import structlog
 
-from crypto_momentum_lab.persistence.parquet.datasets import market_state_15s_row
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal
 from crypto_momentum_lab.research_collector.models import (
     DurableReceipt,
@@ -28,7 +27,6 @@ from crypto_momentum_lab.research_collector.storage import (
     ParquetWindowSink,
     SinkAppendResult,
     SinkFlushResult,
-    state_payload_digest,
 )
 
 log = structlog.get_logger()

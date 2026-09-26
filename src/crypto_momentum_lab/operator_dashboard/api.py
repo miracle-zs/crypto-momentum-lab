@@ -74,7 +74,6 @@ def _set_cache_status(status: str) -> None:
         pass
 
 
-
 class _ResponseCache:
     def __init__(
         self,
@@ -101,7 +100,9 @@ class _ResponseCache:
             self._entries.pop(k, None)
         # If still over capacity, remove oldest by expiry
         if len(self._entries) > self._max_entries:
-            sorted_keys = sorted(self._entries.keys(), key=lambda k: self._entries[k][0])
+            sorted_keys = sorted(
+                self._entries.keys(), key=lambda k: self._entries[k][0]
+            )
             for k in sorted_keys[: len(self._entries) - self._max_entries]:
                 self._entries.pop(k, None)
 
@@ -111,18 +112,23 @@ class _ResponseCache:
             self._refresh_tasks.pop(k, None)
 
         # Prune expired or excessive refresh errors
-        expired_errors = [k for k, v in self._refresh_errors.items() if v[0] + 300.0 <= now]
+        expired_errors = [
+            k for k, v in self._refresh_errors.items() if v[0] + 300.0 <= now
+        ]
         for k in expired_errors:
             self._refresh_errors.pop(k, None)
         if len(self._refresh_errors) > self._max_entries:
-            sorted_errs = sorted(self._refresh_errors.keys(), key=lambda k: self._refresh_errors[k][0])
+            sorted_errs = sorted(
+                self._refresh_errors.keys(), key=lambda k: self._refresh_errors[k][0]
+            )
             for k in sorted_errs[: len(self._refresh_errors) - self._max_entries]:
                 self._refresh_errors.pop(k, None)
 
         # Prune unheld locks for keys not active in entries or tasks
         active_keys = set(self._entries) | set(self._refresh_tasks)
         unused_locks = [
-            k for k, lock in self._locks.items()
+            k
+            for k, lock in self._locks.items()
             if k not in active_keys and not lock.locked()
         ]
         for k in unused_locks:
@@ -374,9 +380,7 @@ def create_dashboard_app(
             scope: Scope,
             status_code: int = 200,
         ) -> Response:
-            response = super().file_response(
-                full_path, stat_result, scope, status_code
-            )
+            response = super().file_response(full_path, stat_result, scope, status_code)
             path_str = str(full_path)
             if "vendor" in path_str:
                 response.headers["Cache-Control"] = (
@@ -395,9 +399,7 @@ def create_dashboard_app(
     dashboard.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @dashboard.middleware("http")
-    async def add_cache_status_header(
-        request: Request, call_next: Any
-    ) -> Response:
+    async def add_cache_status_header(request: Request, call_next: Any) -> Response:
         state = {"status": ""}
         token = _cache_status_context.set(state)
         try:

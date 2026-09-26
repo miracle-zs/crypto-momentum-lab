@@ -28,6 +28,10 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
+from crypto_momentum_lab.domain.live_rollout.authorization import (
+    EMERGENCY_FLATTEN_CONFIRMATION,
+    require_authorized_command,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryInspectionUnknownError,
@@ -42,11 +46,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     LiveSubmissionDisabledError,
     OrderPreSubmissionError,
 )
-from crypto_momentum_lab.domain.live_rollout.authorization import (
-    EMERGENCY_FLATTEN_CONFIRMATION,
-    require_authorized_command,
-)
-
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:
 # /fapi/v3/account, /fapi/v3/balance, /fapi/v3/positionRisk,

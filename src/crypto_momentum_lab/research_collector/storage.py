@@ -25,11 +25,11 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pyarrow as pa
@@ -67,6 +67,7 @@ def state_payload_digest(row: dict[str, object]) -> str:
     keys = sorted(set(row) - _METADATA_COLUMNS)
     items = tuple((k, str(row.get(k))) for k in keys)
     return hashlib.sha256(repr(items).encode("utf-8")).hexdigest()
+
 
 _METADATA_COLUMNS = frozenset(
     {
@@ -472,7 +473,12 @@ class ParquetWindowSink:
                 state_key = _row_key(row)
                 committed_state_keys.add(state_key)
                 committed_version_keys.add(
-                    (state_key[0], state_key[1], state_key[2], state_payload_digest(row))
+                    (
+                        state_key[0],
+                        state_key[1],
+                        state_key[2],
+                        state_payload_digest(row),
+                    )
                 )
                 sequence = row.get("hub_sequence")
                 if isinstance(sequence, int):
@@ -699,7 +705,10 @@ class CapacityGuard:
         return CapacityState.HEALTHY
 
     def scan(self) -> CapacitySnapshot:
-        """Perform a full directory walk and disk usage check (intended to run in a thread)."""
+        """
+        Perform a full directory walk and disk usage check (intended to run in a
+        thread).
+        """
         with self._scan_lock:
             with self._written_lock:
                 scan_start_writes = self._total_bytes_written
@@ -738,9 +747,7 @@ class CapacityGuard:
                     0, self._total_bytes_written - self._baseline_written_total
                 )
                 total_collector = self._base_collector_bytes + written_since
-                total_disk_free = max(
-                    0, self._base_disk_free_bytes - written_since
-                )
+                total_disk_free = max(0, self._base_disk_free_bytes - written_since)
 
             state = self._evaluate_state(total_collector, total_disk_free)
             snapshot = CapacitySnapshot(
@@ -760,19 +767,20 @@ class CapacityGuard:
                 self._total_bytes_written += num_bytes
 
     def current_snapshot(self, now: float | None = None) -> CapacitySnapshot:
-        """Fast non-blocking read of current capacity state based on cached baseline and writes."""
+        """
+        Fast non-blocking read of current capacity state based on cached baseline
+        and writes.
+        """
         if self._last_snapshot is None:
             return self.scan()
         if now is None:
             now = time.monotonic()
         with self._written_lock:
             base_col = self._base_collector_bytes
-            written = max(
-                0, self._total_bytes_written - self._baseline_written_total
-            )
+            written = max(0, self._total_bytes_written - self._baseline_written_total)
             base_free = self._base_disk_free_bytes
             scan_mono = self._last_scan_monotonic
-            scan_obs = self._last_scan_observed_at
+            _scan_obs = self._last_scan_observed_at
 
         estimated_collector = base_col + written
         estimated_disk_free = max(0, base_free - written)
@@ -785,7 +793,8 @@ class CapacityGuard:
         if age > self._max_snapshot_age_seconds:
             is_degraded = True
             degraded_reason = (
-                f"capacity snapshot expired ({age:.1f}s > {self._max_snapshot_age_seconds:.1f}s)"
+                f"capacity snapshot expired ({age:.1f}s > "
+                f"{self._max_snapshot_age_seconds:.1f}s)"
             )
             if state is CapacityState.HEALTHY:
                 state = CapacityState.WARNING
@@ -804,7 +813,10 @@ class CapacityGuard:
         )
 
     def snapshot(self, *, force_scan: bool = False) -> CapacitySnapshot:
-        """Return the capacity snapshot; triggers scan if force_scan or not yet scanned."""
+        """
+        Return the capacity snapshot; triggers scan if force_scan or not yet
+        scanned.
+        """
         if force_scan or self._last_snapshot is None:
             return self.scan()
         return self.current_snapshot()

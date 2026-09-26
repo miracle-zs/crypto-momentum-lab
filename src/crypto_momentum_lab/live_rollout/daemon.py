@@ -208,7 +208,10 @@ class LiveDaemonConfig:
             raise TypeError("entry_order_type must be an EntryType")
         if self.entry_limit_ttl_seconds < 601:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
-        if self.max_concurrency_per_symbol is not None and self.max_concurrency_per_symbol <= 0:
+        if (
+            self.max_concurrency_per_symbol is not None
+            and self.max_concurrency_per_symbol <= 0
+        ):
             raise ValueError("max_concurrency_per_symbol must be positive")
 
 

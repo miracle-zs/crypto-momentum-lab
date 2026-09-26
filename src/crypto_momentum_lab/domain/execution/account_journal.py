@@ -10,22 +10,19 @@ Obays the RFC 2026-09-25 contracts:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
-    DiscrepancyKind,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     FactCoverageStatus,
     PositionCheckpoint,
-    PositionDiscrepancy,
     PositionKey,
 )
 
@@ -68,10 +65,14 @@ class AccountJournal:
         return self._has_late_events
 
     def append_fill(self, fill: AccountFillEvent) -> bool:
-        """Appends a fill event. Returns True if accepted, False if duplicate/idempotent."""
+        """
+        Appends a fill event. Returns True if accepted, False if
+        duplicate/idempotent.
+        """
         if fill.symbol != self._position_key.symbol:
             raise ValueError(
-                f"Fill symbol {fill.symbol} does not match journal symbol {self._position_key.symbol}"
+                f"Fill symbol {fill.symbol} does not match journal "
+                f"symbol {self._position_key.symbol}"
             )
 
         if fill.trade_id in self._fills_by_id:
@@ -84,7 +85,10 @@ class AccountJournal:
                 self._conflicts.append(fill)
             return False
 
-        if self._high_watermark_trade_at is not None and fill.trade_at < self._high_watermark_trade_at:
+        if (
+            self._high_watermark_trade_at is not None
+            and fill.trade_at < self._high_watermark_trade_at
+        ):
             self._has_late_events = True
         else:
             self._high_watermark_trade_at = fill.trade_at
@@ -95,14 +99,16 @@ class AccountJournal:
     def record_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
         if snapshot.symbol != self._position_key.symbol:
             raise ValueError(
-                f"Snapshot symbol {snapshot.symbol} does not match journal {self._position_key.symbol}"
+                f"Snapshot symbol {snapshot.symbol} does not match "
+                f"journal {self._position_key.symbol}"
             )
         self._snapshots.append(snapshot)
 
     def record_boundary(self, boundary: ExitOrderSubmissionFact) -> None:
         if boundary.symbol != self._position_key.symbol:
             raise ValueError(
-                f"Boundary symbol {boundary.symbol} does not match journal {self._position_key.symbol}"
+                f"Boundary symbol {boundary.symbol} does not match "
+                f"journal {self._position_key.symbol}"
             )
         self._boundaries.append(boundary)
 
@@ -112,7 +118,8 @@ class AccountJournal:
     def set_checkpoint(self, checkpoint: PositionCheckpoint) -> None:
         if checkpoint.key.canonical_id != self._position_key.canonical_id:
             raise ValueError(
-                f"Checkpoint key {checkpoint.key.canonical_id} does not match {self._position_key.canonical_id}"
+                f"Checkpoint key {checkpoint.key.canonical_id} does not "
+                f"match {self._position_key.canonical_id}"
             )
         self._checkpoint = checkpoint
 
@@ -130,12 +137,12 @@ class AccountJournal:
             self.set_checkpoint(envelope.checkpoint)
 
     def find_latest_zero_crossing(self) -> datetime | None:
-        """Finds the timestamp of the latest zero-crossing from snapshots or fills replay."""
+        """
+        Finds the timestamp of the latest zero-crossing from snapshots or fills
+        replay.
+        """
         # 1. Check snapshots
-        zero_snapshots = [
-            s for s in self._snapshots
-            if s.position_amt == Decimal("0")
-        ]
+        zero_snapshots = [s for s in self._snapshots if s.position_amt == Decimal("0")]
         latest_zero_snap = max((s.observed_at for s in zero_snapshots), default=None)
 
         # 2. Check fills replay

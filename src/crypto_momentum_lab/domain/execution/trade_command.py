@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -20,7 +20,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 
-class ExitPolicyMode(str, Enum):
+class ExitPolicyMode(StrEnum):
     """Exit allocation policy mode."""
 
     TARGET_BATCHES_ONLY = "target_batches_only"
@@ -29,7 +29,7 @@ class ExitPolicyMode(str, Enum):
     ABSORB_DUST_SINGLE_BATCH = "absorb_dust_single_batch"
 
 
-class TradeCommandType(str, Enum):
+class TradeCommandType(StrEnum):
     """Explicit intent category for a trade command."""
 
     ENTRY = "entry"
@@ -64,14 +64,18 @@ class ExitAllocationPlan:
         )
         if allocated_sum != self.total_allocated_quantity:
             raise ValueError(
-                f"total_allocated_quantity {self.total_allocated_quantity} does not match "
+                f"total_allocated_quantity {self.total_allocated_quantity} does not"
+                "match"
                 f"sum of allocations {allocated_sum}"
             )
 
 
 @dataclass(frozen=True, slots=True)
 class PositionReservation:
-    """Transactional reservation on a specific position lot to prevent concurrent over-exit."""
+    """
+    Transactional reservation on a specific position lot to prevent concurrent
+    over-exit.
+    """
 
     reservation_id: str
     command_id: str
@@ -80,7 +84,7 @@ class PositionReservation:
     reserved_quantity: Decimal
     consumed_quantity: Decimal = Decimal("0")
     released_quantity: Decimal = Decimal("0")
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
         if not self.reservation_id.strip():
@@ -96,18 +100,24 @@ class PositionReservation:
         if self.released_quantity < 0:
             raise ValueError("released_quantity must be non-negative")
         if self.consumed_quantity + self.released_quantity > self.reserved_quantity:
-            raise ValueError("consumed + released quantity cannot exceed reserved quantity")
+            raise ValueError(
+                "consumed + released quantity cannot exceed reserved quantity"
+            )
 
     @property
     def active_quantity(self) -> Decimal:
-        return max(Decimal("0"), self.reserved_quantity - self.consumed_quantity - self.released_quantity)
+        return max(
+            Decimal("0"),
+            self.reserved_quantity - self.consumed_quantity - self.released_quantity,
+        )
 
     def release(self, quantity: Decimal) -> PositionReservation:
         if quantity <= Decimal("0"):
             raise ValueError("quantity to release must be positive")
         if quantity > self.active_quantity:
             raise ValueError(
-                f"cannot release {quantity} exceeding active quantity {self.active_quantity}"
+                f"cannot release {quantity} exceeding active quantity "
+                f"{self.active_quantity}"
             )
         return PositionReservation(
             reservation_id=self.reservation_id,
@@ -125,7 +135,8 @@ class PositionReservation:
             raise ValueError("quantity to consume must be positive")
         if quantity > self.active_quantity:
             raise ValueError(
-                f"cannot consume {quantity} exceeding active quantity {self.active_quantity}"
+                f"cannot consume {quantity} exceeding active quantity "
+                f"{self.active_quantity}"
             )
         return PositionReservation(
             reservation_id=self.reservation_id,
@@ -137,7 +148,6 @@ class PositionReservation:
             released_quantity=self.released_quantity,
             created_at=self.created_at,
         )
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +171,7 @@ class TradeCommand:
     reduce_only: bool = False
     allocation_plan: ExitAllocationPlan | None = None
     reason: str = ""
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     fencing_token: str | None = None
     idempotency_key: str | None = None
     expected_projection_version: str | None = None
@@ -181,13 +191,17 @@ class TradeCommand:
                 )
             if self.allocation_plan.total_allocated_quantity != self.requested_quantity:
                 raise ValueError(
-                    f"requested_quantity {self.requested_quantity} must strictly match "
-                    f"allocation plan total {self.allocation_plan.total_allocated_quantity}"
+                    f"requested_quantity {self.requested_quantity} must "
+                    "strictly match allocation plan total "
+                    f"{self.allocation_plan.total_allocated_quantity}"
                 )
 
 
 class ExitAllocator:
-    """Authoritative pure domain service for planning position exits and lot allocations."""
+    """
+    Authoritative pure domain service for planning position exits and lot
+    allocations.
+    """
 
     @classmethod
     def plan_exit(
@@ -202,12 +216,13 @@ class ExitAllocator:
         min_notional: Decimal | None = None,
         reason: str = "",
     ) -> ExitAllocationPlan:
-        """Plan exit allocations respecting explicit policies, active reservations, and lot boundaries."""
+        """
+        Plan exit allocations respecting explicit policies, active reservations,
+        and lot boundaries.
+        """
         if hasattr(projection, "batches"):
             open_batches = projection.batches
-            total_active_quantity = getattr(
-                projection, "total_quantity", Decimal("0")
-            )
+            total_active_quantity = getattr(projection, "total_quantity", Decimal("0"))
         else:
             open_batches = getattr(projection, "active_batches", ())
             total_active_quantity = getattr(
@@ -219,7 +234,11 @@ class ExitAllocator:
 
         def get_batch_available(batch: Any) -> Decimal:
             reserved = sum(
-                (r.active_quantity for r in active_reservations if r.batch_id == batch.batch_id),
+                (
+                    r.active_quantity
+                    for r in active_reservations
+                    if r.batch_id == batch.batch_id
+                ),
                 start=Decimal("0"),
             )
             batch_qty = getattr(batch, "quantity", Decimal("0"))
@@ -272,15 +291,12 @@ class ExitAllocator:
             )
 
         if policy == ExitPolicyMode.ABSORB_DUST_SINGLE_BATCH:
-            # Only apply dust absorption if there is strictly one single active batch across the entire position!
+            # Only apply dust absorption if there is strictly one single active batch
+            # across the entire position!
             if len(open_batches) == 1:
                 batch = open_batches[0]
                 avail = get_batch_available(batch)
-                req = (
-                    requested_quantity
-                    if requested_quantity is not None
-                    else avail
-                )
+                req = requested_quantity if requested_quantity is not None else avail
                 if req < avail:
                     dust_remainder = avail - req
                     if (
@@ -288,7 +304,8 @@ class ExitAllocator:
                         and min_notional is not None
                         and (dust_remainder * reference_price) < min_notional
                     ):
-                        # Explicitly absorb dust into this exit allocation plan at decision time
+                        # Explicitly absorb dust into this exit allocation plan at
+                        # decision time
                         allocations = (
                             ExitAllocation(
                                 batch_id=batch.batch_id,
@@ -347,7 +364,9 @@ class ExitAllocator:
                 remaining_to_allocate -= allocated
 
         unallocated = max(Decimal("0"), remaining_to_allocate)
-        total = sum((a.allocated_quantity for a in allocations_list), start=Decimal("0"))
+        total = sum(
+            (a.allocated_quantity for a in allocations_list), start=Decimal("0")
+        )
         return ExitAllocationPlan(
             position_key=pos_key,
             allocations=tuple(allocations_list),

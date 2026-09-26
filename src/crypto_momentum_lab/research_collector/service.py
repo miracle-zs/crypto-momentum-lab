@@ -111,7 +111,9 @@ class ResearchStateCollector:
             hard_limit_bytes=config.hard_limit_bytes,
             global_warning_free_bytes=config.global_warning_free_bytes,
             global_pause_free_bytes=config.global_pause_free_bytes,
-            max_snapshot_age_seconds=max(90.0, config.capacity_check_interval_seconds * 3.0),
+            max_snapshot_age_seconds=max(
+                90.0, config.capacity_check_interval_seconds * 3.0
+            ),
         )
         self._backfill_source = backfill_source
         self._startup_timer = startup_timer
@@ -163,7 +165,10 @@ class ResearchStateCollector:
             pass
 
     async def refresh_capacity(self) -> CapacitySnapshot:
-        """Scan collector directory and disk usage in a thread, updating cached snapshot."""
+        """
+        Scan collector directory and disk usage in a thread, updating cached
+        snapshot.
+        """
         snapshot = await asyncio.to_thread(self._capacity.scan)
         self._capacity_snapshot = snapshot
         self._last_capacity_refresh = time.monotonic()
@@ -259,9 +264,6 @@ class ResearchStateCollector:
                 self._materializer_task = asyncio.create_task(
                     self._materializer_worker()
                 )
-
-
-
 
     async def _process_materializer_batch(
         self,
@@ -432,7 +434,6 @@ class ResearchStateCollector:
                 last_sequence=self._checkpoint.last_sequence,
             )
 
-
     async def ingest(self, collection_batch: CollectionBatch) -> CollectionReceipt:
         """Validate, select, journal, and enqueue batch for materialization."""
 
@@ -520,7 +521,6 @@ class ResearchStateCollector:
             skipped_rows=len(collection_batch.states) - len(selected_states),
             durable_receipt=receipt,
         )
-
 
     async def run(self) -> None:
         """Run until stopped, recovering replay gaps from PostgreSQL."""
@@ -624,7 +624,6 @@ class ResearchStateCollector:
             last_market_state_gap_buckets=self._last_market_state_gap_buckets,
             queued_batches=self._queue.qsize(),
         )
-
 
     async def _consume_source_once(self) -> None:
         iterator = self._source.batches()
@@ -760,7 +759,6 @@ class ResearchStateCollector:
         await self._apply_flush_result(result)
         await self._save_checkpoint()
         return result
-
 
     async def _apply_flush_result(self, result: MaterializerFlushResult) -> None:
         if result.bytes_written > 0:

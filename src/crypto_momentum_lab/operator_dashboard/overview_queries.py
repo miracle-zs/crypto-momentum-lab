@@ -71,8 +71,7 @@ def latest_live_account_process_statement() -> Select[Any]:
         .join(
             latest,
             and_(
-                ExecutionAccountProcessStateRow.account_label
-                == latest.c.account_label,
+                ExecutionAccountProcessStateRow.account_label == latest.c.account_label,
                 ExecutionAccountProcessStateRow.occurred_at
                 == latest.c.latest_occurred_at,
                 ExecutionAccountProcessStateRow.environment == "live",
@@ -147,9 +146,7 @@ def live_account_summaries(
         strategy_by_account.setdefault(row.account_label, row)
     lease_by_account = {row.account_label: row for row in leases}
     account_labels = sorted(
-        set(process_by_account)
-        | set(strategy_by_account)
-        | set(lease_by_account),
+        set(process_by_account) | set(strategy_by_account) | set(lease_by_account),
         key=account_label_sort_key,
     )
     summaries: list[LiveAccountSummaryResponse] = []
@@ -157,30 +154,20 @@ def live_account_summaries(
         process_row = process_by_account.get(account_label)
         strategy = strategy_by_account.get(account_label)
         lease = lease_by_account.get(account_label)
-        occurred_at = (
-            process_row.occurred_at
-            if process_row is not None
-            else None
-        )
+        occurred_at = process_row.occurred_at if process_row is not None else None
         state = process_row.state if process_row is not None else None
         summaries.append(
             LiveAccountSummaryResponse(
                 account_label=account_label,
                 environment=(
-                    process_row.environment
-                    if process_row is not None
-                    else "live"
+                    process_row.environment if process_row is not None else "live"
                 ),
                 status=live_account_status(
                     state,
                     observed_at=occurred_at,
                     now=now,
                 ),
-                readiness=(
-                    state
-                    if state is not None
-                    else "missing"
-                ),
+                readiness=(state if state is not None else "missing"),
                 observed_at=occurred_at,
                 strategy_name=(
                     strategy.strategy_name
@@ -189,16 +176,8 @@ def live_account_summaries(
                     if lease is not None
                     else None
                 ),
-                strategy_state=(
-                    strategy.state
-                    if strategy is not None
-                    else None
-                ),
-                lease_expires_at=(
-                    lease.expires_at
-                    if lease is not None
-                    else None
-                ),
+                strategy_state=(strategy.state if strategy is not None else None),
+                lease_expires_at=(lease.expires_at if lease is not None else None),
             )
         )
     return summaries
@@ -266,7 +245,12 @@ class OverviewQueries:
                 continue
             streams_dict[s.name] = (
                 "READY"
-                if s.status in (OperationalStatus.FRESH, OperationalStatus.READY, OperationalStatus.LIVE)
+                if s.status
+                in (
+                    OperationalStatus.FRESH,
+                    OperationalStatus.READY,
+                    OperationalStatus.LIVE,
+                )
                 else "RECOVERING"
             )
         streams_all_ready = bool(
@@ -277,24 +261,18 @@ class OverviewQueries:
         # 1. No active halt and database is UP
         # 2. Market data and execution streams are FRESH/READY
         # 3. Accounts exist, are fresh, have valid active leases, and strategy is active
-        accounts_tradeable = (
-            bool(accounts_resp.accounts)
-            and all(
-                a.status == OperationalStatus.READY
-                and a.observed_at is not None
-                and (now - a.observed_at).total_seconds() <= 90.0
-                and a.lease_expires_at is not None
-                and a.lease_expires_at > now
-                and a.strategy_state in ("active", "running")
-                for a in accounts_resp.accounts
-            )
+        accounts_tradeable = bool(accounts_resp.accounts) and all(
+            a.status == OperationalStatus.READY
+            and a.observed_at is not None
+            and (now - a.observed_at).total_seconds() <= 90.0
+            and a.lease_expires_at is not None
+            and a.lease_expires_at > now
+            and a.strategy_state in ("active", "running")
+            for a in accounts_resp.accounts
         )
 
         can_trade = (
-            not has_halt
-            and database_up
-            and streams_all_ready
-            and accounts_tradeable
+            not has_halt and database_up and streams_all_ready and accounts_tradeable
         )
 
         if has_halt:
@@ -325,7 +303,9 @@ class OverviewQueries:
             # Accounts are present, exit channels remain open, but entry is blocked
             status = (
                 OperationalStatus.STALE
-                if any(a.status == OperationalStatus.STALE for a in accounts_resp.accounts)
+                if any(
+                    a.status == OperationalStatus.STALE for a in accounts_resp.accounts
+                )
                 else OperationalStatus.DEGRADED
             )
             mode = "EXIT_ONLY"
@@ -343,8 +323,7 @@ class OverviewQueries:
             ):
                 entry_gate_reason = "strategy_not_active"
             elif any(
-                a.observed_at is None
-                or (now - a.observed_at).total_seconds() > 90.0
+                a.observed_at is None or (now - a.observed_at).total_seconds() > 90.0
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "account_stale"
@@ -709,9 +688,7 @@ def universe_membership(
             else None
         )
         utc_day_return = (
-            None
-            if entry.utc_day_return is None
-            else str(entry.utc_day_return)
+            None if entry.utc_day_return is None else str(entry.utc_day_return)
         )
         current_price = (
             None if entry.current_price is None else str(entry.current_price)

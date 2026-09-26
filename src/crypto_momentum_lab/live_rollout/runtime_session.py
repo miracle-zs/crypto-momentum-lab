@@ -88,13 +88,15 @@ class ResourceOwnershipRegistry:
         self._resources.append(RegisteredResource(name=name, cleanup=cleanup))
 
     def disarm(self) -> None:
-        """Disarm the construction registry once ownership transfers to session lifecycle."""
+        """
+        Disarm the construction registry once ownership transfers to session
+        lifecycle.
+        """
         self._resources.clear()
 
     async def teardown_all(self, *, deadline: float | None = None) -> None:
         """Tear down all registered resources in reverse order."""
         for res in reversed(self._resources):
-
             started_at = perf_counter()
             try:
                 if deadline is not None and perf_counter() >= deadline:
@@ -476,7 +478,6 @@ class RuntimeSession:
 
             duration = round(perf_counter() - started_at, 3)
             self._shutdown_result = ShutdownResult(
-
                 run_id=self._run_id,
                 drained=drained,
                 checkpoint_durable=checkpoint_durable,

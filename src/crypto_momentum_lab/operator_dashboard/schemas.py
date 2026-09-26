@@ -46,12 +46,8 @@ class DecisionSLOResponse(DashboardSchema):
     window_end: datetime
     persisted_event_count: int
     truncated: bool = False
-    phase_latency: dict[str, DecisionSLOLatencyResponse] = Field(
-        default_factory=dict
-    )
-    terminal_reasons: dict[str, dict[str, dict[str, int]]] = Field(
-        default_factory=dict
-    )
+    phase_latency: dict[str, DecisionSLOLatencyResponse] = Field(default_factory=dict)
+    terminal_reasons: dict[str, dict[str, dict[str, int]]] = Field(default_factory=dict)
     consumers: list[DecisionSLOConsumerResponse] = Field(default_factory=list)
 
 
@@ -108,9 +104,7 @@ class LiveAccountMetricsAccountResponse(DashboardSchema):
     account_label: str
     environment: str
     status: OperationalStatus
-    metrics_curve: list[LiveAccountMetricPointResponse] = Field(
-        default_factory=list
-    )
+    metrics_curve: list[LiveAccountMetricPointResponse] = Field(default_factory=list)
     performance: AccountPerformanceSummaryResponse | None = None
 
 
@@ -122,9 +116,7 @@ class LiveAccountMetricsResponse(DashboardSchema):
     equity_window_start: datetime | None = None
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None
-    accounts: list[LiveAccountMetricsAccountResponse] = Field(
-        default_factory=list
-    )
+    accounts: list[LiveAccountMetricsAccountResponse] = Field(default_factory=list)
 
 
 class SystemOverviewResponse(DashboardSchema):
@@ -300,7 +292,6 @@ class RiskExecutionResponse(DashboardSchema):
     coverage_trace_id: str | None = None
 
 
-
 class RunReportSummaryResponse(DashboardSchema):
     status: OperationalStatus
     shadow_sessions: list[dict[str, JsonValue]]
@@ -331,7 +322,9 @@ class PersistencePerformanceResponse(DashboardSchema):
     p95_total_ms: float | None = None
     max_total_ms: float | None = None
     recent_checkpoints: list[CheckpointMetricItem] = Field(default_factory=list)
-    account_latest_checkpoints: dict[str, CheckpointMetricItem] = Field(default_factory=dict)
+    account_latest_checkpoints: dict[str, CheckpointMetricItem] = Field(
+        default_factory=dict
+    )
 
 
 class MarketDataPerformanceResponse(DashboardSchema):
@@ -391,5 +384,3 @@ class SystemReadinessResponse(DashboardSchema):
     tradeability: TradeabilityDetailResponse
     stream_readiness: StreamReadinessDetailResponse
     accounts: list[LiveAccountSummaryResponse] = Field(default_factory=list)
-
-

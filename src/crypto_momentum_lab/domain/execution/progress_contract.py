@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 
-class ExecutionReadiness(str, Enum):
+class ExecutionReadiness(StrEnum):
     """Execution readiness states enforcing non-blocking degraded operations."""
 
     INDEPENDENT_EXECUTABLE = "independent_executable"
@@ -29,7 +29,8 @@ class ProgressFreshnessSLA:
             raise ValueError("max_lag_seconds_for_execution must be positive")
         if self.max_lag_seconds_for_stall <= self.max_lag_seconds_for_execution:
             raise ValueError(
-                "max_lag_seconds_for_stall must be strictly greater than max_lag_seconds_for_execution"
+                "max_lag_seconds_for_stall must be strictly greater than"
+                "max_lag_seconds_for_execution"
             )
 
 
@@ -42,9 +43,7 @@ class ReadinessAssessment:
     allows_entries: bool
     allows_exits: bool
     reason: str
-    evaluated_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
         if self.evaluated_at.tzinfo is None:
@@ -107,10 +106,7 @@ class ReadinessEvaluator:
 
         reconciliation_unclean = reconciliation_gap != Decimal("0")
 
-        if (
-            lag > effective_sla.max_lag_seconds_for_execution
-            or reconciliation_unclean
-        ):
+        if lag > effective_sla.max_lag_seconds_for_execution or reconciliation_unclean:
             lag_reasons: list[str] = []
             if lag > effective_sla.max_lag_seconds_for_execution:
                 lag_reasons.append(f"lag:{lag:.1f}s")

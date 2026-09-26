@@ -69,7 +69,10 @@ def _extract_sqlstate(exc: Exception) -> str | None:
 
 
 def _sanitize_error_detail(exc: Exception) -> str:
-    """Sanitize exception message for safe internal logging without leaking credentials or tokens."""
+    """
+    Sanitize exception message for safe internal logging without leaking
+    credentials or tokens.
+    """
     raw = f"{type(exc).__name__}: {exc}".replace("\r", " ").replace("\n", " ")
     sanitized = _PRIVATE_KEY_PATTERN.sub("[REDACTED_PRIVATE_KEY]", raw)
     sanitized = _URL_CREDENTIAL_PATTERN.sub(r"://\1:***@", sanitized)
@@ -81,6 +84,7 @@ def _sanitize_error_detail(exc: Exception) -> str:
     if len(sanitized) > 300:
         sanitized = sanitized[:297] + "..."
     return sanitized
+
 
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
     {
@@ -96,9 +100,7 @@ def split_exchange_orders(
     rows: Sequence[ExchangeOrderRow],
 ) -> tuple[list[ExchangeOrderRow], list[ExchangeOrderRow]]:
     """Separate confirmed resting orders from genuinely uncertain orders."""
-    terminal_states = {
-        state.value for state in ExchangeOrderState if state.terminal
-    }
+    terminal_states = {state.value for state in ExchangeOrderState if state.terminal}
     pending: list[ExchangeOrderRow] = []
     ambiguous: list[ExchangeOrderRow] = []
     for row in rows:
@@ -247,9 +249,7 @@ class RiskExecutionQueries:
         now = datetime.now(UTC)
         symbol_times: dict[str, datetime] = {
             row[0]: (
-                row[1]
-                if row[1].tzinfo is not None
-                else row[1].replace(tzinfo=UTC)
+                row[1] if row[1].tzinfo is not None else row[1].replace(tzinfo=UTC)
             )
             for row in market_rows
             if row[1] is not None
@@ -261,12 +261,14 @@ class RiskExecutionQueries:
             coverage_scope = "QUERY_ERROR"
         elif required_symbols:
             missing_symbols = sorted(required_symbols - set(symbol_times.keys()))
-            coverage_complete = (len(missing_symbols) == 0)
+            coverage_complete = len(missing_symbols) == 0
             coverage_scope = f"{len(symbol_times)}/{len(required_symbols)} covered"
         else:
             missing_symbols = []
             coverage_complete = bool(symbol_times)
-            coverage_scope = f"{len(symbol_times)} symbols" if symbol_times else "unconstrained"
+            coverage_scope = (
+                f"{len(symbol_times)} symbols" if symbol_times else "unconstrained"
+            )
 
         if symbol_times:
             # Multi-symbol worst-case freshness: determined by the oldest symbol
@@ -367,7 +369,6 @@ class RiskExecutionQueries:
             coverage_error_code=coverage_error_code,
             coverage_trace_id=coverage_trace_id,
         )
-
 
 
 __all__ = [

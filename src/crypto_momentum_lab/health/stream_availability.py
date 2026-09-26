@@ -14,12 +14,12 @@ Differentiates four distinct stream lifecycle states:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
-from typing import Callable
+from enum import StrEnum
 
 
-class StreamAvailabilityState(str, Enum):
+class StreamAvailabilityState(StrEnum):
     """The four operational availability states of a client stream."""
 
     CONNECTING = "connecting"
@@ -50,7 +50,10 @@ class StreamAvailabilityConfig:
 
 
 class StreamAvailabilityClock:
-    """Tracks availability state and enforces distinct budgets for startup, recovery, and disruption."""
+    """
+    Tracks availability state and enforces distinct budgets for startup, recovery,
+    and disruption.
+    """
 
     def __init__(
         self,
@@ -160,7 +163,9 @@ class StreamAvailabilityClock:
                 msg = (
                     custom_message
                     or f"{self._stream_name} unavailable beyond timeout "
-                    f"(startup timeout of {self._config.startup_timeout_seconds:.1f}s exceeded in {self._state.value})"
+                    f"(startup timeout of "
+                    f"{self._config.startup_timeout_seconds:.1f}s exceeded in "
+                    f"{self._state.value})"
                 )
                 if error_factory:
                     raise error_factory(msg)
@@ -173,7 +178,9 @@ class StreamAvailabilityClock:
                     msg = (
                         custom_message
                         or f"{self._stream_name} unavailable beyond timeout "
-                        f"(disruption timeout of {self._config.disrupted_timeout_seconds:.1f}s exceeded)"
+                        f"(disruption timeout of "
+                        f"{self._config.disrupted_timeout_seconds:.1f}s "
+                        "exceeded)"
                     )
                     if error_factory:
                         raise error_factory(msg)
@@ -185,23 +192,36 @@ class StreamAvailabilityClock:
                     msg = (
                         custom_message
                         or f"{self._stream_name} unavailable beyond timeout "
-                        f"(recovery timeout of {self._config.recovery_timeout_seconds:.1f}s exceeded)"
+                        f"(recovery timeout of "
+                        f"{self._config.recovery_timeout_seconds:.1f}s "
+                        "exceeded)"
                     )
                     if error_factory:
                         raise error_factory(msg)
                     raise StreamAvailabilityTimeoutError(msg)
 
     def remaining_budget(self) -> float:
-        """Return the number of seconds remaining before timeout in current state, or inf if READY."""
+        """
+        Return the number of seconds remaining before timeout in current state, or
+        inf if READY.
+        """
         if self._state == StreamAvailabilityState.READY:
             return float("inf")
         now = self._clock()
         if not self._has_ever_been_ready:
-            return max(0.0, self._config.startup_timeout_seconds - (now - self._startup_since))
+            return max(
+                0.0, self._config.startup_timeout_seconds - (now - self._startup_since)
+            )
         if self._state == StreamAvailabilityState.DISRUPTED:
             assert self._disrupted_since is not None
-            return max(0.0, self._config.disrupted_timeout_seconds - (now - self._disrupted_since))
+            return max(
+                0.0,
+                self._config.disrupted_timeout_seconds - (now - self._disrupted_since),
+            )
         if self._state == StreamAvailabilityState.RECOVERING:
             assert self._recovering_since is not None
-            return max(0.0, self._config.recovery_timeout_seconds - (now - self._recovering_since))
+            return max(
+                0.0,
+                self._config.recovery_timeout_seconds - (now - self._recovering_since),
+            )
         return float("inf")

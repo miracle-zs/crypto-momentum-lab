@@ -54,7 +54,6 @@ class SymbolBackfillReport:
     failure: str | None = None
 
 
-
 def _as_dt(value: object) -> datetime:
     return value if isinstance(value, datetime) else datetime.now(UTC)
 
@@ -120,9 +119,7 @@ def synthesize_states_from_trades(
         acc["high_price"] = max(_dec(acc["high_price"]), trade.price)
         acc["low_price"] = min(_dec(acc["low_price"]), trade.price)
         acc["close_price"] = trade.price
-        acc["last_received_at"] = max(
-            trade.event_at, _as_dt(acc["last_received_at"])
-        )
+        acc["last_received_at"] = max(trade.event_at, _as_dt(acc["last_received_at"]))
 
     states: list[MarketState15s] = []
     for key in sorted(buckets):
@@ -191,7 +188,9 @@ class PromotionHistoryBackfiller:
         *,
         now: datetime | None = None,
     ) -> tuple[SymbolBackfillReport, ...]:
-        ordered = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+        ordered = sorted(
+            {symbol.strip().upper() for symbol in symbols if symbol.strip()}
+        )
         if not ordered:
             return ()
         batch = ordered[: self._max_symbols_per_batch]
@@ -201,7 +200,7 @@ class PromotionHistoryBackfiller:
                 requested=len(ordered),
                 running=len(batch),
             )
-        end = (datetime.now(UTC) if now is None else now.astimezone(UTC))
+        end = datetime.now(UTC) if now is None else now.astimezone(UTC)
         start = end - self._lookback
         reports: list[SymbolBackfillReport] = []
         for symbol in batch:
