@@ -41,6 +41,11 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
     compute_trading_rules_hash,
 )
 from crypto_momentum_lab.domain.risk import RiskEvaluation, TradingLease
+from crypto_momentum_lab.domain.runtime import (
+    CapabilityEvaluator,
+    CapabilityEvidence,
+    RuntimePlanCompiler,
+)
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
@@ -368,6 +373,7 @@ async def run_live_daemon(
     health = LocalHealthWriter.from_environment()
     live_readiness: LiveReadinessPublisher | None = None
     session: RuntimeSession | None = None
+    active_lease: TradingLease | None = None
 
     def mark_live_database_ok() -> None:
         if health is None:
@@ -503,6 +509,11 @@ async def run_live_daemon(
         decision_trace_repository = PostgresDecisionTraceRepository(
             observability_factory
         )
+        fact_source = LiveDecisionFactSource(
+            account_label,
+            trace_repository=decision_trace_repository,
+            strategy_name=strategy_name,
+        )
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
             account_label=account_label,
@@ -605,6 +616,65 @@ async def run_live_daemon(
         )
         order_event_runtime = LiveOrderEventRuntime(telemetry=telemetry)
 
+        runtime_plan = RuntimePlanCompiler.compile(
+            environment="live",
+            account_label=account_label,
+            strategy_name=strategy_name,
+            git_commit=git_commit_hash,
+            schema_version=migration_revision,
+            runtime_generation=git_commit_hash,
+            fencing_epoch=int(getattr(active_lease, "fencing_token", 1) or 1),
+            observed_database_revision=migration_revision,
+        )
+        capability_evaluator = CapabilityEvaluator()
+
+        def _provide_capability_evidence(
+            order_plan: OrderExecutionPlan,
+            checked_at: datetime,
+        ) -> CapabilityEvidence:
+            market_age = 0.0
+            if (
+                live_readiness is not None
+                and live_readiness._latest_market_state_age_seconds is not None
+            ):
+                market_age = max(
+                    0.0, float(live_readiness._latest_market_state_age_seconds)
+                )
+
+            is_concordant = True
+            unresolved_count = 0
+            ctx = fact_source.current_context
+            if ctx is not None:
+                order_sym = getattr(order_plan, "symbol", "")
+                if order_sym in getattr(ctx, "unmanaged_position_symbols", ()):
+                    is_concordant = False
+                unresolved = getattr(ctx, "unresolved_orders", ()) or ()
+                unresolved_count = sum(
+                    1
+                    for o in unresolved
+                    if getattr(getattr(o, "plan", None), "symbol", None)
+                    == order_sym
+                )
+
+            is_app_valid = daemon is not None and daemon.entry_enabled
+            return CapabilityEvidence(
+                evidence_version=f"ev_{account_label}_{checked_at.isoformat()}",
+                market_freshness_seconds=market_age,
+                is_account_concordant=is_concordant,
+                is_account_identity_verified=True,
+                unresolved_inflight_orders_count=unresolved_count,
+                is_approval_valid=is_app_valid,
+                is_lease_active=True,
+                is_emergency_authorized=False,
+                is_universe_ready=is_app_valid,
+                plan_hash=runtime_plan.plan_hash,
+                runtime_generation=runtime_plan.runtime_generation,
+                fencing_epoch=runtime_plan.fencing_epoch,
+                declared_schema_compatibility=runtime_plan.declared_schema_compatibility,
+                observed_database_revision=runtime_plan.observed_database_revision,
+                observed_at=checked_at,
+            )
+
         submission_fence = LiveSubmissionFence(
             risk_state=heartbeat_risk_repository,
             environment="live",
@@ -614,6 +684,9 @@ async def run_live_daemon(
             code_generation=git_commit_hash,
             active_lease=lambda: active_lease,
             entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
+            capability_evaluator=capability_evaluator,
+            runtime_plan=runtime_plan,
+            evidence_provider=_provide_capability_evidence,
         )
 
         state_machine = OrderExecutionStateMachine(
@@ -1013,11 +1086,6 @@ async def run_live_daemon(
         entry_universe_context_provider = entry_runtime.entry_universe_context_provider
         entry_universe_snapshot_provider = (
             entry_runtime.entry_universe_snapshot_provider
-        )
-        fact_source = LiveDecisionFactSource(
-            account_label,
-            trace_repository=decision_trace_repository,
-            strategy_name=strategy_name,
         )
         daemon = LiveStrategyDaemon(
             strategy=strategy,

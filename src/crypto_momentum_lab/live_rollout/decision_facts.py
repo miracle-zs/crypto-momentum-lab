@@ -257,6 +257,10 @@ class LiveDecisionFactSource:
     def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
         self._context = context
 
+    @property
+    def current_context(self) -> LiveDaemonRuntimeContext | None:
+        return self._context
+
     def set_policy_state(self, state: PolicyState) -> None:
         self._policy_state = state
 
