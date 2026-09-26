@@ -96,6 +96,10 @@ class AccountPerformanceSummaryResponse(DashboardSchema):
     coverage_status: str = "uncertified"
     cash_flow_coverage_proof: str = "uncertified_zero_cash_flow_facts"
     cash_flow_corrections_count: int = 0
+    valuation_basis: str = "wallet"
+    asset: str = "USDT"
+    environment: str = "live"
+    method: str | None = None
 
 
 class LiveAccountMetricsAccountResponse(DashboardSchema):

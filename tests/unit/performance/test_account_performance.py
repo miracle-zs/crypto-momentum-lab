@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.performance.account_performance import (
 from crypto_momentum_lab.domain.performance.metric_models import (
     AccountEquityCut,
     CashFlowFact,
+    CoverageReceipt,
     MetricFamily,
     MetricSpec,
     MetricStatus,
@@ -250,3 +251,83 @@ def test_unknown_cash_flows_handling() -> None:
     res_mwr = AccountPerformanceCalculator.calculate(spec_mwr, cut)
     assert res_mwr.status == MetricStatus.INSUFFICIENT_COVERAGE
     assert res_mwr.value is None
+
+
+def test_coverage_receipt_empty_proven_certifies_exact_twr() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    receipt = CoverageReceipt(
+        account_label="primary",
+        asset="USDT",
+        interval_start=t0,
+        interval_end=t1,
+        source="account_balance_snapshots+cash_flow_corrections",
+        cursor_boundary=t1,
+        is_gapless=True,
+        is_empty_proven=True,
+        revision=1,
+        as_of=t1,
+        details={"audit": "no_external_deposits"},
+    )
+
+    cut = AccountEquityCut(
+        account_label="primary",
+        valuation_basis="wallet",
+        asset="USDT",
+        environment="live",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("11500.00"),
+        start_time=t0,
+        end_time=t1,
+        cash_flows=(),
+        coverage_receipt=receipt,
+        # Even if legacy field was set to True, receipt.is_empty_proven overrides it to certified zero
+        has_unknown_cash_flows=True,
+    )
+
+    spec_twr = MetricSpec(name="twr", family=MetricFamily.TIME_WEIGHTED_RETURN)
+    res_twr = AccountPerformanceCalculator.calculate(spec_twr, cut)
+
+    assert res_twr.status == MetricStatus.CONFIRMED
+    assert res_twr.value == Decimal("0.150000")
+    assert res_twr.method == "exact_twr_zero_cash_flows"
+    assert res_twr.coverage == receipt
+    assert "environment:live" in res_twr.source_refs
+    assert "asset:USDT" in res_twr.source_refs
+    assert "basis:wallet" in res_twr.source_refs
+
+
+def test_twr_with_subintervals_uses_linked_modified_dietz_method() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    deposit = CashFlowFact(
+        correction_id="cf_sub_01",
+        account_label="primary",
+        amount=Decimal("1000.00"),
+        cash_flow_type="deposit",
+        effective_at=t0 + timedelta(hours=12),
+        reason="deposit",
+        approval_ref="appr_01",
+        evidence_hash="ev_01",
+    )
+    val_points = (
+        ValuationPoint(timestamp=t0, equity=Decimal("10000.00")),
+        ValuationPoint(timestamp=t0 + timedelta(hours=12), equity=Decimal("11000.00")),
+        ValuationPoint(timestamp=t1, equity=Decimal("12000.00")),
+    )
+    cut = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("12000.00"),
+        start_time=t0,
+        end_time=t1,
+        cash_flows=(deposit,),
+        valuation_points=val_points,
+    )
+    spec_twr = MetricSpec(name="twr", family=MetricFamily.TIME_WEIGHTED_RETURN)
+    res_twr = AccountPerformanceCalculator.calculate(spec_twr, cut)
+
+    assert res_twr.status == MetricStatus.CONFIRMED
+    assert res_twr.method == "linked_modified_dietz"

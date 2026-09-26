@@ -316,6 +316,9 @@ class DashboardQueryProtocol(Protocol):
         self,
         account_label: str = "primary",
         window_hours: int = 24,
+        environment: str = "live",
+        asset: str = "USDT",
+        end_time: datetime | None = None,
     ) -> dict[str, object]: ...
 
 
@@ -529,13 +532,24 @@ def create_dashboard_app(
     async def account_performance(
         account_label: str = "primary",
         window_hours: int = 24,
+        environment: str = "live",
+        asset: str = "USDT",
+        end_time: datetime | None = None,
     ) -> dict[str, object]:
         try:
+            end_key = end_time.isoformat() if end_time else "now"
+            cache_key = (
+                f"account_performance:{environment}:{account_label}:"
+                f"{asset}:{window_hours}:{end_key}"
+            )
             return await response_cache.get(
-                f"account_performance:{account_label}:{window_hours}",
+                cache_key,
                 lambda: query_service().account_performance(
                     account_label=account_label,
                     window_hours=window_hours,
+                    environment=environment,
+                    asset=asset,
+                    end_time=end_time,
                 ),
                 ttl_seconds=_PERFORMANCE_CACHE_TTL_SECONDS,
                 stale_while_revalidate_seconds=default_stale_grace_seconds,
@@ -736,13 +750,24 @@ def create_dashboard_app(
     async def get_account_performance(
         account_label: str = "primary",
         window_hours: int = 24,
+        environment: str = "live",
+        asset: str = "USDT",
+        end_time: datetime | None = None,
     ) -> dict[str, object]:
         try:
+            end_key = end_time.isoformat() if end_time else "now"
+            cache_key = (
+                f"account-performance:{environment}:{account_label}:"
+                f"{asset}:{window_hours}:{end_key}"
+            )
             return await response_cache.get(
-                f"account-performance:{account_label}:{window_hours}",
+                cache_key,
                 lambda: query_service().account_performance(
                     account_label=account_label,
                     window_hours=window_hours,
+                    environment=environment,
+                    asset=asset,
+                    end_time=end_time,
                 ),
                 ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
                 stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,

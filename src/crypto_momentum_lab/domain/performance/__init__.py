@@ -6,6 +6,7 @@ from crypto_momentum_lab.domain.performance.account_performance import (
 from crypto_momentum_lab.domain.performance.metric_models import (
     AccountEquityCut,
     CashFlowFact,
+    CoverageReceipt,
     MetricFamily,
     MetricSpec,
     MetricStatus,
@@ -16,6 +17,7 @@ __all__ = [
     "AccountEquityCut",
     "AccountPerformanceCalculator",
     "CashFlowFact",
+    "CoverageReceipt",
     "MetricFamily",
     "MetricSpec",
     "MetricStatus",

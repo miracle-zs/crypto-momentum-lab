@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.performance.account_performance import (
 from crypto_momentum_lab.domain.performance.metric_models import (
     AccountEquityCut,
     CashFlowFact,
+    CoverageReceipt,
     MetricFamily,
     MetricSpec,
     ValuationPoint,
@@ -289,6 +290,9 @@ def build_performance_summary(
     start_time: datetime,
     end_time: datetime,
     max_equity_gap: timedelta | None = None,
+    environment: str = "live",
+    asset: str = "USDT",
+    valuation_basis: str = "wallet",
 ) -> AccountPerformanceSummaryResponse | None:
     """Builds a fully-audited AccountPerformanceSummaryResponse.
 
@@ -311,6 +315,25 @@ def build_performance_summary(
     cash_facts = build_cash_flow_facts(cf_rows)
     vps = build_valuation_points(equity_rows)
 
+    is_certified, coverage_status, coverage_proof = _assess_coverage(
+        cf_rows,
+        start_time,
+        end_time,
+        equity_rows=equity_rows,
+        max_equity_gap=effective_max_gap,
+    )
+
+    coverage_receipt = CoverageReceipt(
+        account_label=account_label,
+        asset=asset,
+        interval_start=start_time,
+        interval_end=end_time,
+        source="account_balance_snapshots+cash_flow_corrections",
+        is_gapless=is_certified,
+        is_empty_proven=(is_certified and len(cf_rows) == 0),
+        details=coverage_proof,
+    )
+
     cut = AccountEquityCut(
         account_label=account_label,
         start_equity=start_eq,
@@ -319,6 +342,10 @@ def build_performance_summary(
         end_time=end_time,
         cash_flows=cash_facts,
         valuation_points=vps,
+        valuation_basis=valuation_basis,
+        asset=asset,
+        environment=environment,
+        coverage_receipt=coverage_receipt,
         as_of=end_time,
     )
 
@@ -326,14 +353,6 @@ def build_performance_summary(
         spec.name: AccountPerformanceCalculator.calculate(spec, cut)
         for spec in _METRIC_SPECS
     }
-
-    is_certified, coverage_status, coverage_proof = _assess_coverage(
-        cf_rows,
-        start_time,
-        end_time,
-        equity_rows=equity_rows,
-        max_equity_gap=effective_max_gap,
-    )
 
     pnl = metrics["cash_flow_adjusted_pnl"]
     delta = metrics["net_equity_delta"]
@@ -360,6 +379,10 @@ def build_performance_summary(
         coverage_status=coverage_status,
         cash_flow_coverage_proof=coverage_proof,
         cash_flow_corrections_count=len(cf_rows),
+        valuation_basis=valuation_basis,
+        asset=asset,
+        environment=environment,
+        method=twr.method,
     )
 
 
@@ -371,6 +394,9 @@ def build_performance_summary_dict(
     start_time: datetime,
     end_time: datetime,
     max_equity_gap: timedelta | None = None,
+    environment: str = "live",
+    asset: str = "USDT",
+    valuation_basis: str = "wallet",
 ) -> dict[str, object]:
     """Dict variant for the /api/account-performance endpoint."""
     summary = build_performance_summary(
@@ -380,6 +406,9 @@ def build_performance_summary_dict(
         start_time=start_time,
         end_time=end_time,
         max_equity_gap=max_equity_gap,
+        environment=environment,
+        asset=asset,
+        valuation_basis=valuation_basis,
     )
     if summary is None:
         return {"status": "no_data", "account_label": account_label}
@@ -400,4 +429,8 @@ def build_performance_summary_dict(
         "coverage_status": summary.coverage_status,
         "cash_flow_coverage_proof": summary.cash_flow_coverage_proof,
         "cash_flow_corrections_count": summary.cash_flow_corrections_count,
+        "valuation_basis": summary.valuation_basis,
+        "asset": summary.asset,
+        "environment": summary.environment,
+        "method": summary.method,
     }

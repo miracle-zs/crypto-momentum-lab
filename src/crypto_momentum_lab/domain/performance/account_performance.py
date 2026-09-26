@@ -27,15 +27,57 @@ class AccountPerformanceCalculator:
     """Pure domain calculator for account metrics without side effects."""
 
     @classmethod
+    def _resolve_coverage_evidence(
+        cls,
+        cut: AccountEquityCut,
+    ) -> tuple[bool, str, str]:
+        """Resolves certification and proof from coverage receipt or legacy facts."""
+        if cut.coverage_receipt is not None:
+            if not cut.coverage_receipt.is_gapless:
+                return (
+                    False,
+                    "uncertified",
+                    cut.coverage_receipt.details or "coverage_receipt_gap_detected",
+                )
+            if cut.coverage_receipt.is_empty_proven:
+                return (
+                    True,
+                    "confirmed",
+                    cut.coverage_receipt.details or "proven_zero_cash_flows",
+                )
+            if cut.has_unknown_cash_flows:
+                return False, "uncertified", "unknown_cash_flows_present"
+            if cut.cash_flows:
+                return (
+                    True,
+                    "confirmed",
+                    cut.coverage_receipt.details
+                    or f"audited_records_count_{len(cut.cash_flows)}",
+                )
+            return False, "uncertified", "uncertified_zero_cash_flow_facts"
+        if cut.has_unknown_cash_flows:
+            return False, "uncertified", "unknown_cash_flows_present"
+        if cut.cash_flows:
+            return True, "confirmed", f"audited_records_count_{len(cut.cash_flows)}"
+        return False, "uncertified", "uncertified_zero_cash_flow_facts"
+
+    @classmethod
     def calculate(
         cls,
         spec: MetricSpec,
         cut: AccountEquityCut,
     ) -> MetricValue:
         """Evaluates an authoritative MetricValue from an AccountEquityCut."""
+        is_certified, coverage_status, coverage_proof = (
+            cls._resolve_coverage_evidence(cut)
+        )
         source_refs = (
             f"account:{cut.account_label}",
+            f"environment:{cut.environment}",
+            f"asset:{cut.asset}",
+            f"basis:{cut.valuation_basis}",
             f"cut_as_of:{cut.as_of.isoformat()}",
+            *cut.source_refs,
         )
         as_of = cut.as_of
 
@@ -43,9 +85,9 @@ class AccountPerformanceCalculator:
         if spec.family == MetricFamily.NET_EQUITY_DELTA:
             delta = cut.end_equity - cut.start_equity
             status = (
-                MetricStatus.UNVERIFIED_ESTIMATE
-                if cut.has_unknown_cash_flows
-                else MetricStatus.CONFIRMED
+                MetricStatus.CONFIRMED
+                if is_certified
+                else MetricStatus.UNVERIFIED_ESTIMATE
             )
             return MetricValue(
                 metric_name=spec.name,
@@ -58,16 +100,21 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=status,
+                method="raw_equity_delta",
+                coverage=cut.coverage_receipt,
                 details={
                     "start_equity": str(cut.start_equity),
                     "end_equity": str(cut.end_equity),
                     "raw_delta": str(delta),
+                    "valuation_basis": cut.valuation_basis,
+                    "asset": cut.asset,
+                    "environment": cut.environment,
                 },
             )
 
         # 2. CASH_FLOW_ADJUSTED_PNL
         if spec.family == MetricFamily.CASH_FLOW_ADJUSTED_PNL:
-            if cut.has_unknown_cash_flows:
+            if not is_certified:
                 return MetricValue(
                     metric_name=spec.name,
                     family=spec.family,
@@ -79,7 +126,9 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.INSUFFICIENT_COVERAGE,
-                    details={"error": "unknown_cash_flows_present"},
+                    method="cash_flow_adjusted_pnl",
+                    coverage=cut.coverage_receipt,
+                    details={"error": "uncertified_cash_flows_present"},
                 )
 
             total_cash_flow = sum(
@@ -87,6 +136,11 @@ class AccountPerformanceCalculator:
                 start=Decimal("0.00"),
             )
             adjusted_pnl = (cut.end_equity - cut.start_equity) - total_cash_flow
+            status = (
+                MetricStatus.CONFIRMED
+                if (is_certified or cut.cash_flows)
+                else MetricStatus.UNVERIFIED_ESTIMATE
+            )
             return MetricValue(
                 metric_name=spec.name,
                 family=spec.family,
@@ -97,24 +151,24 @@ class AccountPerformanceCalculator:
                 interval_end=cut.end_time,
                 as_of=as_of,
                 source_refs=source_refs,
-                status=MetricStatus.CONFIRMED,
+                status=status,
+                method="cash_flow_adjusted_pnl",
+                coverage=cut.coverage_receipt,
                 details={
                     "total_cash_flow": str(total_cash_flow),
                     "cash_flow_count": len(cut.cash_flows),
                     "raw_delta": str(cut.end_equity - cut.start_equity),
-                    "coverage_status": "confirmed" if cut.cash_flows else "uncertified",
-                    "is_certified": bool(cut.cash_flows),
-                    "cash_flow_coverage_proof": (
-                        f"audited_records_count_{len(cut.cash_flows)}"
-                        if cut.cash_flows
-                        else "uncertified_zero_cash_flow_facts"
-                    ),
+                    "coverage_status": coverage_status,
+                    "is_certified": is_certified,
+                    "cash_flow_coverage_proof": coverage_proof,
+                    "valuation_basis": cut.valuation_basis,
+                    "asset": cut.asset,
                 },
             )
 
         # 3. TIME_WEIGHTED_RETURN (TWR)
         if spec.family == MetricFamily.TIME_WEIGHTED_RETURN:
-            if cut.has_unknown_cash_flows:
+            if not is_certified:
                 return MetricValue(
                     metric_name=spec.name,
                     family=spec.family,
@@ -126,7 +180,9 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.INSUFFICIENT_COVERAGE,
-                    details={"error": "unknown_cash_flows_present"},
+                    method="exact_twr",
+                    coverage=cut.coverage_receipt,
+                    details={"error": "uncertified_cash_flows_present"},
                 )
 
             # If no cash flows, simple return equals TWR
@@ -143,6 +199,8 @@ class AccountPerformanceCalculator:
                         as_of=as_of,
                         source_refs=source_refs,
                         status=MetricStatus.UNKNOWN,
+                        method="exact_twr_zero_cash_flows",
+                        coverage=cut.coverage_receipt,
                         details={"error": "zero_or_negative_starting_equity"},
                     )
                 ret = (cut.end_equity - cut.start_equity) / cut.start_equity
@@ -157,11 +215,13 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.CONFIRMED,
+                    method="exact_twr_zero_cash_flows",
+                    coverage=cut.coverage_receipt,
                     details={
                         "subinterval_count": 1,
-                        "coverage_status": "uncertified",
-                        "is_certified": False,
-                        "cash_flow_coverage_proof": "uncertified_zero_cash_flow_facts",
+                        "coverage_status": coverage_status,
+                        "is_certified": is_certified,
+                        "cash_flow_coverage_proof": coverage_proof,
                     },
                 )
 
@@ -178,6 +238,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.INSUFFICIENT_COVERAGE,
+                    method="exact_twr",
+                    coverage=cut.coverage_receipt,
                     details={"error": "valuation_subintervals_required_for_twr"},
                 )
 
@@ -235,6 +297,8 @@ class AccountPerformanceCalculator:
                         as_of=as_of,
                         source_refs=source_refs,
                         status=MetricStatus.UNKNOWN,
+                        method="linked_modified_dietz",
+                        coverage=cut.coverage_receipt,
                         details={
                             "error": "subinterval_capital_base_zero_or_negative",
                             "capital_base": str(capital_base),
@@ -258,19 +322,19 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=MetricStatus.CONFIRMED,
+                method="linked_modified_dietz",
+                coverage=cut.coverage_receipt,
                 details={
                     "subinterval_count": len(cut.valuation_points),
-                    "coverage_status": "confirmed",
-                    "is_certified": True,
-                    "cash_flow_coverage_proof": (
-                        f"audited_records_count_{len(cut.cash_flows)}"
-                    ),
+                    "coverage_status": coverage_status,
+                    "is_certified": is_certified,
+                    "cash_flow_coverage_proof": coverage_proof,
                 },
             )
 
         # 4. MODIFIED_DIETZ
         if spec.family == MetricFamily.MODIFIED_DIETZ:
-            if cut.has_unknown_cash_flows:
+            if not is_certified:
                 return MetricValue(
                     metric_name=spec.name,
                     family=spec.family,
@@ -282,7 +346,9 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.INSUFFICIENT_COVERAGE,
-                    details={"error": "unknown_cash_flows_present"},
+                    method="modified_dietz",
+                    coverage=cut.coverage_receipt,
+                    details={"error": "uncertified_cash_flows_present"},
                 )
 
             total_duration = Decimal(
@@ -300,6 +366,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.UNKNOWN,
+                    method="modified_dietz",
+                    coverage=cut.coverage_receipt,
                     details={"error": "zero_or_negative_duration"},
                 )
 
@@ -332,6 +400,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.UNKNOWN,
+                    method="modified_dietz",
+                    coverage=cut.coverage_receipt,
                     details={
                         "error": "average_capital_base_zero_or_negative",
                         "average_capital": str(average_capital),
@@ -350,23 +420,21 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=MetricStatus.CONFIRMED,
+                method="modified_dietz",
+                coverage=cut.coverage_receipt,
                 details={
                     "gain": str(gain),
                     "average_capital": str(average_capital),
                     "cash_flow_count": len(cut.cash_flows),
-                    "coverage_status": "confirmed" if cut.cash_flows else "uncertified",
-                    "is_certified": bool(cut.cash_flows),
-                    "cash_flow_coverage_proof": (
-                        f"audited_records_count_{len(cut.cash_flows)}"
-                        if cut.cash_flows
-                        else "uncertified_zero_cash_flow_facts"
-                    ),
+                    "coverage_status": coverage_status,
+                    "is_certified": is_certified,
+                    "cash_flow_coverage_proof": coverage_proof,
                 },
             )
 
         # 5. MONEY_WEIGHTED_RETURN (True Internal Rate of Return - IRR)
         if spec.family == MetricFamily.MONEY_WEIGHTED_RETURN:
-            if cut.has_unknown_cash_flows:
+            if not is_certified:
                 return MetricValue(
                     metric_name=spec.name,
                     family=spec.family,
@@ -378,7 +446,9 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.INSUFFICIENT_COVERAGE,
-                    details={"error": "unknown_cash_flows_present"},
+                    method="exact_irr_bisection",
+                    coverage=cut.coverage_receipt,
+                    details={"error": "uncertified_cash_flows_present"},
                 )
 
             if not cut.cash_flows:
@@ -394,6 +464,8 @@ class AccountPerformanceCalculator:
                         as_of=as_of,
                         source_refs=source_refs,
                         status=MetricStatus.UNKNOWN,
+                        method="simple_return_no_cash_flows",
+                        coverage=cut.coverage_receipt,
                         details={"error": "zero_or_negative_starting_equity"},
                     )
                 ret = (cut.end_equity - cut.start_equity) / cut.start_equity
@@ -408,6 +480,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.CONFIRMED,
+                    method="simple_return_no_cash_flows",
+                    coverage=cut.coverage_receipt,
                     details={"method": "simple_return_no_cash_flows"},
                 )
 
@@ -426,6 +500,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.UNKNOWN,
+                    method="exact_irr_bisection",
+                    coverage=cut.coverage_receipt,
                     details={"error": "invalid_duration_or_starting_equity"},
                 )
 
@@ -486,6 +562,8 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.UNKNOWN,
+                    method="exact_irr_bisection",
+                    coverage=cut.coverage_receipt,
                     details={"error": "irr_convergence_failed"},
                 )
 
@@ -500,9 +578,14 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=MetricStatus.CONFIRMED,
+                method="exact_irr_bisection",
+                coverage=cut.coverage_receipt,
                 details={
                     "method": "exact_irr_bisection",
                     "cash_flow_count": len(cut.cash_flows),
+                    "coverage_status": coverage_status,
+                    "is_certified": is_certified,
+                    "cash_flow_coverage_proof": coverage_proof,
                 },
             )
 
@@ -533,6 +616,8 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=MetricStatus.CONFIRMED,
+                method="peak_to_trough_drawdown",
+                coverage=cut.coverage_receipt,
                 details={"peak_valuation": str(peak)},
             )
 
@@ -547,5 +632,7 @@ class AccountPerformanceCalculator:
             as_of=as_of,
             source_refs=source_refs,
             status=MetricStatus.UNKNOWN,
+            method="unsupported",
+            coverage=cut.coverage_receipt,
             details={"error": f"unsupported_metric_family_{spec.family}"},
         )

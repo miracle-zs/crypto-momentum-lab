@@ -289,10 +289,17 @@ class FakeQueries:
         self,
         account_label: str = "primary",
         window_hours: int = 24,
+        *,
+        environment: str = "live",
+        asset: str = "USDT",
+        end_time: datetime | None = None,
     ) -> dict[str, object]:
+        del end_time
         return {
             "account_label": account_label,
             "window_hours": window_hours,
+            "environment": environment,
+            "asset": asset,
             "status": "ready",
             "twr": "0.05",
             "modified_dietz": "0.048",

@@ -121,8 +121,35 @@ class ValuationPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class CoverageReceipt:
+    """Receipt proving evidence coverage over an account/asset interval (R6)."""
+
+    account_label: str
+    asset: str
+    interval_start: datetime
+    interval_end: datetime
+    source: str
+    cursor_boundary: str | None = None
+    is_gapless: bool = True
+    is_empty_proven: bool = False
+    revision: str = "v1"
+    as_of: datetime = field(default_factory=lambda: datetime.now(UTC))
+    details: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.account_label.strip():
+            raise ValueError("account_label must not be empty")
+        if not self.asset.strip():
+            raise ValueError("asset must not be empty")
+        if self.interval_start.tzinfo is None or self.interval_end.tzinfo is None:
+            raise ValueError("interval bounds must be timezone-aware")
+        if self.interval_end < self.interval_start:
+            raise ValueError("interval_end cannot precede interval_start")
+
+
+@dataclass(frozen=True, slots=True)
 class AccountEquityCut:
-    """Bounded, immutable point-in-time equity cut consumed by evaluation."""
+    """Bounded, immutable point-in-time equity cut consumed by evaluation (R6)."""
 
     account_label: str
     start_equity: Decimal
@@ -136,11 +163,20 @@ class AccountEquityCut:
     fees_paid: Decimal = Decimal("0.00")
     funding_fees: Decimal = Decimal("0.00")
     has_unknown_cash_flows: bool = False
+    valuation_basis: str = "wallet"
+    asset: str = "USDT"
+    environment: str = "live"
+    coverage_receipt: CoverageReceipt | None = None
+    source_refs: tuple[str, ...] = ()
     as_of: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
         if not self.account_label.strip():
             raise ValueError("account_label must not be empty")
+        if not self.asset.strip():
+            raise ValueError("asset must not be empty")
+        if not self.valuation_basis.strip():
+            raise ValueError("valuation_basis must not be empty")
         if self.start_time.tzinfo is None or self.end_time.tzinfo is None:
             raise ValueError("start_time and end_time must be timezone-aware")
         if self.end_time < self.start_time:
@@ -169,7 +205,9 @@ class MetricSpec:
 
 @dataclass(frozen=True, slots=True)
 class MetricValue:
-    """Authoritative outcome of metric evaluation preserving provenance and coverage."""
+    """Authoritative outcome of metric evaluation preserving provenance
+    and coverage (R6).
+    """
 
     metric_name: str
     family: MetricFamily
@@ -181,6 +219,8 @@ class MetricValue:
     as_of: datetime
     source_refs: tuple[str, ...]
     status: MetricStatus
+    method: str = ""
+    coverage: CoverageReceipt | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

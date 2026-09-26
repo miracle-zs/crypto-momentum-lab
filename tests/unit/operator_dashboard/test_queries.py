@@ -1912,7 +1912,7 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     )
 
     perf = await dashboard.account_performance("primary", window_hours=24)
-    assert perf["status"] == "confirmed"
+    assert perf["status"] == "insufficient_coverage"
     assert perf["account_label"] == "primary"
     assert perf["start_equity"] == "200.00"
     assert perf["end_equity"] == "205.00"

@@ -483,11 +483,14 @@ class DashboardQueries:
         self,
         account_label: str = "primary",
         window_hours: int = 24,
+        environment: str = "live",
+        asset: str = "USDT",
+        end_time: datetime | None = None,
     ) -> dict[str, object]:
         """Compute authoritative account performance metrics using
         AccountPerformanceCalculator.
         """
-        now = self._clock()
+        now = self._clock() if end_time is None else end_time
         start_time = now - timedelta(hours=window_hours)
         async with self._session_factory() as session:
             snaps = (
@@ -495,7 +498,10 @@ class DashboardQueries:
                     select(AccountBalanceSnapshotRow)
                     .where(
                         AccountBalanceSnapshotRow.account_label == account_label,
+                        AccountBalanceSnapshotRow.environment == environment,
+                        AccountBalanceSnapshotRow.asset == asset,
                         AccountBalanceSnapshotRow.observed_at >= start_time,
+                        AccountBalanceSnapshotRow.observed_at <= now,
                     )
                     .order_by(AccountBalanceSnapshotRow.observed_at)
                 )
@@ -522,4 +528,6 @@ class DashboardQueries:
                 start_time=start_time,
                 end_time=now,
                 max_equity_gap=None,
+                environment=environment,
+                asset=asset,
             )
