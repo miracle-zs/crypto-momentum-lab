@@ -1879,7 +1879,7 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
         wallet_balance=Decimal("200.00"),
         available_balance=Decimal("200.00"),
         unrealized_pnl=Decimal("0.00"),
-        observed_at=now - timedelta(hours=20),
+        observed_at=now - timedelta(hours=24),
         raw_payload={},
     )
     snap2 = AccountBalanceSnapshotRow(
@@ -1916,26 +1916,39 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     assert perf["account_label"] == "primary"
     assert perf["start_equity"] == "200.00"
     assert perf["end_equity"] == "205.00"
-    assert perf["net_equity_delta"] == "5.00"
-    assert perf["cash_flow_adjusted_pnl"] == "5.00"
+    # Uncertified windows must not publish return figures.
+    assert perf["net_equity_delta"] is None
+    assert perf["cash_flow_adjusted_pnl"] is None
     assert perf["coverage_status"] == "uncertified"
     assert perf["is_certified"] is False
     assert perf["cash_flow_coverage_proof"] == "uncertified_zero_cash_flow_facts"
-    # TWR = 205/200 - 1 = 0.025
-    assert Decimal(str(perf["twr"])) == Decimal("0.025")
+    assert perf["twr"] is None
 
     # Now test with certified cash flows
+    from crypto_momentum_lab.operator_dashboard.performance_builder import (
+        compute_cash_flow_evidence_hash,
+    )
     from crypto_momentum_lab.persistence.postgres.models import CashFlowCorrectionRow
+
+    eff_at = now - timedelta(hours=10)
     cf_row = CashFlowCorrectionRow(
         correction_id="cf_001",
         account_label="primary",
         amount=Decimal("10.00"),
         cash_flow_type="deposit",
-        effective_at=now - timedelta(hours=10),
+        effective_at=eff_at,
         reason="audit_deposit",
         approval_ref="appr_001",
-        evidence_hash="a" * 64,
-        created_at=now - timedelta(hours=10),
+        evidence_hash=compute_cash_flow_evidence_hash(
+            correction_id="cf_001",
+            account_label="primary",
+            amount=Decimal("10.00"),
+            cash_flow_type="deposit",
+            effective_at=eff_at,
+            reason="audit_deposit",
+            approval_ref="appr_001",
+        ),
+        created_at=eff_at,
     )
     scalars_mock.all.side_effect = [
         [snap1, snap2],

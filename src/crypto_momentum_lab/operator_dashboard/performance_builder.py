@@ -287,20 +287,20 @@ def build_performance_summary(
     dietz = metrics["modified_dietz"]
     mwr = metrics["mwr"]
 
+    # Uncertified windows must not publish return figures as if audited.
+    def _certified_value(metric: Any) -> str | None:
+        if not is_certified:
+            return None
+        return str(metric.value) if metric.value is not None else None
+
     return AccountPerformanceSummaryResponse(
         start_equity=str(start_eq),
         end_equity=str(end_eq),
-        net_equity_delta=(
-            str(delta.value) if delta.value is not None else None
-        ),
-        cash_flow_adjusted_pnl=(
-            str(pnl.value) if pnl.value is not None else None
-        ),
-        twr=str(twr.value) if twr.value is not None else None,
-        modified_dietz=(
-            str(dietz.value) if dietz.value is not None else None
-        ),
-        mwr=str(mwr.value) if mwr.value is not None else None,
+        net_equity_delta=_certified_value(delta),
+        cash_flow_adjusted_pnl=_certified_value(pnl),
+        twr=_certified_value(twr),
+        modified_dietz=_certified_value(dietz),
+        mwr=_certified_value(mwr),
         status=twr.status.value,
         is_certified=is_certified,
         coverage_status=coverage_status,
