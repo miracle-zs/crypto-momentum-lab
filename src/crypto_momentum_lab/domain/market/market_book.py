@@ -502,6 +502,12 @@ class DatasetCatalog:
 
     def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
         """Cryptographically verifies a DatasetManifest and its referenced revisions."""
+        verifier = getattr(self._repo, "verify_manifest", None)
+        if callable(verifier):
+            res = verifier(manifest_id)
+            if isinstance(res, dict):
+                return res
+
         manifest = self._repo.load_manifest(manifest_id)
         if manifest is None:
             return {

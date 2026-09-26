@@ -5,10 +5,12 @@ Implements MarketBookRepository protocol defined in domain/market/market_book.py
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, date, datetime
+from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
 from crypto_momentum_lab.domain.market.revision_models import (
@@ -217,13 +219,29 @@ class PostgresMarketBookRepository:
                 return None
             rev_ids = row.revision_ids or []
             # Batch load revision rows in chunks to prevent exceeding
-            # PostgreSQL parameter limit (65535)
+            # PostgreSQL parameter limit (65535) and load_only to exclude payload
             rev_rows: dict[str, MarketRevisionRefRow] = {}
             chunk_size = 5000
             for i in range(0, len(rev_ids), chunk_size):
                 chunk = rev_ids[i : i + chunk_size]
-                stmt = select(MarketRevisionRefRow).where(
-                    MarketRevisionRefRow.revision_id.in_(chunk)
+                stmt = (
+                    select(MarketRevisionRefRow)
+                    .options(
+                        load_only(
+                            MarketRevisionRefRow.revision_id,
+                            MarketRevisionRefRow.scope,
+                            MarketRevisionRefRow.symbol,
+                            MarketRevisionRefRow.interval,
+                            MarketRevisionRefRow.bucket_start,
+                            MarketRevisionRefRow.bucket_end,
+                            MarketRevisionRefRow.content_hash,
+                            MarketRevisionRefRow.published_at,
+                            MarketRevisionRefRow.source_epoch,
+                            MarketRevisionRefRow.visibility_mode,
+                            MarketRevisionRefRow.lineage,
+                        )
+                    )
+                    .where(MarketRevisionRefRow.revision_id.in_(chunk))
                 )
                 for r in session.execute(stmt).scalars().all():
                     rev_rows[r.revision_id] = r
@@ -279,6 +297,120 @@ class PostgresMarketBookRepository:
                 coverage_ratio=row.coverage_ratio,
                 holes=holes,
             )
+
+    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+        """Low-memory cryptographic verification directly via database."""
+        with self._session_factory() as session:
+            bind = session.get_bind()
+            is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+            manifest_row: Any
+            if is_sqlite:
+                row = session.get(DatasetManifestRow, manifest_id)
+                if row is None:
+                    return {
+                        "manifest_id": manifest_id,
+                        "status": "NOT_FOUND",
+                        "error": f"Manifest '{manifest_id}' not found in catalog",
+                        "verified": False,
+                    }
+                holes_cnt = len(row.holes) if row.holes else 0
+                manifest_row = row
+            else:
+                q = session.execute(
+                    select(
+                        DatasetManifestRow.manifest_id,
+                        DatasetManifestRow.scope,
+                        DatasetManifestRow.symbols,
+                        DatasetManifestRow.interval,
+                        DatasetManifestRow.start_time,
+                        DatasetManifestRow.end_time,
+                        DatasetManifestRow.visibility_mode,
+                        DatasetManifestRow.feature_algorithm_version,
+                        DatasetManifestRow.manifest_hash,
+                        DatasetManifestRow.coverage_ratio,
+                        DatasetManifestRow.revision_ids,
+                        func.jsonb_array_length(DatasetManifestRow.holes).label(
+                            "holes_count"
+                        ),
+                    ).where(DatasetManifestRow.manifest_id == manifest_id)
+                ).first()
+                if q is None:
+                    return {
+                        "manifest_id": manifest_id,
+                        "status": "NOT_FOUND",
+                        "error": f"Manifest '{manifest_id}' not found in catalog",
+                        "verified": False,
+                    }
+                manifest_row = q
+                holes_cnt = int(q.holes_count) if q.holes_count is not None else 0
+
+            symbols_list = [s for s in manifest_row.symbols.split(",") if s]
+            hasher = hashlib.sha256()
+            hasher.update(manifest_row.scope.encode())
+            hasher.update(",".join(sorted(symbols_list)).encode())
+            hasher.update(manifest_row.interval.encode())
+            hasher.update(manifest_row.start_time.isoformat().encode())
+            hasher.update(manifest_row.end_time.isoformat().encode())
+            vis_mode = (
+                manifest_row.visibility_mode.value
+                if hasattr(manifest_row.visibility_mode, "value")
+                else str(manifest_row.visibility_mode)
+            )
+            hasher.update(vis_mode.encode())
+            hasher.update(manifest_row.feature_algorithm_version.encode())
+
+            rev_ids = manifest_row.revision_ids or []
+            chunk_size = 5000
+            for i in range(0, len(rev_ids), chunk_size):
+                chunk = rev_ids[i : i + chunk_size]
+                hash_rows = session.execute(
+                    select(
+                        MarketRevisionRefRow.revision_id,
+                        MarketRevisionRefRow.content_hash,
+                    ).where(MarketRevisionRefRow.revision_id.in_(chunk))
+                ).all()
+                chunk_map = {r[0]: r[1] for r in hash_rows}
+                for rid in chunk:
+                    h = chunk_map.get(str(rid))
+                    if h is None:
+                        return {
+                            "manifest_id": manifest_id,
+                            "status": "UNREPRODUCIBLE",
+                            "error": (
+                                f"Manifest is unreproducible: "
+                                f"missing revision {rid}"
+                            ),
+                            "verified": False,
+                        }
+                    hasher.update(h.encode())
+
+            computed_hash = hasher.hexdigest()
+            if computed_hash != manifest_row.manifest_hash:
+                return {
+                    "manifest_id": manifest_id,
+                    "status": "INTEGRITY_VIOLATION",
+                    "error": (
+                        f"Computed hash {computed_hash} != stored "
+                        f"{manifest_row.manifest_hash}"
+                    ),
+                    "verified": False,
+                }
+
+            return {
+                "manifest_id": manifest_row.manifest_id,
+                "status": "VERIFIED_REPRODUCIBLE",
+                "verified": True,
+                "scope": manifest_row.scope,
+                "symbols_count": len(symbols_list),
+                "interval": manifest_row.interval,
+                "start_time": manifest_row.start_time.isoformat(),
+                "end_time": manifest_row.end_time.isoformat(),
+                "visibility_mode": vis_mode,
+                "manifest_hash": manifest_row.manifest_hash,
+                "coverage_ratio": str(manifest_row.coverage_ratio),
+                "revisions_count": len(rev_ids),
+                "holes_count": holes_cnt,
+            }
 
     def save_decision_trace(self, trace: DecisionTrace) -> None:
         payload = dict(trace.trace_payload)
