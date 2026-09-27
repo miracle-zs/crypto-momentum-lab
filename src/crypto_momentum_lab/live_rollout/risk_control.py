@@ -191,11 +191,20 @@ class LiveRiskControlRuntime:
         refresh_entry_gate: Callable[[], None],
         telemetry: LiveTelemetrySink | None,
         clock: Callable[[], datetime],
+        reconcile_retry_initial_seconds: float = 1.0,
+        reconcile_retry_max_seconds: float = 30.0,
     ) -> None:
         if not session_id.strip():
             raise ValueError("session_id must not be empty")
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
+        if reconcile_retry_initial_seconds <= 0:
+            raise ValueError("reconcile_retry_initial_seconds must be positive")
+        if reconcile_retry_max_seconds < reconcile_retry_initial_seconds:
+            raise ValueError(
+                "reconcile_retry_max_seconds must not be below "
+                "reconcile_retry_initial_seconds"
+            )
         self._enabled = enabled
         self._session_id = session_id
         self._load_durable_state = load_durable_state
@@ -209,6 +218,10 @@ class LiveRiskControlRuntime:
         self._entry_blocked = False
         self._entry_block_reason = "risk_control_clear"
         self._reconcile_task: asyncio.Task[None] | None = None
+        self._retry_task: asyncio.Task[None] | None = None
+        self._reconcile_lock = asyncio.Lock()
+        self._reconcile_retry_initial_seconds = reconcile_retry_initial_seconds
+        self._reconcile_retry_max_seconds = reconcile_retry_max_seconds
 
     @property
     def stream_available(self) -> bool:
@@ -323,30 +336,32 @@ class LiveRiskControlRuntime:
         )
 
     async def reconcile(self) -> None:
-        try:
-            draining, active_halt = await self._load_durable_state()
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._state_ready = False
-            self._entry_blocked = True
-            self._entry_block_reason = "risk_control_state_reload_failed"
-            log.warning(
-                "live_risk_control_state_reload_failed",
-                session_id=self._session_id,
-                error_type=type(error).__name__,
-            )
-        else:
-            self._entry_blocked = draining or active_halt
-            self._entry_block_reason = (
-                "session_draining"
-                if draining
-                else "active_risk_halt"
-                if active_halt
-                else "risk_control_clear"
-            )
-            self._state_ready = True
-            self._invalidate_contexts()
+        async with self._reconcile_lock:
+            try:
+                draining, active_halt = await self._load_durable_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._state_ready = False
+                self._entry_blocked = True
+                self._entry_block_reason = "risk_control_state_reload_failed"
+                log.warning(
+                    "live_risk_control_state_reload_failed",
+                    session_id=self._session_id,
+                    error_type=type(error).__name__,
+                )
+                self._schedule_retry()
+            else:
+                self._entry_blocked = draining or active_halt
+                self._entry_block_reason = (
+                    "session_draining"
+                    if draining
+                    else "active_risk_halt"
+                    if active_halt
+                    else "risk_control_clear"
+                )
+                self._state_ready = True
+                self._invalidate_contexts()
         self._refresh_entry_gate()
 
     def _schedule_reconcile(self) -> None:
@@ -358,14 +373,40 @@ class LiveRiskControlRuntime:
             name=f"live-risk-control-reconcile:{self._session_id}",
         )
 
-    async def close(self) -> None:
-        task = self._reconcile_task
-        if task is None:
+    def _schedule_retry(self) -> None:
+        task = self._retry_task
+        if task is not None and not task.done():
             return
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        self._retry_task = asyncio.create_task(
+            self._retry_until_ready(),
+            name=f"live-risk-control-retry:{self._session_id}",
+        )
+
+    async def _retry_until_ready(self) -> None:
+        delay = self._reconcile_retry_initial_seconds
+        try:
+            while self._enabled and self._stream_available and not self._state_ready:
+                await asyncio.sleep(delay)
+                if not self._enabled or not self._stream_available or self._state_ready:
+                    return
+                await self.reconcile()
+                delay = min(delay * 2, self._reconcile_retry_max_seconds)
+        finally:
+            self._retry_task = None
+
+    async def close(self) -> None:
+        tasks = tuple(
+            task
+            for task in (self._reconcile_task, self._retry_task)
+            if task is not None
+        )
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._reconcile_task = None
+        self._retry_task = None
 
 
 def _risk_control_reason_is_lag(reason: str | None) -> bool:

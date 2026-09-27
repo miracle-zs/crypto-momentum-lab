@@ -216,6 +216,42 @@ async def test_risk_control_runtime_dispatch_failure_keeps_entries_blocked() -> 
     assert refreshes
 
 
+async def test_risk_control_runtime_retries_transient_state_reload_failure() -> None:
+    load_count = 0
+    recovered = asyncio.Event()
+
+    async def load_durable_state() -> tuple[bool, bool]:
+        nonlocal load_count
+        load_count += 1
+        if load_count == 1:
+            raise TimeoutError("temporary database pool exhaustion")
+        recovered.set()
+        return False, False
+
+    runtime = LiveRiskControlRuntime(
+        enabled=True,
+        session_id="live-1",
+        load_durable_state=load_durable_state,
+        dispatch=lambda _event: _record_failure(),
+        invalidate_contexts=lambda: None,
+        refresh_entry_gate=lambda: None,
+        telemetry=None,
+        clock=lambda: NOW,
+        reconcile_retry_initial_seconds=0.01,
+        reconcile_retry_max_seconds=0.02,
+    )
+    runtime.on_connection_change(True, None)
+
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=1)
+
+        assert load_count == 2
+        assert runtime.state_ready
+        assert runtime.entry_gate() == (False, "risk_control_clear")
+    finally:
+        await runtime.close()
+
+
 async def _record(calls: list[str], value: str) -> None:
     calls.append(value)
     return None
