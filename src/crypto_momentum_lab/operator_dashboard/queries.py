@@ -302,7 +302,11 @@ class DashboardQueries:
             stale_after_seconds=self._stale_after_seconds,
             research_collector_root=self._research_collector_root,
         )
-        self._risk_execution_queries = RiskExecutionQueries(session_factory)
+        self._risk_execution_queries = RiskExecutionQueries(
+            session_factory,
+            environment="live",
+            market_environment=os.environ.get("CML_MARKET_ENVIRONMENT", "research"),
+        )
         self._live_account_metrics_queries = LiveAccountMetricsQueries(
             session_factory,
             clock=self._clock,

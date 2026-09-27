@@ -6,6 +6,7 @@ operation; order-state classification and response shaping stay behind this
 seam so callers cannot accidentally treat an unknown state as safe.
 """
 
+import os
 import re
 import secrets
 from collections.abc import Sequence
@@ -134,10 +135,16 @@ class RiskExecutionQueries:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         environment: str = "live",
+        market_environment: str | None = None,
         required_symbols: Sequence[str] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._environment = environment
+        self._market_environment = market_environment or (
+            os.environ.get("CML_MARKET_ENVIRONMENT", "research")
+            if environment == "live"
+            else environment
+        )
         self._required_symbols = (
             tuple(required_symbols) if required_symbols is not None else None
         )
@@ -218,7 +225,7 @@ class RiskExecutionQueries:
                     func.max(RuntimeMarketState15sRow.bucket_end),
                 )
                 .where(
-                    RuntimeMarketState15sRow.environment == self._environment,
+                    RuntimeMarketState15sRow.environment == self._market_environment,
                     RuntimeMarketState15sRow.data_complete.is_(True),
                 )
                 .group_by(RuntimeMarketState15sRow.symbol)
