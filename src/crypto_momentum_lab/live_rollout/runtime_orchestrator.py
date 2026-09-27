@@ -780,8 +780,6 @@ async def run_live_daemon(
             "execution_coordinator", execution_coordinator.aclose
         )
         fact_source.set_execution_book(execution_book)
-        context_provider.set_execution_book(execution_book)
-        heartbeat_context_provider.set_execution_book(execution_book)
 
         async def _handle_decision_exit(cmd: TradeCommand) -> OrderExecutionResult:
             allocs = ()
@@ -1153,6 +1151,8 @@ async def run_live_daemon(
             lease_owner=lease_owner,
             approval_id=approval.approval_id,
         )
+        context_provider.set_execution_book(execution_book)
+        heartbeat_context_provider.set_execution_book(execution_book)
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
         entry_universe_context_provider = entry_runtime.entry_universe_context_provider
