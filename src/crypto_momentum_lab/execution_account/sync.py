@@ -39,7 +39,7 @@ _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 # when the latest row is older than 300s, so the refresh window must stay
 # well below that threshold -- 5 minutes raced the alert and flapped
 # critical every cycle.
-_PROCESS_STATE_REFRESH = timedelta(minutes=2)
+_PROCESS_STATE_REFRESH = timedelta(seconds=60)
 # A fill burst can emit many ACCOUNT_UPDATE events with the same position
 # view.  Collapse identical (amount, entry) observations that land within
 # this window so one close does not stamp dozens of duplicate snapshots.

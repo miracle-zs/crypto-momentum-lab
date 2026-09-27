@@ -99,7 +99,7 @@ def live_account_status(
     *,
     observed_at: datetime | None = None,
     now: datetime | None = None,
-    max_age_seconds: float = 90.0,
+    max_age_seconds: float = 180.0,
 ) -> OperationalStatus:
     if state is None:
         return OperationalStatus.UNKNOWN
@@ -379,10 +379,13 @@ class OverviewQueries:
         accounts_tradeable = bool(accounts_resp.accounts) and all(
             a.status == OperationalStatus.READY
             and a.observed_at is not None
-            and (now - a.observed_at).total_seconds() <= 90.0
+            and (now - a.observed_at).total_seconds() <= 180.0
             and a.lease_expires_at is not None
             and a.lease_expires_at > now
-            and a.strategy_state in ("active", "running")
+            and (
+                a.strategy_state in ("active", "running")
+                or (a.strategy_state is None and a.strategy_name is not None)
+            )
             for a in accounts_resp.accounts
         )
 
@@ -434,11 +437,12 @@ class OverviewQueries:
                 entry_gate_reason = "trading_lease_missing_or_expired"
             elif any(
                 a.strategy_state not in ("active", "running")
+                and not (a.strategy_state is None and a.strategy_name is not None)
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "strategy_not_active"
             elif any(
-                a.observed_at is None or (now - a.observed_at).total_seconds() > 90.0
+                a.observed_at is None or (now - a.observed_at).total_seconds() > 180.0
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "account_stale"
