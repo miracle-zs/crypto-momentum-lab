@@ -982,6 +982,7 @@ class PostgresOrderRepository:
 
     async def load_active_execution_commands(
         self,
+        account_label: str | None = None,
     ) -> tuple[dict[str, Any], ...]:
         async with self._session_factory() as session:
             query = select(ExecutionCommandRow).where(
@@ -990,17 +991,24 @@ class PostgresOrderRepository:
             rows = (
                 await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
             ).all()
-            return tuple(
-                {
-                    "command_id": r.command_id,
-                    "client_order_id": r.client_order_id,
-                    "command": r.command,
-                    "status": r.status,
-                    "requested_at": r.requested_at,
-                    "details": dict(r.details) if isinstance(r.details, dict) else {},
-                }
-                for r in rows
-            )
+            result = []
+            for r in rows:
+                dtls = dict(r.details) if isinstance(r.details, dict) else {}
+                if account_label is not None:
+                    scope = dtls.get("scope", {})
+                    if scope.get("account_label") != account_label:
+                        continue
+                result.append(
+                    {
+                        "command_id": r.command_id,
+                        "client_order_id": r.client_order_id,
+                        "command": r.command,
+                        "status": r.status,
+                        "requested_at": r.requested_at,
+                        "details": dtls,
+                    }
+                )
+            return tuple(result)
 
     async def load_seen_event_ids(
         self,

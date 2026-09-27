@@ -847,3 +847,39 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   }
   void loadLiveAccountMetrics(root, requestJson, selectedLiveAccountMetricsRange);
 }
+
+export function updateLiveAccountsDynamic(root, data) {
+  if (!root || !data) return;
+  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  if (!accounts.length) return;
+  root.__liveAccountData = accounts;
+
+  // Update card status and labels in-place
+  accounts.forEach((account) => {
+    const card = root.querySelector(`[data-live-account-label="${account.account_label}"]`);
+    if (!card) return;
+    const statusEl = card.querySelector(".live-account-card-status");
+    if (statusEl) {
+      statusEl.className = `live-account-card-status status-${statusSlug(account.status)}`;
+      statusEl.textContent = liveAccountStatusLabel(account.status);
+    }
+    const stateEl = card.querySelector(".live-account-card-state");
+    if (stateEl) {
+      const reconciliationLabel = account.reconciliation_status
+        ? `对账 ${account.reconciliation_status}`
+        : "未对账";
+      const readiness = account.readiness || "就绪未知";
+      const cardState = (account.summary || account.balances) ? reconciliationLabel : readiness;
+      stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(cardState)}</span>`;
+    }
+  });
+
+  // Update fleet summary counters and KPIs
+  const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
+  const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
+  const reviewCount = accounts.length - readyCount - haltedCount;
+  const fleetStatusEl = root.querySelector(".live-account-fleet-status span");
+  if (fleetStatusEl) {
+    fleetStatusEl.textContent = `${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认`;
+  }
+}

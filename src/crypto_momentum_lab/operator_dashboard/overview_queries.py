@@ -287,7 +287,7 @@ class OverviewQueries:
                     f"reconciliation_{head_st}_mismatches_{head.mismatch_count}"
                 )
             else:
-                recon_matched = acc.status != OperationalStatus.HALTED
+                recon_matched = False
                 recon_details = "unconfirmed_reconciliation_head_absent"
 
             cap_ok = (

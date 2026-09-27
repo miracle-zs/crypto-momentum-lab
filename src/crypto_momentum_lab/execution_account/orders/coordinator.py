@@ -19,6 +19,7 @@ from typing import Any, Protocol, cast
 
 import structlog
 
+from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -411,9 +412,75 @@ class OrderExecutionCoordinator:
         await self._entry_submissions_idle.wait()
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
-        if not plan.reduce_only:
-            return
         if self._reservation_repository is None or self._execution_book is None:
+            return
+
+        if not plan.reduce_only:
+            try:
+                scope = ExecutionScope(
+                    environment="live",
+                    account_label=self._account_label,
+                    symbol=plan.symbol,
+                    position_side=plan.position_side,
+                )
+                current_view = await self._execution_book.read(scope)
+                proj_ver = getattr(plan, "projection_version", None)
+                token = (
+                    proj_ver
+                    if (proj_ver and proj_ver == current_view.projection_version)
+                    else "*"
+                )
+                req = ExecutionRequest(
+                    request_id=plan.client_order_id,
+                    scope=scope,
+                    strategy_name=getattr(plan, "strategy_name", "live_strategy"),
+                    strategy_version=getattr(plan, "strategy_version", "v1"),
+                    run_id=getattr(plan, "run_id", self._account_label),
+                    decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
+                    expected_view_token=token,
+                    expected_projection_version=proj_ver,
+                    action=TradeCommandType.ENTRY,
+                    requested_quantity=Decimal(str(plan.quantity)),
+                    order_type=(
+                        str(plan.order_type.value)
+                        if hasattr(plan.order_type, "value")
+                        else str(plan.order_type)
+                    ),
+                    limit_price=(
+                        Decimal(str(plan.price)) if plan.price is not None else None
+                    ),
+                    reduce_only=False,
+                    target_batch_ids=(),
+                    batch_quantities=None,
+                    created_at=plan.created_at,
+                )
+                act_res = await self._execution_book.act(req)
+            except Exception as err:
+                log.error(
+                    "order_entry_acceptance_failed_refusing_submission",
+                    client_order_id=plan.client_order_id,
+                    error=str(err),
+                )
+                raise OrderPreSubmissionError(
+                    f"Failed to create position entry for "
+                    f"{plan.client_order_id}: {err}"
+                ) from err
+
+            if isinstance(act_res, Blocked):
+                raise OrderPreSubmissionError(
+                    f"Failed to create position entry for "
+                    f"{plan.client_order_id}: {act_res.reason}"
+                )
+            if isinstance(act_res, StaleView):
+                raise OrderPreSubmissionError(
+                    f"Failed to create position entry (stale view) for "
+                    f"{plan.client_order_id}: {act_res.reason}"
+                )
+            if isinstance(act_res, CommandConflict):
+                raise OrderPreSubmissionError(
+                    f"Failed to create position entry (command conflict) for "
+                    f"{plan.client_order_id}: {act_res.reason}"
+                )
             return
 
         batch_str = getattr(plan, "batch_id", None)
@@ -709,12 +776,36 @@ class OrderExecutionCoordinator:
                     ),
                 },
             )
+            order_key = plan.client_order_id or str(res.exchange_order_id or "")
+            cum_executed = Decimal(str(res.executed_quantity))
+            prev_settled = self._settled_cumulative_quantities.get(
+                order_key, Decimal("0")
+            )
+            delta_qty = max(Decimal("0"), cum_executed - prev_settled)
+            fill_ev = None
+            if delta_qty > Decimal("0"):
+                fill_ev = AccountFillEvent(
+                    environment="live",
+                    account_label=self._account_label,
+                    symbol=plan.symbol,
+                    trade_id=f"fill_{res.client_order_id}_{cum_executed}",
+                    order_id=res.client_order_id,
+                    side=plan.side,
+                    price=Decimal(str(res.average_price or (plan.price or "0"))),
+                    quantity=delta_qty,
+                    realized_pnl=Decimal("0"),
+                    fee=Decimal("0"),
+                    fee_asset="USDT",
+                    trade_at=now_dt,
+                    raw_payload={"is_cumulative": True, "cum_qty": str(cum_executed)},
+                )
             await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=order_ev.event_id,
                     scope=scope,
                     observed_at=now_dt,
                     order_event=order_ev,
+                    fill=fill_ev,
                 )
             )
         except Exception as obs_err:

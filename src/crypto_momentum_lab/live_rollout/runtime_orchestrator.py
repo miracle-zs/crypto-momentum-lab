@@ -97,10 +97,6 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
-from crypto_momentum_lab.live_rollout.exits import (
-    LiveExitConfig,
-    LiveExitManager,
-)
 from crypto_momentum_lab.live_rollout.gates import (
     LiveGateContext,
     evaluate_live_gate,
@@ -517,8 +513,13 @@ async def run_live_daemon(
         from crypto_momentum_lab.domain.operational.retention_authority import (
             RetentionAuthority,
         )
+        from crypto_momentum_lab.persistence.postgres.retention_repository import (
+            AsyncPostgresRetentionRepository,
+        )
 
-        retention_authority = RetentionAuthority()
+        retention_authority = RetentionAuthority(
+            repository=AsyncPostgresRetentionRepository(observability_factory)
+        )
         fact_source = LiveDecisionFactSource(
             account_label,
             trace_repository=decision_trace_repository,
@@ -781,7 +782,7 @@ async def run_live_daemon(
             command_repository=order_repository,
         )
         try:
-            await execution_book.restore()
+            await execution_book.restore(account_label=account_label)
         except Exception as eb_rest_err:
             log.warning("execution_book_restore_failed", error=str(eb_rest_err))
 
@@ -1217,6 +1218,7 @@ async def run_live_daemon(
                     fact_provider=fact_source.build,
                     on_decision_result=fact_source.on_decision_result,
                     trace_recorder=fact_source.record_trace,
+                    effective_policy=runtime_plan.effective_policy,
                 ),
                 decision_fact_binder=fact_source.bind_context,
                 readiness_provider=lambda: (
@@ -1225,22 +1227,7 @@ async def run_live_daemon(
                     else ExecutionReadiness.INDEPENDENT_EXECUTABLE
                 ),
             ),
-            exit_manager=LiveExitManager(
-                config=LiveExitConfig(
-                    run_id=session_id,
-                    strategy_name=strategy_name,
-                    strategy_version="v0",
-                    strategy_config_hash=strategy_config_hash,
-                    policy=PositionExitPolicy(
-                        max_holding_seconds=None,
-                        mode=exit_mode,
-                    ),
-                    candle_grace_bars=candle_grace_bars,
-                    candle_grace_decision_profit_pct=(candle_grace_decision_profit_pct),
-                    candle_grace_profit_pct=candle_grace_profit_pct,
-                ),
-                candle_loader=None,
-            ),
+            exit_manager=None,
             exit_recovery_client=client,
             cancel_unfilled_entry_orders=entry_order_canceller.cancel,
             fetch_exchange_positions=client.fetch_positions,

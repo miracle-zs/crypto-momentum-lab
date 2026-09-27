@@ -35,6 +35,7 @@ import {
   SECTION_POLL_MS,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
 import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
+import { captureViewState, restoreViewState } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
 
 test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
   assert.equal(POLL_MS, 15000);
@@ -950,5 +951,61 @@ test("performance renderer exposes decision SLO, checkpoint phase, and host metr
   assert.match(html, /闭桶水位 400ms/);
   assert.match(html, /primary/);
   assert.match(html, /152.0 MiB/);
+});
+
+test("account equity and pnl ticks do not change structural render key", () => {
+  const first = {
+    status: "READY",
+    accounts: [{
+      account_label: "primary",
+      status: "READY",
+      total_equity: "1000.00",
+      unrealized_pnl: "10.00",
+      observed_at: "2026-09-27T08:00:00Z",
+    }],
+  };
+  const second = {
+    status: "READY",
+    accounts: [{
+      account_label: "primary",
+      status: "READY",
+      total_equity: "1005.50",
+      unrealized_pnl: "15.50",
+      observed_at: "2026-09-27T08:00:15Z",
+    }],
+  };
+  assert.equal(sectionRenderKey("account", first), sectionRenderKey("account", second));
+});
+
+test("captureViewState and restoreViewState handle mock document gracefully", () => {
+  const mockDoc = {
+    scrollingElement: { scrollLeft: 0, scrollTop: 250, scrollHeight: 2000 },
+    documentElement: { style: {} },
+    body: { scrollLeft: 0, scrollTop: 250 },
+    defaultView: {
+      scrollX: 0,
+      scrollY: 250,
+      innerHeight: 800,
+      scrollTo(opts) {
+        if (typeof opts === "object") {
+          mockDoc.scrollingElement.scrollTop = opts.top;
+        }
+      },
+    },
+    querySelectorAll: () => [],
+  };
+  const root = {
+    ownerDocument: mockDoc,
+    querySelectorAll: () => [],
+  };
+
+  const state = captureViewState(root);
+  assert.equal(state.pageY, 250);
+  assert.ok(state.capturedAt > 0);
+
+  // Simulate restore
+  mockDoc.scrollingElement.scrollTop = 0;
+  restoreViewState(root, state);
+  assert.equal(mockDoc.scrollingElement.scrollTop, 250);
 });
 

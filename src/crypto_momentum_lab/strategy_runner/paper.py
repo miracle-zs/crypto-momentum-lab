@@ -12,11 +12,16 @@ from crypto_momentum_lab.domain.decision import (
     DecisionEngine,
     EffectivePolicy,
     FillModel,
+    FixedNotionalSizingModel,
     FrozenDecisionInputs,
     PolicyState,
     SimulationExecutionAdapter,
     build_decision_input,
     map_decision_rejection_reason,
+)
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -395,13 +400,16 @@ def run_paper_trading(
         signals.extend(decision.signals)
 
         evaluated_candidates = decision.candidates if decision.candidates else [None]
+        target_notional = config.candidate_notional or Decimal("500.00")
+        sizing_model = FixedNotionalSizingModel(target_notional=target_notional)
         for raw_cand in evaluated_candidates:
             policy = EffectivePolicy(
                 policy_id=f"policy_{config.strategy_name}",
                 strategy_name=config.strategy_name,
-                target_notional=config.candidate_notional or Decimal("500.00"),
+                target_notional=target_notional,
                 candidate_generator=(lambda inp, st, _c=raw_cand: _c),
                 exit_policy=runner_exit_policy,
+                sizing_model=sizing_model,
             )
             dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
             policy_state = dec_res.next_policy_state
@@ -496,7 +504,43 @@ def run_paper_trading(
                 )
                 if matching_cand is not None:
                     try:
-                        _sim_adapter.execute_entry(matching_cand, envelope, journal)
+                        fill_event = AccountFillEvent(
+                            environment=journal.position_key.environment,
+                            account_label=journal.position_key.account_label,
+                            symbol=fill.symbol,
+                            trade_id=f"sim_tr_{fill.fill_id}",
+                            order_id=f"sim_ord_{fill.candidate_id[-12:]}",
+                            side="BUY" if fill.side == StrategySide.LONG else "SELL",
+                            price=fill.price,
+                            quantity=fill.quantity,
+                            realized_pnl=Decimal("0.00"),
+                            fee=fill.fee,
+                            fee_asset="USDT",
+                            trade_at=fill.filled_at,
+                            raw_payload={"candidate_id": fill.candidate_id},
+                        )
+                        journal.append_fill(fill_event)
+                        journal.record_snapshot(
+                            AccountPositionSnapshot(
+                                environment=journal.position_key.environment,
+                                account_label=journal.position_key.account_label,
+                                symbol=fill.symbol,
+                                position_side=(
+                                    "LONG"
+                                    if fill.side == StrategySide.LONG
+                                    else "SHORT"
+                                ),
+                                position_amt=fill.quantity,
+                                entry_price=fill.price,
+                                mark_price=fill.price,
+                                unrealized_pnl=Decimal("0.00"),
+                                notional=fill.quantity * fill.price,
+                                leverage=1,
+                                margin_type="cross",
+                                observed_at=fill.filled_at,
+                                raw_payload={"candidate_id": fill.candidate_id},
+                            )
+                        )
                     except Exception as err:
                         logger.warning(
                             "Failed to execute paper entry for candidate %s: %s",

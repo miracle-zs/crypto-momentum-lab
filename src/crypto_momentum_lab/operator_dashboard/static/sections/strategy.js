@@ -347,13 +347,15 @@ function refreshStrategy(body, data) {
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
   const cards = body.querySelector(".acct-cards");
   if (!cards) return;
-  const focusedIndex = body.ownerDocument.activeElement?.dataset.accountIndex;
+  const activeEl = body.ownerDocument?.activeElement;
+  const isCardFocused = activeEl && cards.contains(activeEl);
+  const focusedIndex = isCardFocused ? activeEl.dataset?.accountIndex : null;
   replaceElementFromHtml(cards, paperCards(accounts.map(withPaperEquity)));
   wirePaperAccountTabs(body, { accounts });
   if (focusedIndex == null) return;
   const focusedTab = [...body.querySelectorAll("[data-account-index]")]
     .find((tab) => tab.dataset.accountIndex === focusedIndex);
-  focusedTab?.focus();
+  focusedTab?.focus({ preventScroll: true });
 }
 
 function setPaperAccountTabState(body, selectedIndex) {

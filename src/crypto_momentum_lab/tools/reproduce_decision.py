@@ -151,106 +151,173 @@ async def audit_decision_trace(
                 "reproduced": False,
             }
 
-        # 4. Semantic Replay verification (if market_state payload is available)
+        # 4. Semantic Replay verification (market_state payload is required)
         market_state_payload = payload.get("market_state")
-        if market_state_payload:
-            from crypto_momentum_lab.domain.decision.decision_engine import (
-                ClockEvent,
-                DecisionInput,
-                EffectivePolicy,
-                PolicyState,
-                decide,
-            )
-            from crypto_momentum_lab.domain.execution.position_ledger_models import (
-                PositionHealthStatus,
-                PositionKey,
-                PositionView,
-            )
-            from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
-            from crypto_momentum_lab.market_data.hub import market_state_from_payload
+        if not market_state_payload:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "EVIDENCE_INSUFFICIENT",
+                "error": "Missing market_state in trace payload; semantic decision replay impossible",
+                "reproduced": False,
+            }
 
-            m_state = market_state_from_payload(market_state_payload)
-            ref0 = trace.evaluated_market_refs[0]
-            envelope = MarketEnvelope(ref=ref0, state=m_state)
+        from crypto_momentum_lab.domain.decision.decision_engine import (
+            ClockEvent,
+            DecisionInput,
+            EffectivePolicy,
+            PolicyState,
+            decide,
+        )
+        from crypto_momentum_lab.domain.execution.position_ledger_models import (
+            PositionHealthStatus,
+            PositionKey,
+            PositionLedgerBatch,
+            PositionView,
+        )
+        from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
+        from crypto_momentum_lab.domain.strategy.models import StrategySide
+        from crypto_momentum_lab.market_data.hub import market_state_from_payload
 
-            if envelope.state.symbol != ref0.symbol:
-                return {
-                    "decision_id": trace.decision_id,
-                    "status": "UNREPRODUCIBLE",
-                    "error": (
-                        f"Envelope symbol {envelope.state.symbol} does not match "
-                        f"ref symbol {ref0.symbol}"
-                    ),
-                    "reproduced": False,
-                }
+        m_state = market_state_from_payload(market_state_payload)
+        ref0 = trace.evaluated_market_refs[0]
+        envelope = MarketEnvelope(ref=ref0, state=m_state)
 
-            # Reconstruct policy parameters from trace payload or defaults
-            pol_params = payload.get("policy_parameters") or {}
-            entry_thresh = Decimal(str(pol_params.get("entry_threshold", "65000.00")))
-            target_notional = Decimal(str(pol_params.get("target_notional", "1000.00")))
-            policy = EffectivePolicy(
-                policy_id=f"policy_{trace.strategy_name}",
-                strategy_name=trace.strategy_name,
-                policy_version=1,
-                entry_threshold=entry_thresh,
-                target_notional=target_notional,
+        if envelope.state.symbol != ref0.symbol:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": (
+                    f"Envelope symbol {envelope.state.symbol} does not match "
+                    f"ref symbol {ref0.symbol}"
+                ),
+                "reproduced": False,
+            }
+
+        # Reconstruct policy parameters from trace payload or defaults
+        pol_params = payload.get("policy_parameters") or {}
+        entry_thresh = Decimal(str(pol_params.get("entry_threshold", "65000.00")))
+        target_notional = Decimal(str(pol_params.get("target_notional", "1000.00")))
+        policy = EffectivePolicy(
+            policy_id=f"policy_{trace.strategy_name}",
+            strategy_name=trace.strategy_name,
+            policy_version=1,
+            entry_threshold=entry_thresh,
+            target_notional=target_notional,
+        )
+
+        # Restore frozen context if recorded
+        ctx = payload.get("decision_context") or {}
+        pos_view_data = ctx.get("position_view") or {}
+        batches_list = []
+        for b in pos_view_data.get("batches", ()):
+            qty = Decimal(str(b.get("allocated_quantity", b.get("quantity", "0"))))
+            batches_list.append(
+                PositionLedgerBatch(
+                    batch_id=b["batch_id"],
+                    episode_id=b.get("episode_id", f"ep_{b['batch_id']}"),
+                    quantity=qty,
+                    original_quantity=qty,
+                    entry_price=Decimal(str(b["entry_price"])),
+                    opened_at=datetime.fromisoformat(b["opened_at"]),
+                )
             )
+
+        pos_key = PositionKey(
+            environment="live",
+            account_label=trace.account_label,
+            symbol=ref0.symbol,
+            position_side=pos_view_data.get("position_side", "BOTH"),
+        )
+        pos_view = PositionView(
+            key=pos_key,
+            projection_version=pos_view_data.get("projection_version", "pv_replay_0"),
+            input_revision=1,
+            event_cut=None,
+            policy_version="v1",
+            schema_version="v1",
+            coverage=None,
+            active_episode=None,
+            batches=tuple(batches_list),
+            unallocated_quantity=Decimal(str(pos_view_data.get("unallocated_quantity", "0"))),
+            reconciliation_gap=Decimal("0"),
+            health_status=PositionHealthStatus(pos_view_data.get("health_status", "READY")),
+        )
+
+        prior_state_data = payload.get("prior_policy_state") or {}
+        if prior_state_data:
+            prior_state = PolicyState(
+                policy_version=prior_state_data.get("policy_version", 1),
+                cooldown_until_by_symbol={
+                    k: datetime.fromisoformat(v)
+                    for k, v in prior_state_data.get("cooldown_until", {}).items()
+                },
+                anchor_prices_by_symbol={
+                    k: Decimal(str(v))
+                    for k, v in prior_state_data.get("anchor_prices", {}).items()
+                },
+                active_intent_ids_by_symbol=dict(prior_state_data.get("active_intent_ids", {})),
+                warmup_status=dict(prior_state_data.get("warmup_status", {})),
+                grace_until_by_symbol={
+                    k: datetime.fromisoformat(v)
+                    for k, v in prior_state_data.get("grace_until", {}).items()
+                },
+                holding_deadline_by_symbol={
+                    k: datetime.fromisoformat(v)
+                    for k, v in prior_state_data.get("holding_deadline", {}).items()
+                },
+                signal_memory=dict(prior_state_data.get("signal_memory", {})),
+                custom_state=dict(prior_state_data.get("custom_state", {})),
+                sizing_state_by_symbol=dict(prior_state_data.get("sizing_state", {})),
+            )
+        else:
             prior_state = PolicyState(policy_version=1)
-            pos_key = PositionKey(
-                environment="live",
-                account_label=trace.account_label,
-                symbol=ref0.symbol,
-            )
-            pos_view = PositionView(
-                key=pos_key,
-                projection_version="pv_replay_0",
-                input_revision=1,
-                event_cut=None,
-                policy_version="v1",
-                schema_version="v1",
-                coverage=None,
-                active_episode=None,
-                batches=(),
-                unallocated_quantity=Decimal("0"),
-                reconciliation_gap=Decimal("0"),
-                health_status=PositionHealthStatus.READY,
-            )
-            dec_input = DecisionInput(
-                symbol=ref0.symbol,
-                market_ref=ref0,
-                market_envelope=envelope,
-                position_view=pos_view,
-                universe_version="u1",
-                clock_event=ClockEvent(sequence=1, timestamp=trace.decision_time),
-                cash_balance=Decimal("10000.00"),
-                risk_config_version="risk_v1",
-            )
-            replayed_result = decide(dec_input, prior_state, policy)
-            rep_intent_produced = replayed_result.intent is not None
-            if rep_intent_produced != trace.intent_produced:
-                return {
-                    "decision_id": trace.decision_id,
-                    "status": "UNREPRODUCIBLE",
-                    "error": (
-                        f"Replay intent mismatch: produced={rep_intent_produced} "
-                        f"vs recorded={trace.intent_produced}"
-                    ),
-                    "reproduced": False,
-                }
-            if (
-                not trace.intent_produced
-                and replayed_result.rejection_reason != trace.rejection_reason
-            ):
-                rej = replayed_result.rejection_reason
-                rec = trace.rejection_reason
-                return {
-                    "decision_id": trace.decision_id,
-                    "status": "UNREPRODUCIBLE",
-                    "error": (
-                        f"Replay rejection reason mismatch: '{rej}' vs recorded '{rec}'"
-                    ),
-                    "reproduced": False,
-                }
+
+        dec_input = DecisionInput(
+            symbol=ref0.symbol,
+            market_ref=ref0,
+            market_envelope=envelope,
+            position_view=pos_view,
+            universe_version=ctx.get("universe_version", "u1"),
+            clock_event=ClockEvent(sequence=1, timestamp=trace.decision_time),
+            cash_balance=Decimal(str(ctx.get("cash_balance", "10000.00"))),
+            risk_config_version=ctx.get("risk_config_version", "risk_v1"),
+        )
+        replayed_result = decide(dec_input, prior_state, policy)
+        rep_intent_produced = replayed_result.intent is not None
+        if rep_intent_produced != trace.intent_produced:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": (
+                    f"Replay intent mismatch: produced={rep_intent_produced} "
+                    f"vs recorded={trace.intent_produced}"
+                ),
+                "reproduced": False,
+            }
+        if (
+            not trace.intent_produced
+            and replayed_result.rejection_reason != trace.rejection_reason
+        ):
+            rej = replayed_result.rejection_reason
+            rec = trace.rejection_reason
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": (
+                    f"Replay rejection reason mismatch: '{rej}' vs recorded '{rec}'"
+                ),
+                "reproduced": False,
+            }
+
+        # Check exit command consistency
+        recorded_exit = payload.get("output_exit_command")
+        if bool(recorded_exit) != (replayed_result.exit_command is not None):
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": "Replay exit command presence mismatch",
+                "reproduced": False,
+            }
 
         return {
             "decision_id": trace.decision_id,

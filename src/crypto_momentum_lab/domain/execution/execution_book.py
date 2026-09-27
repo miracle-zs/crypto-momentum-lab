@@ -259,6 +259,24 @@ class ExecutionBook:
                         "attempt_count": entry.attempt_count,
                         "external_order_id": entry.external_order_id,
                         "last_error": entry.last_error,
+                        "quantity": str(entry.command.requested_quantity),
+                        "side": (
+                            entry.command.side.value
+                            if hasattr(entry.command.side, "value")
+                            else str(entry.command.side)
+                        ),
+                        "order_type": (
+                            entry.command.order_type.value
+                            if hasattr(entry.command.order_type, "value")
+                            else str(entry.command.order_type)
+                        ),
+                        "limit_price": (
+                            str(entry.command.limit_price)
+                            if entry.command.limit_price is not None
+                            else None
+                        ),
+                        "reduce_only": entry.command.reduce_only,
+                        "expected_projection_version": entry.command.expected_projection_version,
                         "reservations": self._command_reservations.get(
                             entry.command_id, []
                         ),
@@ -277,37 +295,89 @@ class ExecutionBook:
                             details=details,
                         )
                     )
-            except Exception:
-                pass
+            except Exception as err:
+                log.error(
+                    "persist_outbox_state_failed",
+                    command_id=entry.command_id,
+                    error=str(err),
+                )
 
     def _trigger_persist_outbox(self, entry: OutboxEntry) -> None:
         if self._command_repo is not None:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._persist_outbox_state(entry))
+                task = loop.create_task(self._persist_outbox_state(entry))
+
+                def _on_done(t: asyncio.Task[Any]) -> None:
+                    if not t.cancelled() and t.exception():
+                        log.error(
+                            "persist_outbox_task_failed",
+                            command_id=entry.command_id,
+                            error=str(t.exception()),
+                        )
+
+                task.add_done_callback(_on_done)
             except RuntimeError:
                 pass
 
-    async def restore(self) -> None:
+    async def restore(self, account_label: str | None = None) -> None:
         """Restores in-flight outbox commands, deduplication, and reservations."""
         if self._command_repo is not None:
             loader = getattr(self._command_repo, "load_active_execution_commands", None)
             if callable(loader):
                 try:
-                    active_cmds = await _maybe_await(loader())
+                    import inspect
+
+                    sig = inspect.signature(loader)
+                    if "account_label" in sig.parameters:
+                        active_cmds = await _maybe_await(
+                            loader(account_label=account_label)
+                        )
+                    else:
+                        active_cmds = await _maybe_await(loader())
                     for cmd_data in active_cmds:
                         cid = cmd_data["command_id"]
                         status_str = cmd_data.get("status", "prepared")
                         dtls = cmd_data.get("details", {})
                         scope_data = dtls.get("scope", {})
+                        acc = scope_data.get("account_label", "primary")
+                        if account_label is not None and acc != account_label:
+                            continue
                         scope = ExecutionScope(
                             environment=scope_data.get("environment", "live"),
-                            account_label=scope_data.get("account_label", "primary"),
+                            account_label=acc,
                             symbol=scope_data.get("symbol", "BTCUSDT"),
                             position_side=FuturesPositionSide(
                                 scope_data.get("position_side", "BOTH")
                             ),
                         )
+                        side_val = dtls.get("side")
+                        if side_val:
+                            try:
+                                side = StrategySide(side_val)
+                            except ValueError:
+                                side = StrategySide.LONG
+                        else:
+                            side = StrategySide.LONG
+
+                        order_type_val = dtls.get("order_type")
+                        if order_type_val:
+                            try:
+                                order_type = EntryType(order_type_val.lower())
+                            except ValueError:
+                                order_type = EntryType.MARKET
+                        else:
+                            order_type = EntryType.MARKET
+
+                        limit_price_val = dtls.get("limit_price")
+                        limit_price = (
+                            Decimal(str(limit_price_val))
+                            if limit_price_val is not None
+                            else None
+                        )
+                        reduce_only = bool(dtls.get("reduce_only", False))
+                        expected_ver = dtls.get("expected_projection_version")
+
                         cmd = TradeCommand(
                             command_id=cid,
                             position_key=scope.to_position_key(),
@@ -318,9 +388,12 @@ class ExecutionBook:
                                 if cmd_data.get("command")
                                 else TradeCommandType.ENTRY
                             ),
-                            side=StrategySide.LONG,
-                            order_type=EntryType.MARKET,
+                            side=side,
+                            order_type=order_type,
                             requested_quantity=Decimal(str(dtls.get("quantity", "1"))),
+                            limit_price=limit_price,
+                            reduce_only=reduce_only,
+                            expected_projection_version=expected_ver,
                             created_at=cmd_data.get("requested_at", datetime.now(UTC)),
                         )
                         try:
@@ -343,8 +416,8 @@ class ExecutionBook:
                         res_ids = dtls.get("reservations", [])
                         if res_ids:
                             self._command_reservations[cid] = res_ids
-                except Exception:
-                    pass
+                except Exception as err:
+                    log.warning("restore_active_commands_failed", error=str(err))
 
             ev_loader = getattr(self._command_repo, "load_seen_event_ids", None)
             if callable(ev_loader):

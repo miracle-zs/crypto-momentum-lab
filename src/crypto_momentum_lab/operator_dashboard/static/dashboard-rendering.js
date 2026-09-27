@@ -34,10 +34,23 @@ export function sectionRenderKey(id, data) {
   }
 
   if (id === "account") {
-    for (const account of snapshot.accounts || []) {
-      delete account.observed_at;
-      delete account.lease_expires_at;
-    }
+    const fields = [
+      "account_label",
+      "status",
+      "strategy_name",
+      "strategy_state",
+      "readiness",
+      "mode",
+      "environment",
+    ];
+    snapshot.accounts = (snapshot.accounts || []).map((account) =>
+      Object.fromEntries(
+        fields
+          .filter((field) => account[field] !== undefined)
+          .map((field) => [field, account[field]]),
+      ),
+    );
+    delete snapshot.selected_account_label;
   }
 
   if (id === "strategy") {

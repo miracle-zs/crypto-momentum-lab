@@ -652,6 +652,12 @@ def decision_trace_from_result(
     anchor_items = result.next_policy_state.anchor_prices_by_symbol.items()
     intent_items = result.next_policy_state.active_intent_ids_by_symbol.items()
     warmup_items = result.next_policy_state.warmup_status.items()
+    grace_items = getattr(result.next_policy_state, "grace_until_by_symbol", {}).items()
+    deadline_items = getattr(result.next_policy_state, "holding_deadline_by_symbol", {}).items()
+    sig_mem = getattr(result.next_policy_state, "signal_memory", {})
+    custom_st = getattr(result.next_policy_state, "custom_state", {})
+    sizing_st = getattr(result.next_policy_state, "sizing_state_by_symbol", {})
+
     payload: dict[str, Any] = {
         "input_hash": result.input_hash,
         "frame_digest": result.frame_digest,
@@ -661,8 +667,51 @@ def decision_trace_from_result(
             "anchor_prices": {k: str(v) for k, v in sorted(anchor_items)},
             "active_intent_ids": dict(sorted(intent_items)),
             "warmup_status": dict(sorted(warmup_items)),
+            "grace_until": {k: v.isoformat() for k, v in sorted(grace_items)},
+            "holding_deadline": {k: v.isoformat() for k, v in sorted(deadline_items)},
+            "signal_memory": dict(sig_mem),
+            "custom_state": dict(custom_st),
+            "sizing_state": dict(sizing_st),
         },
     }
+    if hasattr(decision_input, "position_view") and decision_input.position_view is not None:
+        pv = decision_input.position_view
+        batches_data = []
+        for b in getattr(pv, "batches", ()):
+            batches_data.append({
+                "batch_id": getattr(b, "batch_id", ""),
+                "symbol": getattr(b, "symbol", pv.key.symbol),
+                "side": (
+                    b.side.value if hasattr(getattr(b, "side", None), "value") else str(getattr(b, "side", ""))
+                ),
+                "allocated_quantity": str(getattr(b, "allocated_quantity", "0")),
+                "entry_price": str(getattr(b, "entry_price", "0")),
+                "opened_at": (
+                    b.opened_at.isoformat() if hasattr(getattr(b, "opened_at", None), "isoformat") else str(getattr(b, "opened_at", ""))
+                ),
+            })
+        payload["decision_context"] = {
+            "cash_balance": str(getattr(decision_input, "cash_balance", "10000.00")),
+            "universe_version": getattr(decision_input, "universe_version", "u1"),
+            "risk_config_version": getattr(decision_input, "risk_config_version", "risk_v1"),
+            "position_view": {
+                "symbol": pv.key.symbol,
+                "position_side": (
+                    pv.key.position_side.value
+                    if hasattr(pv.key.position_side, "value")
+                    else str(pv.key.position_side)
+                ),
+                "total_quantity": str(getattr(pv, "total_quantity", "0")),
+                "unallocated_quantity": str(getattr(pv, "unallocated_quantity", "0")),
+                "health_status": (
+                    pv.health_status.value
+                    if hasattr(pv.health_status, "value")
+                    else str(pv.health_status)
+                ),
+                "projection_version": getattr(pv, "projection_version", "pv_replay_0"),
+                "batches": batches_data,
+            },
+        }
     if (
         hasattr(decision_input, "market_envelope")
         and decision_input.market_envelope is not None
@@ -731,6 +780,7 @@ def create_authoritative_decision_filter(
     | None = None,
     on_decision_result: Callable[..., None] | None = None,
     trace_recorder: Callable[[DecisionTrace], None] | None = None,
+    effective_policy: EffectivePolicy | None = None,
 ) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
     """Authoritative decision filter wrapping DecisionEngine for runtime loops.
 
@@ -777,11 +827,18 @@ def create_authoritative_decision_filter(
                     and frozen.position_view.total_quantity > Decimal("0")
                 ):
                     scope_to_use = getattr(state, "environment", None) or "live"
-                    policy = EffectivePolicy(
-                        policy_id=f"policy_{strategy_name}",
-                        strategy_name=strategy_name,
-                        target_notional=notional,
-                        candidate_generator=lambda inp, st: None,
+                    policy = (
+                        replace(
+                            effective_policy,
+                            candidate_generator=lambda inp, st: None,
+                        )
+                        if effective_policy is not None
+                        else EffectivePolicy(
+                            policy_id=f"policy_{strategy_name}",
+                            strategy_name=strategy_name,
+                            target_notional=notional,
+                            candidate_generator=lambda inp, st: None,
+                        )
                     )
                     dec_input = build_decision_input(
                         state=state,
@@ -832,11 +889,18 @@ def create_authoritative_decision_filter(
             )
 
         scope_to_use = getattr(state, "environment", None) or "live"
-        base_policy = EffectivePolicy(
-            policy_id=f"policy_{strategy_name}",
-            strategy_name=strategy_name,
-            target_notional=notional,
-            candidate_generator=lambda inp, st: None,
+        base_policy = (
+            replace(
+                effective_policy,
+                candidate_generator=lambda inp, st: None,
+            )
+            if effective_policy is not None
+            else EffectivePolicy(
+                policy_id=f"policy_{strategy_name}",
+                strategy_name=strategy_name,
+                target_notional=notional,
+                candidate_generator=lambda inp, st: None,
+            )
         )
         dec_input = build_decision_input(
             state=state,
@@ -851,11 +915,18 @@ def create_authoritative_decision_filter(
         new_rejections: list[StrategyRejection] = list(decision.rejections)
 
         for cand in decision.candidates:
-            policy = EffectivePolicy(
-                policy_id=f"policy_{strategy_name}",
-                strategy_name=strategy_name,
-                target_notional=notional,
-                candidate_generator=lambda inp, st, _c=cand: _c,
+            policy = (
+                replace(
+                    effective_policy,
+                    candidate_generator=lambda inp, st, _c=cand: _c,
+                )
+                if effective_policy is not None
+                else EffectivePolicy(
+                    policy_id=f"policy_{strategy_name}",
+                    strategy_name=strategy_name,
+                    target_notional=notional,
+                    candidate_generator=lambda inp, st, _c=cand: _c,
+                )
             )
             # Shared starting PolicyState — never a fresh empty state.
             dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)

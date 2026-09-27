@@ -29,6 +29,10 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
 )
+from crypto_momentum_lab.domain.strategy.sizing import (
+    EquityFractionSizingModel,
+    FixedNotionalSizingModel,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +209,21 @@ class RuntimePlanCompiler:
 
         plan_id = f"plan_{environment}_{account_label}_{strat_hash[:8]}_{exec_hash[:8]}"
 
+        sizing_model_type = user_overrides.get("sizing_model", "fixed_notional")
+        if sizing_model_type == "equity_fraction":
+            fraction = Decimal(str(user_overrides.get("equity_fraction", "0.05")))
+            max_notional = Decimal(
+                str(user_overrides.get("max_order_notional", target_notional))
+            )
+            sizing_model = EquityFractionSizingModel(
+                fraction_of_equity=fraction,
+                max_notional_cap=max_notional,
+            )
+        else:
+            sizing_model = FixedNotionalSizingModel(
+                target_notional=Decimal(str(target_notional)),
+            )
+
         policy = EffectivePolicy(
             policy_id=strat_hash[:16],
             strategy_name=strategy_name,
@@ -212,6 +231,7 @@ class RuntimePlanCompiler:
             entry_threshold=Decimal(str(entry_thresh)),
             order_type=order_type,
             target_notional=Decimal(str(target_notional)),
+            sizing_model=sizing_model,
             exit_policy=exit_policy,
         )
 

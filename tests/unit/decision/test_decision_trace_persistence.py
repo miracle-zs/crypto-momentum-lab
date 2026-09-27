@@ -350,31 +350,76 @@ async def test_audit_decision_trace_reproducibility(
 ) -> None:
     session = _FakeAsyncSession()
     t0 = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+
+    from crypto_momentum_lab.domain.decision.decision_engine import (
+        ClockEvent,
+        DecisionInput,
+        EffectivePolicy,
+        PolicyState,
+        decide,
+        decision_trace_from_result,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        PositionHealthStatus,
+        PositionKey,
+        PositionView,
+    )
+    from tests.unit.decision.test_decision_engine import _make_market_envelope
+    ref, env = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    pos_view = PositionView(
+        key=PositionKey("live", "primary", "BTCUSDT"),
+        projection_version="pv_replay_0",
+        input_revision=1,
+        event_cut=None,
+        policy_version="v1",
+        schema_version="v1",
+        coverage=None,
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.READY,
+    )
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=ref,
+        market_envelope=env,
+        position_view=pos_view,
+        universe_version="u1",
+        clock_event=ClockEvent(sequence=1, timestamp=t0),
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+    )
+    policy = EffectivePolicy(
+        policy_id="pol-1",
+        strategy_name="orderflow_impulse",
+        policy_version=1,
+        entry_threshold=Decimal("65000.00"),
+        target_notional=Decimal("1000.00"),
+    )
+    res = decide(inp, PolicyState(policy_version=1), policy)
+    real_trace = decision_trace_from_result(res, inp, "orderflow_impulse", "primary")
+
     trace_row = DecisionTraceRow(
         decision_id="trace_audit_001",
-        strategy_name="orderflow_impulse",
-        account_label="primary",
+        strategy_name=real_trace.strategy_name,
+        account_label=real_trace.account_label,
         decision_time=t0,
-        intent_produced=False,
-        intent_id=None,
-        rejection_reason="holding_position_no_exit",
-        evaluated_revision_ids=["live:BTCUSDT:15s:1790323200:testref"],
-        trace_payload={
-            "input_hash": "input_hash_xyz",
-            "frame_digest": "frame_digest_xyz",
-            "output_intent": None,
-            "next_policy_state": {"policy_version": 3},
-        },
+        intent_produced=real_trace.intent_produced,
+        intent_id=real_trace.intent_id,
+        rejection_reason=real_trace.rejection_reason,
+        evaluated_revision_ids=[ref.revision_id],
+        trace_payload=real_trace.trace_payload,
         created_at=t0,
     )
     rev_row = MarketRevisionRefRow(
-        revision_id="live:BTCUSDT:15s:1790323200:testref",
+        revision_id=ref.revision_id,
         scope="live",
         symbol="BTCUSDT",
         interval="15s",
         bucket_start=t0,
         bucket_end=t0 + timedelta(seconds=15),
-        content_hash="testrefhash",
+        content_hash=ref.content_hash,
         published_at=t0,
         source_epoch="ep_live",
         visibility_mode="decision_visible",
@@ -383,7 +428,7 @@ async def test_audit_decision_trace_reproducibility(
         lineage={},
     )
     session.trace_rows["trace_audit_001"] = trace_row
-    session.rev_rows["live:BTCUSDT:15s:1790323200:testref"] = rev_row
+    session.rev_rows[ref.revision_id] = rev_row
 
     from crypto_momentum_lab.tools import reproduce_decision
 
@@ -412,9 +457,9 @@ async def test_audit_decision_trace_reproducibility(
     assert audit_res["evaluated_revisions_count"] == 1
     assert (
         audit_res["evaluated_revisions"][0]["revision_id"]
-        == "live:BTCUSDT:15s:1790323200:testref"
+        == ref.revision_id
     )
-    assert audit_res["next_policy_state_version"] == 3
+    assert audit_res["next_policy_state_version"] == 2
 
 
 @pytest.mark.asyncio

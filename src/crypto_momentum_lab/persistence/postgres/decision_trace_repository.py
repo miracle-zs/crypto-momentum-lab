@@ -266,9 +266,10 @@ class PostgresDecisionTraceRepository:
         self, strategy_name: str, account_label: str
     ) -> DecisionTrace | None:
         """Loads the most recent DecisionTrace recorded for strategy and account."""
+        decision_id: str | None = None
         async with self._session_factory() as session:
             stmt = (
-                select(DecisionTraceRow)
+                select(DecisionTraceRow.decision_id)
                 .where(
                     DecisionTraceRow.strategy_name == strategy_name,
                     DecisionTraceRow.account_label == account_label,
@@ -277,10 +278,10 @@ class PostgresDecisionTraceRepository:
                 .limit(1)
             )
             res = await session.execute(stmt)
-            row = res.scalar_one_or_none()
-            if row is None:
-                return None
-            return await self.load_decision_trace(row.decision_id)
+            decision_id = res.scalar_one_or_none()
+        if decision_id is None:
+            return None
+        return await self.load_decision_trace(decision_id)
 
 
 __all__ = ["PostgresDecisionTraceRepository"]

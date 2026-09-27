@@ -26,7 +26,8 @@ import { renderCollector } from "./sections/collector.js";
 import {
   renderLiveAccounts,
   wireLiveAccounts,
-} from "./sections/account.js?v=20260918-perf-v3";
+  updateLiveAccountsDynamic,
+} from "./sections/account.js?v=20260927-scroll-fix-v1";
 import { renderReports } from "./sections/reports.js";
 import { renderPerformance } from "./sections/performance.js?v=20260918-perf-v4";
 import { createStrategySection } from "./sections/strategy.js?v=20260918-perf-v3";
@@ -409,21 +410,30 @@ async function refreshSection(id) {
       if (shouldRender) strategySection.wire(body, data);
       else strategySection.refresh(body, data);
     }
-    if (id === "account" && shouldRender) wireLiveAccounts(body, data);
+    if (id === "account") {
+      if (shouldRender) wireLiveAccounts(body, data);
+      else updateLiveAccountsDynamic(body, data);
+    }
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);
   } catch (error) {
     console.error(`[FlightDeck] 刷新分区 ${id} 失败:`, error);
-    setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
     if (endpoint !== section.dataset.endpoint) return;
     const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
     const reason = timedOut ? `请求超时（>${SECTION_FETCH_TIMEOUT_MS / 1000}s）` : error.message;
     const errorHtml = emptyBox("数据加载未完成", `${endpoint} · ${reason}`);
     const errorKey = `error:${endpoint}:${reason}`;
-    if (sectionRenderKeys.get(id) !== errorKey) {
-      replaceChildrenFromHtml(body, errorHtml);
-      sectionRenderKeys.set(id, errorKey);
+    const hadPriorSuccess = sectionRenderKeys.has(id) && !sectionRenderKeys.get(id).startsWith("error:");
+    if (!hadPriorSuccess) {
+      setSectionStatus(id, "UNKNOWN");
+      if (sectionRenderKeys.get(id) !== errorKey) {
+        replaceChildrenFromHtml(body, errorHtml);
+        sectionRenderKeys.set(id, errorKey);
+      }
+    } else {
+      // Retain existing view layout and content, do not collapse body height!
+      setSectionStatus(id, "STALE");
     }
     body?.classList.remove("loading");
     updateGlobalState(id, { status: "UNKNOWN", error: true });

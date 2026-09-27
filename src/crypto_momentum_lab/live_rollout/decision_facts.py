@@ -274,20 +274,57 @@ class LiveDecisionFactSource:
                 if trace is not None and trace.trace_payload:
                     st_data = trace.trace_payload.get("next_policy_state")
                     if st_data:
+                        cooldown_raw = (
+                            st_data.get("cooldown_until_by_symbol")
+                            or st_data.get("cooldown_until", {})
+                        )
+                        anchor_raw = (
+                            st_data.get("anchor_prices_by_symbol")
+                            or st_data.get("anchor_prices", {})
+                        )
+                        intent_raw = (
+                            st_data.get("active_intent_ids_by_symbol")
+                            or st_data.get("active_intent_ids", {})
+                        )
+                        warmup_raw = st_data.get("warmup_status", {})
+                        grace_raw = (
+                            st_data.get("grace_until_by_symbol")
+                            or st_data.get("grace_until", {})
+                        )
+                        deadline_raw = (
+                            st_data.get("holding_deadline_by_symbol")
+                            or st_data.get("holding_deadline", {})
+                        )
+                        custom_raw = st_data.get("custom_state", {})
+                        signal_raw = st_data.get("signal_memory", {})
+                        sizing_raw = (
+                            st_data.get("sizing_state_by_symbol")
+                            or st_data.get("sizing_state", {})
+                        )
+
                         self._policy_state = PolicyState(
-                            policy_version=st_data.get("policy_version", "v1"),
+                            policy_version=int(st_data.get("policy_version", 1)),
                             cooldown_until_by_symbol={
-                                k: datetime.fromisoformat(v)
-                                for k, v in st_data.get("cooldown_until", {}).items()
+                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                for k, v in cooldown_raw.items()
                             },
                             anchor_prices_by_symbol={
                                 k: Decimal(str(v))
-                                for k, v in st_data.get("anchor_prices", {}).items()
+                                for k, v in anchor_raw.items()
                             },
-                            active_intent_ids_by_symbol=dict(
-                                st_data.get("active_intent_ids", {})
-                            ),
-                            warmup_status=dict(st_data.get("warmup_status", {})),
+                            active_intent_ids_by_symbol=dict(intent_raw),
+                            custom_state=dict(custom_raw),
+                            signal_memory=dict(signal_raw),
+                            warmup_status=dict(warmup_raw),
+                            grace_until_by_symbol={
+                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                for k, v in grace_raw.items()
+                            },
+                            holding_deadline_by_symbol={
+                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                for k, v in deadline_raw.items()
+                            },
+                            sizing_state_by_symbol=dict(sizing_raw),
                         )
                         log.info(
                             "policy_state_restored_from_durable_trace",
