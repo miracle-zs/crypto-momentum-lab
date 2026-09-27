@@ -614,9 +614,8 @@ COMMIT;
    - 持仓账本阴影比对实时汇报：`concordant=True, details='Exact match between legacy rebuild and PositionLedger v2', reconciliation_gap=0E-18`。
 
 2. **多重风控与池外拦截实证**：
-   - 2026-09-27 02:42:15 UTC，`NOTUSDT` 产生信号意图，系统正确在候选过滤层与限额层予以拦截：
-     - 原因一：`NOTUSDT` 属于 Top 30 候选池外标的（`outside_entry_symbol_pool`）。
-     - 原因二：4 账户已各持仓 1 笔（`AIOUSDT`），达到 `max_open_positions=1` 限制，触发限额保护。
+   - 2026-09-27 02:42:15 UTC，`NOTUSDT` 产生信号意图，系统正确在候选过滤层予以拦截：
+     - 原因：`NOTUSDT` 属于 Top 30 候选池外标的（`outside_entry_symbol_pool`）。系统严守入场候选池边界，未触发任何违规发单。
 
 3. **历史挂单与预留彻底闭环**：
    - 生产数据库 `position_reservations`：COMMITTED 为 37，RELEASED 为 10，**ACTIVE 为 0**。彻底清除了旧架构中 8 条 ACTIVE 与 FILLED 长期脱节的顽疾。
