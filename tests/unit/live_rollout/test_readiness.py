@@ -59,6 +59,27 @@ def test_readiness_publishes_warmup_and_entry_gate_state(tmp_path) -> None:
     assert payload["entry_enabled_reason"] == "strategy_warmup_incomplete"
 
 
+def test_mature_symbols_can_run_while_cold_symbols_keep_warming(tmp_path) -> None:
+    _, publisher = _publisher(tmp_path)
+    publisher.update_warmup(
+        LiveWarmupStatus(
+            required_buckets=140,
+            expected_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
+            complete_symbols=frozenset({"BTCUSDT"}),
+            cutover_at=datetime(2026, 9, 12, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert publisher.has_warmup_ready_symbols is True
+
+
+def test_no_mature_symbols_keeps_entries_blocked(tmp_path) -> None:
+    _, publisher = _publisher(tmp_path)
+    publisher.set_expected_warmup_symbols({"BTCUSDT", "ETHUSDT"})
+
+    assert publisher.has_warmup_ready_symbols is False
+
+
 def test_readiness_refreshes_progress_and_market_age(tmp_path) -> None:
     health, publisher = _publisher(tmp_path)
     publisher.set_expected_warmup_symbols({"BTCUSDT", "ETHUSDT"})

@@ -368,10 +368,15 @@ class LiveReadinessPublisher:
         self.publish()
 
     @property
-    def is_warmup_complete(self) -> bool:
-        if not self._warmup_expected_symbols:
-            return True
-        return self._warmup_complete_symbols >= self._warmup_expected_symbols
+    def has_warmup_ready_symbols(self) -> bool:
+        """Return whether at least one expected symbol has a complete window.
+
+        Readiness is global, while warmup safety is per symbol: the strategy
+        runtime rejects signals for any symbol whose own rolling window is
+        incomplete. A cold symbol must therefore not block mature symbols.
+        """
+
+        return bool(self._warmup_complete_symbols)
 
     def set_expected_warmup_symbols(self, symbols: Collection[str]) -> None:
         """Set the expected warmup universe before recovery starts."""

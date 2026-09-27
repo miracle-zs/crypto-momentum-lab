@@ -1341,7 +1341,7 @@ async def run_live_daemon(
                 else startup_market_buffer.connection_available
             ),
             strategy_warmup_ready=(
-                live_readiness.is_warmup_complete
+                live_readiness.has_warmup_ready_symbols
                 if live_readiness is not None
                 else False
             ),
