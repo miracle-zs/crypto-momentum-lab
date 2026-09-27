@@ -601,9 +601,13 @@ class LiveCandidateSubmission:
             else reference_price
         )
         if requested_quantity is None:
-            if candidate.desired_notional is None or sizing_price <= 0:
+            raw_quantized = candidate.features.get("quantized_quantity")
+            if raw_quantized is not None:
+                req_qty = Decimal(str(raw_quantized))
+            elif candidate.desired_notional is None or sizing_price <= 0:
                 return None
-            req_qty = candidate.desired_notional / sizing_price
+            else:
+                req_qty = candidate.desired_notional / sizing_price
         else:
             req_qty = requested_quantity
 

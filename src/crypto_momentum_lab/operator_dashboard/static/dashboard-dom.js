@@ -5,7 +5,6 @@ function fragmentFromHtml(ownerDocument, html) {
 }
 
 let lastUserInteractionTime = 0;
-let currentRenderGeneration = 0;
 
 if (typeof window !== "undefined") {
   const markUserInteraction = () => {
@@ -166,9 +165,11 @@ export function restoreViewState(root, state) {
 }
 
 export function replaceChildrenFromHtml(root, html) {
-  const generation = ++currentRenderGeneration;
+  const generation = ((root.__renderGeneration || 0) + 1);
+  root.__renderGeneration = generation;
   const state = captureViewState(root);
-  const previousMinHeight = root.style.minHeight;
+  const previousMinHeight = root.__previousMinHeight !== undefined ? root.__previousMinHeight : root.style.minHeight;
+  root.__previousMinHeight = previousMinHeight;
   if (root.offsetHeight > 0) {
     root.style.minHeight = `${root.offsetHeight}px`;
   }
@@ -178,12 +179,14 @@ export function replaceChildrenFromHtml(root, html) {
   const view = root.ownerDocument?.defaultView;
   if (typeof view?.requestAnimationFrame === "function") {
     view.requestAnimationFrame(() => {
-      if (generation !== currentRenderGeneration) return;
+      if (root.__renderGeneration !== generation) return;
       root.style.minHeight = previousMinHeight;
+      delete root.__previousMinHeight;
       restoreViewState(root, state);
     });
   } else {
     root.style.minHeight = previousMinHeight;
+    delete root.__previousMinHeight;
   }
 }
 

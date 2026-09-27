@@ -1721,3 +1721,181 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
     assert repo.res.active_quantity == Decimal("5.0")
 
     await coord.aclose()
+
+
+@pytest.mark.asyncio
+async def test_first_live_entry_reservation_on_cold_start() -> None:
+    """Verifies F1: first live entry on empty ExecutionBook succeeds and is admitted."""
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ExecutionCoordinator,
+    )
+
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, Any] = {}
+
+        def load_active_reservations(self, key: Any = None) -> list[Any]:
+            return [
+                r
+                for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+    backend = BlockingBackend()
+    repo = InMemoryReservationRepo()
+    domain_coord = ExecutionCoordinator()
+    book = ExecutionBook(coordinator=domain_coord, reservation_repository=repo)
+    coord = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+        domain_coordinator=domain_coord,
+        execution_book=book,
+    )
+    snap = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=Decimal("10"),
+        margin_type="cross",
+        observed_at=NOW,
+        raw_payload={},
+    )
+    await coord.observe_account_snapshot(snap)
+    plan = OrderExecutionPlan(
+        intent_id="intent-entry-1",
+        run_id="run-1",
+        client_order_id="order-entry-1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=Decimal("0.01"),
+        price=Decimal("65000"),
+        reduce_only=False,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        projection_version="pv_primary_BTCUSDT_first",
+    )
+    # Must succeed without OrderPreSubmissionError: PositionView is not ready for trade
+    await coord._ensure_reservation(plan)
+
+    # Outbox should have the command prepared
+    outbox = book.get_outbox("order-entry-1")
+    assert outbox is not None
+    assert outbox.command.requested_quantity == Decimal("0.01")
+    assert not outbox.command.reduce_only
+
+    await coord.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
+    """Verifies F6: 3 partial -> 5 partial -> 10 filled produces exact cumulative tracking."""
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    res = PositionReservation(
+        reservation_id="res-cum-1",
+        command_id="cmd-cum-1",
+        batch_id="batch-1",
+        position_key=PositionKey(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.BOTH,
+        ),
+        reserved_quantity=Decimal("10.0"),
+        consumed_quantity=Decimal("0.0"),
+        released_quantity=Decimal("0.0"),
+        created_at=NOW,
+    )
+
+    class InMemoryRepo:
+        def __init__(self, initial: PositionReservation) -> None:
+            self.res = initial
+
+        def load_active_reservations(
+            self, k: PositionKey | None = None
+        ) -> list[PositionReservation]:
+            return [self.res] if self.res.active_quantity > 0 else []
+
+        def update_reservation(
+            self, updated: PositionReservation, **kwargs: Any
+        ) -> None:
+            self.res = updated
+
+    backend = BlockingBackend()
+    repo = InMemoryRepo(res)
+    coord = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+        initial_reservations=[res],
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-1",
+        run_id="run-1",
+        client_order_id="order-exit-cum",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("10.0"),
+        price=Decimal("65000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        batch_id="batch-1",
+    )
+    await coord._ensure_reservation(plan)
+
+    # 1. First report: 3 partial
+    res1 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        executed_quantity=Decimal("3.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-cum-1",
+    )
+    await coord._consume_reservation_if_filled(plan, res1)
+    assert repo.res.consumed_quantity == Decimal("3.0")
+    assert repo.res.active_quantity == Decimal("7.0")
+
+    # 2. Second report: 5 partial (cumulative 5)
+    res2 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        executed_quantity=Decimal("5.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-cum-1",
+    )
+    await coord._consume_reservation_if_filled(plan, res2)
+    assert repo.res.consumed_quantity == Decimal("5.0")
+    assert repo.res.active_quantity == Decimal("5.0")
+
+    # 3. Third report: 10 filled (cumulative 10)
+    res3 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.FILLED,
+        executed_quantity=Decimal("10.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-cum-1",
+    )
+    await coord._consume_reservation_if_filled(plan, res3)
+    assert repo.res.consumed_quantity == Decimal("10.0")
+    assert repo.res.active_quantity == Decimal("0.0")
+
+    await coord.aclose()

@@ -143,6 +143,7 @@ def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
             val = getattr(policy, f)
             if hasattr(val, "total_seconds"):
                 res[f] = int(val.total_seconds())
+                res[f"{f}_seconds"] = int(val.total_seconds())
             elif hasattr(val, "value"):
                 res[f] = val.value
             elif isinstance(val, (int, float, bool, str)) or val is None:
@@ -151,6 +152,34 @@ def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
                 res[f] = str(val)
             else:
                 res[f] = str(val)
+
+    sizing_model = getattr(policy, "sizing_model", None)
+    if sizing_model is not None:
+        model_name = sizing_model.__class__.__name__
+        model_dict: dict[str, Any] = {"class": model_name}
+        if hasattr(sizing_model, "__dataclass_fields__"):
+            for f in sorted(sizing_model.__dataclass_fields__):
+                v = getattr(sizing_model, f)
+                model_dict[f] = str(v) if isinstance(v, Decimal) else v
+        elif hasattr(sizing_model, "__dict__"):
+            for k, v in sorted(sizing_model.__dict__.items()):
+                if not k.startswith("_"):
+                    model_dict[k] = str(v) if isinstance(v, Decimal) else v
+        res["sizing_model"] = model_dict
+
+    lot_rules = getattr(policy, "symbol_lot_rules", None)
+    if lot_rules is not None:
+        rules_dict: dict[str, Any] = {}
+        if hasattr(lot_rules, "__dataclass_fields__"):
+            for f in sorted(lot_rules.__dataclass_fields__):
+                v = getattr(lot_rules, f)
+                rules_dict[f] = str(v) if isinstance(v, Decimal) else v
+        elif hasattr(lot_rules, "__dict__"):
+            for k, v in sorted(lot_rules.__dict__.items()):
+                if not k.startswith("_"):
+                    rules_dict[k] = str(v) if isinstance(v, Decimal) else v
+        res["symbol_lot_rules"] = rules_dict
+
     if hasattr(policy, "__dict__"):
         for k, v in sorted(policy.__dict__.items()):
             if not k.startswith("_") and k not in res:
@@ -395,16 +424,11 @@ def execute_policy_transition(
                     reason=exit_reason,
                     projection_version=position_view.projection_version,
                 )
-                exit_side = (
-                    StrategySide.SHORT
-                    if pos_side == StrategySide.LONG
-                    else StrategySide.LONG
-                )
                 exit_cmd = TradeCommand(
                     command_id=f"cmd_exit_{decision_id}",
                     position_key=position_view.key,
                     command_type=TradeCommandType.EXIT,
-                    side=exit_side,
+                    side=pos_side,
                     order_type=EntryType.MARKET,
                     requested_quantity=total_qty,
                     reduce_only=True,

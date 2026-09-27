@@ -431,7 +431,9 @@ class LiveDecisionFactSource:
                 if inspect.isawaitable(res):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(res)
+                        task = loop.create_task(res)
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._active_tasks.discard)
                     except RuntimeError:
                         pass
             except Exception as exit_err:

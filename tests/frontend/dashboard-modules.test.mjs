@@ -35,7 +35,7 @@ import {
   SECTION_POLL_MS,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
 import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
-import { captureViewState, restoreViewState } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
+import { captureViewState, restoreViewState, replaceChildrenFromHtml } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
 
 test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
   assert.equal(POLL_MS, 15000);
@@ -1008,4 +1008,64 @@ test("captureViewState and restoreViewState handle mock document gracefully", ()
   restoreViewState(root, state);
   assert.equal(mockDoc.scrollingElement.scrollTop, 250);
 });
+
+test("replaceChildrenFromHtml restores minHeight on independent roots across rAF", () => {
+  const rafCallbacks = [];
+  const mockDoc = {
+    createElement(tag) {
+      if (tag === "template") {
+        return {
+          set innerHTML(val) { this._html = val; },
+          get content() { return { childNodes: [] }; },
+        };
+      }
+      return {};
+    },
+    scrollingElement: { scrollLeft: 0, scrollTop: 0 },
+    documentElement: { style: {} },
+    body: { scrollLeft: 0, scrollTop: 0 },
+    defaultView: {
+      scrollX: 0,
+      scrollY: 0,
+      innerHeight: 800,
+      requestAnimationFrame(cb) {
+        rafCallbacks.push(cb);
+      },
+    },
+    querySelectorAll: () => [],
+  };
+
+  const rootA = {
+    ownerDocument: mockDoc,
+    style: { minHeight: "10px" },
+    offsetHeight: 500,
+    replaceChildren() {},
+    querySelectorAll: () => [],
+  };
+
+  const rootB = {
+    ownerDocument: mockDoc,
+    style: { minHeight: "20px" },
+    offsetHeight: 300,
+    replaceChildren() {},
+    querySelectorAll: () => [],
+  };
+
+  replaceChildrenFromHtml(rootA, "<div>A</div>");
+  assert.equal(rootA.style.minHeight, "500px");
+
+  replaceChildrenFromHtml(rootB, "<div>B</div>");
+  assert.equal(rootB.style.minHeight, "300px");
+
+  // Fire rAF callbacks in sequence
+  while (rafCallbacks.length > 0) {
+    const cb = rafCallbacks.shift();
+    cb();
+  }
+
+  // Both should have their respective previous minHeights restored!
+  assert.equal(rootA.style.minHeight, "10px");
+  assert.equal(rootB.style.minHeight, "20px");
+});
+
 

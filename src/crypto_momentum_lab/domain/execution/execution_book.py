@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.execution.position_book import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
+    FactCoverageInterval,
     FreshnessRequirement,
     PositionKey,
     PositionView,
@@ -44,6 +45,9 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+import structlog
+
+log = structlog.get_logger(__name__)
 
 
 async def _maybe_await(val: Any) -> Any:
@@ -176,6 +180,7 @@ class ExecutionEvidence:
     snapshot: AccountPositionSnapshot | None = None
     boundary: ExitOrderSubmissionFact | None = None
     order_event: ExchangeOrderEvent | None = None
+    coverage: FactCoverageInterval | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +239,7 @@ class ExecutionBook:
         self._outbox_by_command_id: dict[str, OutboxEntry] = {}
         self._command_reservations: dict[str, list[str]] = {}
         self._order_cumulative_fills: dict[str, Decimal] = {}
+        self._active_persist_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def coordinator(self) -> ExecutionCoordinator:
@@ -307,8 +313,10 @@ class ExecutionBook:
             try:
                 loop = asyncio.get_running_loop()
                 task = loop.create_task(self._persist_outbox_state(entry))
+                self._active_persist_tasks.add(task)
 
                 def _on_done(t: asyncio.Task[Any]) -> None:
+                    self._active_persist_tasks.discard(t)
                     if not t.cancelled() and t.exception():
                         log.error(
                             "persist_outbox_task_failed",
@@ -319,6 +327,22 @@ class ExecutionBook:
                 task.add_done_callback(_on_done)
             except RuntimeError:
                 pass
+
+    async def drain(self, timeout_seconds: float = 5.0) -> None:
+        """Awaits in-flight asynchronous outbox persistence tasks before shutdown."""
+        if not self._active_persist_tasks:
+            return
+        tasks = list(self._active_persist_tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            log.warning(
+                "drain_outbox_persist_tasks_timeout",
+                remaining=len(self._active_persist_tasks),
+            )
 
     async def restore(self, account_label: str | None = None) -> None:
         """Restores in-flight outbox commands, deduplication, and reservations."""
@@ -507,17 +531,7 @@ class ExecutionBook:
         key = request.scope.to_position_key()
         book = self._ensure_book(key)
         view = book.get_view()
-        journal = self._ensure_journal(key)
-        is_empty_book = (
-            len(journal._fills_by_id) == 0
-            and len(journal._snapshots) == 0
-            and len(view.batches) == 0
-        )
-        effective_view_token = (
-            request.expected_view_token
-            if is_empty_book and request.expected_view_token not in ("*", "pv_initial")
-            else view.projection_version
-        )
+        effective_view_token = view.projection_version
 
         # 1. Idempotency verification
         if request.request_id in self._requests_by_id:
@@ -1007,14 +1021,45 @@ class ExecutionBook:
 
                 # Reconcile active reservations if this is an exit / reduction fill
                 is_exit_fill = (
-                    evidence.fill.side.upper() == "SELL"
-                    and key.position_side == FuturesPositionSide.LONG
-                ) or (
-                    evidence.fill.side.upper() == "BUY"
-                    and key.position_side == FuturesPositionSide.SHORT
+                    (
+                        evidence.fill.side.upper() == "SELL"
+                        and key.position_side == FuturesPositionSide.LONG
+                    )
+                    or (
+                        evidence.fill.side.upper() == "BUY"
+                        and key.position_side == FuturesPositionSide.SHORT
+                    )
+                    or bool(self._find_active_reservations_for_command(order_id))
+                    or (
+                        evidence.order_event is not None
+                        and bool(
+                            (evidence.order_event.details or {}).get("is_reduce_only")
+                        )
+                    )
+                    or (
+                        isinstance(evidence.fill.raw_payload, dict)
+                        and bool(evidence.fill.raw_payload.get("reduce_only"))
+                    )
+                    or (
+                        book.get_view().active_episode is not None
+                        and (
+                            (
+                                book.get_view().active_episode.side == StrategySide.LONG
+                                and evidence.fill.side.upper() == "SELL"
+                            )
+                            or (
+                                book.get_view().active_episode.side == StrategySide.SHORT
+                                and evidence.fill.side.upper() == "BUY"
+                            )
+                        )
+                    )
                 )
 
-                if is_exit_fill and delta_qty > Decimal("0"):
+                already_reconciled = (
+                    isinstance(evidence.fill.raw_payload, dict)
+                    and bool(evidence.fill.raw_payload.get("reservation_reconciled"))
+                )
+                if is_exit_fill and delta_qty > Decimal("0") and not already_reconciled:
                     cand_res = self._find_active_reservations_for_command(order_id)
                     if not cand_res:
                         cand_res = list(self._coordinator.get_active_reservations(key))
@@ -1040,6 +1085,10 @@ class ExecutionBook:
         # 2. Process Snapshot
         if evidence.snapshot is not None:
             journal.record_snapshot(evidence.snapshot)
+
+        # 2b. Process Coverage
+        if getattr(evidence, "coverage", None) is not None:
+            journal.set_coverage(evidence.coverage)
 
         # 3. Process Boundary
         if evidence.boundary is not None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -30,6 +30,7 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
     compute_policy_parameters_digest,
     compute_policy_state_digest,
     execute_policy_transition,
+    serialize_policy_parameters,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
@@ -398,31 +399,7 @@ def compute_decision_input_hash(
         "clock_sequence": decision_input.clock_event.sequence,
         "cash_balance": str(decision_input.cash_balance),
         "risk_config_version": decision_input.risk_config_version,
-        "policy_parameters": {
-            "policy_id": policy.policy_id,
-            "strategy_name": policy.strategy_name,
-            "policy_version": policy.policy_version,
-            "entry_threshold": str(policy.entry_threshold),
-            "short_entry_threshold": (
-                str(policy.short_entry_threshold)
-                if policy.short_entry_threshold is not None
-                else None
-            ),
-            "order_type": (
-                policy.order_type.value
-                if hasattr(policy.order_type, "value")
-                else str(policy.order_type)
-            ),
-            "target_notional": str(policy.target_notional),
-            "max_open_positions": policy.max_open_positions,
-            "cooldown_duration_seconds": int(policy.cooldown_duration.total_seconds()),
-            "position_mode": (
-                policy.position_mode.value
-                if hasattr(policy.position_mode, "value")
-                else str(policy.position_mode)
-            ),
-            "grace_period_seconds": int(policy.grace_period.total_seconds()),
-        },
+        "policy_parameters": serialize_policy_parameters(policy),
         "policy_state": {
             "policy_version": state.policy_version,
             "cooldown_until_by_symbol": {
@@ -644,8 +621,10 @@ def build_decision_input(
 def decision_trace_from_result(
     result: DecisionResult,
     decision_input: DecisionInput,
-    strategy_name: str,
-    account_label: str,
+    strategy_name: str = "strategy",
+    account_label: str = "primary",
+    prior_policy_state: PolicyState | None = None,
+    policy: EffectivePolicy | None = None,
 ) -> DecisionTrace:
     """Builds an immutable DecisionTrace with semantic outputs and next state."""
     cd_items = result.next_policy_state.cooldown_until_by_symbol.items()
@@ -674,17 +653,43 @@ def decision_trace_from_result(
             "sizing_state": dict(sizing_st),
         },
     }
+    if prior_policy_state is not None:
+        prior_cd = prior_policy_state.cooldown_until_by_symbol.items()
+        prior_anchors = prior_policy_state.anchor_prices_by_symbol.items()
+        prior_intents = prior_policy_state.active_intent_ids_by_symbol.items()
+        prior_warmup = prior_policy_state.warmup_status.items()
+        prior_grace = getattr(prior_policy_state, "grace_until_by_symbol", {}).items()
+        prior_deadlines = getattr(prior_policy_state, "holding_deadline_by_symbol", {}).items()
+        payload["prior_policy_state"] = {
+            "policy_version": prior_policy_state.policy_version,
+            "cooldown_until": {k: v.isoformat() for k, v in sorted(prior_cd)},
+            "anchor_prices": {k: str(v) for k, v in sorted(prior_anchors)},
+            "active_intent_ids": dict(sorted(prior_intents)),
+            "warmup_status": dict(sorted(prior_warmup)),
+            "grace_until": {k: v.isoformat() for k, v in sorted(prior_grace)},
+            "holding_deadline": {k: v.isoformat() for k, v in sorted(prior_deadlines)},
+            "signal_memory": dict(getattr(prior_policy_state, "signal_memory", {})),
+            "custom_state": dict(getattr(prior_policy_state, "custom_state", {})),
+            "sizing_state": dict(getattr(prior_policy_state, "sizing_state_by_symbol", {})),
+        }
+    if policy is not None:
+        payload["policy_parameters"] = serialize_policy_parameters(policy)
+
     if hasattr(decision_input, "position_view") and decision_input.position_view is not None:
         pv = decision_input.position_view
         batches_data = []
         for b in getattr(pv, "batches", ()):
+            qty_val = getattr(b, "quantity", None)
+            if qty_val is None:
+                qty_val = getattr(b, "allocated_quantity", "0")
             batches_data.append({
                 "batch_id": getattr(b, "batch_id", ""),
                 "symbol": getattr(b, "symbol", pv.key.symbol),
                 "side": (
                     b.side.value if hasattr(getattr(b, "side", None), "value") else str(getattr(b, "side", ""))
                 ),
-                "allocated_quantity": str(getattr(b, "allocated_quantity", "0")),
+                "allocated_quantity": str(qty_val),
+                "quantity": str(qty_val),
                 "entry_price": str(getattr(b, "entry_price", "0")),
                 "opened_at": (
                     b.opened_at.isoformat() if hasattr(getattr(b, "opened_at", None), "isoformat") else str(getattr(b, "opened_at", ""))
@@ -937,6 +942,8 @@ def create_authoritative_decision_filter(
                         dec_input,
                         strategy_name=strategy_name,
                         account_label=frozen.position_view.key.account_label,
+                        prior_policy_state=frozen.policy_state,
+                        policy=policy,
                     )
                     trace_recorder(trace)
                 except Exception:
@@ -947,7 +954,7 @@ def create_authoritative_decision_filter(
                 except TypeError:
                     on_decision_result(dec_res)
             if dec_res.intent is not None:
-                filtered_candidates.append(cand)
+                filtered_candidates.append(dec_res.intent)
             else:
                 raw_reason = dec_res.rejection_reason or ("decision_engine_filtered")
                 rej_reason = (

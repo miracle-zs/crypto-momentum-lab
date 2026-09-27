@@ -19,7 +19,10 @@ from typing import Any, Protocol, cast
 
 import structlog
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -359,6 +362,7 @@ class OrderExecutionCoordinator:
         if self._domain_coordinator is None and self._execution_book is not None:
             self._domain_coordinator = self._execution_book.coordinator
         self._settled_cumulative_quantities: dict[str, Decimal] = {}
+        self._observed_cumulative_quantities: dict[str, Decimal] = {}
         if initial_reservations:
             for r in initial_reservations:
                 if self._domain_coordinator is not None:
@@ -411,6 +415,78 @@ class OrderExecutionCoordinator:
         """Wait until no entry operation can still reach the exchange."""
         await self._entry_submissions_idle.wait()
 
+    async def observe_account_snapshot(
+        self,
+        snapshot: Any,
+        symbols: tuple[str, ...] | frozenset[str] = (),
+    ) -> None:
+        """Feed authoritative exchange account snapshot into ExecutionBook."""
+        if self._execution_book is None or snapshot is None:
+            return
+        observed_at = getattr(snapshot, "observed_at", None) or getattr(
+            getattr(snapshot, "config", None), "observed_at", None
+        ) or datetime.now(UTC)
+        seen_symbols: set[str] = set()
+        positions = getattr(snapshot, "positions", None)
+        if positions is None:
+            if hasattr(snapshot, "symbol") and hasattr(snapshot, "position_amt"):
+                positions = (snapshot,)
+            else:
+                positions = ()
+        for pos in positions:
+            seen_symbols.add(pos.symbol)
+            side_raw = getattr(pos, "position_side", "BOTH")
+            side_str = (
+                side_raw.value
+                if hasattr(side_raw, "value")
+                else str(side_raw)
+            ).upper()
+            scope = ExecutionScope(
+                environment="live",
+                account_label=self._account_label,
+                symbol=pos.symbol,
+                position_side=FuturesPositionSide(side_str),
+            )
+            ev = ExecutionEvidence(
+                evidence_id=f"snap_{self._account_label}_{pos.symbol}_{int(observed_at.timestamp())}",
+                scope=scope,
+                observed_at=observed_at,
+                snapshot=pos,
+            )
+            await self._execution_book.observe(ev)
+
+        # For known flat symbols, emit zero snapshots
+        for sym in symbols:
+            if sym not in seen_symbols:
+                scope = ExecutionScope(
+                    environment="live",
+                    account_label=self._account_label,
+                    symbol=sym,
+                    position_side=FuturesPositionSide.BOTH,
+                )
+                zero_pos = AccountPositionSnapshot(
+                    environment="live",
+                    account_label=self._account_label,
+                    symbol=sym,
+                    position_side="BOTH",
+                    position_amt=Decimal("0"),
+                    entry_price=Decimal("0"),
+                    mark_price=Decimal("0"),
+                    unrealized_pnl=Decimal("0"),
+                    notional=Decimal("0"),
+                    leverage=None,
+                    margin_type=None,
+                    observed_at=observed_at,
+                    raw_payload={},
+                )
+                ev = ExecutionEvidence(
+                    evidence_id=f"snap_{self._account_label}_{sym}_{int(observed_at.timestamp())}",
+                    scope=scope,
+                    observed_at=observed_at,
+                    snapshot=zero_pos,
+                )
+                await self._execution_book.observe(ev)
+
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if self._reservation_repository is None or self._execution_book is None:
             return
@@ -428,7 +504,11 @@ class OrderExecutionCoordinator:
                 token = (
                     proj_ver
                     if (proj_ver and proj_ver == current_view.projection_version)
-                    else "*"
+                    else (
+                        current_view.projection_version
+                        if current_view.is_ready_for_trade
+                        else "*"
+                    )
                 )
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,
@@ -778,12 +858,13 @@ class OrderExecutionCoordinator:
             )
             order_key = plan.client_order_id or str(res.exchange_order_id or "")
             cum_executed = Decimal(str(res.executed_quantity))
-            prev_settled = self._settled_cumulative_quantities.get(
+            prev_observed = self._observed_cumulative_quantities.get(
                 order_key, Decimal("0")
             )
-            delta_qty = max(Decimal("0"), cum_executed - prev_settled)
+            delta_qty = max(Decimal("0"), cum_executed - prev_observed)
             fill_ev = None
             if delta_qty > Decimal("0"):
+                self._observed_cumulative_quantities[order_key] = cum_executed
                 fill_ev = AccountFillEvent(
                     environment="live",
                     account_label=self._account_label,
@@ -797,8 +878,21 @@ class OrderExecutionCoordinator:
                     fee=Decimal("0"),
                     fee_asset="USDT",
                     trade_at=now_dt,
-                    raw_payload={"is_cumulative": True, "cum_qty": str(cum_executed)},
+                    raw_payload={
+                        "is_cumulative": True,
+                        "cum_qty": str(cum_executed),
+                        "reduce_only": plan.reduce_only,
+                        "reservation_reconciled": True,
+                    },
                 )
+            if res.state in (
+                ExchangeOrderState.FILLED,
+                ExchangeOrderState.CANCELED,
+                ExchangeOrderState.EXPIRED,
+                ExchangeOrderState.REJECTED,
+                ExchangeOrderState.ABSENT_RECONCILED,
+            ):
+                self._observed_cumulative_quantities.pop(order_key, None)
             await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=order_ev.event_id,
@@ -1030,6 +1124,8 @@ class OrderExecutionCoordinator:
             self._schedulers.clear()
         if schedulers:
             await asyncio.gather(*(scheduler.close() for scheduler in schedulers))
+        if self._execution_book is not None and hasattr(self._execution_book, "drain"):
+            await self._execution_book.drain()
 
     def _remove_idle_scheduler(self, key: OrderExecutionKey) -> None:
         self._schedulers.pop(key, None)

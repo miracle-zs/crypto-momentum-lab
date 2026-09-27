@@ -1412,6 +1412,20 @@ async def run_live_daemon(
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
+        def _on_account_snapshot_combined(event: AccountEvent) -> None:
+            control_plane_runtime.on_account_snapshot(event)
+            if event.account_snapshot is not None and execution_coordinator is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        execution_coordinator.observe_account_snapshot(
+                            event.account_snapshot,
+                            symbols=event.symbols,
+                        )
+                    )
+                except Exception:
+                    pass
+
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,
             latest_market_states=latest_market_states,
@@ -1422,7 +1436,7 @@ async def run_live_daemon(
             is_transient_error=_is_transient_live_runtime_error,
             is_order_identity_conflict=_is_order_identity_conflict,
             on_exit_failure=on_exit_failure,
-            on_account_snapshot=control_plane_runtime.on_account_snapshot,
+            on_account_snapshot=_on_account_snapshot_combined,
             on_account_snapshot_recovery=(
                 control_plane_runtime.on_account_snapshot_recovery
             ),

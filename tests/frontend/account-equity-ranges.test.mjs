@@ -8,6 +8,7 @@ import {
 import {
   renderAccount,
   renderLiveAccounts,
+  updateLiveAccountsDynamic,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 
 
@@ -89,3 +90,61 @@ test("live account cards surface the leased strategy and known state", () => {
   assert.doesNotMatch(html, /未关联策略/);
   assert.doesNotMatch(html, /状态未知/);
 });
+
+test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet summary in-place", () => {
+  const cardElements = {
+    status: { className: "", textContent: "" },
+    state: { innerHTML: "" },
+    kpis: { innerHTML: "", className: "live-account-card-kpis" },
+    footer: { innerHTML: "" },
+  };
+  const fleetElements = {
+    status: { innerHTML: "" },
+    kpis: { innerHTML: "" },
+  };
+  const mockCard = {
+    querySelector(selector) {
+      if (selector === ".live-account-card-status") return cardElements.status;
+      if (selector === ".live-account-card-state") return cardElements.state;
+      if (selector === ".live-account-card-kpis") return cardElements.kpis;
+      if (selector === ".live-account-card-footer") return cardElements.footer;
+      return null;
+    },
+  };
+  const mockRoot = {
+    querySelector(selector) {
+      if (selector === '[data-live-account-label="primary"]') return mockCard;
+      if (selector === ".live-account-fleet-status") return fleetElements.status;
+      if (selector === ".live-account-fleet-kpis") return fleetElements.kpis;
+      return null;
+    },
+  };
+
+  updateLiveAccountsDynamic(mockRoot, {
+    status: "READY",
+    accounts: [
+      {
+        account_label: "primary",
+        status: "READY",
+        observed_at: "2026-09-27T10:00:00Z",
+        summary: {
+          usdt_wallet_balance: "1500.50",
+          usdt_available_balance: "1200.00",
+          total_unrealized_pnl: "45.20",
+          gross_position_notional: "3000.00",
+          position_count: 2,
+          open_order_count: 1,
+        },
+      },
+    ],
+  });
+
+  assert.equal(cardElements.status.className, "live-account-card-status status-READY");
+  assert.equal(cardElements.status.textContent, "正常");
+  assert.match(cardElements.kpis.innerHTML, /1,500\.50/);
+  assert.match(cardElements.kpis.innerHTML, /\+\$45\.20/);
+  assert.match(cardElements.footer.innerHTML, /2 个持仓 · 1 个挂单/);
+  assert.match(fleetElements.status.innerHTML, /1 正常 · 0 停止 · 0 待确认/);
+  assert.match(fleetElements.kpis.innerHTML, /USDT 钱包合计/);
+});
+

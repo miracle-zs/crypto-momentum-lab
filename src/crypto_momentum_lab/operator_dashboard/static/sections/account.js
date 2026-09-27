@@ -814,6 +814,7 @@ async function loadLiveAccountMetrics(root, requestJson, equityRange) {
 export function wireLiveAccounts(root, data, { requestJson = defaultAccountRequestJson } = {}) {
   const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
   root.__liveAccountData = accounts;
+  root.__requestJson = requestJson;
   root.querySelectorAll("[data-live-account-label]").forEach((button) => {
     if (button.dataset.liveAccountWired === "true") return;
     button.dataset.liveAccountWired = "true";
@@ -854,23 +855,66 @@ export function updateLiveAccountsDynamic(root, data) {
   if (!accounts.length) return;
   root.__liveAccountData = accounts;
 
-  // Update card status and labels in-place
+  // Update card status, labels, KPIs and footers in-place
   accounts.forEach((account) => {
     const card = root.querySelector(`[data-live-account-label="${account.account_label}"]`);
     if (!card) return;
     const statusEl = card.querySelector(".live-account-card-status");
     if (statusEl) {
-      statusEl.className = `live-account-card-status status-${statusSlug(account.status)}`;
+      statusEl.className = `live-account-card-status ${liveAccountStatusClass(account.status)}`;
       statusEl.textContent = liveAccountStatusLabel(account.status);
     }
+    const summary = account.summary || {};
+    const financialSnapshot = Object.keys(summary).length > 0;
+    const reconciliation = account.reconciliation || {};
+    const mismatchCount = asNumber(reconciliation.mismatch_count);
+    const reconciliationLabel = mismatchCount != null && mismatchCount > 0
+      ? `${mismatchCount} 项差异`
+      : String(reconciliation.status || "").toUpperCase() === "READY"
+        ? "对账一致"
+        : (account.reconciliation_status ? `对账 ${account.reconciliation_status}` : "对账待确认");
+    const readiness = account.readiness || "就绪未知";
+    const cardState = financialSnapshot ? reconciliationLabel : readiness;
+
     const stateEl = card.querySelector(".live-account-card-state");
     if (stateEl) {
-      const reconciliationLabel = account.reconciliation_status
-        ? `对账 ${account.reconciliation_status}`
-        : "未对账";
-      const readiness = account.readiness || "就绪未知";
-      const cardState = (account.summary || account.balances) ? reconciliationLabel : readiness;
       stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(cardState)}</span>`;
+    }
+
+    // Update secondary details / KPIs
+    const kpisEl = card.querySelector(".live-account-card-kpis");
+    const stateDetailEl = card.querySelector(".live-account-card-state-detail");
+    if (financialSnapshot) {
+      const kpisHtml = `<span><small>USDT 钱包</small><b class="num">${esc(money(summary.usdt_wallet_balance))}</b></span>` +
+        `<span><small>可用余额</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>` +
+        `<span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>` +
+        `<span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>`;
+      if (kpisEl) {
+        kpisEl.innerHTML = kpisHtml;
+      } else if (stateDetailEl) {
+        stateDetailEl.className = "live-account-card-kpis";
+        stateDetailEl.innerHTML = kpisHtml;
+      }
+    } else {
+      const strategy = account.strategy_name || "未关联策略";
+      const strategyState = liveStrategyStateLabel(account.strategy_state, account.lease_expires_at);
+      const lease = account.lease_expires_at ? `租约至 ${dayTime(account.lease_expires_at)}` : "无有效租约";
+      const stateDetailHtml = `<span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)} · ${esc(lease)}</span>`;
+      if (stateDetailEl) {
+        stateDetailEl.innerHTML = stateDetailHtml;
+      } else if (kpisEl) {
+        kpisEl.className = "live-account-card-state-detail";
+        kpisEl.innerHTML = stateDetailHtml;
+      }
+    }
+
+    // Update footer
+    const footerEl = card.querySelector(".live-account-card-footer");
+    if (footerEl) {
+      const footerText = financialSnapshot
+        ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
+        : "进入账户详情";
+      footerEl.innerHTML = `${esc(footerText)}<span aria-hidden="true">→</span>`;
     }
   });
 
@@ -878,8 +922,39 @@ export function updateLiveAccountsDynamic(root, data) {
   const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
   const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
   const reviewCount = accounts.length - readyCount - haltedCount;
-  const fleetStatusEl = root.querySelector(".live-account-fleet-status span");
+  const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
+
+  const fleetStatusEl = root.querySelector(".live-account-fleet-status");
   if (fleetStatusEl) {
-    fleetStatusEl.textContent = `${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认`;
+    fleetStatusEl.innerHTML = `<small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span>`;
+  }
+  const fleetKpisEl = root.querySelector(".live-account-fleet-kpis");
+  if (fleetKpisEl) {
+    const tiles = [
+      tile("实盘账户", `${accounts.length} 个`, "execution-account 独立状态"),
+      tile("正常账户", `${readyCount} 个`, "可继续观察"),
+      tile("停止账户", `${haltedCount} 个`, "需要检查"),
+      tile("待确认", `${reviewCount} 个`, "缺少可靠状态"),
+    ];
+    if (accounts.some((account) => account.summary)) {
+      tiles.push(
+        tile("USDT 钱包合计", money(accountFleetMetric(accounts, "usdt_wallet_balance")), "账户快照合计", "hero"),
+        tile("总未实现盈亏", signedMoney(accountFleetMetric(accounts, "total_unrealized_pnl")), "账户群当前浮动盈亏", pnlClass(accountFleetMetric(accounts, "total_unrealized_pnl"))),
+      );
+    }
+    fleetKpisEl.innerHTML = tiles.join("");
+  }
+
+  // Update detail slot if rendered account snapshot updated
+  const slot = root.querySelector("[data-live-account-detail]");
+  if (slot) {
+    const currentDetailLabel = slot.dataset.accountLabel || slot.dataset.renderedAccount;
+    const targetAccount = accounts.find((a) => a.account_label === currentDetailLabel);
+    if (targetAccount && (targetAccount.summary || targetAccount.balances) && slot.dataset.renderedAccount === currentDetailLabel) {
+      const [status, html] = renderAccount(targetAccount);
+      replaceChildrenFromHtml(slot, html);
+      slot.dataset.accountStatus = status;
+      wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, currentDetailLabel, root.__requestJson || defaultAccountRequestJson, nextRange));
+    }
   }
 }

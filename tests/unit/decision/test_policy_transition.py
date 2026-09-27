@@ -621,8 +621,8 @@ def test_short_position_holding_exit_and_reversal_command() -> None:
 
     assert t.exit_command is not None
     assert t.exit_command.command_type == TradeCommandType.EXIT
-    # Closing a short position requires a LONG order
-    assert t.exit_command.side == StrategySide.LONG
+    # TradeCommand on a short position records position side SHORT with reduce_only=True
+    assert t.exit_command.side == StrategySide.SHORT
     assert t.exit_command.reduce_only is True
     assert t.exit_command.requested_quantity == Decimal("1.5")
     assert t.exit_command.reason == "candle_15m_bullish"
@@ -677,7 +677,7 @@ def test_short_position_max_holding_exit() -> None:
     )
 
     assert t.exit_command is not None
-    assert t.exit_command.side == StrategySide.LONG
+    assert t.exit_command.side == StrategySide.SHORT
     assert t.exit_command.requested_quantity == Decimal("2.0")
     assert t.exit_command.reason == "max_holding_period"
     assert t.next_state.is_in_cooldown("BTCUSDT", clock.timestamp)

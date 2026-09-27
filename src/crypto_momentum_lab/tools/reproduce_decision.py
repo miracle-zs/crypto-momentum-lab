@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -196,13 +197,62 @@ async def audit_decision_trace(
         # Reconstruct policy parameters from trace payload or defaults
         pol_params = payload.get("policy_parameters") or {}
         entry_thresh = Decimal(str(pol_params.get("entry_threshold", "65000.00")))
+        short_entry_thresh = (
+            Decimal(str(pol_params["short_entry_threshold"]))
+            if pol_params.get("short_entry_threshold") is not None
+            else None
+        )
         target_notional = Decimal(str(pol_params.get("target_notional", "1000.00")))
+        cd_secs = pol_params.get("cooldown_duration_seconds") or pol_params.get("cooldown_duration") or 900
+        grace_secs = pol_params.get("grace_period_seconds") or pol_params.get("grace_period") or 0
+
+        sizing_data = pol_params.get("sizing_model")
+        sizing_model = None
+        if sizing_data and isinstance(sizing_data, dict):
+            cls_name = sizing_data.get("class")
+            from crypto_momentum_lab.domain.strategy.sizing import (
+                EquityFractionSizingModel,
+                FixedNotionalSizingModel,
+            )
+            if cls_name == "FixedNotionalSizingModel":
+                sizing_model = FixedNotionalSizingModel(
+                    target_notional=Decimal(str(sizing_data.get("target_notional", "500.00"))),
+                    max_leverage=Decimal(str(sizing_data.get("max_leverage", "5.0"))),
+                    max_slippage_budget_bps=Decimal(str(sizing_data.get("max_slippage_budget_bps", "10.0"))),
+                    resize_tolerance=Decimal(str(sizing_data.get("resize_tolerance", "0.05"))),
+                )
+            elif cls_name == "EquityFractionSizingModel":
+                sizing_model = EquityFractionSizingModel(
+                    target_fraction=Decimal(str(sizing_data.get("target_fraction", "0.10"))),
+                    max_leverage=Decimal(str(sizing_data.get("max_leverage", "5.0"))),
+                    max_slippage_budget_bps=Decimal(str(sizing_data.get("max_slippage_budget_bps", "10.0"))),
+                    resize_tolerance=Decimal(str(sizing_data.get("resize_tolerance", "0.05"))),
+                )
+
+        lot_rules_data = pol_params.get("symbol_lot_rules")
+        lot_rules = None
+        if lot_rules_data and isinstance(lot_rules_data, dict):
+            from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
+            lot_rules = SymbolLotRules(
+                symbol=lot_rules_data.get("symbol", ref0.symbol),
+                tick_size=Decimal(str(lot_rules_data.get("tick_size", "0.1"))),
+                step_size=Decimal(str(lot_rules_data.get("step_size", "0.001"))),
+                min_quantity=Decimal(str(lot_rules_data.get("min_quantity", "0.001"))),
+                max_quantity=Decimal(str(lot_rules_data.get("max_quantity", "1000"))),
+                min_notional=Decimal(str(lot_rules_data.get("min_notional", "5.0"))),
+            )
+
         policy = EffectivePolicy(
-            policy_id=f"policy_{trace.strategy_name}",
+            policy_id=str(pol_params.get("policy_id", f"policy_{trace.strategy_name}")),
             strategy_name=trace.strategy_name,
-            policy_version=1,
+            policy_version=int(pol_params.get("policy_version", 1)),
             entry_threshold=entry_thresh,
+            short_entry_threshold=short_entry_thresh,
             target_notional=target_notional,
+            cooldown_duration=timedelta(seconds=int(cd_secs)),
+            grace_period=timedelta(seconds=int(grace_secs)),
+            sizing_model=sizing_model,
+            symbol_lot_rules=lot_rules,
         )
 
         # Restore frozen context if recorded
@@ -318,6 +368,35 @@ async def audit_decision_trace(
                 "error": "Replay exit command presence mismatch",
                 "reproduced": False,
             }
+
+        if replayed_result.intent is not None and output_intent:
+            rep_notional = getattr(replayed_result.intent, "desired_notional", None)
+            rec_notional = output_intent.get("desired_notional")
+            if rep_notional is not None and rec_notional is not None:
+                if Decimal(str(rep_notional)) != Decimal(str(rec_notional)):
+                    return {
+                        "decision_id": trace.decision_id,
+                        "status": "UNREPRODUCIBLE",
+                        "error": (
+                            f"Replay intent desired_notional mismatch: replayed {rep_notional} "
+                            f"vs recorded {rec_notional}"
+                        ),
+                        "reproduced": False,
+                    }
+
+        if replayed_result.exit_command is not None and recorded_exit:
+            rep_qty = replayed_result.exit_command.requested_quantity
+            rec_qty = recorded_exit.get("quantity")
+            if rec_qty is not None and Decimal(str(rep_qty)) != Decimal(str(rec_qty)):
+                return {
+                    "decision_id": trace.decision_id,
+                    "status": "UNREPRODUCIBLE",
+                    "error": (
+                        f"Replay exit command quantity mismatch: replayed {rep_qty} "
+                        f"vs recorded {rec_qty}"
+                    ),
+                    "reproduced": False,
+                }
 
         return {
             "decision_id": trace.decision_id,

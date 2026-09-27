@@ -10,6 +10,7 @@ Obays RFC 2026-09-25:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
@@ -96,6 +97,11 @@ class PositionBook:
             "OK" if health_status == PositionHealthStatus.READY else health_status.value
         )
 
+        zero_confirmed = (
+            len(projection.active_batches) == 0
+            and any(s.position_amt == Decimal("0") for s in facts.snapshots)
+        )
+
         return PositionView(
             key=self._position_key,
             projection_version=version_id,
@@ -115,4 +121,5 @@ class PositionBook:
             diagnostics=tuple(diagnostics),
             discrepancy=projection.discrepancy,
             is_comparable=is_comparable,
+            zero_position_snapshot_confirmed=zero_confirmed,
         )
