@@ -85,6 +85,30 @@ class FakeService:
         self.heartbeat_states.append(state)
 
 
+class BlockingReconciliationService(FakeService):
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.reconciliation_started = asyncio.Event()
+        self.release_reconciliation = asyncio.Event()
+
+    async def sync_once_for_realtime(
+        self,
+        *,
+        observed_at,
+        publish_transient_states,
+        include_fills,
+    ):
+        del observed_at, publish_transient_states, include_fills
+        self.reconciliation_started.set()
+        await self.release_reconciliation.wait()
+        return ExecutionAccountSyncResult(
+            status=ExecutionAccountStatus.READY_READONLY,
+            reconciliation_id="blocked-reconciliation",
+            mismatch_count=0,
+            snapshot=self.snapshot,
+        )
+
+
 async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up() -> (
     None
 ):
@@ -125,6 +149,40 @@ async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up
     )
     await daemon._publish_heartbeat()
     assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
+
+    # An authoritative REST reconciliation may take much longer than a
+    # heartbeat interval. Continue publishing SYNCING while that work runs.
+    daemon._accept_events = False
+    daemon._reconciliation_active = True
+    await daemon._publish_heartbeat()
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+
+
+async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> None:
+    service = BlockingReconciliationService(_snapshot())
+    stream = BlockingStream()
+    stop_requested = asyncio.Event()
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(
+            rest_reconciliation_interval_seconds=0.08,
+            heartbeat_interval_seconds=0.01,
+            snapshot_interval_seconds=1.0,
+        ),
+    )
+    task = asyncio.create_task(daemon.run(stop_requested=stop_requested))
+    try:
+        await asyncio.wait_for(service.reconciliation_started.wait(), timeout=1)
+        previous_heartbeat_count = len(service.heartbeats)
+        await asyncio.sleep(0.04)
+
+        assert len(service.heartbeats) > previous_heartbeat_count
+        assert ExecutionAccountStatus.SYNCING in service.heartbeat_states
+    finally:
+        service.release_reconciliation.set()
+        stop_requested.set()
+        await asyncio.wait_for(task, timeout=1)
 
 
 async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:

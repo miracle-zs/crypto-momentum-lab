@@ -347,7 +347,7 @@ class UserDataAccountSyncDaemon:
         startup_stream_logged = False
         log.info("execution_account_startup_started")
         stream_task: asyncio.Task[None] | None = None
-        heartbeat_task: asyncio.Future[None] | None = None
+        heartbeat_task: asyncio.Task[None] | None = None
         reconciliation_task: asyncio.Future[None] | None = None
         snapshot_task: asyncio.Future[None] | None = None
         recovery_task: asyncio.Task[None] | None = None
@@ -361,6 +361,10 @@ class UserDataAccountSyncDaemon:
         )
         consecutive_failures = 0
         try:
+            heartbeat_task = asyncio.create_task(
+                self._run_heartbeat_loop(),
+                name="execution-account-heartbeat-loop",
+            )
             while True:
                 if stop_requested is not None and stop_requested.is_set():
                     return
@@ -420,10 +424,6 @@ class UserDataAccountSyncDaemon:
                         name="binance-user-data-stream",
                     )
 
-                if heartbeat_task is None or heartbeat_task.done():
-                    heartbeat_task = asyncio.ensure_future(
-                        self._sleep(self._config.heartbeat_interval_seconds)
-                    )
                 if reconciliation_task is None or reconciliation_task.done():
                     reconciliation_task = asyncio.ensure_future(
                         self._sleep(self._config.rest_reconciliation_interval_seconds)
@@ -458,13 +458,10 @@ class UserDataAccountSyncDaemon:
                     return
                 if recovery_task in done:
                     recovery_task = None
-                    if heartbeat_task is not None:
-                        await _cancel_task(heartbeat_task)
                     if reconciliation_task is not None:
                         await _cancel_task(reconciliation_task)
                     if snapshot_task is not None:
                         await _cancel_task(snapshot_task)
-                    heartbeat_task = None
                     reconciliation_task = None
                     snapshot_task = None
                     try:
@@ -506,23 +503,23 @@ class UserDataAccountSyncDaemon:
                     self._request_pipeline_recovery("persistence_worker_stopped")
                     continue
                 if stream_task in done:
-                    if heartbeat_task is not None:
-                        await _cancel_task(heartbeat_task)
                     if reconciliation_task is not None:
                         await _cancel_task(reconciliation_task)
                     if snapshot_task is not None:
                         await _cancel_task(snapshot_task)
-                    heartbeat_task = None
                     reconciliation_task = None
                     snapshot_task = None
                     self._observe_stream_failure(stream_task)
                     continue
                 if heartbeat_task in done:
-                    heartbeat_task = None
-                    try:
-                        await self._publish_heartbeat()
-                    except Exception as error:
-                        self._report_error(error)
+                    self._observe_worker_failure(
+                        heartbeat_task,
+                        worker_name="heartbeat",
+                    )
+                    heartbeat_task = asyncio.create_task(
+                        self._run_heartbeat_loop(),
+                        name="execution-account-heartbeat-loop",
+                    )
                 if reconciliation_task in done:
                     reconciliation_task = None
                     try:
@@ -972,28 +969,42 @@ class UserDataAccountSyncDaemon:
 
     async def _publish_heartbeat(self) -> None:
         self._check_stream_queue_health()
-        async with self._state_lock:
-            if self._accept_events and self._state is not None:
-                is_syncing = self._last_sync_result is not None and (
-                    self._last_sync_result.fills_catching_up
-                    or self._last_sync_result.status == ExecutionAccountStatus.SYNCING
-                )
-                target_state = (
-                    ExecutionAccountStatus.SYNCING
-                    if is_syncing
-                    else ExecutionAccountStatus.READY_READONLY
-                )
-                async with self._rest_sync_lock:
-                    if _accepts_state_kwarg(self._service.publish_user_data_heartbeat):
-                        await self._service.publish_user_data_heartbeat(
-                            observed_at=self._now(),
-                            state=target_state,
-                        )
-                    else:
-                        await self._service.publish_user_data_heartbeat(
-                            observed_at=self._now(),
-                        )
-                    self._notify_heartbeat()
+        if self._state is None or not (
+            self._accept_events or self._reconciliation_active
+        ):
+            return
+        last_sync_result = self._last_sync_result
+        is_syncing = self._reconciliation_active or (
+            last_sync_result is not None
+            and (
+                last_sync_result.fills_catching_up
+                or last_sync_result.status == ExecutionAccountStatus.SYNCING
+            )
+        )
+        target_state = (
+            ExecutionAccountStatus.SYNCING
+            if is_syncing
+            else ExecutionAccountStatus.READY_READONLY
+        )
+        publish_heartbeat = self._service.publish_user_data_heartbeat
+        if _accepts_state_kwarg(publish_heartbeat):
+            await publish_heartbeat(
+                observed_at=self._now(),
+                state=target_state,
+            )
+        else:
+            await publish_heartbeat(observed_at=self._now())
+        self._notify_heartbeat()
+
+    async def _run_heartbeat_loop(self) -> None:
+        while True:
+            await self._sleep(self._config.heartbeat_interval_seconds)
+            try:
+                await self._publish_heartbeat()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._report_error(error)
 
     async def _reconcile(
         self,
