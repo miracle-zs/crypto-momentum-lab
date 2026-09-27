@@ -153,7 +153,9 @@ class PostgresRiskRepository:
                     .with_for_update()
                 )
                 owned_row = _require_owned_active_lease(row, owner)
-                if expires_at <= owned_row.expires_at:
+                if expires_at < owned_row.expires_at:
+                    raise ValueError("renewed expiration must extend the lease")
+                if expires_at == owned_row.expires_at and code_generation is None:
                     raise ValueError("renewed expiration must extend the lease")
                 owned_row.expires_at = expires_at
                 if code_generation is not None:

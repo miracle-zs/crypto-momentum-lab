@@ -1958,18 +1958,22 @@ async def _renew_live_lease(
             raise RuntimeError(
                 f"live lease strategy mismatch for account {account_label}"
             )
+        target_expires_at = max(
+            lease.expires_at,
+            now + timedelta(seconds=lease_ttl_seconds),
+        )
         if code_generation is not None:
             renewed = await repository.renew_lease(
                 lease_id=lease.lease_id,
                 owner=lease_owner,
-                expires_at=now + timedelta(seconds=lease_ttl_seconds),
+                expires_at=target_expires_at,
                 code_generation=code_generation,
             )
         else:
             renewed = await repository.renew_lease(
                 lease_id=lease.lease_id,
                 owner=lease_owner,
-                expires_at=now + timedelta(seconds=lease_ttl_seconds),
+                expires_at=target_expires_at,
             )
     finally:
         await engine.dispose()

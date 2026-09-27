@@ -418,6 +418,81 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
     assert renewed_calls[0][3] == "new-generation"
 
 
+def test_renew_live_lease_preserves_longer_existing_lease_when_updating_code_generation(
+    monkeypatch,
+) -> None:
+    now = datetime.now(tz=UTC)
+    long_lease = TradingLease(
+        lease_id="lease-long",
+        environment="live",
+        account_label="account-4",
+        strategy_name="orderflow_impulse",
+        owner="live-worker-account-4",
+        code_generation="old-generation",
+        state=TradingLeaseState.ACTIVE,
+        acquired_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(days=7),
+    )
+    renewed_calls: list[tuple[str, str, datetime, str | None]] = []
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeRepository:
+        def __init__(self, factory) -> None:
+            del factory
+
+        async def load_active_lease(self, environment, account_label, current):
+            return long_lease
+
+        async def renew_lease(
+            self,
+            *,
+            lease_id,
+            owner,
+            expires_at,
+            code_generation=None,
+        ):
+            renewed_calls.append((lease_id, owner, expires_at, code_generation))
+            return TradingLease(
+                lease_id=long_lease.lease_id,
+                environment=long_lease.environment,
+                account_label=long_lease.account_label,
+                strategy_name=long_lease.strategy_name,
+                owner=long_lease.owner,
+                code_generation=code_generation or long_lease.code_generation,
+                state=long_lease.state,
+                acquired_at=long_lease.acquired_at,
+                expires_at=expires_at,
+            )
+
+    monkeypatch.setattr(
+        main,
+        "create_execution_database_engine",
+        lambda _: FakeEngine(),
+    )
+    monkeypatch.setattr(main, "PostgresRiskRepository", FakeRepository)
+
+    payload = asyncio.run(
+        main._renew_live_lease(
+            database_url="postgresql+asyncpg://unused",
+            account_label="account-4",
+            strategy_name="orderflow_impulse",
+            lease_owner="live-worker-account-4",
+            lease_ttl_seconds=3600,
+            code_generation="new-commit-hash",
+        )
+    )
+
+    assert payload["account_label"] == "account-4"
+    assert payload["lease_id"] == "lease-long"
+    assert renewed_calls[0][0:2] == ("lease-long", "live-worker-account-4")
+    # Expiration is preserved at 7 days, NOT shrunk to 1 hour
+    assert renewed_calls[0][2] == long_lease.expires_at
+    assert renewed_calls[0][3] == "new-commit-hash"
+
+
 def test_live_run_exposes_operation_aware_telemetry_option() -> None:
     result = runner.invoke(app, ["run", "--help"])
 
@@ -722,9 +797,8 @@ def test_resolve_missing_order_requires_exact_confirmation() -> None:
     assert "RESOLVE MISSING LIVE ORDER" in result.output
 
 
-def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order() -> (
-    None
-):
+def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order(
+) -> None:
     main._validate_missing_order_resolution(
         state="unknown_pending_reconciliation",
         reduce_only=True,
