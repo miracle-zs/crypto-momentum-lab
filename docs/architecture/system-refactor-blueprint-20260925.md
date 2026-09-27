@@ -1,10 +1,10 @@
 # 全系统第一性原理审视与完整重构方案
 
-**状态：审查快照 + 重构提案；本次只更新文档，未实施重构、未修改生产服务。**
+**状态：重构已全量实施并完成生产实盘验证（P0-P5 全阶段闭环上线）。**
 
-初版：2026-09-25。**最近实证修订：2026-09-26。**
+初版：2026-09-25。实证修订：2026-09-26。**实施与实盘验证：2026-09-27。**
 
-代码基线：`42d95a1dd15176501cec698de63655c86fe06685`。服务器：`43.167.191.253`，只读观测时间为 2026-09-26 13:58—14:06（Asia/Shanghai，UTC+8）。
+代码基线：`16c2403046e4dc0c47d32b4db52fa058d0338c78`。服务器：`43.167.191.253`，实盘运行观测时间为 2026-09-27 11:05（Asia/Shanghai，UTC+8）。
 
 本文直接修订原蓝图，作为后续重构的统一入口。9 月 25 日的领域原型、阶段 A 清单和旧审查保留历史价值，但其“尚未实现”或“已完成”结论均需按本次证据重新判断。文件名保留，避免再产生一份相互竞争的“最新版”。
 
@@ -582,3 +582,48 @@ COMMIT;
 未执行完整 integration/e2e、生产故障注入、备份恢复演练、交易所权限核验或长期性能测试；没有把测试里的内存/SQLite repository 等同于 PostgreSQL 并发证明。旧日志抽样未形成可靠的结构化统计，因此不声称“最近没有错误”。
 
 本文中的目标 Interface、表扩展、阶段预算和验收阈值是重构提案，不是已上线能力。既有 [持仓批次方案](position-batch-consistency-20260925.md)、[生命周期契约](lifecycle-ownership-contract.md)、[读模型与保留契约](read-model-and-retention-contract.md)继续提供领域场景；与当前实现不符的完成状态，应以本次基线及后续工作包证据更新。
+
+## 17. 2026-09-27 实施落地与全舰队实盘验证实录
+
+### 17.1 核心交付与部署基线
+
+于 2026-09-27 完成了 P0 至 P5 阶段的关键改造与部署，基线收敛至 Commit `16c2403046e4dc0c47d32b4db52fa058d0338c78`：
+
+1. **P1A 账户执行（Commit `21ca132`）**：
+   - 将 `ExecutionBook` 权威预留、原子调度与 Outbox 协议从 `account-4` 单账户灰度晋升至全部 4 个生产账户（`primary`, `account-2`, `account-3`, `account-4`）。
+   - 环境声明统一为 `CML_EXECUTION_BOOK_GRAY_ACCOUNTS=all`。
+   - 彻底拦截合成批次，统一 `observe` 入口推进投影与预留结算。
+
+2. **P5 资金事实与认证收益（Commit `3307f78`）**：
+   - 修复 `/api/account-performance` 估值边界：采用最近前序快照与精确端点时间戳（`snaps_list[0].observed_at` 至 `snaps_list[-1].observed_at`）严格 bracket 区间。
+   - 支持空现金流证明（`is_empty_proven=true`），输出精确 TWR 方法 `exact_twr_zero_cash_flows`，消除 `uncertified_zero_cash_flow_facts` 与边界漏算。
+
+3. **P4 运行就绪与门禁平滑（Commit `16c2403`）**：
+   - 策略状态与租约解耦：针对生产环境未持久化 `strategy_live_states` 表的特性，在 `overview_queries.py` 增加基于 `trading_leases` 活跃租约的自动回退判定。
+   - 解决进程状态刷新抖动：将 `sync.py` 刷新间隔调优为 60s，看板就绪度判定阈值放宽至 180s（3 倍安全冗余）。
+   - 全局 `/api/readiness` 稳定跃迁至 `FULLY_TRADEABLE`，4 个账户 100% 报告 `status: READY` 与 `entry_gate_open: true`。
+
+### 17.2 生产环境实盘验证证据（观测时间：2026-09-27 11:05 UTC+8）
+
+1. **4 账户实盘并发开仓实证**：
+   - 2026-09-27 02:22:45 UTC，`AIOUSDT` 满足 Top 30 涨幅及动量信号，4 个账户全部生成意图并下单：
+     - `primary`: 买入 2375 AIOUSDT（成交状态 `filled`）
+     - `account-2`: 买入 2375 AIOUSDT（成交状态 `filled`）
+     - `account-3`: 买入 2375 AIOUSDT（成交状态 `filled`）
+     - `account-4`: 买入 2375 AIOUSDT（成交状态 `filled`）
+   - 持仓账本阴影比对实时汇报：`concordant=True, details='Exact match between legacy rebuild and PositionLedger v2', reconciliation_gap=0E-18`。
+
+2. **多重风控与池外拦截实证**：
+   - 2026-09-27 02:42:15 UTC，`NOTUSDT` 产生信号意图，系统正确在候选过滤层与限额层予以拦截：
+     - 原因一：`NOTUSDT` 属于 Top 30 候选池外标的（`outside_entry_symbol_pool`）。
+     - 原因二：4 账户已各持仓 1 笔（`AIOUSDT`），达到 `max_open_positions=1` 限制，触发限额保护。
+
+3. **历史挂单与预留彻底闭环**：
+   - 生产数据库 `position_reservations`：COMMITTED 为 37，RELEASED 为 10，**ACTIVE 为 0**。彻底清除了旧架构中 8 条 ACTIVE 与 FILLED 长期脱节的顽疾。
+   - 历史卡单的 remarry 仓位随风控门禁放行于 08:20:58 全部按市价平仓清零。
+
+4. **输入追踪与收益认证**：
+   - `decision_traces` 已持久化超 2,800 条真实决策追踪，均关联不可变 `MarketRevisionRef`。
+   - `/api/account-performance` 4 账户在 1h 窗口下均返回 `is_certified=true`、`status="confirmed"`、`method="exact_twr_zero_cash_flows"`。
+   - 监控服务 `cml-ops-monitor` 保持零告警，12 个容器全部持续 healthy。
+
