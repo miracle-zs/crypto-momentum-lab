@@ -3355,10 +3355,19 @@ class ExecutionBook:
                             ),
                             Decimal("0"),
                         )
-                        if confirmed_trade_quantity >= outbox.command.requested_quantity:
+                        if (
+                            confirmed_trade_quantity
+                            >= outbox.command.requested_quantity
+                            or self._execution_unit_of_work is None
+                        ):
                             released_qty += await self._release_command_reservations(
                                 cmd_id,
-                                reason="order_filled_with_confirmed_trades",
+                                reason=(
+                                    "order_filled_with_confirmed_trades"
+                                    if confirmed_trade_quantity
+                                    >= outbox.command.requested_quantity
+                                    else "order_finished_filled"
+                                ),
                             )
                         else:
                             self._recovery_required_commands.add(cmd_id)

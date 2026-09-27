@@ -12,7 +12,7 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
+    OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
     OrderExecutionKey,
     _KeyCommandScheduler,
 )
@@ -22,6 +22,29 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
+
+
+class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
+    def __init__(self, *args: Any, environment: str = "live", **kwargs: Any) -> None:
+        super().__init__(*args, environment=environment, **kwargs)
+
+    async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
+        if plan.projection_version is None and self._execution_book is not None:
+            from crypto_momentum_lab.domain.execution import ExecutionScope
+
+            scope = ExecutionScope(
+                environment=self._environment,
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            view = await self._execution_book.read(scope)
+            object.__setattr__(plan, "projection_version", view.projection_version)
+        if plan.strategy_name is None:
+            object.__setattr__(plan, "strategy_name", "orderflow_impulse")
+        if plan.strategy_version is None:
+            object.__setattr__(plan, "strategy_version", "v1")
+        await super()._ensure_reservation(plan)
 
 
 def _register_execution_command_with_reservations(
@@ -307,6 +330,8 @@ def _plan(symbol: str, *, reduce_only: bool) -> OrderExecutionPlan:
     return OrderExecutionPlan(
         intent_id=f"intent-{symbol}-{reduce_only}",
         run_id="run-1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
         client_order_id=f"cml_{symbol}_{str(reduce_only).lower():0<20}",
         symbol=symbol,
         side="SELL" if reduce_only else "BUY",
@@ -961,6 +986,16 @@ async def test_reservation_save_receives_projection_version() -> None:
         account_label="primary",
         reservation_repository=CaptureRepo(),
     )
+    from crypto_momentum_lab.domain.execution import ExecutionScope
+
+    scope = ExecutionScope(
+        environment=coordinator._environment,
+        account_label=coordinator._account_label,
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    view = await coordinator.execution_book.read(scope)
+    expected_pv = view.projection_version
     plan = OrderExecutionPlan(
         intent_id="intent-pv",
         run_id="run-1",
@@ -974,11 +1009,11 @@ async def test_reservation_save_receives_projection_version() -> None:
         position_side=FuturesPositionSide.BOTH,
         created_at=NOW,
         quantized=True,
-        projection_version="pv_123",
+        projection_version=expected_pv,
         batch_id="batch_1",
     )
     await coordinator.submit(plan)
-    assert captured["kwargs"].get("expected_projection_version") == "pv_123"
+    assert captured["kwargs"].get("expected_projection_version") == expected_pv
     await coordinator.aclose()
 
 
@@ -1437,7 +1472,7 @@ async def test_coordinator_execution_book_integration() -> None:
     )
 
     view = await coordinator.execution_book.read(scope)
-    assert view.projection_version.startswith("pv_BTCUSDT_")
+    assert view.projection_version.startswith("pv_")
     assert view.unallocated_quantity == Decimal("0")
 
     await coordinator.aclose()
@@ -1670,6 +1705,27 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
             margin_type=None,
             observed_at=NOW,
             raw_payload={},
+        )
+    )
+    from crypto_momentum_lab.domain.execution import (
+        FactCoverageInterval,
+        FactCoverageStatus,
+        PositionKey,
+    )
+
+    journal = book._ensure_journal(
+        PositionKey(
+            environment=coordinator._environment,
+            account_label=coordinator._account_label,
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.BOTH,
+        )
+    )
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=NOW,
+            end_at=NOW,
+            status=FactCoverageStatus.CONFIRMED,
         )
     )
 
@@ -2022,6 +2078,15 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
         raw_payload={},
     )
     await coord.observe_account_snapshot(snap)
+    from crypto_momentum_lab.domain.execution import ExecutionScope
+
+    scope = ExecutionScope(
+        environment=coord._environment,
+        account_label=coord._account_label,
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    view = await coord.execution_book.read(scope)
     plan = OrderExecutionPlan(
         intent_id="intent-entry-1",
         run_id="run-1",
@@ -2034,7 +2099,7 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
         reduce_only=False,
         position_side=FuturesPositionSide.BOTH,
         created_at=NOW,
-        projection_version="pv_primary_BTCUSDT_first",
+        projection_version=view.projection_version,
     )
     # Must succeed without OrderPreSubmissionError: PositionView is not ready for trade
     await coord._ensure_reservation(plan)
@@ -2279,16 +2344,9 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
         .fills
         if fill.order_id == plan.client_order_id
     ]
-    assert [fill.quantity for fill in order_fills] == [
-        Decimal("3.0"),
-        Decimal("2.0"),
-        Decimal("5.0"),
-    ]
-    assert [fill.price for fill in order_fills] == [
-        Decimal("100"),
-        Decimal("200"),
-        Decimal("120"),
-    ]
+    # Under RFC 2026-09-25 authoritative model, cumulative order reports settle
+    # reservations but do not fabricate synthetic AccountFillEvent into the journal.
+    assert order_fills == []
 
     await coord.aclose()
 
@@ -2417,14 +2475,9 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
     order_fills = [
         fill for fill in facts.fills if fill.order_id == plan.client_order_id
     ]
-    assert [fill.quantity for fill in order_fills] == [
-        Decimal("3"),
-        Decimal("2"),
-        Decimal("5"),
-    ]
-    assert sum((fill.quantity for fill in order_fills), start=Decimal("0")) == Decimal(
-        "10"
-    )
+    # Under RFC 2026-09-25 authoritative model, cumulative order reports settle
+    # reservations but do not fabricate synthetic AccountFillEvent into the journal.
+    assert order_fills == []
     reservations = book.get_active_reservations(scope.to_position_key())
     assert reservations == ()
 

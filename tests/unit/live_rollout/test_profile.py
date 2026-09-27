@@ -29,18 +29,9 @@ def test_profile_resolves_account_specific_environment_values() -> None:
     }
 
 
-def test_profile_defaults_to_primary_production_values() -> None:
-    assert LiveOrderFlowImpulseProfile.from_environment({}) == (
-        LiveOrderFlowImpulseProfile(
-            impulse_window_buckets=2,
-            confirmation_buckets=1,
-            min_return_pct=Decimal("0.005"),
-            min_aggressive_imbalance=Decimal("0.30"),
-            min_notional_intensity=Decimal("4.0"),
-            min_notional_5m_vs_30m=Decimal("1.50"),
-            cooldown_buckets=0,
-        )
-    )
+def test_profile_fails_closed_when_environment_variable_missing() -> None:
+    with pytest.raises(ValueError, match="Missing required environment variable"):
+        LiveOrderFlowImpulseProfile.from_environment({})
 
 
 @pytest.mark.parametrize(
@@ -60,5 +51,15 @@ def test_profile_defaults_to_primary_production_values() -> None:
     ],
 )
 def test_profile_rejects_invalid_values(field: str, value: str, message: str) -> None:
+    base_env = {
+        "CML_LIVE_IMPULSE_WINDOW_BUCKETS": "2",
+        "CML_LIVE_CONFIRMATION_BUCKETS": "1",
+        "CML_LIVE_MIN_RETURN_PCT": "0.0075",
+        "CML_LIVE_MIN_IMBALANCE": "0.30",
+        "CML_LIVE_MIN_INTENSITY": "3.0",
+        "CML_LIVE_MIN_NOTIONAL_5M_VS_30M": "1.25",
+        "CML_LIVE_COOLDOWN_BUCKETS": "0",
+    }
+    base_env[field] = value
     with pytest.raises(ValueError, match=message):
-        LiveOrderFlowImpulseProfile.from_environment({field: value})
+        LiveOrderFlowImpulseProfile.from_environment(base_env)

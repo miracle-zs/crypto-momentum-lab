@@ -95,7 +95,7 @@ def build_runtime_config(
         )
         event_config = config.get("compression_breakout")
         if event_config is None:
-            event_config = _default_compression_config()
+            raise StrategyRegistryError("compression_breakout configuration is required")
         if not isinstance(event_config, CompressionBreakoutConfig):
             raise StrategyRegistryError("compression_breakout config is invalid")
         return CompressionBreakoutRuntimeConfig(
@@ -107,7 +107,62 @@ def build_runtime_config(
     if strategy_name == "orderflow_impulse":
         event_config = config.get("order_flow_impulse")
         if event_config is None:
-            event_config = _default_order_flow_config()
+            if "order_flow_impulse_impulse_window_buckets" in config:
+                try:
+                    event_config = OrderFlowImpulseConfig(
+                        impulse_window_buckets=_int_value(
+                            config.get("order_flow_impulse_impulse_window_buckets"),
+                            default=0,
+                            field_name="impulse_window_buckets",
+                        ),
+                        baseline_window_buckets=_int_value(
+                            config.get("order_flow_impulse_baseline_window_buckets"),
+                            default=4,
+                            field_name="baseline_window_buckets",
+                        ),
+                        breakout_window_buckets=_int_value(
+                            config.get("order_flow_impulse_breakout_window_buckets"),
+                            default=4,
+                            field_name="breakout_window_buckets",
+                        ),
+                        min_return_pct=_decimal_value(
+                            config.get("order_flow_impulse_min_return_pct"),
+                            default=Decimal("0"),
+                            field_name="min_return_pct",
+                        ),
+                        min_aggressive_imbalance=_decimal_value(
+                            config.get("order_flow_impulse_min_aggressive_imbalance"),
+                            default=Decimal("0"),
+                            field_name="min_aggressive_imbalance",
+                        ),
+                        min_notional_intensity=_decimal_value(
+                            config.get("order_flow_impulse_min_notional_intensity"),
+                            default=Decimal("0"),
+                            field_name="min_notional_intensity",
+                        ),
+                        confirmation_buckets=_int_value(
+                            config.get("order_flow_impulse_confirmation_buckets"),
+                            default=0,
+                            field_name="confirmation_buckets",
+                        ),
+                        cooldown_buckets=_int_value(
+                            config.get("cooldown_buckets"),
+                            default=0,
+                            field_name="cooldown_buckets",
+                        ),
+                        forward_horizon_buckets=tuple(
+                            config.get("order_flow_impulse_forward_horizon_buckets") or (1,)
+                        ),
+                        min_notional_5m_vs_30m=_decimal_value(
+                            config.get("order_flow_impulse_min_notional_5m_vs_30m"),
+                            default=Decimal("0"),
+                            field_name="min_notional_5m_vs_30m",
+                        ),
+                    )
+                except Exception as error:
+                    raise StrategyRegistryError(f"orderflow_impulse config is invalid: {error}") from error
+            else:
+                raise StrategyRegistryError("orderflow_impulse configuration is required")
         if not isinstance(event_config, OrderFlowImpulseConfig):
             raise StrategyRegistryError("orderflow_impulse config is invalid")
         event_config = _replace_order_flow_overrides(event_config, config)
@@ -119,7 +174,7 @@ def build_runtime_config(
     if strategy_name == "liquidation_cascade":
         event_config = config.get("liquidation_cascade")
         if event_config is None:
-            event_config = _default_liquidation_config()
+            raise StrategyRegistryError("liquidation_cascade configuration is required")
         if not isinstance(event_config, LiquidationCascadeConfig):
             raise StrategyRegistryError("liquidation_cascade config is invalid")
         return LiquidationCascadeRuntimeConfig(
@@ -169,31 +224,6 @@ def _int_value(value: object, *, default: int, field_name: str) -> int:
     if isinstance(value, int):
         return value
     raise StrategyRegistryError(f"{field_name} is invalid")
-
-
-def _default_compression_config() -> CompressionBreakoutConfig:
-    return CompressionBreakoutConfig(
-        compression_window_buckets=20,
-        max_range_width_pct=Decimal("0.025"),
-        min_breakout_pct=Decimal("0.003"),
-        acceptance_buckets=1,
-        cooldown_buckets=12,
-        forward_horizon_buckets=(1, 3, 6, 12),
-    )
-
-
-def _default_order_flow_config() -> OrderFlowImpulseConfig:
-    return OrderFlowImpulseConfig(
-        impulse_window_buckets=3,
-        baseline_window_buckets=4,
-        breakout_window_buckets=4,
-        min_return_pct=Decimal("0.01"),
-        min_aggressive_imbalance=Decimal("0.50"),
-        min_notional_intensity=Decimal("2"),
-        confirmation_buckets=1,
-        cooldown_buckets=2,
-        forward_horizon_buckets=(1,),
-    )
 
 
 def _replace_order_flow_overrides(
@@ -257,17 +287,3 @@ def _decimal_value(
     if not decimal_value.is_finite():
         raise StrategyRegistryError(f"{field_name} must be finite")
     return decimal_value
-
-
-def _default_liquidation_config() -> LiquidationCascadeConfig:
-    return LiquidationCascadeConfig(
-        liquidation_window_buckets=2,
-        breakout_window_buckets=4,
-        min_liquidation_count=1,
-        min_liquidation_notional=Decimal("500"),
-        min_price_move_pct=Decimal("0.01"),
-        min_aggressive_imbalance=Decimal("0.33"),
-        confirmation_buckets=1,
-        cooldown_buckets=2,
-        forward_horizon_buckets=(1,),
-    )

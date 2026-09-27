@@ -4,7 +4,7 @@ from collections.abc import (
     Callable,
     Mapping,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -138,13 +138,14 @@ class LiveDaemonRepository(LiveSubmissionRepository, Protocol):
 @dataclass(frozen=True, slots=True)
 class LiveDaemonConfig:
     run_id: str
+    account_label: str
     resize_tolerance: Decimal
     checkpoint_every_states: int
     checkpoint_every_seconds: float = 60.0
     checkpoint_phase_seconds: float = 0.0
     max_dirty_age_seconds: float = 90.0
     reconcile_once_per_bucket: bool = True
-    hedge_mode: bool = False
+    hedge_mode: bool = True
     entry_long_only: bool = False
     entry_symbol_refresh_seconds: float = 15.0
     entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = None
@@ -179,6 +180,8 @@ class LiveDaemonConfig:
     def __post_init__(self) -> None:
         if not self.run_id.strip():
             raise ValueError("run_id must not be empty")
+        if not self.account_label.strip():
+            raise ValueError("account_label must not be empty")
         if self.resize_tolerance < 0 or self.resize_tolerance >= 1:
             raise ValueError("resize_tolerance must be in [0, 1)")
         if self.checkpoint_every_states <= 0:
@@ -258,6 +261,12 @@ class LiveStrategyDaemon:
         )
         self._context_provider = context_provider
         self._config = config
+        if exit_manager is not None and getattr(exit_manager, "_config", None) is not None:
+            if getattr(exit_manager._config, "account_label", None) is None:
+                exit_manager._config = replace(
+                    exit_manager._config,
+                    account_label=config.account_label,
+                )
         self._exit_manager = exit_manager
         self._exit_recovery_client = exit_recovery_client
         self._reconcile_orders = reconcile_orders
@@ -331,6 +340,7 @@ class LiveStrategyDaemon:
             state_machine=self._state_machine,
             config=LiveSubmissionConfig(
                 run_id=config.run_id,
+                account_label=config.account_label,
                 resize_tolerance=config.resize_tolerance,
                 hedge_mode=config.hedge_mode,
                 entry_order_type=config.entry_order_type,
@@ -513,7 +523,7 @@ class LiveStrategyDaemon:
         market_state_available: bool,
         market_state_unavailable_reason: str,
         account_snapshot_available: bool,
-        strategy_warmup_ready: bool = True,
+        strategy_warmup_ready: bool,
         strategy_warmup_reason: str = "strategy_warmup_ready",
     ) -> None:
         self._entry_control.refresh_entry_prerequisites(

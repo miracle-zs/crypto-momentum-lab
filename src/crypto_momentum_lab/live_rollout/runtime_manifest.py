@@ -105,9 +105,9 @@ _DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
     entry_leverage=1,
     margin_type="CROSSED",
     exit_mode=PositionExitMode.CANDLE_15M,
-    candle_grace_bars=1,
-    candle_grace_decision_profit_pct=Decimal("0.001"),
-    candle_grace_profit_pct=Decimal("0.0088"),
+    candle_grace_bars=8,
+    candle_grace_decision_profit_pct=Decimal("0.002"),
+    candle_grace_profit_pct=Decimal("0.002"),
     persist_exchange_operations="submit,cancel",
     max_concurrency_per_symbol=None,
 )

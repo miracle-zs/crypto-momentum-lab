@@ -497,7 +497,11 @@ async def audit_decision_trace(
             policy_id=str(pol_params["policy_id"]),
             strategy_name=str(pol_params["strategy_name"]),
             policy_version=int(pol_params["policy_version"]),
-            entry_threshold=Decimal(str(pol_params["entry_threshold"])),
+            entry_threshold=(
+                Decimal(str(pol_params["entry_threshold"]))
+                if pol_params.get("entry_threshold") is not None
+                else None
+            ),
             short_entry_threshold=(
                 Decimal(str(pol_params["short_entry_threshold"]))
                 if pol_params.get("short_entry_threshold") is not None

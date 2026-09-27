@@ -39,13 +39,13 @@ class CapabilityEvidence:
     evidence_version: str
     market_freshness_seconds: float
     is_account_concordant: bool
-    is_account_identity_verified: bool = True
-    unresolved_inflight_orders_count: int = 0
-    is_approval_valid: bool = True
-    is_lease_active: bool = True
-    is_emergency_authorized: bool = False
-    is_universe_ready: bool = True
-    is_collector_healthy: bool = True
+    is_account_identity_verified: bool
+    unresolved_inflight_orders_count: int
+    is_approval_valid: bool
+    is_lease_active: bool
+    is_emergency_authorized: bool
+    is_universe_ready: bool
+    is_collector_healthy: bool
     scope: ExecutionScope | None = None
     plan_hash: str | None = None
     runtime_generation: str | None = None
@@ -185,6 +185,8 @@ class CapabilityEvaluator:
                 return _decision(False, "unresolved_inflight_orders_present")
             if not evidence.is_universe_ready:
                 return _decision(False, "universe_or_warmup_not_ready")
+            if not evidence.is_collector_healthy:
+                return _decision(False, "collector_unhealthy")
             if evidence.market_freshness_seconds > self._max_entry_age:
                 return _decision(False, "market_data_stale_for_entry")
             return _decision(True, "entry_prerequisites_satisfied")

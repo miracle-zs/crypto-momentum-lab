@@ -87,6 +87,7 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         market_state_available=True,
         market_state_unavailable_reason="market_state_hub_ready",
         account_snapshot_available=True,
+        strategy_warmup_ready=True,
     )
     assert gate.entry_enabled is False
     assert gate.entry_enabled_reason == "entry_cache_warming"
@@ -98,6 +99,7 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         market_state_available=True,
         market_state_unavailable_reason="market_state_hub_ready",
         account_snapshot_available=True,
+        strategy_warmup_ready=True,
     )
     assert gate.entry_enabled_reason == ("exit_failure:BTCUSDT:exit request failed")
 
@@ -109,6 +111,7 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         market_state_available=False,
         market_state_unavailable_reason="market_state_consumer_lagged",
         account_snapshot_available=True,
+        strategy_warmup_ready=True,
     )
     assert gate.entry_enabled_reason == "market_state_consumer_lagged"
 
@@ -118,6 +121,7 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         market_state_available=True,
         market_state_unavailable_reason="market_state_hub_ready",
         account_snapshot_available=True,
+        strategy_warmup_ready=True,
     )
     assert gate.entry_enabled is True
 
@@ -153,6 +157,7 @@ def test_entry_control_validates_external_prerequisites() -> None:
             market_state_available=True,
             market_state_unavailable_reason=" ",
             account_snapshot_available=True,
+            strategy_warmup_ready=True,
         )
 
 

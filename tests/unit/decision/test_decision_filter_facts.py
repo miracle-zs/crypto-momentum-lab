@@ -198,7 +198,10 @@ async def test_filter_invokes_on_decision_result_callback() -> None:
         OrderIntentCandidate,
         StrategySide,
     )
-    from crypto_momentum_lab.domain.strategy.sizing import FixedNotionalSizingModel
+    from crypto_momentum_lab.domain.strategy.sizing import (
+        FixedNotionalSizingModel,
+        default_symbol_lot_rules,
+    )
 
     key = PositionKey(
         environment="live",
@@ -237,8 +240,13 @@ async def test_filter_invokes_on_decision_result_callback() -> None:
     effective_policy = EffectivePolicy(
         policy_id="sized-policy",
         strategy_name="orderflow_impulse",
-        target_notional=Decimal("500"),
-        sizing_model=FixedNotionalSizingModel(target_notional=Decimal("21")),
+        sizing_model=FixedNotionalSizingModel(
+            target_notional=Decimal("21"),
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        ),
+        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
     )
     filt = create_authoritative_decision_filter(
         "orderflow_impulse",

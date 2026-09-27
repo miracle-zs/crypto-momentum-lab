@@ -7,15 +7,15 @@ from crypto_momentum_lab.domain.strategy import (
     deterministic_config_hash,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 from crypto_momentum_lab.strategy_runner.registry import build_runtime_config
 
-_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
+_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 30
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
 _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
-_LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 _BINANCE_SHARED_REQUEST_PACER_PATH_ENV = "CML_BINANCE_SHARED_REQUEST_PACER_PATH"
 _BINANCE_SHARED_COMMAND_PACER_PATH_ENV = "CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH"
@@ -41,36 +41,48 @@ _ORDER_IDENTITY_CONFLICT_MESSAGE = (
 
 
 def _live_strategy_config(
-    profile: LiveOrderFlowImpulseProfile | None = None,
+    profile: LiveOrderFlowImpulseProfile,
 ) -> dict[str, object]:
-    resolved_profile = profile or _LIVE_ORDERFLOW_PROFILE
+    event_config = OrderFlowImpulseConfig(
+        impulse_window_buckets=profile.impulse_window_buckets,
+        baseline_window_buckets=4,
+        breakout_window_buckets=4,
+        min_return_pct=profile.min_return_pct,
+        min_aggressive_imbalance=profile.min_aggressive_imbalance,
+        min_notional_intensity=profile.min_notional_intensity,
+        confirmation_buckets=profile.confirmation_buckets,
+        cooldown_buckets=profile.cooldown_buckets,
+        forward_horizon_buckets=(1,),
+        min_notional_5m_vs_30m=profile.min_notional_5m_vs_30m,
+    )
     return {
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
+        "order_flow_impulse": event_config,
         "order_flow_impulse_impulse_window_buckets": (
-            resolved_profile.impulse_window_buckets
+            profile.impulse_window_buckets
         ),
         "order_flow_impulse_confirmation_buckets": (
-            resolved_profile.confirmation_buckets
+            profile.confirmation_buckets
         ),
-        "order_flow_impulse_min_return_pct": resolved_profile.min_return_pct,
+        "order_flow_impulse_min_return_pct": profile.min_return_pct,
         "order_flow_impulse_min_aggressive_imbalance": (
-            resolved_profile.min_aggressive_imbalance
+            profile.min_aggressive_imbalance
         ),
         "order_flow_impulse_min_notional_intensity": (
-            resolved_profile.min_notional_intensity
+            profile.min_notional_intensity
         ),
         "order_flow_impulse_min_notional_5m_vs_30m": (
-            resolved_profile.min_notional_5m_vs_30m
+            profile.min_notional_5m_vs_30m
         ),
-        "cooldown_buckets": resolved_profile.cooldown_buckets,
+        "cooldown_buckets": profile.cooldown_buckets,
     }
 
 
 def _live_strategy_config_hash(
     strategy_name: str,
     *,
-    profile: LiveOrderFlowImpulseProfile | None = None,
+    profile: LiveOrderFlowImpulseProfile,
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,

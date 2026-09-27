@@ -50,7 +50,6 @@ from crypto_momentum_lab.domain.strategy.sizing import (
     SizingPlan,
     SizingRejection,
     SymbolLotRules,
-    default_symbol_lot_rules,
 )
 
 
@@ -358,9 +357,11 @@ def _evaluate_sizing(
     if sizing_model is None:
         return cand, None, None
 
-    lot_rules: SymbolLotRules = getattr(
+    lot_rules: SymbolLotRules | None = getattr(
         policy_artifact, "symbol_lot_rules", None
-    ) or default_symbol_lot_rules(symbol)
+    )
+    if lot_rules is None:
+        return None, None, "sizing_missing_realtime_lot_rules"
 
     result = sizing_model.compute_plan(
         symbol=symbol,
@@ -706,15 +707,15 @@ def execute_policy_transition(
                 )
 
         # Built-in breakout threshold evaluation
-        entry_thresh: Decimal = getattr(
-            policy_artifact, "entry_threshold", Decimal("65000.00")
+        entry_thresh: Decimal | None = getattr(
+            policy_artifact, "entry_threshold", None
         )
         short_entry_thresh: Decimal | None = getattr(
             policy_artifact, "short_entry_threshold", None
         )
         close_px = state_15s.close_price or Decimal("0")
         cand = None
-        if close_px > entry_thresh:
+        if entry_thresh is not None and close_px > entry_thresh:
             if pos_mode == StrategyPositionMode.SHORT_ONLY:
                 return PolicyTransition(
                     decision_id=decision_id,
@@ -789,13 +790,14 @@ def execute_policy_transition(
                 features={"close_price": str(close_px)},
             )
         else:
+            reason = "below_entry_threshold" if entry_thresh is not None else "no_candidate"
             return PolicyTransition(
                 decision_id=decision_id,
                 frame_digest=frame.frame_digest,
                 input_hash=input_hash,
                 prior_state_version=prior_state.policy_version,
                 next_state=prior_state,
-                rejection_reason="below_entry_threshold",
+                rejection_reason=reason,
                 transition_time=clock_time,
             )
 

@@ -156,8 +156,8 @@ _LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 # These two columns are retained by the existing risk-config schema for paper
 # and shadow sessions. Live execution no longer enforces state-age limits; the
 # large compatibility value makes that explicit without a destructive schema
-# migration.
-_LIVE_UNENFORCED_STATE_AGE_SECONDS = 1_000_000_000.0
+_LIVE_DEFAULT_MAX_STATE_AGE_SECONDS = 30.0
+_LIVE_UNENFORCED_STATE_AGE_SECONDS = _LIVE_DEFAULT_MAX_STATE_AGE_SECONDS
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")

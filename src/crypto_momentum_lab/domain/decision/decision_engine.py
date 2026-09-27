@@ -325,7 +325,7 @@ class EffectivePolicy:
     policy_id: str
     strategy_name: str
     policy_version: int = 1
-    entry_threshold: Decimal = Decimal("65000.00")
+    entry_threshold: Decimal | None = None
     short_entry_threshold: Decimal | None = None
     order_type: EntryType = EntryType.MARKET
     target_notional: Decimal = Decimal("100.00")
@@ -440,8 +440,9 @@ def decide(
         scope_to_use = (
             getattr(decision_input.market_ref, "scope", None)
             or getattr(decision_input.position_view.key, "environment", None)
-            or "live"
         )
+        if not scope_to_use:
+            raise ValueError("Decision frame requires an explicit environment/scope")
         frame = DecisionFrame(
             scope=scope_to_use,
             symbol=decision_input.symbol,
@@ -546,7 +547,9 @@ def build_decision_input(
     Every runner freezes the same kind of facts; only the epoch/scope
     labels differ. Do not reassemble DecisionInput ad hoc in runners.
     """
-    effective_scope = scope or getattr(state, "environment", None) or "live"
+    effective_scope = scope or getattr(state, "environment", None)
+    if not effective_scope:
+        raise ValueError("Decision input assembly requires an explicit environment/scope")
     effective_source_epoch = source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
 
     if market_ref is None:
@@ -922,7 +925,10 @@ def create_authoritative_decision_filter(
             if source_epoch_provider is None
             else source_epoch_provider(state)
         )
-        return epoch or f"ep_{getattr(state, 'environment', None) or 'live'}"
+        env = getattr(state, "environment", None)
+        if not env:
+            raise ValueError("MarketState15s requires an explicit environment")
+        return epoch or f"ep_{env}"
 
     def _reject_all(
         decision: StrategyDecision,
@@ -959,7 +965,9 @@ def create_authoritative_decision_filter(
                     and frozen.position_view.key.symbol == state.symbol
                     and frozen.position_view.total_quantity > Decimal("0")
                 ):
-                    scope_to_use = getattr(state, "environment", None) or "live"
+                    scope_to_use = getattr(state, "environment", None)
+                    if not scope_to_use:
+                        raise ValueError("MarketState15s requires an explicit environment")
                     policy = (
                         replace(
                             effective_policy,
@@ -1021,7 +1029,9 @@ def create_authoritative_decision_filter(
                 "position_not_ready_for_trade",
             )
 
-        scope_to_use = getattr(state, "environment", None) or "live"
+        scope_to_use = getattr(state, "environment", None)
+        if not scope_to_use:
+            raise ValueError("MarketState15s requires an explicit environment")
         base_policy = (
             replace(
                 effective_policy,

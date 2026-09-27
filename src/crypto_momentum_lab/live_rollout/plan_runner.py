@@ -196,6 +196,7 @@ async def run_live_plan(
         execution_coordinator = OrderExecutionCoordinator(
             backend=machine,
             account_label=account_label,
+            environment="live",
             reservation_repository=reservation_repo,
         )
         session = LiveRolloutSession(

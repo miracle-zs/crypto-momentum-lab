@@ -241,10 +241,12 @@ class PostgresPositionReservationRepository:
     def __init__(
         self,
         session_factory: sessionmaker[Session],
-        strategy_name: str = "default",
+        strategy_name: str,
     ) -> None:
+        if not strategy_name or not strategy_name.strip():
+            raise ValueError("strategy_name must not be empty")
         self._session_factory = session_factory
-        self._strategy_name = strategy_name
+        self._strategy_name = strategy_name.strip()
 
     def save_reservation(
         self,
@@ -538,10 +540,12 @@ class AsyncPostgresPositionReservationRepository:
     def __init__(
         self,
         session_maker: async_sessionmaker[AsyncSession],
-        strategy_name: str = "default",
+        strategy_name: str,
     ) -> None:
+        if not strategy_name or not strategy_name.strip():
+            raise ValueError("strategy_name must not be empty")
         self._session_maker = session_maker
-        self._strategy_name = strategy_name
+        self._strategy_name = strategy_name.strip()
 
     async def save_reservation(
         self,

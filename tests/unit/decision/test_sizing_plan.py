@@ -179,6 +179,7 @@ def test_fixed_notional_sizing_success() -> None:
     model = FixedNotionalSizingModel(
         target_notional=Decimal("650.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.05"),
     )
     lot_rules = default_symbol_lot_rules("BTCUSDT")
@@ -205,6 +206,7 @@ def test_fixed_notional_sizing_fail_closed_rejections() -> None:
     model = FixedNotionalSizingModel(
         target_notional=Decimal("100.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.05"),
     )
     lot_rules = default_symbol_lot_rules("BTCUSDT")
@@ -262,6 +264,7 @@ def test_equity_fraction_sizing_dynamic_compounding() -> None:
         min_notional_floor=Decimal("10.00"),
         max_notional_cap=Decimal("2000.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.10"),
     )
     lot_rules = default_symbol_lot_rules("BTCUSDT")
@@ -307,6 +310,7 @@ def test_execute_policy_transition_with_sizing_model() -> None:
     sizing_model = FixedNotionalSizingModel(
         target_notional=Decimal("660.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.05"),
     )
     policy = EffectivePolicy(
@@ -315,6 +319,7 @@ def test_execute_policy_transition_with_sizing_model() -> None:
         entry_threshold=Decimal("65000.00"),
         position_mode=StrategyPositionMode.LONG_ONLY,
         sizing_model=sizing_model,
+        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
     )
 
     transition = execute_policy_transition(
@@ -363,6 +368,8 @@ def test_execute_policy_transition_fail_closed_on_sizing_rejection() -> None:
     sizing_model = FixedNotionalSizingModel(
         target_notional=Decimal("660.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
     )
     policy = EffectivePolicy(
         policy_id="breakout_v1",
@@ -370,6 +377,7 @@ def test_execute_policy_transition_fail_closed_on_sizing_rejection() -> None:
         entry_threshold=Decimal("65000.00"),
         position_mode=StrategyPositionMode.LONG_ONLY,
         sizing_model=sizing_model,
+        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
     )
 
     transition = execute_policy_transition(
@@ -432,12 +440,15 @@ def test_execute_policy_transition_generator_with_dynamic_sizing() -> None:
         min_notional_floor=Decimal("10.00"),
         max_notional_cap=Decimal("5000.00"),
         max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.10"),
     )
     policy = EffectivePolicy(
         policy_id="custom_v1",
         strategy_name="custom_strat",
         candidate_generator=generator,
         sizing_model=sizing_model,
+        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
     )
 
     transition = execute_policy_transition(
@@ -543,3 +554,53 @@ def test_validate_exit_allocation_plan_invariants() -> None:
     )
     with pytest.raises(ValueError, match="references non-existent batch"):
         validate_exit_allocation_plan(bad_plan_unknown, (b1, b2))
+
+
+def test_execute_policy_transition_fail_closed_when_missing_lot_rules() -> None:
+    """When symbol_lot_rules is not provided on policy_artifact, sizing fails closed."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000.00"))
+    pview = _make_position_view("BTCUSDT")
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+        policy_code_digest="code_01",
+        policy_parameters_digest="params_01",
+        policy_state_digest="state_01",
+        cash_balance=Decimal("5000.00"),
+    )
+    state = PolicyState()
+    sizing_model = FixedNotionalSizingModel(
+        target_notional=Decimal("660.00"),
+        max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
+    )
+    # Deliberately omit symbol_lot_rules
+    policy = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000.00"),
+        position_mode=StrategyPositionMode.LONG_ONLY,
+        sizing_model=sizing_model,
+        symbol_lot_rules=None,
+    )
+
+    transition = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+    )
+
+    assert transition.entry_candidate is None
+    assert transition.rejection_reason == "sizing_missing_realtime_lot_rules"
+

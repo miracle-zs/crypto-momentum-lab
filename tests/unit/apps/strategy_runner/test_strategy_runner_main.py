@@ -10,6 +10,9 @@ from crypto_momentum_lab.apps.strategy_runner import main
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
+    OrderFlowImpulseConfig,
+)
 from crypto_momentum_lab.strategy_runner import (
     PaperRunnerConfig,
     ReplayConfig,
@@ -953,13 +956,17 @@ def test_runtime_identity_keeps_legacy_zero_volume_hash_alias() -> None:
         run_id="run-orderflow",
         generated_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         source_description="postgres-runtime-states:research",
-        compression_breakout=CompressionBreakoutConfig(
-            compression_window_buckets=3,
-            max_range_width_pct=Decimal("0.01"),
-            min_breakout_pct=Decimal("0.001"),
-            acceptance_buckets=1,
+        order_flow_impulse=OrderFlowImpulseConfig(
+            impulse_window_buckets=3,
+            baseline_window_buckets=4,
+            breakout_window_buckets=4,
+            min_return_pct=Decimal("0.01"),
+            min_aggressive_imbalance=Decimal("0.50"),
+            min_notional_intensity=Decimal("2"),
+            confirmation_buckets=1,
             cooldown_buckets=2,
             forward_horizon_buckets=(1,),
+            min_notional_5m_vs_30m=Decimal("0"),
         ),
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=4,

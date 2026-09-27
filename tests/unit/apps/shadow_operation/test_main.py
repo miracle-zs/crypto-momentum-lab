@@ -17,9 +17,20 @@ def test_shadow_cli_exposes_run_report_and_drill_commands() -> None:
 def test_shadow_run_requires_database_url() -> None:
     result = runner.invoke(
         app,
-        ["run", "--run-id", "shadow-test"],
+        ["run", "--run-id", "shadow-test", "--account-label", "test-account"],
         env={"CML_DATABASE_URL": ""},
     )
 
     assert result.exit_code != 0
     assert "database-url" in result.output
+
+
+def test_shadow_run_requires_account_label() -> None:
+    result = runner.invoke(
+        app,
+        ["run", "--database-url", "postgresql://localhost/test", "--run-id", "shadow-test"],
+    )
+
+    assert result.exit_code != 0
+    assert "account-label" in result.output
+

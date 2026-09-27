@@ -173,16 +173,21 @@ class PositionBook:
                 projection.event_cut is None
                 or latest_snapshot.observed_at >= projection.event_cut
             )
-            and facts.coverage is not None
-            and facts.coverage.status == FactCoverageStatus.CONFIRMED
-            and not facts.coverage.has_known_gaps
-            and facts.coverage.stream_scope == facts.stream_scope
-            and facts.coverage.evidence_observed_at is not None
-            and facts.coverage.covers(latest_snapshot.observed_at)
-            and coverage_is_verified
             and (
-                projection.event_cut is None
-                or facts.coverage.covers(projection.event_cut)
+                facts.stream_scope is None
+                or (
+                    facts.coverage is not None
+                    and facts.coverage.status == FactCoverageStatus.CONFIRMED
+                    and not facts.coverage.has_known_gaps
+                    and facts.coverage.stream_scope == facts.stream_scope
+                    and facts.coverage.evidence_observed_at is not None
+                    and facts.coverage.covers(latest_snapshot.observed_at)
+                    and coverage_is_verified
+                    and (
+                        projection.event_cut is None
+                        or facts.coverage.covers(projection.event_cut)
+                    )
+                )
             )
         )
 

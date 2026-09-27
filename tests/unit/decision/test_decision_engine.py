@@ -435,11 +435,21 @@ def test_decision_input_hash_sensitivity() -> None:
     # 7. Changing policy sizing_model alters hash
     pol_sizing1 = replace(
         policy,
-        sizing_model=FixedNotionalSizingModel(target_notional=Decimal("500.00")),
+        sizing_model=FixedNotionalSizingModel(
+            target_notional=Decimal("500.00"),
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        ),
     )
     pol_sizing2 = replace(
         policy,
-        sizing_model=FixedNotionalSizingModel(target_notional=Decimal("1000.00")),
+        sizing_model=FixedNotionalSizingModel(
+            target_notional=Decimal("1000.00"),
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        ),
     )
     assert compute_decision_input_hash(inp, pol_sizing1, state) != base_hash
     assert compute_decision_input_hash(
@@ -798,7 +808,12 @@ async def test_reproduce_decision_with_batches_and_sizing() -> None:
         policy_version=1,
         entry_threshold=Decimal("65000.00"),
         target_notional=Decimal("1000.00"),
-        sizing_model=FixedNotionalSizingModel(target_notional=Decimal("1000.00")),
+        sizing_model=FixedNotionalSizingModel(
+            target_notional=Decimal("1000.00"),
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        ),
     )
     res = decide(inp, state, policy)
     trace = decision_trace_from_result(

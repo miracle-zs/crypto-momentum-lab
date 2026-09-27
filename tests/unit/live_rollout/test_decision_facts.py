@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
-    AccountOpenOrderSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.decision.decision_engine import (
+    DecisionResult,
+    PolicyState,
+)
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
+    PositionKey,
+    PositionView,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
 from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.decision_facts import (
@@ -61,7 +69,9 @@ class _Risk:
 class _Ctx:
     def __init__(self, **kwargs: object) -> None:
         self.account_snapshot = kwargs.get("account_snapshot")
-        self.account_state = kwargs.get("account_state")
+        self.account_state = kwargs.get(
+            "account_state", ExecutionAccountStatus.READY_READONLY
+        )
         self.account_observed_at = kwargs.get("account_observed_at")
         self.managed_positions = kwargs.get("managed_positions", ())
         self.pending_position_symbols = kwargs.get(
@@ -107,91 +117,63 @@ def _snapshot(cash: str = "1000") -> AccountSnapshot:
     )
 
 
+def _position_view(
+    *,
+    symbol: str = "BTCUSDT",
+    position_side: FuturesPositionSide = FuturesPositionSide.BOTH,
+    account_label: str = "primary",
+    health_status: PositionHealthStatus = PositionHealthStatus.READY,
+    zero_position_snapshot_confirmed: bool = True,
+    is_comparable: bool = True,
+) -> PositionView:
+    return PositionView(
+        key=PositionKey("live", account_label, symbol, position_side),
+        projection_version=f"pv_test_{account_label}_7",
+        input_revision=1,
+        event_cut=None,
+        policy_version="1",
+        schema_version="1",
+        coverage=None,
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        zero_position_snapshot_confirmed=zero_position_snapshot_confirmed,
+        health_status=health_status,
+        is_comparable=is_comparable,
+    )
+
+
 def test_missing_snapshot_yields_none() -> None:
     out = frozen_decision_inputs_from_context(
         _Ctx(account_snapshot=None),
         _state(),
         account_label="primary",
+        position_view=_position_view(),
     )
     assert out is None
 
 
-def test_real_cash_and_versions_are_used() -> None:
+def test_missing_position_view_yields_none() -> None:
     out = frozen_decision_inputs_from_context(
-        _Ctx(account_snapshot=_snapshot("250.5")),
+        _Ctx(account_snapshot=_snapshot()),
         _state(),
         account_label="primary",
+        position_view=None,
     )
-    assert out is not None
-    assert out.cash_balance == Decimal("250.5")
-    # Without proven coverage the facts must not claim READY.
-    assert out.position_view.health_status == PositionHealthStatus.CATCHING_UP
-    assert "primary" in out.position_view.projection_version
-    assert out.position_view.projection_version.endswith("_7")
+    assert out is None
 
 
-def test_current_flat_account_snapshot_confirms_live_zero_position() -> None:
-    snapshot = _snapshot()
-    context = _Ctx(
-        account_snapshot=snapshot,
-        account_state=ExecutionAccountStatus.READY_READONLY,
-        account_observed_at=snapshot.config.observed_at,
-    )
-
+def test_unready_position_view_yields_none() -> None:
     out = frozen_decision_inputs_from_context(
-        context,
+        _Ctx(account_snapshot=_snapshot()),
         _state(),
         account_label="primary",
+        position_view=_position_view(health_status=PositionHealthStatus.CATCHING_UP),
     )
-
-    assert out is not None
-    assert out.position_view.health_status == PositionHealthStatus.READY
-    assert out.position_view.zero_position_snapshot_confirmed is True
-    assert out.position_view.is_ready_for_trade is True
+    assert out is None
 
 
-def test_open_order_prevents_zero_position_snapshot_confirmation() -> None:
-    snapshot = _snapshot()
-    open_order = AccountOpenOrderSnapshot(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        order_id="order_1",
-        client_order_id="client_order_1",
-        side="BUY",
-        order_type="LIMIT",
-        status="NEW",
-        price=Decimal("100"),
-        original_quantity=Decimal("1"),
-        executed_quantity=Decimal("0"),
-        reduce_only=False,
-        observed_at=snapshot.config.observed_at,
-        raw_payload={},
-    )
-    context = _Ctx(
-        account_snapshot=AccountSnapshot(
-            config=snapshot.config,
-            balances=snapshot.balances,
-            positions=snapshot.positions,
-            open_orders=(open_order,),
-        ),
-        account_state=ExecutionAccountStatus.READY_READONLY,
-        account_observed_at=snapshot.config.observed_at,
-    )
-
-    out = frozen_decision_inputs_from_context(
-        context,
-        _state(),
-        account_label="primary",
-    )
-
-    assert out is not None
-    assert out.position_view.health_status == PositionHealthStatus.CATCHING_UP
-    assert out.position_view.zero_position_snapshot_confirmed is False
-    assert out.position_view.is_ready_for_trade is False
-
-
-def test_non_active_strategy_is_not_ready() -> None:
+def test_non_active_strategy_yields_none() -> None:
     out = frozen_decision_inputs_from_context(
         _Ctx(
             account_snapshot=_snapshot(),
@@ -199,56 +181,41 @@ def test_non_active_strategy_is_not_ready() -> None:
         ),
         _state(),
         account_label="primary",
+        position_view=_position_view(),
     )
-    assert out is not None
-    assert out.position_view.health_status == PositionHealthStatus.CATCHING_UP
+    assert out is None
 
 
-def test_fact_source_requires_bound_context() -> None:
-    src = LiveDecisionFactSource("primary")
-    assert src.build(_state()) is None
-    src.bind_context(_Ctx(account_snapshot=_snapshot()))
-    assert src.build(_state()) is not None
-
-
-def test_proven_coverage_yields_ready_position_health() -> None:
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        CoverageEvidence,
-        FactCoverageStatus,
-    )
-
-    state = _state()
-    evidence = CoverageEvidence(
-        fill_cursor_id="cursor_1",
-        fill_load_start=state.bucket_start - timedelta(hours=1),
-        fill_checked_through=state.bucket_end + timedelta(minutes=1),
-        checkpoint_id="chk_1",
-        checkpoint_event_cut=state.bucket_end + timedelta(minutes=1),
-    )
-    ctx = _Ctx(
-        account_snapshot=_snapshot("500"),
-        coverage_by_symbol={state.symbol: evidence},
-    )
+def test_real_cash_and_versions_are_used() -> None:
+    view = _position_view()
     out = frozen_decision_inputs_from_context(
-        ctx,
-        state,
+        _Ctx(account_snapshot=_snapshot("250.5")),
+        _state(),
         account_label="primary",
+        position_view=view,
     )
     assert out is not None
-    assert out.position_view.health_status == PositionHealthStatus.READY
-    assert out.position_view.coverage is not None
-    assert out.position_view.coverage.status == FactCoverageStatus.CONFIRMED
+    assert out.cash_balance == Decimal("250.5")
     assert out.position_view.is_ready_for_trade is True
+    assert out.universe_version == "univ_1"
 
 
-def test_fact_source_on_decision_result_updates_policy_state() -> None:
-    from crypto_momentum_lab.domain.decision.decision_engine import (
-        DecisionResult,
-        PolicyState,
-    )
-
+async def test_fact_source_requires_bound_context() -> None:
     src = LiveDecisionFactSource("primary")
-    assert src._policy_state.policy_version == 1
+    assert await src.build(_state()) is None
+
+
+async def test_fact_source_commit_decision_updates_policy_state() -> None:
+    class FakeUoW:
+        async def commit_decision(self, commit):
+            return SimpleNamespace(
+                policy_revision=commit.expected_policy_revision + 1,
+                next_state_digest="digest_test",
+                decision_id="dec_test",
+            )
+
+    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    assert src.current_policy_state.policy_version == 1
 
     next_st = PolicyState(policy_version=7)
     res = DecisionResult(
@@ -260,24 +227,18 @@ def test_fact_source_on_decision_result_updates_policy_state() -> None:
         rejection_reason=None,
         evaluated_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
     )
-    src.on_decision_result(res)
-    assert src._policy_state.policy_version == 7
-
-
-def test_decision_callback_does_not_overwrite_engine_trace(monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    from crypto_momentum_lab.domain.decision.decision_engine import PolicyState
-    from crypto_momentum_lab.live_rollout import decision_facts
-
-    writes = []
-    monkeypatch.setattr(
-        decision_facts,
-        "build_decision_trace",
-        lambda *args, **kwargs: writes.append(kwargs),
-        raising=False,
+    trace = DecisionTrace(
+        decision_id="dec_test",
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        decision_time=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        intent_produced=False,
+        frame_digest="frame_digest",
+        evaluated_market_refs=(
+            SimpleNamespace(bucket_start=datetime(2026, 9, 25, 8, 0, tzinfo=UTC)),
+        ),
     )
-    source = LiveDecisionFactSource("primary", trace_repository=object())
-    result = SimpleNamespace(next_policy_state=PolicyState(), exit_command=None)
-    source.on_decision_result(result, object())
-    assert writes == []
+    receipt = await src.commit_decision(trace, res, None)
+    assert receipt.decision_id == "dec_test"
+    assert src.current_policy_state.policy_version == 7
+    assert src.policy_revision == 1

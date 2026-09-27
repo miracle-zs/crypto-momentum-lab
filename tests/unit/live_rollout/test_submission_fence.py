@@ -210,8 +210,24 @@ async def test_submission_fence_blocks_entry_on_evaluator_reject() -> None:
     )
     evaluator = CapabilityEvaluator(max_entry_market_age_seconds=15.0)
 
+    def _make_ev(**kwargs: Any) -> CapabilityEvidence:
+        defaults = {
+            "evidence_version": "ev-test",
+            "market_freshness_seconds": 1.0,
+            "is_account_concordant": True,
+            "is_account_identity_verified": True,
+            "unresolved_inflight_orders_count": 0,
+            "is_approval_valid": True,
+            "is_lease_active": True,
+            "is_emergency_authorized": False,
+            "is_universe_ready": True,
+            "is_collector_healthy": True,
+        }
+        defaults.update(kwargs)
+        return CapabilityEvidence(**defaults)
+
     # 1. Market stale for entry (>15s)
-    stale_evidence = CapabilityEvidence(
+    stale_evidence = _make_ev(
         evidence_version="ev-stale",
         market_freshness_seconds=20.0,
         is_account_concordant=True,
@@ -249,6 +265,22 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
         RuntimePlanCompiler,
     )
 
+    def _make_ev(**kwargs: Any) -> CapabilityEvidence:
+        defaults = {
+            "evidence_version": "ev-test",
+            "market_freshness_seconds": 1.0,
+            "is_account_concordant": True,
+            "is_account_identity_verified": True,
+            "unresolved_inflight_orders_count": 0,
+            "is_approval_valid": True,
+            "is_lease_active": True,
+            "is_emergency_authorized": False,
+            "is_universe_ready": True,
+            "is_collector_healthy": True,
+        }
+        defaults.update(kwargs)
+        return CapabilityEvidence(**defaults)
+
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     lease = SimpleNamespace(
         lease_id="lease-1",
@@ -275,7 +307,7 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
     evaluator = CapabilityEvaluator(max_exit_market_age_seconds=60.0)
 
     # Batch conflict/gap on exit
-    discordant_evidence = CapabilityEvidence(
+    discordant_evidence = _make_ev(
         evidence_version="ev-discordant",
         market_freshness_seconds=5.0,
         is_account_concordant=False,
@@ -301,7 +333,7 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
         )
 
     # Valid exit succeeds
-    valid_exit_evidence = CapabilityEvidence(
+    valid_exit_evidence = _make_ev(
         evidence_version="ev-valid-exit",
         market_freshness_seconds=5.0,
         is_account_concordant=True,

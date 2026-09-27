@@ -367,6 +367,12 @@ class LiveReadinessPublisher:
         self._alert_manager = alert_manager or TradeabilityAlertManager()
         self.publish()
 
+    @property
+    def is_warmup_complete(self) -> bool:
+        if not self._warmup_expected_symbols:
+            return True
+        return self._warmup_complete_symbols >= self._warmup_expected_symbols
+
     def set_expected_warmup_symbols(self, symbols: Collection[str]) -> None:
         """Set the expected warmup universe before recovery starts."""
 

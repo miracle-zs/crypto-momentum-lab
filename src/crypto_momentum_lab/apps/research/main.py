@@ -238,6 +238,13 @@ def order_flow_impulse_study_command(
             help="Buckets skipped after a detected event.",
         ),
     ] = 8,
+    min_notional_5m_vs_30m: Annotated[
+        str,
+        typer.Option(
+            "--min-notional-5m-vs-30m",
+            help="Minimum 5-minute versus 30-minute volume ratio.",
+        ),
+    ] = "1.25",
     forward_horizon_buckets: Annotated[
         list[int] | None,
         typer.Option(
@@ -261,6 +268,7 @@ def order_flow_impulse_study_command(
             confirmation_buckets=confirmation_buckets,
             cooldown_buckets=cooldown_buckets,
             forward_horizon_buckets=horizons,
+            min_notional_5m_vs_30m=Decimal(min_notional_5m_vs_30m),
         ),
     )
     typer.echo(f"order_flow_impulse_events={report.summary.total_count}")

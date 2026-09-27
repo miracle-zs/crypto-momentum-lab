@@ -20,7 +20,7 @@ class SimulatedFillStatus(StrEnum):
 class ReplayExecutionConfig:
     latency_buckets: int = 1
     state_interval_seconds: int = 15
-    taker_fee_rate: Decimal = Decimal("0.0004")
+    taker_fee_rate: Decimal = Decimal("0.0005")
     slippage_bps: Decimal = Decimal("0")
     require_market_quote: bool = False
 

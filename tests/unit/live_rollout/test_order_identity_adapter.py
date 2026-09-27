@@ -57,7 +57,7 @@ def test_position_ledger_direct_projection_scenario() -> None:
 
     system_orders = get_b2_system_order_facts()[:1]
     obs = get_b2_position_observation(position_amt=Decimal("120"))
-    fills = get_b2_account_fill_events()[:1]
+    fills = get_b2_account_fill_events(account_label="primary")[:1]
 
     facts = LegacyOrderIdentityAdapter.to_account_facts(
         position_key=key,

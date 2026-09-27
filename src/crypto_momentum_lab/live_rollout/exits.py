@@ -82,6 +82,7 @@ class ManagedLivePosition:
     quantity: Decimal
     entry_price: Decimal
     opened_at: datetime
+    account_label: str | None = None
     closing_order_filled: bool = False
     recovery_order_client_id: str | None = None
     recovery_order_created_at: datetime | None = None
@@ -244,6 +245,7 @@ def managed_live_positions_from_views(
                 quantity=quantity,
                 entry_price=entry_price,
                 opened_at=min(batch.opened_at for batch in managed_batches),
+                account_label=view.key.account_label,
                 batch_id=(
                     managed_batches[0].batch_id
                     if len(managed_batches) == 1
@@ -263,6 +265,7 @@ class LiveExitConfig:
     strategy_version: str
     strategy_config_hash: str
     policy: PositionExitPolicy
+    account_label: str | None = None
     candidate_ttl_seconds: int = 60
     candle_grace_bars: int = 0
     candle_grace_decision_profit_pct: Decimal | None = None
@@ -940,7 +943,7 @@ class LiveExitManager:
         order_quantity: Decimal,
         reference_price: Decimal,
         reason: str,
-        hedge_mode: bool = False,
+        hedge_mode: bool = True,
     ) -> Decimal:
         pos_side = getattr(position, "position_side", None)
         if isinstance(pos_side, FuturesPositionSide):
@@ -956,9 +959,16 @@ class LiveExitManager:
         else:
             position_side = FuturesPositionSide.BOTH
 
+        resolved_label = getattr(position, "account_label", None) or getattr(
+            self._config, "account_label", None
+        )
+        if not resolved_label or not str(resolved_label).strip():
+            raise ValueError(
+                f"Position for symbol {position.symbol} is missing required account_label"
+            )
         position_key = PositionKey(
             environment="live",
-            account_label=getattr(position, "account_label", "primary"),
+            account_label=str(resolved_label).strip(),
             symbol=position.symbol,
             position_side=position_side,
         )

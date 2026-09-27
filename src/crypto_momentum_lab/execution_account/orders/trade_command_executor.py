@@ -53,7 +53,7 @@ class TradeCommandExecutor:
         *,
         run_id: str,
         reference_price: Decimal,
-        hedge_mode: bool = False,
+        hedge_mode: bool = True,
     ) -> TradeExecutionPlanResult:
         if command.position_key.symbol != rules.symbol:
             raise ValueError("command symbol must match trading rules")

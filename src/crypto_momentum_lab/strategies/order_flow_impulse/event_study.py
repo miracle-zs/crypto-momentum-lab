@@ -30,7 +30,7 @@ class OrderFlowImpulseConfig:
     confirmation_buckets: int
     cooldown_buckets: int
     forward_horizon_buckets: tuple[int, ...]
-    min_notional_5m_vs_30m: Decimal = Decimal("0")
+    min_notional_5m_vs_30m: Decimal
 
     def __post_init__(self) -> None:
         if self.impulse_window_buckets <= 1:

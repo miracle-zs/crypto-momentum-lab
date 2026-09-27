@@ -150,6 +150,7 @@ def relaxed_config() -> OrderFlowImpulseConfig:
         confirmation_buckets=1,
         cooldown_buckets=0,
         forward_horizon_buckets=(1,),
+        min_notional_5m_vs_30m=Decimal("0"),
     )
 
 

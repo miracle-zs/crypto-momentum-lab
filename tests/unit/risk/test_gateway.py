@@ -71,7 +71,7 @@ def test_gateway_approves_small_entry_when_all_limits_pass() -> None:
     assert evaluation.reason == "approved"
 
 
-def test_gateway_approves_entry_with_unbounded_capacity_limits() -> None:
+def test_gateway_rejects_entry_with_unbounded_capacity_limits() -> None:
     context = replace(
         _context(),
         open_position_symbols=frozenset({"ETHUSDT", "SOLUSDT"}),
@@ -87,8 +87,8 @@ def test_gateway_approves_entry_with_unbounded_capacity_limits() -> None:
         context,
     )
 
-    assert evaluation.decision is RiskDecision.APPROVED
-    assert evaluation.reason == "approved"
+    assert evaluation.decision is RiskDecision.REJECTED
+    assert evaluation.reason == "missing_max_order_notional_limit"
 
 
 def test_gateway_allows_reduce_only_while_draining() -> None:

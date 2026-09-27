@@ -582,7 +582,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         context: LiveDaemonRuntimeContext,
         state: MarketState15s,
     ) -> LiveDaemonRuntimeContext:
-        book = self._execution_book
+        book = getattr(self, "_execution_book", None)
         if book is None:
             return context
         views = await book.list_position_views(
@@ -1220,7 +1220,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
-            build_managed_positions=self._execution_book is None,
+            build_managed_positions=getattr(self, "_execution_book", None) is None,
         )
         return (
             process_at,
@@ -1379,7 +1379,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
-            build_managed_positions=self._execution_book is None,
+            build_managed_positions=getattr(self, "_execution_book", None) is None,
         )
         return (
             snapshot.config.observed_at,

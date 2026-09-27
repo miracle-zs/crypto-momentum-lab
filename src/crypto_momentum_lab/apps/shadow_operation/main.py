@@ -82,7 +82,9 @@ def shadow_operation_app() -> None:
 @app.command("run")
 def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    account_label: Annotated[
+        str, typer.Option("--account-label", help="Target execution account label")
+    ] = ...,
     strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
     market_environment: Annotated[
         str,

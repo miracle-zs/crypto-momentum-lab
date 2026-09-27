@@ -163,7 +163,7 @@ def _decimal_limit_is_covered(
     approved: Decimal | None,
 ) -> bool:
     if approved is None:
-        return True
+        return False
     return required is not None and required <= approved
 
 
@@ -172,5 +172,5 @@ def _integer_limit_is_covered(
     approved: int | None,
 ) -> bool:
     if approved is None:
-        return True
+        return False
     return required is not None and required <= approved

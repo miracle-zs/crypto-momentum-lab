@@ -1,7 +1,7 @@
 import json
 import logging
 from collections import Counter, deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -61,6 +61,10 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
+)
+from crypto_momentum_lab.domain.strategy.sizing import (
+    SymbolLotRules,
+    default_symbol_lot_rules,
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
@@ -138,6 +142,7 @@ class PaperRunnerConfig:
     max_states: int | None = None
     reset_on_gap: bool = True
     portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
+    symbol_lot_rules: SymbolLotRules | Mapping[str, SymbolLotRules] | None = None
 
     def __post_init__(self) -> None:
         if not self.strategy_name:
@@ -160,6 +165,12 @@ class PaperRunnerConfig:
             raise ValueError("max_states must be positive")
         if not isinstance(self.reset_on_gap, bool):
             raise TypeError("reset_on_gap must be a bool")
+        if self.portfolio.initial_balance != self.initial_cash_balance:
+            object.__setattr__(
+                self,
+                "portfolio",
+                replace(self.portfolio, initial_balance=self.initial_cash_balance),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +215,12 @@ def run_paper_trading(
         market_freshness_seconds=1.0,
         is_account_concordant=True,
         is_account_identity_verified=True,
+        unresolved_inflight_orders_count=0,
         is_approval_valid=True,
         is_lease_active=True,
+        is_emergency_authorized=False,
+        is_universe_ready=True,
+        is_collector_healthy=True,
     )
     sim_eval = evaluator.evaluate(
         action=SystemAction.ENTER,
@@ -401,7 +416,21 @@ def run_paper_trading(
 
         evaluated_candidates = decision.candidates if decision.candidates else [None]
         target_notional = config.candidate_notional or Decimal("500.00")
-        sizing_model = FixedNotionalSizingModel(target_notional=target_notional)
+        sizing_model = FixedNotionalSizingModel(
+            target_notional=target_notional,
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        )
+        resolved_lot_rules = None
+        if config.symbol_lot_rules is not None:
+            if isinstance(config.symbol_lot_rules, Mapping):
+                resolved_lot_rules = config.symbol_lot_rules.get(state.symbol)
+            else:
+                resolved_lot_rules = config.symbol_lot_rules
+        else:
+            resolved_lot_rules = default_symbol_lot_rules(state.symbol)
+
         for raw_cand in evaluated_candidates:
             policy = EffectivePolicy(
                 policy_id=f"policy_{config.strategy_name}",
@@ -410,6 +439,7 @@ def run_paper_trading(
                 candidate_generator=(lambda inp, st, _c=raw_cand: _c),
                 exit_policy=runner_exit_policy,
                 sizing_model=sizing_model,
+                symbol_lot_rules=resolved_lot_rules,
             )
             dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
             policy_state = dec_res.next_policy_state

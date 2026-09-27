@@ -646,9 +646,11 @@ def _config(
     candle_grace_bars: int = 0,
     candle_grace_decision_profit_pct: Decimal | None = None,
     candle_grace_profit_pct: Decimal = Decimal("0"),
+    account_label: str = "test_account",
 ) -> LiveExitConfig:
     return LiveExitConfig(
         run_id="run-1",
+        account_label=account_label,
         strategy_name="compression_breakout",
         strategy_version="v1",
         strategy_config_hash="a" * 64,
@@ -665,6 +667,7 @@ def _config(
 def _long_position() -> ManagedLivePosition:
     return ManagedLivePosition(
         symbol="BTCUSDT",
+        account_label="test_account",
         side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("1.25"),

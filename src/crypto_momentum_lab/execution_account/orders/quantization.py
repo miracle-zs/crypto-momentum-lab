@@ -53,7 +53,7 @@ def quantize_order_plan(
     *,
     reference_price: Decimal,
     resize_tolerance: Decimal,
-    hedge_mode: bool = False,
+    hedge_mode: bool = True,
     requested_quantity: Decimal | None = None,
     allocations: tuple[ExitAllocation, ...] = (),
     projection_version: str | None = None,
@@ -159,6 +159,8 @@ def quantize_order_plan(
         batch_id=resolved_batch_id,
         allocations=resolved_allocations,
         projection_version=resolved_projection_version,
+        strategy_name=getattr(intent, "strategy_name", None),
+        strategy_version=getattr(intent, "strategy_version", None),
     )
 
 

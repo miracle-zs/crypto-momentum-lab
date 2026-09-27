@@ -2180,6 +2180,7 @@ def _daemon(
         signal_recorder=signal_recorder,
         config=LiveDaemonConfig(
             run_id="run-1",
+            account_label="test_account",
             resize_tolerance=Decimal("0.20"),
             checkpoint_every_states=checkpoint_every_states,
             hedge_mode=hedge_mode,

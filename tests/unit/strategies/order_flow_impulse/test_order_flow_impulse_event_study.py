@@ -121,6 +121,7 @@ def test_requires_confirmation_and_applies_cooldown() -> None:
         confirmation_buckets=2,
         cooldown_buckets=4,
         forward_horizon_buckets=(1,),
+        min_notional_5m_vs_30m=Decimal("0"),
     )
     states = (
         _state(0, Decimal("100.00"), notional=Decimal("100")),
@@ -207,6 +208,7 @@ def _config() -> OrderFlowImpulseConfig:
         confirmation_buckets=1,
         cooldown_buckets=2,
         forward_horizon_buckets=(1, 2),
+        min_notional_5m_vs_30m=Decimal("0"),
     )
 
 

@@ -111,7 +111,7 @@ class LiveEntryControlGate:
         market_state_available: bool,
         market_state_unavailable_reason: str,
         account_snapshot_available: bool,
-        strategy_warmup_ready: bool = True,
+        strategy_warmup_ready: bool,
         strategy_warmup_reason: str = "strategy_warmup_ready",
     ) -> None:
         """Apply external live prerequisites in their fail-closed priority."""

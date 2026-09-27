@@ -263,12 +263,6 @@ def resolve_live_profile_options(
             return LiveOrderFlowImpulseProfile.from_environment(environment)
         except ValueError as error:
             raise LiveRuntimeOptionsError(str(error)) from error
-    legacy_values = values[:5] + values[6:]
-    if min_notional_5m_vs_30m is None and all(
-        value is not None for value in legacy_values
-    ):
-        # Preserve the six-option CLI form; the seventh dimension is opt-in.
-        min_notional_5m_vs_30m = "0"
     if not all(value is not None for value in values):
         raise LiveRuntimeOptionsError(
             "all seven order-flow profile options must be provided together"
@@ -394,14 +388,14 @@ def resolve_live_runtime_config(
         entry_leverage = 1 if options.entry_leverage is None else options.entry_leverage
         margin_type = "CROSSED" if options.margin_type is None else options.margin_type
         exit_mode = PositionExitMode.CANDLE_15M if exit_mode is None else exit_mode
-        candle_grace_bars = 1 if candle_grace_bars is None else candle_grace_bars
+        candle_grace_bars = 8 if candle_grace_bars is None else candle_grace_bars
         candle_grace_decision_profit_pct = (
-            "0.001"
+            "0.002"
             if candle_grace_decision_profit_pct is None
             else candle_grace_decision_profit_pct
         )
         candle_grace_profit_pct = (
-            "0.0088" if candle_grace_profit_pct is None else candle_grace_profit_pct
+            "0.002" if candle_grace_profit_pct is None else candle_grace_profit_pct
         )
         persist_exchange_operations = (
             "submit,cancel"

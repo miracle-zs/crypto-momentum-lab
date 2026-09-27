@@ -18,6 +18,12 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.liquidation_cascade import (
+    LiquidationCascadeConfig,
+)
+from crypto_momentum_lab.strategies.order_flow_impulse import (
+    OrderFlowImpulseConfig,
+)
 from crypto_momentum_lab.strategy_runner import (
     InMemoryPaperMarketStateSource,
     PaperRunnerConfig,
@@ -323,7 +329,34 @@ def _paper_config(
     strategy_name: str = "compression_breakout",
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
+    order_flow_impulse: OrderFlowImpulseConfig | None = None,
+    liquidation_cascade: LiquidationCascadeConfig | None = None,
 ) -> PaperRunnerConfig:
+    if strategy_name == "orderflow_impulse" and order_flow_impulse is None:
+        order_flow_impulse = OrderFlowImpulseConfig(
+            impulse_window_buckets=2,
+            baseline_window_buckets=4,
+            breakout_window_buckets=4,
+            min_return_pct=Decimal("0.005"),
+            min_aggressive_imbalance=Decimal("0.5"),
+            min_notional_intensity=Decimal("1.5"),
+            confirmation_buckets=1,
+            cooldown_buckets=1,
+            forward_horizon_buckets=(1,),
+            min_notional_5m_vs_30m=Decimal("1.25"),
+        )
+    if strategy_name == "liquidation_cascade" and liquidation_cascade is None:
+        liquidation_cascade = LiquidationCascadeConfig(
+            liquidation_window_buckets=1,
+            breakout_window_buckets=1,
+            min_liquidation_count=1,
+            min_liquidation_notional=Decimal("100"),
+            min_price_move_pct=Decimal("0.001"),
+            min_aggressive_imbalance=Decimal("0.5"),
+            confirmation_buckets=1,
+            cooldown_buckets=1,
+            forward_horizon_buckets=(1,),
+        )
     return PaperRunnerConfig(
         strategy_name=strategy_name,
         run_id="paper-1",
@@ -337,6 +370,8 @@ def _paper_config(
             cooldown_buckets=3,
             forward_horizon_buckets=(1,),
         ),
+        order_flow_impulse=order_flow_impulse,
+        liquidation_cascade=liquidation_cascade,
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,
         signal_interval_seconds=15,

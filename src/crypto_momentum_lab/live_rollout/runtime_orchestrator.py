@@ -290,16 +290,35 @@ log = structlog.get_logger()
 
 
 def _resolve_scheduled_risk_window() -> ScheduledRiskWindowConfig:
-    reopen_val = os.environ.get("CML_SCHEDULED_REOPEN_AT", "").strip()
-    if reopen_val:
-        try:
-            parts = reopen_val.split(":")
-            return ScheduledRiskWindowConfig(
-                reopen_at=time(int(parts[0]), int(parts[1]))
-            )
-        except Exception:
-            pass
-    return ScheduledRiskWindowConfig()
+    kwargs: dict[str, object] = {}
+    time_env_map = {
+        "CML_SCHEDULED_ENTRY_STOP_AT": "entry_stop_at",
+        "CML_SCHEDULED_FLATTEN_START_AT": "flatten_start_at",
+        "CML_SCHEDULED_FLATTEN_DEADLINE_AT": "flatten_deadline_at",
+        "CML_SCHEDULED_VERIFY_AT": "verify_at",
+        "CML_SCHEDULED_REOPEN_AT": "reopen_at",
+    }
+    for env_key, field_name in time_env_map.items():
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            try:
+                parts = [int(p) for p in val.split(":")]
+                if len(parts) == 2:
+                    kwargs[field_name] = time(parts[0], parts[1])
+                elif len(parts) == 3:
+                    kwargs[field_name] = time(parts[0], parts[1], parts[2])
+                else:
+                    raise ValueError(f"Invalid time format: {val}")
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to parse {env_key}={val}: expected HH:MM or HH:MM:SS"
+                ) from exc
+
+    tz_val = os.environ.get("CML_SCHEDULED_TIMEZONE", "").strip()
+    if tz_val:
+        kwargs["timezone"] = tz_val
+
+    return ScheduledRiskWindowConfig(**kwargs)
 
 
 async def run_live_daemon(
@@ -633,6 +652,9 @@ async def run_live_daemon(
             if getattr(config.strategy, "market_orders", False)
             else "limit",
             "max_open_positions": getattr(risk_config, "max_open_positions", 4),
+            "max_account_drawdown": getattr(
+                risk_config, "max_account_drawdown", "0.10"
+            ),
             "max_gross_notional": getattr(
                 risk_config,
                 "max_gross_notional",
@@ -654,6 +676,7 @@ async def run_live_daemon(
             fencing_epoch=int(getattr(active_lease, "fencing_token", 1) or 1),
             observed_database_revision=migration_revision,
             overrides=plan_overrides,
+            strict=True,
         )
         capability_evaluator = CapabilityEvaluator()
 
@@ -715,6 +738,7 @@ async def run_live_daemon(
                 is_lease_active=is_lease_valid,
                 is_emergency_authorized=False,
                 is_universe_ready=is_app_valid,
+                is_collector_healthy=True if live_readiness is None else (live_readiness._latest_market_state_age_seconds is not None),
                 plan_hash=runtime_plan.plan_hash,
                 runtime_generation=runtime_plan.runtime_generation,
                 fencing_epoch=runtime_plan.fencing_epoch,
@@ -772,6 +796,7 @@ async def run_live_daemon(
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
             account_label=account_label,
+            environment="live",
             reservation_repository=reservation_repository,
             domain_coordinator=domain_coordinator,
             execution_book=execution_book,
@@ -804,6 +829,8 @@ async def run_live_daemon(
                 quantized=True,
                 allocations=allocs,
                 projection_version=cmd.expected_projection_version,
+                strategy_name=strategy_name,
+                strategy_version="v0",
             )
             return await execution_coordinator.submit(plan)
 
@@ -1181,6 +1208,7 @@ async def run_live_daemon(
             entry_order_lifecycle=entry_order_lifecycle,
             config=LiveDaemonConfig(
                 run_id=session_id,
+                account_label=account_label,
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
                 checkpoint_every_seconds=checkpoint_every_seconds,
@@ -1312,7 +1340,11 @@ async def run_live_daemon(
                 if startup_market_buffer is None
                 else startup_market_buffer.connection_available
             ),
-            strategy_warmup_ready=True,
+            strategy_warmup_ready=(
+                live_readiness.is_warmup_complete
+                if live_readiness is not None
+                else False
+            ),
             notify_market_state_gap=(
                 lambda reason: daemon.notify_market_state_gap(reason=reason)
             ),

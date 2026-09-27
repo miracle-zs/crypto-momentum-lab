@@ -16,6 +16,8 @@ Tests:
 
 from datetime import UTC, datetime
 
+import pytest
+
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionScope
 from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     CapabilityEvaluator,
@@ -38,12 +40,29 @@ def _make_plan() -> RuntimePlan:
     )
 
 
+def _make_evidence(**kwargs) -> CapabilityEvidence:
+    defaults = {
+        "evidence_version": "ev_default",
+        "market_freshness_seconds": 1.0,
+        "is_account_concordant": True,
+        "is_account_identity_verified": True,
+        "unresolved_inflight_orders_count": 0,
+        "is_approval_valid": True,
+        "is_lease_active": True,
+        "is_emergency_authorized": False,
+        "is_universe_ready": True,
+        "is_collector_healthy": True,
+    }
+    defaults.update(kwargs)
+    return CapabilityEvidence(**defaults)
+
+
 def test_reconcile_always_allowed() -> None:
     evaluator = CapabilityEvaluator()
     plan = _make_plan()
 
     # Even with terrible operational state, RECONCILE must be allowed
-    evidence = CapabilityEvidence(
+    evidence = _make_evidence(
         evidence_version="ev_01",
         market_freshness_seconds=9999.0,
         is_account_concordant=False,
@@ -51,6 +70,8 @@ def test_reconcile_always_allowed() -> None:
         unresolved_inflight_orders_count=10,
         is_approval_valid=False,
         is_lease_active=False,
+        is_universe_ready=False,
+        is_collector_healthy=False,
         observed_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -64,7 +85,7 @@ def test_cancel_never_blocked_by_stale_market_or_batch_conflict() -> None:
     plan = _make_plan()
 
     # Market is stale (300s) and ledger is discordant, but lease and identity are valid
-    evidence = CapabilityEvidence(
+    evidence = _make_evidence(
         evidence_version="ev_02",
         market_freshness_seconds=300.0,
         is_account_concordant=False,
@@ -81,7 +102,7 @@ def test_cancel_never_blocked_by_stale_market_or_batch_conflict() -> None:
     assert decision.reason == "cancel_permitted_under_active_lease"
 
     # However, if lease is inactive, CANCEL must be blocked
-    no_lease_evidence = CapabilityEvidence(
+    no_lease_evidence = _make_evidence(
         evidence_version="ev_03",
         market_freshness_seconds=1.0,
         is_account_concordant=True,
@@ -97,7 +118,7 @@ def test_normal_exit_gates() -> None:
     plan = _make_plan()
 
     # 1. Blocked when batch attribution has conflict or gap
-    discordant_ev = CapabilityEvidence(
+    discordant_ev = _make_evidence(
         evidence_version="ev_04",
         market_freshness_seconds=5.0,
         is_account_concordant=False,
@@ -107,7 +128,7 @@ def test_normal_exit_gates() -> None:
     assert dec1.reason == "batch_attribution_conflict_or_gap"
 
     # 2. Blocked when unresolved inflight orders exist
-    inflight_ev = CapabilityEvidence(
+    inflight_ev = _make_evidence(
         evidence_version="ev_05",
         market_freshness_seconds=5.0,
         is_account_concordant=True,
@@ -118,7 +139,7 @@ def test_normal_exit_gates() -> None:
     assert dec2.reason == "unresolved_inflight_orders_present"
 
     # 3. Blocked when market data exceeds exit staleness threshold
-    stale_ev = CapabilityEvidence(
+    stale_ev = _make_evidence(
         evidence_version="ev_06",
         market_freshness_seconds=90.0,
         is_account_concordant=True,
@@ -130,7 +151,7 @@ def test_normal_exit_gates() -> None:
 
     # 4. Allowed when all prerequisites satisfied
     # (even if live approval expired or schema outdated!)
-    valid_exit_ev = CapabilityEvidence(
+    valid_exit_ev = _make_evidence(
         evidence_version="ev_07",
         market_freshness_seconds=10.0,
         is_account_concordant=True,
@@ -148,7 +169,7 @@ def test_enter_strict_gates() -> None:
     plan = _make_plan()
 
     # 1. Blocked if approval invalid
-    no_app_ev = CapabilityEvidence(
+    no_app_ev = _make_evidence(
         evidence_version="ev_08",
         market_freshness_seconds=2.0,
         is_account_concordant=True,
@@ -157,7 +178,7 @@ def test_enter_strict_gates() -> None:
     assert not evaluator.evaluate(SystemAction.ENTER, no_app_ev, plan).allowed
 
     # 2. Blocked if market slightly stale (>15s) even if <60s
-    stale_entry_ev = CapabilityEvidence(
+    stale_entry_ev = _make_evidence(
         evidence_version="ev_09",
         market_freshness_seconds=20.0,
         is_account_concordant=True,
@@ -168,7 +189,7 @@ def test_enter_strict_gates() -> None:
     assert dec_stale.reason == "market_data_stale_for_entry"
 
     # 3. Blocked if database schema revision mismatches declared plan compatibility
-    mismatch_schema_ev = CapabilityEvidence(
+    mismatch_schema_ev = _make_evidence(
         evidence_version="ev_schema",
         market_freshness_seconds=3.0,
         is_account_concordant=True,
@@ -181,7 +202,7 @@ def test_enter_strict_gates() -> None:
     assert dec_schema.reason == "schema_compatibility_mismatch"
 
     # 4. Allowed when all healthy
-    healthy_ev = CapabilityEvidence(
+    healthy_ev = _make_evidence(
         evidence_version="ev_10",
         market_freshness_seconds=3.0,
         is_account_concordant=True,
@@ -199,7 +220,7 @@ def test_emergency_reduce_authorization() -> None:
     evaluator = CapabilityEvaluator()
     plan = _make_plan()
 
-    unauth_ev = CapabilityEvidence(
+    unauth_ev = _make_evidence(
         evidence_version="ev_11",
         market_freshness_seconds=120.0,
         is_account_concordant=False,
@@ -209,7 +230,7 @@ def test_emergency_reduce_authorization() -> None:
         SystemAction.EMERGENCY_REDUCE, unauth_ev, plan
     ).allowed
 
-    auth_ev = CapabilityEvidence(
+    auth_ev = _make_evidence(
         evidence_version="ev_12",
         market_freshness_seconds=120.0,
         is_account_concordant=False,
@@ -231,7 +252,7 @@ def test_evidence_and_decision_context_binding() -> None:
     )
     t_source = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
-    evidence = CapabilityEvidence(
+    evidence = _make_evidence(
         evidence_version="ev_bind",
         market_freshness_seconds=2.0,
         is_account_concordant=True,
@@ -255,7 +276,7 @@ def test_plan_hash_and_fencing_epoch_mismatch_blocks_actions() -> None:
     plan = _make_plan()
 
     # Mismatched fencing epoch
-    epoch_mismatch_ev = CapabilityEvidence(
+    epoch_mismatch_ev = _make_evidence(
         evidence_version="ev_epoch_bad",
         market_freshness_seconds=2.0,
         is_account_concordant=True,
@@ -266,7 +287,7 @@ def test_plan_hash_and_fencing_epoch_mismatch_blocks_actions() -> None:
     assert dec_epoch.reason == "fencing_epoch_mismatch"
 
     # Mismatched plan hash
-    hash_mismatch_ev = CapabilityEvidence(
+    hash_mismatch_ev = _make_evidence(
         evidence_version="ev_hash_bad",
         market_freshness_seconds=2.0,
         is_account_concordant=True,
@@ -277,7 +298,7 @@ def test_plan_hash_and_fencing_epoch_mismatch_blocks_actions() -> None:
     assert dec_hash.reason == "plan_hash_mismatch"
 
     # Mismatched runtime generation
-    gen_mismatch_ev = CapabilityEvidence(
+    gen_mismatch_ev = _make_evidence(
         evidence_version="ev_gen_bad",
         market_freshness_seconds=2.0,
         is_account_concordant=True,
@@ -286,3 +307,24 @@ def test_plan_hash_and_fencing_epoch_mismatch_blocks_actions() -> None:
     dec_gen = evaluator.evaluate(SystemAction.ENTER, gen_mismatch_ev, plan)
     assert dec_gen.allowed is False
     assert dec_gen.reason == "runtime_generation_mismatch"
+
+
+def test_capability_evidence_fail_closed_on_missing_fields() -> None:
+    """Verifies that CapabilityEvidence has no default security flags and fails closed on missing arguments."""
+    with pytest.raises(TypeError):
+        # Missing required flags like is_account_identity_verified, is_approval_valid, etc.
+        CapabilityEvidence(  # type: ignore[call-arg]
+            evidence_version="ev_incomplete",
+            market_freshness_seconds=1.0,
+            is_account_concordant=True,
+        )
+
+
+def test_enter_blocked_when_collector_unhealthy() -> None:
+    evaluator = CapabilityEvaluator()
+    plan = _make_plan()
+    ev = _make_evidence(is_collector_healthy=False)
+    dec = evaluator.evaluate(SystemAction.ENTER, ev, plan)
+    assert dec.allowed is False
+    assert dec.reason == "collector_unhealthy"
+

@@ -13,6 +13,9 @@ from typing import TypedDict, cast
 from urllib.parse import urlencode
 
 import httpx
+import structlog
+
+log = structlog.get_logger(__name__)
 
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
@@ -894,9 +897,12 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
         entry_leverage: int | None = None,
         margin_type: str | None = None,
+        leverage_fallback_steps: int = 2,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
             raise ValueError("entry_leverage must be between 1 and 125")
+        if leverage_fallback_steps < 0:
+            raise ValueError("leverage_fallback_steps must be non-negative")
         normalized_margin_type = (
             None if margin_type is None else _normalize_margin_type(margin_type)
         )
@@ -919,6 +925,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
+        self._leverage_fallback_steps = leverage_fallback_steps
         self._entry_margin_type = normalized_margin_type
         self._configured_leverage_by_symbol: dict[str, int] = {}
         self._configured_margin_type_by_symbol: dict[str, str] = {}
@@ -1031,7 +1038,11 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             params["positionSide"] = plan.position_side.value
         if plan.price is not None:
             params["price"] = format(plan.price, "f")
-            time_in_force = plan.time_in_force or "GTC"
+            time_in_force = plan.time_in_force
+            if not time_in_force:
+                raise OrderPreSubmissionError(
+                    f"Limit order {plan.client_order_id} is missing required time_in_force"
+                )
             params["timeInForce"] = time_in_force
             if time_in_force == "GTD":
                 if plan.expires_at is None:
@@ -1174,9 +1185,19 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if configured is not None:
             return configured
 
-        candidates = _entry_leverage_candidates(self._entry_leverage)
+        candidates = _entry_leverage_candidates(
+            self._entry_leverage, max_steps=self._leverage_fallback_steps
+        )
         last_rejection: str | None = None
         for leverage in candidates:
+            if leverage != self._entry_leverage:
+                log.warning(
+                    "binance_entry_leverage_fallback_attempt",
+                    symbol=symbol,
+                    requested_leverage=self._entry_leverage,
+                    attempted_leverage=leverage,
+                    account_label=self._account_label,
+                )
             try:
                 payload = await self._signed_post(
                     "/fapi/v1/leverage",
@@ -1200,6 +1221,14 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 raise ExchangeOrderRejectedError(
                     "Binance entry leverage was not confirmed; order was not sent"
                 ) from exc
+            if leverage != self._entry_leverage:
+                log.warning(
+                    "binance_entry_leverage_fallback_accepted",
+                    symbol=symbol,
+                    requested_leverage=self._entry_leverage,
+                    accepted_leverage=leverage,
+                    account_label=self._account_label,
+                )
             self._configured_leverage_by_symbol[symbol] = leverage
             return leverage
 
@@ -1435,8 +1464,10 @@ def _open_order_matches_exit(
     return plan.position_side is not FuturesPositionSide.BOTH or order.reduce_only
 
 
-def _entry_leverage_candidates(requested: int) -> tuple[int, ...]:
-    return tuple(dict.fromkeys(max(1, requested - offset) for offset in range(3)))
+def _entry_leverage_candidates(requested: int, max_steps: int = 2) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(max(1, requested - offset) for offset in range(max_steps + 1))
+    )
 
 
 def _optional_int(value: object) -> int | None:

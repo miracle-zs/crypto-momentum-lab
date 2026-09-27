@@ -335,6 +335,7 @@ class OrderExecutionCoordinator:
         *,
         backend: OrderExecutionPort,
         account_label: str,
+        environment: str,
         max_queue_depth: int = 64,
         exit_headroom: int = 16,
         max_queue_wait_seconds: float = 30.0,
@@ -344,6 +345,8 @@ class OrderExecutionCoordinator:
         execution_book: ExecutionBook | None = None,
         initial_reservations: Iterable[PositionReservation] | None = None,
     ) -> None:
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
         if max_queue_depth <= 0:
@@ -353,6 +356,7 @@ class OrderExecutionCoordinator:
                 "exit_headroom must be non-negative and less than max_queue_depth"
             )
         self._backend = backend
+        self._environment = environment.strip()
         self._account_label = account_label.strip()
         self._max_queue_depth = max_queue_depth
         self._exit_headroom = exit_headroom
@@ -447,7 +451,7 @@ class OrderExecutionCoordinator:
             if not isinstance(snapshot.config, AccountConfigSnapshot):
                 raise TypeError("AccountSnapshot.config must be AccountConfigSnapshot")
             if (
-                snapshot.config.environment != "live"
+                snapshot.config.environment != self._environment
                 or snapshot.config.account_label != self._account_label
             ):
                 raise ValueError(
@@ -470,15 +474,17 @@ class OrderExecutionCoordinator:
                 raise TypeError(
                     "AccountSnapshot.positions must contain AccountPositionSnapshot"
                 )
-            if pos.environment != "live":
-                raise ValueError("AccountPositionSnapshot environment must be live")
+            if pos.environment != self._environment:
+                raise ValueError(
+                    f"AccountPositionSnapshot environment must match coordinator ({self._environment})"
+                )
             if pos.account_label != self._account_label:
                 raise ValueError(
                     "AccountPositionSnapshot account_label does not match coordinator"
                 )
             side_str = pos.position_side.upper()
             scope = ExecutionScope(
-                environment="live",
+                environment=self._environment,
                 account_label=self._account_label,
                 symbol=pos.symbol,
                 position_side=FuturesPositionSide(side_str),
@@ -488,7 +494,7 @@ class OrderExecutionCoordinator:
         fills_by_key: dict[PositionKey, list[AccountFillEvent]] = {}
         for fill in fills:
             if (
-                fill.environment != "live"
+                fill.environment != self._environment
                 or fill.account_label != self._account_label
             ):
                 raise ValueError("account fill scope does not match coordinator")
@@ -569,7 +575,7 @@ class OrderExecutionCoordinator:
         if not plan.reduce_only:
             try:
                 scope = ExecutionScope(
-                    environment="live",
+                    environment=self._environment,
                     account_label=self._account_label,
                     symbol=plan.symbol,
                     position_side=plan.position_side,
@@ -586,11 +592,21 @@ class OrderExecutionCoordinator:
                         f"projection {proj_ver}; current projection is "
                         f"{current_view.projection_version}"
                     )
+                strategy_name = getattr(plan, "strategy_name", None)
+                if not strategy_name or not str(strategy_name).strip():
+                    raise OrderPreSubmissionError(
+                        f"Entry order {plan.client_order_id} is missing required strategy_name"
+                    )
+                strategy_version = getattr(plan, "strategy_version", None)
+                if not strategy_version or not str(strategy_version).strip():
+                    raise OrderPreSubmissionError(
+                        f"Entry order {plan.client_order_id} is missing required strategy_version"
+                    )
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,
                     scope=scope,
-                    strategy_name=getattr(plan, "strategy_name", "live_strategy"),
-                    strategy_version=getattr(plan, "strategy_version", "v1"),
+                    strategy_name=str(strategy_name).strip(),
+                    strategy_version=str(strategy_version).strip(),
                     run_id=getattr(plan, "run_id", self._account_label),
                     decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
                     expected_view_token=proj_ver,
@@ -650,7 +666,7 @@ class OrderExecutionCoordinator:
 
         try:
             scope = ExecutionScope(
-                environment="live",
+                environment=self._environment,
                 account_label=self._account_label,
                 symbol=plan.symbol,
                 position_side=plan.position_side,
@@ -686,11 +702,22 @@ class OrderExecutionCoordinator:
                     f"or batch_id; cannot invent synthetic batch"
                 )
 
+            strategy_name = getattr(plan, "strategy_name", None)
+            if not strategy_name or not str(strategy_name).strip():
+                raise OrderPreSubmissionError(
+                    f"Exit order {plan.client_order_id} is missing required strategy_name"
+                )
+            strategy_version = getattr(plan, "strategy_version", None)
+            if not strategy_version or not str(strategy_version).strip():
+                raise OrderPreSubmissionError(
+                    f"Exit order {plan.client_order_id} is missing required strategy_version"
+                )
+
             req = ExecutionRequest(
                 request_id=plan.client_order_id,
                 scope=scope,
-                strategy_name=getattr(plan, "strategy_name", "live_strategy"),
-                strategy_version=getattr(plan, "strategy_version", "v1"),
+                strategy_name=str(strategy_name).strip(),
+                strategy_version=str(strategy_version).strip(),
                 run_id=getattr(plan, "run_id", self._account_label),
                 decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
                 expected_view_token=proj_ver,
@@ -759,7 +786,7 @@ class OrderExecutionCoordinator:
         if not self.is_execution_book_enabled or res is None:
             return
         scope = ExecutionScope(
-            environment="live",
+            environment=self._environment,
             account_label=self._account_label,
             symbol=plan.symbol,
             position_side=plan.position_side,

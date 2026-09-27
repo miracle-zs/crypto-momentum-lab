@@ -18,7 +18,10 @@ from crypto_momentum_lab.domain.execution import (
     PositionObservation,
     PositionOrderFact,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
 from crypto_momentum_lab.domain.execution.position_batches import (
     _EXIT_SUBMITTED_STATES,
 )
@@ -148,6 +151,13 @@ class LegacyOrderIdentityAdapter:
                             else Decimal("1.0")
                         )
                     )
+                    pos_side_val = getattr(order, "position_side", None)
+                    if pos_side_val is None:
+                        pos_side_val = position_key.position_side.value
+                    elif isinstance(pos_side_val, FuturesPositionSide):
+                        pos_side_val = pos_side_val.value
+                    else:
+                        pos_side_val = str(pos_side_val)
                     fill_list.append(
                         AccountFillEvent(
                             environment=position_key.environment,
@@ -167,6 +177,7 @@ class LegacyOrderIdentityAdapter:
                                 "is_system": True,
                                 "client_order_id": order.client_order_id,
                                 "reduce_only": order.reduce_only,
+                                "positionSide": pos_side_val,
                             },
                         )
                     )

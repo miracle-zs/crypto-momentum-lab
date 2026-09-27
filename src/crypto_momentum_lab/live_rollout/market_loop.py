@@ -907,7 +907,7 @@ def _is_complete_gap_recovery(
         return False
     if tuple(state.bucket_start for state in ordered) != expected:
         return False
-    if any(not getattr(state, "data_complete", True) for state in ordered):
+    if any(not bool(getattr(state, "data_complete", False)) for state in ordered):
         return False
     required_data = getattr(strategy, "required_data", None)
     if not callable(required_data):

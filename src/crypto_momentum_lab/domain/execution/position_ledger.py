@@ -257,8 +257,6 @@ class PositionLedger:
         conflicting_fills: list[AccountFillEvent] = list(facts.conflicting_fills)
         identity_issues = list(facts.integrity_issues)
         for fill in facts.fills:
-            if _is_synthetic_fill(fill):
-                continue
             if (
                 fill.environment != self._position_key.environment
                 or fill.account_label != self._position_key.account_label

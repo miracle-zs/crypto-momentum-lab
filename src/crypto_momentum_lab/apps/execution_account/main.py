@@ -440,7 +440,12 @@ def sync_command(
 def _resolve_account_label(account_label: str | None) -> str:
     if account_label is not None and account_label.strip():
         return account_label.strip()
-    return os.environ.get("CML_ACCOUNT_LABEL", "primary").strip() or "primary"
+    env_label = os.environ.get("CML_ACCOUNT_LABEL", "").strip()
+    if env_label:
+        return env_label
+    raise ValueError(
+        "Missing required account_label (must pass --account-label or set CML_ACCOUNT_LABEL)"
+    )
 
 
 async def sync_once(
@@ -452,7 +457,7 @@ async def sync_once(
     api_key: str,
     api_secret: str,
     expected_multi_assets_mode: bool,
-    expected_hedge_mode: bool = False,
+    expected_hedge_mode: bool = True,
     fill_symbols: tuple[str, ...] = (),
     request_interval_seconds: float = 0.2,
     shared_request_pacer_path: str | None = None,

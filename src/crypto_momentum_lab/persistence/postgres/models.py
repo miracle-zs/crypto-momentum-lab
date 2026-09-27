@@ -225,7 +225,7 @@ class RuntimeMarketState15sRow(Base):
     closure_reason: Mapped[str] = mapped_column(String(32))
     input_sequence_min: Mapped[int | None] = mapped_column(Integer)
     input_sequence_max: Mapped[int | None] = mapped_column(Integer)
-    data_complete: Mapped[bool] = mapped_column(Boolean, default=True)
+    data_complete: Mapped[bool] = mapped_column(Boolean)
     missing_agg_trade_count: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (
@@ -798,7 +798,7 @@ class AccountConfigSnapshotRow(Base):
     environment: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str] = mapped_column(String(64))
     multi_assets_mode: Mapped[bool] = mapped_column(Boolean)
-    hedge_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    hedge_mode: Mapped[bool] = mapped_column(Boolean)
     fee_tier: Mapped[int | None] = mapped_column(Integer)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
@@ -1151,7 +1151,7 @@ class ExchangeOrderRow(Base):
         server_default="0",
     )
     reduce_only: Mapped[bool] = mapped_column(Boolean)
-    position_side: Mapped[str] = mapped_column(String(8), default="BOTH")
+    position_side: Mapped[str] = mapped_column(String(8))
     state: Mapped[str] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -1606,10 +1606,10 @@ class DatasetManifestRow(Base):
     )
     manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     coverage_ratio: Mapped[Decimal] = mapped_column(
-        Numeric(10, 4), nullable=False, default=Decimal("1.0")
+        Numeric(10, 4), nullable=False
     )
     revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
-    holes: Mapped[list[object]] = mapped_column(JSONB, nullable=False, default=list)
+    holes: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

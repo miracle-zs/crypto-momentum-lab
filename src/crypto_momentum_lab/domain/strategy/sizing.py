@@ -161,9 +161,9 @@ class FixedNotionalSizingModel:
     """Fixed notional sizing baseline with lot quantization and margin check."""
 
     target_notional: Decimal
-    max_leverage: Decimal = Decimal("5.0")
-    max_slippage_budget_bps: Decimal = Decimal("10.0")
-    resize_tolerance: Decimal = Decimal("0.05")
+    max_leverage: Decimal
+    max_slippage_budget_bps: Decimal
+    resize_tolerance: Decimal
 
     def __post_init__(self) -> None:
         if self.target_notional <= Decimal("0"):
@@ -292,12 +292,12 @@ class FixedNotionalSizingModel:
 class EquityFractionSizingModel:
     """Dynamic compounding sizing based on available account equity fraction."""
 
-    fraction_of_equity: Decimal = Decimal("0.05")
-    min_notional_floor: Decimal = Decimal("10.00")
-    max_notional_cap: Decimal = Decimal("5000.00")
-    max_leverage: Decimal = Decimal("5.0")
-    max_slippage_budget_bps: Decimal = Decimal("10.0")
-    resize_tolerance: Decimal = Decimal("0.10")
+    fraction_of_equity: Decimal
+    min_notional_floor: Decimal
+    max_notional_cap: Decimal
+    max_leverage: Decimal
+    max_slippage_budget_bps: Decimal
+    resize_tolerance: Decimal
 
     def __post_init__(self) -> None:
         if self.fraction_of_equity <= Decimal("0") or self.fraction_of_equity > Decimal(

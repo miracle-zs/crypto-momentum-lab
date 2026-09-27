@@ -79,6 +79,8 @@ class OrderExecutionPlan:
     allocations: tuple[ExitAllocation, ...] = ()
     projection_version: str | None = None
     batch_quantities: Mapping[str, Decimal] | None = None
+    strategy_name: str | None = None
+    strategy_version: str | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (

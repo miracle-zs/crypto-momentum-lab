@@ -16,7 +16,15 @@ from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 
 
 def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
-    profile = LiveOrderFlowImpulseProfile()
+    profile = LiveOrderFlowImpulseProfile(
+        impulse_window_buckets=2,
+        confirmation_buckets=1,
+        min_return_pct=Decimal("0.0075"),
+        min_aggressive_imbalance=Decimal("0.30"),
+        min_notional_intensity=Decimal("3.0"),
+        min_notional_5m_vs_30m=Decimal("1.25"),
+        cooldown_buckets=0,
+    )
     config = LiveRuntimeConfig(
         databases=LiveRuntimeDatabases(
             execution_database_url="postgresql+asyncpg://execution",

@@ -210,6 +210,7 @@ def build_pool(
         confirmation_buckets=confirmation_buckets,
         cooldown_buckets=0,
         forward_horizon_buckets=horizons,
+        min_notional_5m_vs_30m=Decimal("0"),
     )
     events: list[OrderFlowImpulseEvent] = []
     for segment in segments:

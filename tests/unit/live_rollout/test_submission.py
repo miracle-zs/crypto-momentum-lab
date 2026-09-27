@@ -114,6 +114,7 @@ def _submission(
         state_machine=cast(OrderExecutionPort, state_machine),
         config=LiveSubmissionConfig(
             run_id="run-1",
+            account_label="account-1",
             resize_tolerance=Decimal("0.20"),
             hedge_mode=False,
             entry_order_type=EntryType.MARKET,

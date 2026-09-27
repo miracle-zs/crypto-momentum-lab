@@ -95,7 +95,9 @@ async def test_bootstrap_real_flat_hedge_rows_ready_both_execution_scopes() -> N
     async def fetch_positions(*, include_flat):
         return rows
 
-    coordinator = OrderExecutionCoordinator(backend=object(), account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=object(), account_label="primary", environment="live"
+    )
     await _bootstrap_execution_position_facts(
         SimpleNamespace(fetch_positions=fetch_positions),
         coordinator,

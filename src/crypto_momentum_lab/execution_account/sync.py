@@ -837,7 +837,12 @@ class ExecutionAccountSyncService:
                 for scan in fill_load_scans
             )
             fill_keys = _fill_keys(fills)
-            new_fill_keys = frozenset(key for key in fill_keys if key not in self._known_fill_keys)
+            new_fill_keys = frozenset(
+                key
+                for key in fill_keys
+                if (key[0] in previous_fill_cursors or key[0] in newly_active_symbols)
+                and key not in self._known_fill_keys
+            )
             fill_count_by_symbol = _fill_counts_by_symbol(fills)
             next_fill_cursors = (
                 _advance_fill_cursors(

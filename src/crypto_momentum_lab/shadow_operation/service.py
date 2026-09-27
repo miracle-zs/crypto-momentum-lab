@@ -81,7 +81,7 @@ class ShadowOperationConfig:
     lease_owner: str
     max_market_state_age_seconds: float
     resize_tolerance: Decimal
-    hedge_mode: bool = False
+    hedge_mode: bool = True
     warm_stale_states: bool = False
     entry_long_only: bool = False
 

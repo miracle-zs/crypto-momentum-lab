@@ -104,7 +104,7 @@ class LiveControlPlaneRuntime:
         mark_database_ok: Callable[[], None],
         telemetry: LiveTelemetrySink | None = None,
         clock: Clock | None = None,
-        strategy_warmup_ready: bool = True,
+        strategy_warmup_ready: bool = False,
     ) -> None:
         if not session_id.strip():
             raise ValueError("session_id must not be empty")

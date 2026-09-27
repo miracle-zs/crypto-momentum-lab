@@ -31,6 +31,9 @@ from crypto_momentum_lab.persistence.postgres import (
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
+    OrderFlowImpulseConfig,
+)
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     BinanceRestClosedCandle15mSource,
@@ -1730,7 +1733,8 @@ def _paired_runtime_identity(
     strategy_name: str,
     generated_at: datetime,
     source_description: str,
-    compression_breakout: CompressionBreakoutConfig,
+    compression_breakout: CompressionBreakoutConfig | None = None,
+    order_flow_impulse: OrderFlowImpulseConfig | None = None,
     candidate_notional: Decimal,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int,
@@ -1744,6 +1748,7 @@ def _paired_runtime_identity(
         generated_at=generated_at,
         source_description=source_description,
         compression_breakout=compression_breakout,
+        order_flow_impulse=order_flow_impulse,
         candidate_notional=candidate_notional,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
@@ -1828,13 +1833,57 @@ def _parse_optional_non_negative_decimal(
     return parsed
 
 
+def _resolve_order_flow_impulse_for_cli(
+    *,
+    order_flow_min_aggressive_imbalance: Decimal | None = None,
+    cooldown_buckets: int = 0,
+) -> OrderFlowImpulseConfig:
+    try:
+        from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+
+        profile = LiveOrderFlowImpulseProfile.from_environment()
+        config = profile.to_strategy_config()
+        if order_flow_min_aggressive_imbalance is not None:
+            config = OrderFlowImpulseConfig(
+                impulse_window_buckets=config.impulse_window_buckets,
+                baseline_window_buckets=config.baseline_window_buckets,
+                breakout_window_buckets=config.breakout_window_buckets,
+                min_return_pct=config.min_return_pct,
+                min_aggressive_imbalance=order_flow_min_aggressive_imbalance,
+                min_notional_intensity=config.min_notional_intensity,
+                confirmation_buckets=config.confirmation_buckets,
+                cooldown_buckets=cooldown_buckets or config.cooldown_buckets,
+                forward_horizon_buckets=config.forward_horizon_buckets,
+                min_notional_5m_vs_30m=config.min_notional_5m_vs_30m,
+            )
+        return config
+    except Exception:
+        return OrderFlowImpulseConfig(
+            impulse_window_buckets=2,
+            baseline_window_buckets=4,
+            breakout_window_buckets=4,
+            min_return_pct=Decimal("0.0075"),
+            min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance
+                if order_flow_min_aggressive_imbalance is not None
+                else Decimal("0.30")
+            ),
+            min_notional_intensity=Decimal("3.0"),
+            confirmation_buckets=1,
+            cooldown_buckets=cooldown_buckets,
+            forward_horizon_buckets=(1,),
+            min_notional_5m_vs_30m=Decimal("1.25"),
+        )
+
+
 def build_runtime_strategy_for_cli(
     *,
     strategy_name: str,
     run_id: str,
     generated_at: datetime,
     source_description: str,
-    compression_breakout: CompressionBreakoutConfig,
+    compression_breakout: CompressionBreakoutConfig | None = None,
+    order_flow_impulse: OrderFlowImpulseConfig | None = None,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int = 300,
@@ -1847,6 +1896,7 @@ def build_runtime_strategy_for_cli(
         generated_at=generated_at,
         source_description=source_description,
         compression_breakout=compression_breakout,
+        order_flow_impulse=order_flow_impulse,
         candidate_notional=candidate_notional,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
@@ -1856,8 +1906,15 @@ def build_runtime_strategy_for_cli(
         "candidate_notional": candidate_notional,
         "candidate_ttl_buckets": candidate_ttl_buckets,
         "signal_interval_seconds": signal_interval_seconds,
-        "compression_breakout": compression_breakout,
     }
+    if compression_breakout is not None:
+        config_payload["compression_breakout"] = compression_breakout
+    if order_flow_impulse is not None:
+        config_payload["order_flow_impulse"] = order_flow_impulse
+    elif strategy_name == "orderflow_impulse":
+        config_payload["order_flow_impulse"] = _resolve_order_flow_impulse_for_cli(
+            order_flow_min_aggressive_imbalance=order_flow_min_aggressive_imbalance,
+        )
     if order_flow_min_aggressive_imbalance is not None:
         config_payload["order_flow_impulse_min_aggressive_imbalance"] = (
             order_flow_min_aggressive_imbalance
@@ -1875,7 +1932,8 @@ def build_runtime_identity_for_cli(
     run_id: str,
     generated_at: datetime,
     source_description: str,
-    compression_breakout: CompressionBreakoutConfig,
+    compression_breakout: CompressionBreakoutConfig | None = None,
+    order_flow_impulse: OrderFlowImpulseConfig | None = None,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int = 300,
@@ -1886,8 +1944,15 @@ def build_runtime_identity_for_cli(
         "candidate_notional": candidate_notional,
         "candidate_ttl_buckets": candidate_ttl_buckets,
         "signal_interval_seconds": signal_interval_seconds,
-        "compression_breakout": compression_breakout,
     }
+    if compression_breakout is not None:
+        config_payload["compression_breakout"] = compression_breakout
+    if order_flow_impulse is not None:
+        config_payload["order_flow_impulse"] = order_flow_impulse
+    elif strategy_name == "orderflow_impulse":
+        config_payload["order_flow_impulse"] = _resolve_order_flow_impulse_for_cli(
+            order_flow_min_aggressive_imbalance=order_flow_min_aggressive_imbalance,
+        )
     if order_flow_min_aggressive_imbalance is not None:
         config_payload["order_flow_impulse_min_aggressive_imbalance"] = (
             order_flow_min_aggressive_imbalance

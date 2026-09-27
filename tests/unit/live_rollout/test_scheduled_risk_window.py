@@ -65,7 +65,7 @@ def test_resolve_scheduled_risk_window_from_env(
     custom_config = _resolve_scheduled_risk_window()
     assert custom_config.reopen_at == time(9, 30)
 
-    # Invalid format falls back gracefully
+    # Invalid format fails closed with ValueError
     monkeypatch.setenv("CML_SCHEDULED_REOPEN_AT", "invalid")
-    fallback_config = _resolve_scheduled_risk_window()
-    assert fallback_config.reopen_at == time(9, 0)
+    with pytest.raises(ValueError, match="Failed to parse CML_SCHEDULED_REOPEN_AT"):
+        _resolve_scheduled_risk_window()

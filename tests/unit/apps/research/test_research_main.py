@@ -214,6 +214,7 @@ def test_order_flow_impulse_study_command_writes_report(
                 confirmation_buckets=2,
                 cooldown_buckets=6,
                 forward_horizon_buckets=(1, 2),
+                min_notional_5m_vs_30m=Decimal("1.25"),
             ),
         )
     ]

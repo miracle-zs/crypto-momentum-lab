@@ -139,19 +139,25 @@ class RuntimePlanCompiler:
         runtime_generation: str | None = None,
         fencing_epoch: int = 1,
         observed_database_revision: str | None = None,
+        strict: bool = False,
     ) -> RuntimePlan:
         """Statically compiles configuration options into an immutable RuntimePlan."""
         user_overrides = overrides or {}
         sources: dict[str, str] = {}
 
-        # 1. Resolve strategy parameters
-        entry_thresh = user_overrides.get("entry_threshold", Decimal("65000.00"))
-        sources["entry_threshold"] = (
-            "override" if "entry_threshold" in user_overrides else "default"
-        )
+        # 1. Resolve strategy parameters - NEVER use hardcoded 65000
+        entry_thresh_raw = user_overrides.get("entry_threshold")
+        if entry_thresh_raw is not None:
+            entry_thresh = Decimal(str(entry_thresh_raw))
+            sources["entry_threshold"] = "override"
+        else:
+            entry_thresh = None
+            sources["entry_threshold"] = "none"
 
         target_notional_raw = user_overrides.get("target_notional")
         if target_notional_raw is None:
+            if strict:
+                raise ValueError("target_notional must be explicitly specified in strict mode")
             target_notional = Decimal("100.00")
             sources["target_notional"] = "default"
         else:
@@ -166,18 +172,26 @@ class RuntimePlanCompiler:
             "override" if "order_type" in user_overrides else "default"
         )
 
-        exit_policy = PositionExitPolicy(
-            max_holding_seconds=user_overrides.get("max_holding_seconds", 1200),
-            mode=PositionExitMode.CANDLE_15M,
-        )
-        sources["exit_policy"] = (
-            "override" if "max_holding_seconds" in user_overrides else "default"
-        )
+        max_holding_raw = user_overrides.get("max_holding_seconds")
+        if max_holding_raw is not None:
+            exit_policy = PositionExitPolicy(
+                max_holding_seconds=int(max_holding_raw),
+                mode=PositionExitMode.CANDLE_15M,
+            )
+            sources["exit_policy"] = "override"
+        elif strict:
+            raise ValueError("max_holding_seconds must be explicitly specified in strict mode")
+        else:
+            exit_policy = PositionExitPolicy(
+                max_holding_seconds=1200,
+                mode=PositionExitMode.CANDLE_15M,
+            )
+            sources["exit_policy"] = "default"
 
         # 2. Compute Hashes
         strat_payload = {
             "strategy_name": strategy_name,
-            "entry_threshold": str(entry_thresh),
+            "entry_threshold": str(entry_thresh) if entry_thresh is not None else None,
             "order_type": order_type.value,
         }
         strat_hash = hashlib.sha256(
@@ -193,22 +207,48 @@ class RuntimePlanCompiler:
         ).hexdigest()
 
         max_order_notional_raw = user_overrides.get("max_order_notional")
-        max_order_notional = (
-            Decimal(str(max_order_notional_raw))
-            if max_order_notional_raw is not None
-            else target_notional
-        )
+        if max_order_notional_raw is not None:
+            max_order_notional = Decimal(str(max_order_notional_raw))
+            sources["max_order_notional"] = "override"
+        elif strict:
+            raise ValueError("max_order_notional must be explicitly specified in strict mode")
+        else:
+            max_order_notional = target_notional
+            sources["max_order_notional"] = "default"
+
+        max_open_positions_raw = user_overrides.get("max_open_positions")
+        if max_open_positions_raw is not None:
+            max_open_positions = int(max_open_positions_raw)
+            sources["max_open_positions"] = "override"
+        elif strict:
+            raise ValueError("max_open_positions must be explicitly specified in strict mode")
+        else:
+            max_open_positions = 4
+            sources["max_open_positions"] = "default"
+
+        max_account_drawdown_raw = user_overrides.get("max_account_drawdown")
+        if max_account_drawdown_raw is not None:
+            max_account_drawdown = str(max_account_drawdown_raw)
+            sources["max_account_drawdown"] = "override"
+        elif strict:
+            raise ValueError("max_account_drawdown must be explicitly specified in strict mode")
+        else:
+            max_account_drawdown = "0.10"
+            sources["max_account_drawdown"] = "default"
+
         max_gross_notional_raw = user_overrides.get("max_gross_notional")
-        max_gross_notional = (
-            Decimal(str(max_gross_notional_raw))
-            if max_gross_notional_raw is not None
-            else target_notional * Decimal("4")
-        )
+        if max_gross_notional_raw is not None:
+            max_gross_notional = Decimal(str(max_gross_notional_raw))
+            sources["max_gross_notional"] = "override"
+        elif strict:
+            raise ValueError("max_gross_notional must be explicitly specified in strict mode")
+        else:
+            max_gross_notional = target_notional * Decimal(str(max_open_positions))
+            sources["max_gross_notional"] = "default"
+
         risk_payload = {
-            "max_open_positions": int(user_overrides.get("max_open_positions", 4)),
-            "max_account_drawdown": str(
-                user_overrides.get("max_account_drawdown", "0.10")
-            ),
+            "max_open_positions": max_open_positions,
+            "max_account_drawdown": max_account_drawdown,
             "max_gross_notional": str(max_gross_notional),
             "max_order_notional": str(max_order_notional),
         }
@@ -224,24 +264,41 @@ class RuntimePlanCompiler:
 
         sizing_model_type = user_overrides.get("sizing_model", "fixed_notional")
         if sizing_model_type == "equity_fraction":
-            fraction = Decimal(str(user_overrides.get("equity_fraction", "0.05")))
+            fraction_raw = user_overrides.get("equity_fraction")
+            if fraction_raw is None and strict:
+                raise ValueError("equity_fraction must be explicitly specified in strict mode")
+            fraction = Decimal(str(fraction_raw if fraction_raw is not None else "0.05"))
             max_notional = Decimal(
                 str(user_overrides.get("max_order_notional", target_notional))
             )
+            min_floor = Decimal(str(user_overrides.get("min_notional_floor", "10.00")))
+            max_leverage = Decimal(str(user_overrides.get("entry_leverage", user_overrides.get("max_leverage", "5.0"))))
+            max_slippage = Decimal(str(user_overrides.get("max_slippage_budget_bps", "10.0")))
+            resize_tol = Decimal(str(user_overrides.get("resize_tolerance", "0.10")))
             sizing_model = EquityFractionSizingModel(
                 fraction_of_equity=fraction,
+                min_notional_floor=min_floor,
                 max_notional_cap=max_notional,
+                max_leverage=max_leverage,
+                max_slippage_budget_bps=max_slippage,
+                resize_tolerance=resize_tol,
             )
         else:
+            max_leverage = Decimal(str(user_overrides.get("entry_leverage", user_overrides.get("max_leverage", "5.0"))))
+            max_slippage = Decimal(str(user_overrides.get("max_slippage_budget_bps", "10.0")))
+            resize_tol = Decimal(str(user_overrides.get("resize_tolerance", "0.05")))
             sizing_model = FixedNotionalSizingModel(
                 target_notional=Decimal(str(target_notional)),
+                max_leverage=max_leverage,
+                max_slippage_budget_bps=max_slippage,
+                resize_tolerance=resize_tol,
             )
 
         policy = EffectivePolicy(
             policy_id=strat_hash[:16],
             strategy_name=strategy_name,
             policy_version=1,
-            entry_threshold=Decimal(str(entry_thresh)),
+            entry_threshold=entry_thresh,
             order_type=order_type,
             target_notional=Decimal(str(target_notional)),
             sizing_model=sizing_model,

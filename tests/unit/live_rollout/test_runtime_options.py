@@ -81,11 +81,20 @@ def test_manual_options_resolve_to_grouped_runtime_config() -> None:
     config = resolve_live_runtime_config(
         _options(entry_order_type=EntryType.LIMIT),
         credentials=_credentials(),
+        environment={
+            "CML_LIVE_IMPULSE_WINDOW_BUCKETS": "2",
+            "CML_LIVE_CONFIRMATION_BUCKETS": "1",
+            "CML_LIVE_MIN_RETURN_PCT": "0.0075",
+            "CML_LIVE_MIN_IMBALANCE": "0.30",
+            "CML_LIVE_MIN_INTENSITY": "3.0",
+            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M": "1.25",
+            "CML_LIVE_COOLDOWN_BUCKETS": "0",
+        },
     )
 
     assert config.identity.session_id == "live-manual"
     assert config.identity.lease_owner == "live-worker"
-    assert config.strategy.entry_positive_gainer_top_count == 100
+    assert config.strategy.entry_positive_gainer_top_count == 30
     assert config.execution.exit_mode is PositionExitMode.CANDLE_15M
     assert config.lifecycle.checkpoint_every_seconds == 60.0
     assert config.lifecycle.checkpoint_phase_seconds == 0.0

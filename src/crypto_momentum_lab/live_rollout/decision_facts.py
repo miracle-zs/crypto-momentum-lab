@@ -136,7 +136,7 @@ class LiveDecisionFactSource:
         *,
         execution_book: ExecutionBook | None = None,
         decision_unit_of_work: AsyncPostgresDecisionUnitOfWork | None = None,
-        hedge_mode: bool = False,
+        hedge_mode: bool = True,
     ) -> None:
         # Legacy persistence arguments remain accepted for callers migrating
         # to the UoW, but live commits never use their background APIs.

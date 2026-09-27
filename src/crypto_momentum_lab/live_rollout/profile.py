@@ -18,13 +18,13 @@ from decimal import Decimal, InvalidOperation
 class LiveOrderFlowImpulseProfile:
     """Validated per-account parameters for ``orderflow_impulse``."""
 
-    impulse_window_buckets: int = 2
-    confirmation_buckets: int = 1
-    min_return_pct: Decimal = Decimal("0.005")
-    min_aggressive_imbalance: Decimal = Decimal("0.30")
-    min_notional_intensity: Decimal = Decimal("4.0")
-    min_notional_5m_vs_30m: Decimal = Decimal("1.50")
-    cooldown_buckets: int = 0
+    impulse_window_buckets: int
+    confirmation_buckets: int
+    min_return_pct: Decimal
+    min_aggressive_imbalance: Decimal
+    min_notional_intensity: Decimal
+    min_notional_5m_vs_30m: Decimal
+    cooldown_buckets: int
 
     def __post_init__(self) -> None:
         if self.impulse_window_buckets <= 1:
@@ -70,73 +70,62 @@ class LiveOrderFlowImpulseProfile:
     ) -> LiveOrderFlowImpulseProfile:
         """Resolve one profile from ``CML_LIVE_*`` environment variables.
 
-        Missing variables use the production primary-account defaults.  An
-        invalid value fails closed before a worker can submit an order.
+        All variables are strictly required. Missing or empty variables fail closed.
         """
 
         values = os.environ if environment is None else environment
-        defaults = cls()
         return cls(
-            impulse_window_buckets=_read_int(
+            impulse_window_buckets=_read_required_int(
                 values,
                 "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
-                defaults.impulse_window_buckets,
             ),
-            confirmation_buckets=_read_int(
+            confirmation_buckets=_read_required_int(
                 values,
                 "CML_LIVE_CONFIRMATION_BUCKETS",
-                defaults.confirmation_buckets,
             ),
-            min_return_pct=_read_decimal(
+            min_return_pct=_read_required_decimal(
                 values,
                 "CML_LIVE_MIN_RETURN_PCT",
-                defaults.min_return_pct,
             ),
-            min_aggressive_imbalance=_read_decimal(
+            min_aggressive_imbalance=_read_required_decimal(
                 values,
                 "CML_LIVE_MIN_IMBALANCE",
-                defaults.min_aggressive_imbalance,
             ),
-            min_notional_intensity=_read_decimal(
+            min_notional_intensity=_read_required_decimal(
                 values,
                 "CML_LIVE_MIN_INTENSITY",
-                defaults.min_notional_intensity,
             ),
-            min_notional_5m_vs_30m=_read_decimal(
+            min_notional_5m_vs_30m=_read_required_decimal(
                 values,
                 "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
-                defaults.min_notional_5m_vs_30m,
             ),
-            cooldown_buckets=_read_int(
+            cooldown_buckets=_read_required_int(
                 values,
                 "CML_LIVE_COOLDOWN_BUCKETS",
-                defaults.cooldown_buckets,
             ),
         )
 
 
-def _read_int(
+def _read_required_int(
     environment: Mapping[str, str],
     name: str,
-    default: int,
 ) -> int:
     raw = environment.get(name)
     if raw is None or not raw.strip():
-        return default
+        raise ValueError(f"Missing required environment variable: {name}")
     try:
         return int(raw.strip())
     except ValueError as error:
         raise ValueError(f"{name} must be an integer") from error
 
 
-def _read_decimal(
+def _read_required_decimal(
     environment: Mapping[str, str],
     name: str,
-    default: Decimal,
 ) -> Decimal:
     raw = environment.get(name)
     if raw is None or not raw.strip():
-        return default
+        raise ValueError(f"Missing required environment variable: {name}")
     try:
         return Decimal(raw.strip())
     except (InvalidOperation, ValueError) as error:

@@ -139,6 +139,7 @@ class PendingEntryReservation(Protocol):
 @dataclass(frozen=True, slots=True)
 class LiveSubmissionConfig:
     run_id: str
+    account_label: str
     resize_tolerance: Decimal
     hedge_mode: bool
     entry_order_type: EntryType
@@ -147,6 +148,8 @@ class LiveSubmissionConfig:
     def __post_init__(self) -> None:
         if not self.run_id.strip():
             raise ValueError("run_id must not be empty")
+        if not self.account_label.strip():
+            raise ValueError("account_label must not be empty")
         if self.resize_tolerance < 0 or self.resize_tolerance >= 1:
             raise ValueError("resize_tolerance must be in [0, 1)")
         if not isinstance(self.entry_order_type, EntryType):
@@ -587,7 +590,9 @@ class LiveCandidateSubmission:
         else:
             position_side = FuturesPositionSide.BOTH
 
-        account_label = getattr(candidate, "account_label", None) or "primary"
+        account_label = getattr(candidate, "account_label", None) or self._config.account_label
+        if not account_label or not str(account_label).strip():
+            raise ValueError("account_label must not be empty")
         position_key = PositionKey(
             environment="live",
             account_label=account_label,

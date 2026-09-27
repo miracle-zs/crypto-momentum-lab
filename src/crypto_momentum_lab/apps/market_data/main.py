@@ -197,12 +197,12 @@ def parse_observed_at(value: str | None) -> datetime:
 def resolve_config_path(value: Path | None) -> Path:
     if value is not None:
         return value
-    return Path(
-        os.environ.get(
-            "CML_ENVIRONMENT_CONFIG",
-            "configs/environments/research.yaml",
+    env_config = os.environ.get("CML_ENVIRONMENT_CONFIG")
+    if not env_config or not env_config.strip():
+        raise typer.BadParameter(
+            "Configuration file must be explicitly specified via --config or CML_ENVIRONMENT_CONFIG"
         )
-    )
+    return Path(env_config.strip())
 
 
 def _market_database_url(default_url: str) -> str:
