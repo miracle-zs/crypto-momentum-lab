@@ -231,3 +231,21 @@ def test_market_connection_changes_fail_closed_and_report_sequence_gaps() -> Non
     assert runtime.market_state_unavailable_reason == "market_state_hub_ready"
     assert telemetry.events[-1]["recovery"] is True
     assert len(refreshes) == 2
+
+
+def test_strategy_warmup_transition_refreshes_entry_gate() -> None:
+    provider = FakeContextProvider()
+    heartbeat_provider = FakeContextProvider()
+    runtime, refreshes, _, _, _, _ = _runtime(
+        provider=provider,
+        heartbeat_provider=heartbeat_provider,
+    )
+
+    runtime.set_strategy_warmup_ready(
+        True,
+        reason="strategy_warmup_ready",
+    )
+
+    assert runtime.strategy_warmup_ready is True
+    assert runtime.strategy_warmup_reason == "strategy_warmup_ready"
+    assert len(refreshes) == 1

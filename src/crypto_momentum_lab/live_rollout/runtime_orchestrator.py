@@ -19,7 +19,6 @@ from datetime import UTC, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -124,7 +123,10 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     live_limits_from_approval,
     poll_live_market_states,
 )
-from crypto_momentum_lab.live_rollout.readiness import LiveReadinessPublisher
+from crypto_momentum_lab.live_rollout.readiness import (
+    LiveReadinessPublisher,
+    ReadinessStrategy,
+)
 from crypto_momentum_lab.live_rollout.resource_lifecycle import LiveResourceLifecycle
 from crypto_momentum_lab.live_rollout.risk_control import (
     LiveRiskControlRuntime,
@@ -738,7 +740,9 @@ async def run_live_daemon(
                 is_lease_active=is_lease_valid,
                 is_emergency_authorized=False,
                 is_universe_ready=is_app_valid,
-                is_collector_healthy=True if live_readiness is None else (live_readiness._latest_market_state_age_seconds is not None),
+                is_collector_healthy=True
+                if live_readiness is None
+                else (live_readiness._latest_market_state_age_seconds is not None),
                 plan_hash=runtime_plan.plan_hash,
                 runtime_generation=runtime_plan.runtime_generation,
                 fencing_epoch=runtime_plan.fencing_epoch,
@@ -1436,9 +1440,8 @@ async def run_live_daemon(
         async def _on_account_snapshot_combined(event: AccountEvent) -> None:
             # The account channel owns and awaits fact ingestion. Publish the
             # ready context only after the execution projection has accepted it.
-            if (
-                execution_coordinator is not None
-                and (event.account_snapshot is not None or event.fills)
+            if execution_coordinator is not None and (
+                event.account_snapshot is not None or event.fills
             ):
                 await execution_coordinator.observe_account_snapshot(
                     event.account_snapshot,
@@ -1520,12 +1523,34 @@ async def run_live_daemon(
             )
         assert entry_runtime is not None
         assert live_readiness is not None
+
+        def observe_live_market_state(
+            state: MarketState15s,
+            *,
+            strategy: ReadinessStrategy,
+            entry_universe_count: int,
+        ) -> None:
+            live_readiness.observe_market_state(
+                state,
+                strategy=strategy,
+                entry_universe_count=entry_universe_count,
+            )
+            warmup_ready = live_readiness.has_warmup_ready_symbols
+            control_plane_runtime.set_strategy_warmup_ready(
+                warmup_ready,
+                reason=(
+                    "strategy_warmup_ready"
+                    if warmup_ready
+                    else "strategy_warmup_incomplete"
+                ),
+            )
+
         market_task = asyncio.create_task(
             daemon.run(
                 _observe_market_states(
                     state_stream,
                     latest_market_states,
-                    on_observed=live_readiness.observe_market_state,
+                    on_observed=observe_live_market_state,
                     strategy=strategy,
                     entry_universe_count=entry_runtime.entry_universe_count,
                 )
