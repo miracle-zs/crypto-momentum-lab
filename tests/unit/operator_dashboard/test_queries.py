@@ -1960,5 +1960,19 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     assert perf_certified["cash_flow_coverage_proof"] == "audited_records_count_1_with_verified_evidence"
     assert perf_certified["cash_flow_corrections_count"] == 1
 
+    # Test proven empty cash flows
+    scalars_mock.all.side_effect = [
+        [snap1, snap2],
+        [],
+    ]
+    perf_proven_empty = await dashboard.account_performance(
+        "primary", window_hours=24, is_empty_proven=True
+    )
+    assert perf_proven_empty["coverage_status"] == "confirmed"
+    assert perf_proven_empty["is_certified"] is True
+    assert perf_proven_empty["cash_flow_coverage_proof"] == "proven_zero_cash_flows"
+    assert perf_proven_empty["net_equity_delta"] is not None
+
+
 
 

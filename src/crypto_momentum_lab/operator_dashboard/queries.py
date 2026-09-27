@@ -547,8 +547,8 @@ class DashboardQueries:
                 )
             ).all()
 
-            effective_start = min(start_time, snaps_list[0].observed_at)
-            effective_end = max(now, snaps_list[-1].observed_at)
+            effective_start = snaps_list[0].observed_at
+            effective_end = snaps_list[-1].observed_at
 
             return build_performance_summary_dict(
                 account_label=account_label,
