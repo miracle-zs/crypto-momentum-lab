@@ -14,6 +14,7 @@ from sqlalchemy.dialects import postgresql
 from crypto_momentum_lab.domain.decision.decision_engine import (
     FrozenDecisionInputs,
     PolicyState,
+    create_authoritative_async_decision_filter,
     create_authoritative_decision_filter,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -32,7 +33,6 @@ from crypto_momentum_lab.domain.market.revision_models import (
     MarketVisibilityMode,
 )
 from crypto_momentum_lab.domain.strategy.models import StrategyDecision
-from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
@@ -134,23 +134,86 @@ class _FakeAsyncSession:
             return _FakeQueryResult()
 
         if "INSERT INTO market_revision_refs" in compiled_str:
+            self._persist_insert(statement, MarketRevisionRefRow, self.rev_rows)
             return _FakeQueryResult()
 
         if "INSERT INTO decision_traces" in compiled_str:
+            self._persist_insert(statement, DecisionTraceRow, self.trace_rows)
             return _FakeQueryResult()
 
         if "SELECT count(decision_traces.decision_id)" in compiled_str:
             return _FakeQueryResult(scalar_val=len(self.trace_rows))
 
         if "FROM decision_traces" in compiled_str:
-            rows = list(self.trace_rows.values())
+            rows = self._matching_rows(statement, self.trace_rows.values())
             row = rows[0] if rows else None
             return _FakeQueryResult(scalar_val=row, scalars_list=rows)
 
         if "FROM market_revision_refs" in compiled_str:
-            return _FakeQueryResult(scalars_list=list(self.rev_rows.values()))
+            return _FakeQueryResult(
+                scalars_list=self._matching_rows(statement, self.rev_rows.values())
+            )
 
         return _FakeQueryResult()
+
+    @staticmethod
+    def _insert_values(statement: Any) -> list[dict[str, Any]]:
+        multi_values = getattr(statement, "_multi_values", ())
+        if multi_values:
+            rows = multi_values[0]
+            return [
+                {
+                    getattr(column, "name", str(column)): value
+                    for column, value in row.items()
+                }
+                for row in rows
+            ]
+        values = getattr(statement, "_values", None) or {}
+        return [
+            {
+                getattr(column, "name", str(column)): getattr(value, "value", value)
+                for column, value in values.items()
+            }
+        ]
+
+    @classmethod
+    def _persist_insert(
+        cls,
+        statement: Any,
+        row_type: type[Any],
+        rows_by_id: dict[str, Any],
+    ) -> None:
+        for values in cls._insert_values(statement):
+            row = row_type(**values)
+            identity = row.decision_id if isinstance(row, DecisionTraceRow) else row.revision_id
+            rows_by_id.setdefault(identity, row)
+
+    @staticmethod
+    def _matching_rows(statement: Any, rows: Any) -> list[Any]:
+        where = getattr(statement, "whereclause", None)
+        if where is None:
+            return list(rows)
+        predicates = list(getattr(where, "clauses", (where,)))
+        matched = []
+        for row in rows:
+            valid = True
+            for predicate in predicates:
+                column = getattr(predicate, "left", None)
+                right = getattr(predicate, "right", None)
+                field_name = getattr(column, "key", None)
+                expected = getattr(right, "value", None)
+                if field_name is None:
+                    continue
+                actual = getattr(row, field_name, None)
+                if isinstance(expected, (list, tuple, set, frozenset)):
+                    valid = actual in expected
+                else:
+                    valid = actual == expected
+                if not valid:
+                    break
+            if valid:
+                matched.append(row)
+        return matched
 
 
 class _FakeSessionFactory:
@@ -271,14 +334,7 @@ async def test_postgres_decision_trace_repository_load() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_decision_fact_source_records_trace_on_decision() -> None:
-    session = _FakeAsyncSession()
-    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))  # type: ignore[arg-type]
-    fact_source = LiveDecisionFactSource(
-        account_label="primary",
-        trace_repository=repo,
-        strategy_name="orderflow_impulse",
-    )
+async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
 
     state = _make_market_state()
     key = PositionKey(
@@ -322,18 +378,23 @@ async def test_live_decision_fact_source_records_trace_on_decision() -> None:
         risk_config_version="risk_v1",
     )
 
-    traces_received: list[DecisionTrace] = []
+    commits: list[tuple[DecisionTrace, object, object]] = []
+    callback_finished = False
 
-    def record_trace(trace: DecisionTrace) -> None:
-        traces_received.append(trace)
-        fact_source.record_trace(trace)
+    async def provide_facts(_state: MarketState15s, _side: object) -> FrozenDecisionInputs:
+        return frozen
 
-    filt = create_authoritative_decision_filter(
+    async def durable_commit(trace: DecisionTrace, result: object, inp: object) -> None:
+        nonlocal callback_finished
+        await asyncio.sleep(0)
+        commits.append((trace, result, inp))
+        callback_finished = True
+
+    filt = create_authoritative_async_decision_filter(
         "orderflow_impulse",
+        fact_provider=provide_facts,
+        durable_decision_commit=durable_commit,
         target_notional=Decimal("500"),
-        fact_provider=lambda s: frozen,
-        on_decision_result=fact_source.on_decision_result,
-        trace_recorder=record_trace,
     )
 
     from crypto_momentum_lab.domain.strategy.models import (
@@ -376,10 +437,11 @@ async def test_live_decision_fact_source_records_trace_on_decision() -> None:
         features={},
     )
     dec = StrategyDecision(signals=(signal,), candidates=(candidate,), rejections=())
-    filt(dec, state)
+    await filt(dec, state)
 
-    assert len(traces_received) == 1
-    trace = traces_received[0]
+    assert len(commits) == 1
+    assert callback_finished
+    trace = commits[0][0]
     assert trace.account_label == "primary"
     assert trace.strategy_name == "orderflow_impulse"
     assert "market_state" in trace.trace_payload
@@ -387,9 +449,6 @@ async def test_live_decision_fact_source_records_trace_on_decision() -> None:
     assert "prior_policy_state" in trace.trace_payload
     assert "output_exit_command" in trace.trace_payload
 
-    # Background async task execution
-    await asyncio.sleep(0.01)
-    assert len(session.statements) >= 3
 
 
 @pytest.mark.asyncio

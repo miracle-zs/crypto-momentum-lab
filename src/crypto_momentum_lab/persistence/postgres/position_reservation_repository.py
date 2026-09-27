@@ -728,6 +728,221 @@ class AsyncPostgresPositionReservationRepository:
                         "conflicted but no active row was found"
                     )
 
+    async def save_reservations_in_session(
+        self,
+        session: AsyncSession,
+        reservations: Sequence[PositionReservation],
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+        batch_quantities: Mapping[str, Decimal] | None = None,
+        proven_position_quantity: Decimal | None = None,
+    ) -> None:
+        """Save reservations on the transaction owned by an execution UoW.
+
+        Live ExecutionBook callers provide the projection's proven total and
+        batch capacities. That avoids making a second, potentially stale account
+        snapshot the authority for a reservation. The legacy standalone helper
+        still reads its historical snapshot when no projection proof is given.
+        """
+        if not reservations:
+            return
+        first = reservations[0]
+        for reservation in reservations:
+            if reservation.position_key.canonical_id != first.position_key.canonical_id:
+                raise ReservationConflictError(
+                    "one reservation transaction cannot span position scopes"
+                )
+        await _acquire_reservation_lock_async(
+            session, f"res_{first.position_key.canonical_id}"
+        )
+        result = await session.execute(
+            select(PositionReservationRow).where(
+                PositionReservationRow.environment == first.position_key.environment,
+                PositionReservationRow.account_label
+                == first.position_key.account_label,
+                PositionReservationRow.symbol == first.position_key.symbol,
+                PositionReservationRow.position_side
+                == first.position_key.position_side.value,
+                PositionReservationRow.status == "ACTIVE",
+            )
+        )
+        active_rows = result.scalars().all()
+        if expected_projection_version is not None:
+            for row in active_rows:
+                if (
+                    row.expected_projection_version is not None
+                    and row.expected_projection_version != expected_projection_version
+                ):
+                    raise ReservationConflictError(
+                        "reservation projection version mismatch: "
+                        f"expected {expected_projection_version}, active "
+                        f"{row.expected_projection_version}"
+                    )
+            if not active_rows:
+                latest = await session.scalar(
+                    select(PositionReservationRow)
+                    .where(
+                        PositionReservationRow.environment
+                        == first.position_key.environment,
+                        PositionReservationRow.account_label
+                        == first.position_key.account_label,
+                        PositionReservationRow.symbol == first.position_key.symbol,
+                        PositionReservationRow.position_side
+                        == first.position_key.position_side.value,
+                    )
+                    .order_by(PositionReservationRow.created_at.desc())
+                    .limit(1)
+                )
+                if (
+                    latest is not None
+                    and latest.expected_projection_version is not None
+                    and _is_stale_projection_version(
+                        expected_projection_version,
+                        latest.expected_projection_version,
+                    )
+                ):
+                    raise ReservationConflictError(
+                        "stale reservation projection version: expected "
+                        f"{expected_projection_version}, latest "
+                        f"{latest.expected_projection_version}"
+                    )
+
+        batch_quantities = batch_quantities or {}
+        active_by_batch: dict[str, Decimal] = {}
+        active_total = Decimal("0")
+        for row in active_rows:
+            remaining = (
+                row.reserved_quantity - row.consumed_quantity - row.released_quantity
+            )
+            active_by_batch[row.batch_id] = (
+                active_by_batch.get(row.batch_id, Decimal("0")) + remaining
+            )
+            active_total += remaining
+
+        pending_by_batch: dict[str, Decimal] = {}
+        now = datetime.now(UTC)
+        for reservation in reservations:
+            existing = await session.get(
+                PositionReservationRow,
+                reservation.reservation_id,
+                with_for_update=True,
+            )
+            if existing is not None:
+                if existing.status != "ACTIVE":
+                    raise ReservationConflictError(
+                        f"reservation {reservation.reservation_id} is terminal"
+                    )
+                _adopt_or_reject_existing(_row_to_reservation(existing), reservation)
+                continue
+            if batch_quantities and reservation.batch_id not in batch_quantities:
+                raise ReservationConflictError(
+                    f"batch {reservation.batch_id} has no proven capacity"
+                )
+            already = pending_by_batch.get(reservation.batch_id, Decimal("0"))
+            _require_batch_capacity(
+                batch_id=reservation.batch_id,
+                reserved_quantity=reservation.reserved_quantity,
+                total_active_for_batch=active_by_batch.get(
+                    reservation.batch_id, Decimal("0")
+                )
+                + already,
+                batch_quantity=batch_quantities.get(reservation.batch_id),
+            )
+            position_amount = proven_position_quantity
+            if position_amount is not None and (
+                not position_amount.is_finite() or position_amount <= Decimal("0")
+            ):
+                raise ReservationConflictError(
+                    "authoritative position quantity must be finite and positive"
+                )
+            if position_amount is None:
+                position_amount = await _load_position_amt_async(session, reservation)
+            _require_capacity(
+                reserved_quantity=reservation.reserved_quantity,
+                total_active=active_total,
+                pos_amt=position_amount,
+            )
+            active_total += reservation.reserved_quantity
+            pending_by_batch[reservation.batch_id] = (
+                already + reservation.reserved_quantity
+            )
+            session.add(
+                PositionReservationRow(
+                    reservation_id=reservation.reservation_id,
+                    environment=reservation.position_key.environment,
+                    account_label=reservation.position_key.account_label,
+                    strategy_name=self._strategy_name,
+                    symbol=reservation.position_key.symbol,
+                    position_side=reservation.position_key.position_side.value,
+                    batch_id=reservation.batch_id,
+                    command_id=reservation.command_id,
+                    client_order_id=None,
+                    reserved_quantity=reservation.reserved_quantity,
+                    consumed_quantity=reservation.consumed_quantity,
+                    released_quantity=reservation.released_quantity,
+                    expected_projection_version=expected_projection_version,
+                    status="ACTIVE",
+                    created_at=reservation.created_at,
+                    updated_at=now,
+                    expires_at=expires_at,
+                )
+            )
+
+    async def update_reservation_in_session(
+        self,
+        session: AsyncSession,
+        reservation: PositionReservation,
+        release_reason: str | None = None,
+    ) -> None:
+        """Apply a monotonic reservation settlement on the shared transaction."""
+        row = await session.get(
+            PositionReservationRow,
+            reservation.reservation_id,
+            with_for_update=True,
+        )
+        if row is None:
+            raise ReservationConflictError(
+                f"reservation {reservation.reservation_id} is missing"
+            )
+        if (
+            row.command_id != reservation.command_id
+            or row.environment != reservation.position_key.environment
+            or row.account_label != reservation.position_key.account_label
+            or row.symbol != reservation.position_key.symbol
+            or row.position_side != reservation.position_key.position_side.value
+            or row.batch_id != reservation.batch_id
+            or row.reserved_quantity != reservation.reserved_quantity
+        ):
+            raise ReservationConflictError(
+                f"reservation {reservation.reservation_id} identity changed"
+            )
+        if (
+            reservation.consumed_quantity < row.consumed_quantity
+            or reservation.released_quantity < row.released_quantity
+            or reservation.consumed_quantity + reservation.released_quantity
+            > row.reserved_quantity
+        ):
+            raise ReservationConflictError(
+                f"reservation {reservation.reservation_id} settlement regressed "
+                "or exceeded its reserved quantity"
+            )
+        now = datetime.now(UTC)
+        status = (
+            "ACTIVE"
+            if reservation.active_quantity > Decimal("0")
+            else (
+                "COMMITTED"
+                if reservation.consumed_quantity > Decimal("0")
+                else "RELEASED"
+            )
+        )
+        row.consumed_quantity = reservation.consumed_quantity
+        row.released_quantity = reservation.released_quantity
+        row.status = status
+        row.updated_at = now
+        row.released_at = now if status == "RELEASED" else None
+        row.release_reason = release_reason
+
     async def update_reservation(
         self,
         reservation: PositionReservation,

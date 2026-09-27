@@ -1,13 +1,13 @@
-"""Build FrozenDecisionInputs from the live daemon runtime context.
+"""Live decision inputs and durable commit coordination.
 
-Never invents READY positions or cash. Missing or incomplete account facts
-yield ``None`` so the decision filter can fail closed.
+Position facts are read directly from the restored ExecutionBook. Context
+supplies only cash, risk, and operational posture; it never reconstructs lots.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -21,126 +21,50 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     FrozenDecisionInputs,
     PolicyState,
 )
+from crypto_momentum_lab.domain.decision.policy_transition import (
+    compute_policy_state_digest,
+)
+from crypto_momentum_lab.domain.execution.execution_book import (
+    ExecutionBook,
+    ExecutionScope,
+)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    FactCoverageStatus,
-    PositionHealthStatus,
-    PositionKey,
-    PositionLedgerBatch,
+    AccountFactStreamScope,
     PositionView,
-    compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
+from crypto_momentum_lab.domain.operational.retention_models import (
+    ConsumerDependency,
+    RecoverySpec,
+)
 from crypto_momentum_lab.domain.risk import StrategyLiveState
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+    AsyncPostgresDecisionUnitOfWork,
+    DecisionCommit,
+    DecisionCommitReceipt,
+)
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+
+log = structlog.get_logger(__name__)
 
 
 def _cash_balance(context: LiveDaemonRuntimeContext) -> Decimal | None:
     snapshot = context.account_snapshot
     if snapshot is None:
         return None
-    usdt = [
-        b.wallet_balance
-        for b in snapshot.balances
-        if getattr(b, "asset", "").upper() in {"USDT", "USDC", "BUSD"}
+    balances = [
+        balance.wallet_balance
+        for balance in snapshot.balances
+        if getattr(balance, "asset", "").upper() in {"USDT", "USDC", "BUSD"}
     ]
-    if not usdt:
+    if not balances:
         return None
-    total = sum(usdt, start=Decimal("0"))
-    return total if total >= Decimal("0") else None
-
-
-def _position_batches(
-    context: LiveDaemonRuntimeContext,
-    symbol: str,
-) -> tuple[PositionLedgerBatch, ...]:
-    batches: list[PositionLedgerBatch] = []
-    for pos in context.managed_positions:
-        if pos.symbol != symbol:
-            continue
-        if pos.batches:
-            for b in pos.batches:
-                batches.append(
-                    PositionLedgerBatch(
-                        batch_id=b.batch_id,
-                        episode_id=f"ep_{symbol}_{pos.opened_at.date()}",
-                        quantity=b.quantity,
-                        original_quantity=b.quantity,
-                        entry_price=b.entry_price,
-                        opened_at=b.opened_at,
-                    )
-                )
-        else:
-            batches.append(
-                PositionLedgerBatch(
-                    batch_id=pos.batch_id or f"live_{symbol}_{pos.opened_at.date()}",
-                    episode_id=f"ep_{symbol}_{pos.opened_at.date()}",
-                    quantity=pos.quantity,
-                    original_quantity=pos.quantity,
-                    entry_price=pos.entry_price,
-                    opened_at=pos.opened_at,
-                )
-            )
-    return tuple(batches)
-
-
-def _snapshot_confirms_zero_position(
-    context: LiveDaemonRuntimeContext,
-    symbol: str,
-    *,
-    account_label: str,
-) -> bool:
-    """Use a current complete account snapshot to prove a symbol is flat.
-
-    Fill cursors are needed to reconstruct an existing position. A symbol with
-    no position or working order can instead be admitted from the account
-    snapshot, allowing its first entry without weakening checks on open lots.
-    """
-    snapshot = getattr(context, "account_snapshot", None)
-    observed_at = getattr(context, "account_observed_at", None)
-    if (
-        snapshot is None
-        or getattr(context, "account_snapshot_version", None) is None
-        or getattr(context, "account_state", None)
-        != ExecutionAccountStatus.READY_READONLY
-        or observed_at is None
-        or snapshot.config.environment != "live"
-        or snapshot.config.account_label != account_label
-        or snapshot.config.observed_at != observed_at
-    ):
-        return False
-
-    normalized_symbol = symbol.strip().upper()
-    if not normalized_symbol or getattr(context, "active_halts", False):
-        return False
-    if normalized_symbol in (
-        getattr(context, "pending_position_symbols", frozenset())
-        | getattr(context, "unmanaged_position_symbols", frozenset())
-    ):
-        return False
-    if any(
-        position.symbol.strip().upper() == normalized_symbol
-        for position in context.managed_positions
-    ):
-        return False
-    if any(
-        position.symbol.strip().upper() == normalized_symbol
-        and position.position_amt != 0
-        for position in snapshot.positions
-    ):
-        return False
-    if any(
-        order.symbol.strip().upper() == normalized_symbol
-        for order in snapshot.open_orders
-    ):
-        return False
-    for order in getattr(context, "unresolved_orders", ()) or ():
-        plan = getattr(order, "plan", None)
-        order_symbol = str(getattr(plan, "symbol", "")).strip().upper()
-        if order_symbol == normalized_symbol:
-            return False
-    return True
+    total = sum(balances, start=Decimal("0"))
+    return total if total >= 0 else None
 
 
 def frozen_decision_inputs_from_context(
@@ -148,88 +72,49 @@ def frozen_decision_inputs_from_context(
     state: MarketState15s,
     *,
     account_label: str,
+    position_view: PositionView | None = None,
     policy_state: PolicyState | None = None,
 ) -> FrozenDecisionInputs | None:
-    """Derive frozen decision facts from real account context.
+    """Combine operational context with one already-read Book view.
 
-    Returns ``None`` when cash or account identity cannot be proven so the
-    filter fails closed instead of trading on synthetic facts.
+    No position, coverage, or zero-balance inference is performed here. A
+    caller that does not supply an authoritative Book view cannot evaluate a
+    live decision.
     """
+    if position_view is None:
+        return None
+    if (
+        position_view.key.environment != "live"
+        or position_view.key.account_label != account_label
+        or position_view.key.symbol != state.symbol
+    ):
+        return None
+    if not position_view.is_ready_for_trade:
+        return None
     cash = _cash_balance(context)
     if cash is None:
         return None
-
-    pos_key = PositionKey(
-        environment="live",
-        account_label=account_label,
-        symbol=state.symbol,
-        position_side=FuturesPositionSide.BOTH,
-    )
-    batches = _position_batches(context, state.symbol)
-
-    pending_or_unmanaged = state.symbol in (
-        getattr(context, "pending_position_symbols", frozenset())
-        | getattr(context, "unmanaged_position_symbols", frozenset())
-    )
-    evidence = getattr(context, "coverage_by_symbol", {}).get(state.symbol)
-    zero_position_snapshot_confirmed = _snapshot_confirms_zero_position(
-        context,
-        state.symbol,
-        account_label=account_label,
-    )
-    coverage = (
-        compose_fact_coverage(
-            evidence,
-            start=state.bucket_start,
-            end=state.bucket_end,
-        )
-        if evidence is not None
-        else None
-    )
+    if context.account_state != ExecutionAccountStatus.READY_READONLY:
+        return None
     if context.strategy_state != StrategyLiveState.ACTIVE:
-        health = PositionHealthStatus.CATCHING_UP
-    elif context.active_halts or pending_or_unmanaged:
-        health = PositionHealthStatus.INCOMPLETE
-    elif (
-        coverage is None or coverage.status != FactCoverageStatus.CONFIRMED
-    ) and not zero_position_snapshot_confirmed:
-        # Without fill coverage or an authoritative empty snapshot, the
-        # position facts are not authoritative.
-        health = PositionHealthStatus.CATCHING_UP
-    else:
-        health = PositionHealthStatus.READY
-
-    projection_version = (
-        f"pv_{account_label}_{state.symbol}_{context.account_snapshot_version}"
-        if context.account_snapshot_version is not None
-        else f"pv_{account_label}_{state.symbol}_unversioned"
-    )
-    risk_version = getattr(context.risk_config, "config_hash", None) or (
-        f"risk_{context.risk_config.created_at.isoformat()}"
+        return None
+    if context.active_halts:
+        return None
+    if state.symbol in (
+        context.pending_position_symbols | context.unmanaged_position_symbols
+    ):
+        return None
+    risk_config = context.risk_config
+    risk_version = getattr(risk_config, "config_hash", None) or (
+        f"risk_{risk_config.created_at.isoformat()}"
     )
     universe_version = (
         f"univ_{context.context_epoch}"
         if context.context_epoch is not None
         else "univ_live"
     )
-
-    pos_view = PositionView(
-        key=pos_key,
-        projection_version=projection_version,
-        input_revision=int(context.context_epoch or 0),
-        event_cut=state.bucket_end,
-        policy_version="live",
-        schema_version="v1",
-        coverage=coverage,
-        active_episode=None,
-        batches=batches,
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        health_status=health,
-        zero_position_snapshot_confirmed=zero_position_snapshot_confirmed,
-    )
     return FrozenDecisionInputs(
-        position_view=pos_view,
+        position_view=position_view,
         cash_balance=cash,
         policy_state=policy_state or PolicyState(),
         universe_version=universe_version,
@@ -237,11 +122,10 @@ def frozen_decision_inputs_from_context(
     )
 
 
-log = structlog.get_logger()
-
-
 class LiveDecisionFactSource:
-    """Mutable holder the market loop updates before each filter call."""
+    """Live authority for Book reads and synchronous durable decisions."""
+
+    _ACCOUNT_EVENT_STREAM_ID = "account_event_hub"
 
     def __init__(
         self,
@@ -249,195 +133,377 @@ class LiveDecisionFactSource:
         trace_repository: Any | None = None,
         strategy_name: str = "orderflow_impulse",
         retention_authority: Any | None = None,
+        *,
+        execution_book: ExecutionBook | None = None,
+        decision_unit_of_work: AsyncPostgresDecisionUnitOfWork | None = None,
+        hedge_mode: bool = False,
     ) -> None:
+        # Legacy persistence arguments remain accepted for callers migrating
+        # to the UoW, but live commits never use their background APIs.
+        del trace_repository, retention_authority
+        if not account_label.strip() or not strategy_name.strip():
+            raise ValueError("account and strategy identity must not be empty")
         self._account_label = account_label
+        self._strategy_name = strategy_name
+        self._policy_key = f"live/{account_label}/{strategy_name}"
+        self._execution_book = execution_book
+        self._decision_uow = decision_unit_of_work
+        self._hedge_mode = hedge_mode
         self._context: LiveDaemonRuntimeContext | None = None
         self._policy_state = PolicyState()
-        self._trace_repository = trace_repository
-        self._strategy_name = strategy_name
-        self._retention_authority = retention_authority
-        self._active_tasks: set[asyncio.Task[Any]] = set()
+        self._policy_revision = 0
+        self._policy_digest = compute_policy_state_digest(self._policy_state)
+        self._stream_id: str | None = None
+        self._stream_epoch: str | None = None
+        self._stream_sequence: int | None = None
         self._exit_handler: Any | None = None
+        self._commit_lock = asyncio.Lock()
 
-    def set_exit_handler(self, handler: Any | None) -> None:
-        self._exit_handler = handler
+    @property
+    def policy_key(self) -> str:
+        return self._policy_key
 
-    async def restore(self) -> None:
-        """Restores policy state from the latest durable decision trace if available."""
-        if self._trace_repository is None:
-            return
-        loader = getattr(self._trace_repository, "load_latest_decision_trace", None)
-        if callable(loader):
-            try:
-                trace = await loader(self._strategy_name, self._account_label)
-                if trace is not None and trace.trace_payload:
-                    st_data = trace.trace_payload.get("next_policy_state")
-                    if st_data:
-                        cooldown_raw = st_data.get(
-                            "cooldown_until_by_symbol"
-                        ) or st_data.get("cooldown_until", {})
-                        anchor_raw = st_data.get(
-                            "anchor_prices_by_symbol"
-                        ) or st_data.get("anchor_prices", {})
-                        intent_raw = st_data.get(
-                            "active_intent_ids_by_symbol"
-                        ) or st_data.get("active_intent_ids", {})
-                        warmup_raw = st_data.get("warmup_status", {})
-                        grace_raw = st_data.get("grace_until_by_symbol") or st_data.get(
-                            "grace_until", {}
-                        )
-                        deadline_raw = st_data.get(
-                            "holding_deadline_by_symbol"
-                        ) or st_data.get("holding_deadline", {})
-                        custom_raw = st_data.get("custom_state", {})
-                        signal_raw = st_data.get("signal_memory", {})
-                        sizing_raw = st_data.get(
-                            "sizing_state_by_symbol"
-                        ) or st_data.get("sizing_state", {})
-
-                        self._policy_state = PolicyState(
-                            policy_version=int(st_data.get("policy_version", 1)),
-                            cooldown_until_by_symbol={
-                                k: datetime.fromisoformat(v)
-                                if isinstance(v, str)
-                                else v
-                                for k, v in cooldown_raw.items()
-                            },
-                            anchor_prices_by_symbol={
-                                k: Decimal(str(v)) for k, v in anchor_raw.items()
-                            },
-                            active_intent_ids_by_symbol=dict(intent_raw),
-                            custom_state=dict(custom_raw),
-                            signal_memory=dict(signal_raw),
-                            warmup_status=dict(warmup_raw),
-                            grace_until_by_symbol={
-                                k: datetime.fromisoformat(v)
-                                if isinstance(v, str)
-                                else v
-                                for k, v in grace_raw.items()
-                            },
-                            holding_deadline_by_symbol={
-                                k: datetime.fromisoformat(v)
-                                if isinstance(v, str)
-                                else v
-                                for k, v in deadline_raw.items()
-                            },
-                            sizing_state_by_symbol=dict(sizing_raw),
-                        )
-                        log.info(
-                            "policy_state_restored_from_durable_trace",
-                            decision_id=trace.decision_id,
-                            account_label=self._account_label,
-                        )
-            except Exception as exc:
-                log.warning("policy_state_restore_failed", error=str(exc))
-
-    def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
-        self._context = context
+    @property
+    def policy_revision(self) -> int:
+        return self._policy_revision
 
     @property
     def current_context(self) -> LiveDaemonRuntimeContext | None:
         return self._context
 
-    def set_policy_state(self, state: PolicyState) -> None:
-        self._policy_state = state
+    @property
+    def current_policy_state(self) -> PolicyState:
+        return self._policy_state
 
-    def record_trace(self, trace: DecisionTrace) -> None:
-        """Saves a trace asynchronously with supervisor tracking."""
-        if self._trace_repository is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(self._safe_persist_trace(trace))
-            self._active_tasks.add(task)
-            task.add_done_callback(self._active_tasks.discard)
-        except RuntimeError:
-            pass
+    def set_execution_book(self, execution_book: ExecutionBook) -> None:
+        if execution_book is None:
+            raise ValueError("execution_book is required")
+        self._execution_book = execution_book
 
-    async def _safe_persist_trace(self, trace: DecisionTrace) -> None:
-        try:
-            if self._trace_repository is not None:
-                await self._trace_repository.save_decision_trace(trace)
-            if self._retention_authority is not None and getattr(
-                trace, "evaluated_market_refs", ()
-            ):
-                earliest_bucket = min(
-                    r.bucket_start for r in trace.evaluated_market_refs
-                )
-                from crypto_momentum_lab.domain.operational.retention_authority import (
-                    RecoverySpec,
-                )
+    def set_exit_handler(self, handler: Any | None) -> None:
+        self._exit_handler = handler
 
-                spec = RecoverySpec(
-                    source_dataset="market_revisions",
-                    earliest_needed_watermark=earliest_bucket,
-                    earliest_checkpoint_id=trace.decision_id,
-                    cold_recovery_supported=True,
+    def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
+        self._context = context
+
+    def bind_account_stream(
+        self,
+        *,
+        stream_id: str,
+        stream_epoch: str,
+        sequence: int,
+    ) -> None:
+        if not stream_id.strip() or not stream_epoch.strip() or sequence <= 0:
+            raise ValueError("account stream identity must be complete and positive")
+        if self._stream_epoch == stream_epoch and (
+            self._stream_sequence is not None and sequence < self._stream_sequence
+        ):
+            raise ValueError("account event sequence regressed")
+        self._stream_id = stream_id
+        self._stream_epoch = stream_epoch
+        self._stream_sequence = sequence
+
+    async def restore(self) -> None:
+        """Restore the newest durable policy head before decision admission."""
+        if self._decision_uow is None:
+            raise RuntimeError("live decision persistence UoW is required")
+        snapshot = await self._decision_uow.load_or_import_policy_state(
+            self._policy_key,
+            strategy_name=self._strategy_name,
+            account_label=self._account_label,
+        )
+        if snapshot is None:
+            default_state = PolicyState()
+            self._policy_state = default_state
+            self._policy_revision = 0
+            self._policy_digest = compute_policy_state_digest(default_state)
+        else:
+            self._policy_state = snapshot.state
+            self._policy_revision = snapshot.revision
+            self._policy_digest = snapshot.state_digest
+        log.info(
+            "durable_policy_state_restored",
+            policy_key=self._policy_key,
+            policy_revision=self._policy_revision,
+        )
+
+    async def build(
+        self,
+        state: MarketState15s,
+        candidate_side: StrategySide | None = None,
+    ) -> FrozenDecisionInputs | None:
+        """Read the exact Book view used by decision and exit allocation."""
+        context = self._context
+        book = self._execution_book
+        if (
+            context is None
+            or book is None
+            or self._stream_id is None
+            or self._stream_epoch is None
+            or self._stream_sequence is None
+        ):
+            return None
+
+        if self._hedge_mode:
+            if candidate_side is not None:
+                position_side = (
+                    FuturesPositionSide.LONG
+                    if candidate_side == StrategySide.LONG
+                    else FuturesPositionSide.SHORT
                 )
-                if hasattr(self._retention_authority, "register_dependency_async"):
-                    await self._retention_authority.register_dependency_async(
-                        consumer_id=f"decision_{trace.decision_id}",
-                        generation=1,
-                        recovery_spec=spec,
+            else:
+                views = await book.list_position_views(
+                    environment="live",
+                    account_label=self._account_label,
+                    event_cut=state.bucket_end,
+                    stream_id=self._stream_id,
+                    stream_epoch=self._stream_epoch,
+                )
+                active_views = tuple(
+                    view
+                    for view in views
+                    if view.key.symbol == state.symbol
+                    and (
+                        view.total_quantity > 0
+                        or view.unallocated_quantity > 0
                     )
-                elif hasattr(self._retention_authority, "register_dependency"):
-                    self._retention_authority.register_dependency(
-                        consumer_id=f"decision_{trace.decision_id}",
-                        generation=1,
-                        recovery_spec=spec,
+                )
+                if len(active_views) != 1:
+                    return None
+                position_side = active_views[0].key.position_side
+        else:
+            position_side = FuturesPositionSide.BOTH
+
+        scope = ExecutionScope(
+            environment="live",
+            account_label=self._account_label,
+            symbol=state.symbol,
+            position_side=position_side,
+        )
+        view = await book.read(
+            scope,
+            event_cut=state.bucket_end,
+            stream_id=self._stream_id,
+            stream_epoch=self._stream_epoch,
+        )
+        expected_stream = AccountFactStreamScope.for_position_key(
+            scope.to_position_key(),
+            stream_id=self._stream_id,
+            stream_epoch=self._stream_epoch,
+        )
+        if view.stream_scope != expected_stream:
+            return None
+        return frozen_decision_inputs_from_context(
+            context,
+            state,
+            account_label=self._account_label,
+            position_view=view,
+            policy_state=self._policy_state,
+        )
+
+    async def commit_decision(
+        self,
+        trace: DecisionTrace,
+        result: DecisionResult,
+        decision_input: DecisionInput,
+    ) -> DecisionCommitReceipt:
+        """Await durable trace/policy/exit commit before any effect is released."""
+        if self._decision_uow is None:
+            raise RuntimeError("live decision persistence UoW is required")
+        if trace.account_label != self._account_label:
+            raise ValueError("decision trace account does not match live source")
+        async with self._commit_lock:
+            prior_state = self._policy_state
+            prior_revision = self._policy_revision
+            prior_digest = compute_policy_state_digest(prior_state)
+            if prior_digest != self._policy_digest:
+                raise RuntimeError("in-memory durable policy head digest diverged")
+            dependencies = _decision_dependencies(trace)
+            commit = DecisionCommit(
+                trace=trace,
+                policy_key=self._policy_key,
+                expected_policy_revision=prior_revision,
+                expected_prior_digest=prior_digest,
+                prior_policy_state=prior_state,
+                next_policy_state=result.next_policy_state,
+                dependencies=dependencies,
+                accepted_exit=result.exit_command,
+            )
+            receipt = await self._decision_uow.commit_decision(commit)
+
+            if getattr(receipt, "is_replay", False):
+                # UoW returns the original durable receipt for an exact retry.
+                # Its trace may still contain an entry candidate or an exit
+                # command; neither may be released a second time here. Pending
+                # exits are handled by the durable outbox recovery path.
+                if receipt.policy_revision > self._policy_revision:
+                    raise RuntimeError(
+                        "replayed decision receipt is ahead of the durable policy head"
                     )
-        except Exception as exc:
-            log.warning(
-                "async_save_decision_trace_failed",
-                decision_id=trace.decision_id,
-                error=str(exc),
+                if receipt.policy_revision == self._policy_revision and (
+                    receipt.next_state_digest != self._policy_digest
+                ):
+                    raise RuntimeError(
+                        "replayed decision receipt disagrees with the durable policy head"
+                    )
+                return receipt
+            if receipt.policy_revision <= self._policy_revision:
+                raise RuntimeError(
+                    "new decision receipt did not advance the durable policy head"
+                )
+            if receipt.policy_revision != prior_revision + 1:
+                raise RuntimeError(
+                    "decision commit receipt skipped the expected policy revision"
+                )
+
+            # Publish only after PostgreSQL's synchronous transaction returns.
+            self._policy_state = result.next_policy_state
+            self._policy_revision = receipt.policy_revision
+            self._policy_digest = receipt.next_state_digest
+
+            if result.exit_command is not None:
+                await self._dispatch_exit(
+                    receipt.decision_id,
+                    result.exit_command,
+                )
+            del decision_input
+            return receipt
+
+    async def recover_pending_exits(self) -> None:
+        if self._decision_uow is None:
+            raise RuntimeError("live decision persistence UoW is required")
+        if self._exit_handler is None:
+            raise RuntimeError("live decision exit handler is not configured")
+        for decision_id, command in await self._decision_uow.load_pending_exits(
+            self._policy_key
+        ):
+            if not await self._exit_matches_current_book(command):
+                log.warning(
+                    "durable_decision_exit_deferred_until_book_ready",
+                    decision_id=decision_id,
+                    command_id=command.command_id,
+                    projection_version=command.expected_projection_version,
+                    stream_id=self._stream_id,
+                    stream_epoch=self._stream_epoch,
+                )
+                continue
+            try:
+                await self._dispatch_exit(decision_id, command)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # The durable row remains PENDING until the coordinator gives
+                # an accepted result and its acknowledgement is persisted.
+                # This allows account/order reconciliation to resolve unknown
+                # POST outcomes without reposting the command.
+                log.exception(
+                    "durable_decision_exit_dispatch_deferred",
+                    decision_id=decision_id,
+                    command_id=command.command_id,
+                )
+
+    async def _exit_matches_current_book(self, command: TradeCommand) -> bool:
+        book = self._execution_book
+        if (
+            book is None
+            or self._stream_id is None
+            or self._stream_epoch is None
+            or command.expected_projection_version is None
+        ):
+            return False
+        key = command.position_key
+        if key.environment != "live" or key.account_label != self._account_label:
+            return False
+        scope = ExecutionScope(
+            environment=key.environment,
+            account_label=key.account_label,
+            symbol=key.symbol,
+            position_side=key.position_side,
+        )
+        view = await book.read(
+            scope,
+            stream_id=self._stream_id,
+            stream_epoch=self._stream_epoch,
+        )
+        expected_scope = AccountFactStreamScope.for_position_key(
+            key,
+            stream_id=self._stream_id,
+            stream_epoch=self._stream_epoch,
+        )
+        return (
+            view.stream_scope == expected_scope
+            and view.is_ready_for_trade
+            and view.projection_version == command.expected_projection_version
+            and command.allocation_plan is not None
+            and command.allocation_plan.projection_version
+            == command.expected_projection_version
+        )
+
+    async def _dispatch_exit(
+        self,
+        decision_id: str,
+        command: TradeCommand,
+    ) -> None:
+        handler = self._exit_handler
+        if handler is None:
+            raise RuntimeError("durable accepted exit has no dispatch handler")
+        if not await self._exit_matches_current_book(command):
+            raise RuntimeError(
+                f"accepted exit {command.command_id} does not match the current "
+                "ready Book projection; its durable outbox remains pending"
+            )
+        result = handler(command)
+        if asyncio.iscoroutine(result):
+            result = await result
+        state = getattr(result, "state", None)
+        state_value = getattr(state, "value", state)
+        if state_value not in {
+            "submitted",
+            "acknowledged",
+            "partially_filled",
+            "filled",
+        }:
+            raise RuntimeError(
+                f"accepted exit {command.command_id} was not durably accepted: "
+                f"{state_value}"
+            )
+        assert self._decision_uow is not None
+        marked = await self._decision_uow.mark_exit_dispatched(
+            decision_id,
+            command.command_id,
+        )
+        if not marked:
+            raise RuntimeError(
+                f"durable accepted exit {decision_id} disappeared before ack"
             )
 
     async def drain(self, timeout_seconds: float = 5.0) -> None:
-        """Awaits all pending background trace persistence tasks before teardown."""
-        if not self._active_tasks:
-            return
-        tasks = list(self._active_tasks)
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
-            log.warning(
-                "drain_traces_timeout",
-                remaining=len(self._active_tasks),
-            )
+        """Compatibility lifecycle hook; all decision commits are inline."""
+        del timeout_seconds
 
-    def on_decision_result(
-        self,
-        result: DecisionResult,
-        decision_input: DecisionInput | None = None,
-    ) -> None:
-        self.set_policy_state(result.next_policy_state)
-        # The engine's trace_recorder owns the complete frozen trace, including
-        # policy, prior state and original candidate. Do not overwrite it with
-        # an incomplete second trace under the same decision ID.
-        if result.exit_command is not None and self._exit_handler is not None:
-            try:
-                res = self._exit_handler(result.exit_command)
-                if inspect.isawaitable(res):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        task = loop.create_task(res)
-                        self._active_tasks.add(task)
-                        task.add_done_callback(self._active_tasks.discard)
-                    except RuntimeError:
-                        pass
-            except Exception as exit_err:
-                log.warning("decision_exit_handler_failed", error=str(exit_err))
 
-    def build(self, state: MarketState15s) -> FrozenDecisionInputs | None:
-        if self._context is None:
-            return None
-        return frozen_decision_inputs_from_context(
-            self._context,
-            state,
-            account_label=self._account_label,
-            policy_state=self._policy_state,
-        )
+def _decision_dependencies(trace: DecisionTrace) -> tuple[ConsumerDependency, ...]:
+    if not trace.evaluated_market_refs:
+        raise ValueError("durable live decision has no market references")
+    earliest_bucket = min(ref.bucket_start for ref in trace.evaluated_market_refs)
+    dependency = ConsumerDependency(
+        consumer_id=f"live-policy:{trace.account_label}:{trace.strategy_name}",
+        dataset_name="market_revisions",
+        generation=1,
+        recovery_spec=RecoverySpec(
+            source_dataset="market_revisions",
+            earliest_needed_watermark=earliest_bucket,
+            earliest_checkpoint_id=trace.decision_id,
+            cold_recovery_supported=True,
+            reason="durable live decision input",
+        ),
+        dependency_version=trace.frame_digest,
+        updated_at=trace.decision_time,
+    )
+    return (dependency,)
+
+
+__all__ = [
+    "LiveDecisionFactSource",
+    "frozen_decision_inputs_from_context",
+]

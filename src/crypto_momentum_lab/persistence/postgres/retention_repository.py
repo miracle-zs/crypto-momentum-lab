@@ -203,6 +203,70 @@ class AsyncPostgresRetentionRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    async def save_dependency_in_session(
+        self,
+        session: AsyncSession,
+        dependency: ConsumerDependency,
+    ) -> None:
+        """Persist a recovery dependency without ending the caller's transaction.
+
+        The minimum recovery watermark is monotonic: a later decision cannot
+        silently authorize pruning facts an earlier decision still needs.
+        Lock failures propagate so a decision commit cannot claim durability
+        without registering its retention contract.
+        """
+        scope = resolve_dataset_scope(dependency.dataset_name)
+        for lock_key in scope.advisory_lock_keys:
+            await session.execute(
+                _RETENTION_ADVISORY_LOCK_SQL,
+                {"lock_key": lock_key},
+            )
+
+        row = await session.get(
+            ConsumerDependencyRow,
+            (dependency.consumer_id, dependency.dataset_name),
+            with_for_update=True,
+        )
+        spec = dependency.recovery_spec
+        if row is not None:
+            if row.recovery_watermark <= spec.earliest_needed_watermark:
+                watermark = row.recovery_watermark
+                checkpoint_id = row.earliest_checkpoint_id
+            else:
+                watermark = spec.earliest_needed_watermark
+                checkpoint_id = spec.earliest_checkpoint_id
+            recovery_deadline = row.recovery_deadline
+            if spec.recovery_deadline is not None and (
+                recovery_deadline is None or spec.recovery_deadline > recovery_deadline
+            ):
+                recovery_deadline = spec.recovery_deadline
+            row.generation = max(row.generation, dependency.generation)
+            row.recovery_watermark = watermark
+            row.earliest_checkpoint_id = checkpoint_id
+            row.recovery_deadline = recovery_deadline
+            row.cold_recovery_supported = (
+                row.cold_recovery_supported and spec.cold_recovery_supported
+            )
+            row.dependency_version = dependency.dependency_version
+            row.reason = spec.reason
+            row.updated_at = dependency.updated_at
+            return
+
+        session.add(
+            ConsumerDependencyRow(
+                consumer_id=dependency.consumer_id,
+                dataset_name=dependency.dataset_name,
+                generation=dependency.generation,
+                recovery_watermark=spec.earliest_needed_watermark,
+                earliest_checkpoint_id=spec.earliest_checkpoint_id,
+                recovery_deadline=spec.recovery_deadline,
+                cold_recovery_supported=spec.cold_recovery_supported,
+                dependency_version=dependency.dependency_version,
+                reason=spec.reason,
+                updated_at=dependency.updated_at,
+            )
+        )
+
     async def save_dependency(self, dependency: ConsumerDependency) -> None:
         spec = dependency.recovery_spec
         async with self._session_factory() as session:

@@ -15,15 +15,23 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
+    AccountFillReconciliationCursor,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactConflict,
     AccountFacts,
+    AccountFactStreamScope,
+    AccountFillLoadProvenance,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
-    FactCoverageStatus,
     PositionCheckpoint,
     PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    DurableJournalCut,
+    PositionRecoveryCheckpoint,
 )
 
 
@@ -36,21 +44,40 @@ class AccountFactEnvelope:
     boundary: ExitOrderSubmissionFact | None = None
     coverage: FactCoverageInterval | None = None
     checkpoint: PositionCheckpoint | None = None
+    recovery_checkpoint: PositionRecoveryCheckpoint | None = None
+    conflict: AccountFactConflict | None = None
+    fill_load_provenance: AccountFillLoadProvenance | None = None
 
 
 class AccountJournal:
     """In-memory authoritative journal of account-level facts for a PositionKey."""
 
-    def __init__(self, position_key: PositionKey) -> None:
+    def __init__(
+        self,
+        position_key: PositionKey,
+        *,
+        stream_scope: AccountFactStreamScope | None = None,
+    ) -> None:
+        if stream_scope is not None and not stream_scope.matches(position_key):
+            raise ValueError("stream scope does not match journal position key")
         self._position_key = position_key
+        self._stream_scope = stream_scope
         self._fills_by_id: dict[str, AccountFillEvent] = {}
         self._conflicts: list[AccountFillEvent] = []
+        self._fact_conflicts: list[AccountFactConflict] = []
+        self._integrity_issues: list[str] = []
         self._snapshots: list[AccountPositionSnapshot] = []
         self._boundaries: list[ExitOrderSubmissionFact] = []
         self._coverage: FactCoverageInterval | None = None
         self._checkpoint: PositionCheckpoint | None = None
+        self._recovery_checkpoint: PositionRecoveryCheckpoint | None = None
         self._high_watermark_trade_at: datetime | None = None
         self._has_late_events: bool = False
+        self._late_trade_ids: set[str] = set()
+        self._has_synthetic_fills: bool = False
+        self._prefix_facts_complete: bool = True
+        self._fill_cursor_provenance: AccountFillReconciliationCursor | None = None
+        self._fill_load_provenance: AccountFillLoadProvenance | None = None
         self._revision: int = 0
 
     @property
@@ -63,11 +90,15 @@ class AccountJournal:
 
     @property
     def has_conflicts(self) -> bool:
-        return len(self._conflicts) > 0
+        return len(self._conflicts) > 0 or len(self._fact_conflicts) > 0
 
     @property
     def has_late_events(self) -> bool:
         return self._has_late_events
+
+    @property
+    def stream_scope(self) -> AccountFactStreamScope | None:
+        return self._stream_scope
 
     def append_fill(self, fill: AccountFillEvent) -> bool:
         """
@@ -79,24 +110,67 @@ class AccountJournal:
                 f"Fill symbol {fill.symbol} does not match journal "
                 f"symbol {self._position_key.symbol}"
             )
+        if (
+            fill.environment != self._position_key.environment
+            or fill.account_label != self._position_key.account_label
+        ):
+            raise ValueError(
+                "Fill account identity does not match journal position key"
+            )
+        raw_position_side = (fill.raw_payload or {}).get("positionSide") or (
+            fill.raw_payload or {}
+        ).get("position_side")
+        if (
+            raw_position_side is not None
+            and str(raw_position_side).upper() != self._position_key.position_side.value
+        ):
+            raise ValueError("Fill position side does not match journal position key")
+        if (
+            raw_position_side is None
+            and self._position_key.position_side != FuturesPositionSide.BOTH
+        ):
+            issue = (
+                f"Fill {fill.trade_id} has no positionSide for side-specific journal"
+            )
+            if issue not in self._integrity_issues:
+                self._integrity_issues.append(issue)
+                self._revision += 1
 
         if fill.trade_id in self._fills_by_id:
             existing = self._fills_by_id[fill.trade_id]
-            if (
-                existing.quantity != fill.quantity
-                or existing.price != fill.price
-                or existing.side.upper() != fill.side.upper()
-            ):
+            if not _same_fill(existing, fill):
                 self._conflicts.append(fill)
+                self._has_synthetic_fills = self._has_synthetic_fills or bool(
+                    (fill.raw_payload or {}).get("synthetic_from_order", False)
+                )
+                self._revision += 1
             return False
 
+        self._has_synthetic_fills = self._has_synthetic_fills or bool(
+            (fill.raw_payload or {}).get("synthetic_from_order", False)
+        )
+
+        checkpoint_cut = (
+            self._recovery_checkpoint.event_cut
+            if self._recovery_checkpoint is not None
+            else None
+        )
+        if checkpoint_cut is not None and fill.trade_at <= checkpoint_cut:
+            self._has_late_events = True
+            self._late_trade_ids.add(fill.trade_id)
         if (
             self._high_watermark_trade_at is not None
             and fill.trade_at < self._high_watermark_trade_at
         ):
             self._has_late_events = True
+            self._late_trade_ids.add(fill.trade_id)
         else:
-            self._high_watermark_trade_at = fill.trade_at
+            self._high_watermark_trade_at = max(
+                filter(
+                    None,
+                    (self._high_watermark_trade_at, fill.trade_at),
+                )
+            )
 
         self._fills_by_id[fill.trade_id] = fill
         self._revision += 1
@@ -108,6 +182,15 @@ class AccountJournal:
                 f"Snapshot symbol {snapshot.symbol} does not match "
                 f"journal {self._position_key.symbol}"
             )
+        if (
+            snapshot.environment != self._position_key.environment
+            or snapshot.account_label != self._position_key.account_label
+        ):
+            raise ValueError("Snapshot account identity does not match journal key")
+        if snapshot.position_side.upper() != self._position_key.position_side.value:
+            raise ValueError(
+                "Snapshot position side does not match journal position key"
+            )
         self._snapshots.append(snapshot)
         self._revision += 1
 
@@ -117,12 +200,25 @@ class AccountJournal:
                 f"Boundary symbol {boundary.symbol} does not match "
                 f"journal {self._position_key.symbol}"
             )
+        if boundary.position_side != self._position_key.position_side:
+            raise ValueError("Boundary position side does not match journal key")
         self._boundaries.append(boundary)
         self._revision += 1
 
     def set_coverage(self, coverage: FactCoverageInterval) -> None:
-        self._coverage = coverage
-        self._revision += 1
+        if coverage.stream_scope is not None:
+            if not coverage.stream_scope.matches(self._position_key):
+                raise ValueError("Coverage scope does not match journal position key")
+            if (
+                self._stream_scope is not None
+                and coverage.stream_scope != self._stream_scope
+            ):
+                raise ValueError("Coverage scope does not match journal stream scope")
+        if coverage.load_provenance is not None:
+            self.record_fill_load_provenance(coverage.load_provenance)
+        if self._coverage != coverage:
+            self._coverage = coverage
+            self._revision += 1
 
     def set_checkpoint(self, checkpoint: PositionCheckpoint) -> None:
         if checkpoint.key.canonical_id != self._position_key.canonical_id:
@@ -132,6 +228,145 @@ class AccountJournal:
             )
         self._checkpoint = checkpoint
         self._revision += 1
+
+    def set_recovery_checkpoint(
+        self,
+        checkpoint: PositionRecoveryCheckpoint,
+    ) -> None:
+        if checkpoint.key.canonical_id != self._position_key.canonical_id:
+            raise ValueError("Recovery checkpoint position key does not match journal")
+        if (
+            self._stream_scope is not None
+            and checkpoint.stream_scope != self._stream_scope
+        ):
+            raise ValueError("Recovery checkpoint stream scope does not match journal")
+        if checkpoint.coverage is not None:
+            self.set_coverage(checkpoint.coverage)
+        self._recovery_checkpoint = checkpoint
+        self._high_watermark_trade_at = max(
+            filter(
+                None,
+                (
+                    self._high_watermark_trade_at,
+                    checkpoint.projection.high_watermark_trade_at,
+                ),
+            ),
+            default=None,
+        )
+        self._has_late_events = self._has_late_events or checkpoint.has_late_events
+        self._revision = max(self._revision, checkpoint.source_revision)
+
+    def record_conflict(self, conflict: AccountFactConflict) -> None:
+        if conflict.event_at is not None and conflict.event_at.tzinfo is None:
+            raise ValueError("Conflict event time must be timezone-aware")
+        self._fact_conflicts.append(conflict)
+        self._revision += 1
+
+    def record_integrity_issue(self, issue: str) -> None:
+        normalized = issue.strip()
+        if not normalized:
+            raise ValueError("integrity issue must not be empty")
+        self._integrity_issues.append(normalized)
+        self._revision += 1
+
+    def record_fill_cursor(
+        self,
+        cursor: AccountFillReconciliationCursor,
+    ) -> None:
+        if (
+            cursor.environment != self._position_key.environment
+            or cursor.account_label != self._position_key.account_label
+            or cursor.symbol != self._position_key.symbol
+        ):
+            raise ValueError("fill cursor identity does not match journal position key")
+        if (
+            self._fill_cursor_provenance is not None
+            and cursor.last_checked_at < self._fill_cursor_provenance.last_checked_at
+        ):
+            raise ValueError("fill cursor provenance cannot move backwards")
+        if cursor != self._fill_cursor_provenance:
+            self._fill_cursor_provenance = cursor
+            self._revision += 1
+
+    def record_fill_load_provenance(
+        self,
+        provenance: AccountFillLoadProvenance,
+    ) -> None:
+        if self._stream_scope is None or provenance.stream_scope != self._stream_scope:
+            raise ValueError("fill load provenance does not match journal stream scope")
+        previous = self._fill_load_provenance
+        if previous is not None and previous.load_id == provenance.load_id:
+            if provenance == previous:
+                return
+            if previous.page_exhausted:
+                raise ValueError("completed fill load cannot resume under the same id")
+            if previous.next_from_id is None:
+                raise ValueError("incomplete fill load has no durable resume cursor")
+            if provenance.request_from_id != previous.next_from_id:
+                raise ValueError("fill load resume cursor is discontinuous")
+            if (
+                provenance.scan_origin_from_id != previous.scan_origin_from_id
+                or provenance.scan_origin_start_time_ms
+                != previous.scan_origin_start_time_ms
+                or provenance.source_anchor_id != previous.source_anchor_id
+                or provenance.source_anchor_event_cut
+                != previous.source_anchor_event_cut
+                or provenance.source_anchor_kind != previous.source_anchor_kind
+                or provenance.observed_at < previous.observed_at
+            ):
+                raise ValueError("fill load resume changed its origin or source anchor")
+        elif provenance.scan_origin_from_id is not None:
+            if provenance.request_from_id != provenance.scan_origin_from_id:
+                raise ValueError("new fill load did not start at its declared origin")
+        elif provenance.request_from_id is not None:
+            raise ValueError("new time-origin fill load must start without a cursor")
+        self._fill_load_provenance = provenance
+        self._revision += 1
+
+    @classmethod
+    def from_durable_cut(cls, cut: DurableJournalCut) -> AccountJournal:
+        """Restore the exact persisted cut without manufacturing missing facts."""
+        journal = cls(cut.facts.position_key, stream_scope=cut.scope)
+        for fill in cut.facts.fills:
+            existing = journal._fills_by_id.get(fill.trade_id)
+            if existing is None:
+                journal._fills_by_id[fill.trade_id] = fill
+            elif not _same_fill(existing, fill):
+                journal._conflicts.append(fill)
+        journal._conflicts.extend(cut.facts.conflicting_fills)
+        journal._snapshots = list(cut.facts.snapshots)
+        journal._boundaries = list(cut.facts.exit_boundaries)
+        journal._coverage = cut.facts.coverage
+        journal._checkpoint = cut.facts.checkpoint
+        journal._recovery_checkpoint = cut.checkpoint
+        journal._fact_conflicts = list(cut.facts.fact_conflicts)
+        journal._fact_conflicts = list(
+            dict.fromkeys((*journal._fact_conflicts, *cut.conflicts))
+        )
+        journal._integrity_issues = list(
+            dict.fromkeys((*cut.facts.integrity_issues, *cut.integrity_issues))
+        )
+        journal._high_watermark_trade_at = max(
+            (fill.trade_at for fill in journal._fills_by_id.values()),
+            default=None,
+        )
+        journal._has_late_events = cut.facts.has_late_events or bool(
+            cut.checkpoint and cut.checkpoint.has_late_events
+        )
+        journal._late_trade_ids = {fill.trade_id for fill in cut.facts.late_fills}
+        journal._has_synthetic_fills = cut.facts.has_synthetic_fills or bool(
+            cut.checkpoint and cut.checkpoint.has_synthetic_fills
+        )
+        journal._prefix_facts_complete = cut.facts.prefix_facts_complete
+        journal._fill_cursor_provenance = (
+            cut.facts.fill_cursor_provenance or cut.cursor_provenance
+        )
+        journal._fill_load_provenance = cut.facts.fill_load_provenance
+        journal._revision = max(
+            cut.revision,
+            cut.checkpoint.source_revision if cut.checkpoint is not None else 0,
+        )
+        return journal
 
     def append(self, envelope: AccountFactEnvelope) -> None:
         """Convenience method to ingest any fact envelope."""
@@ -145,6 +380,12 @@ class AccountJournal:
             self.set_coverage(envelope.coverage)
         if envelope.checkpoint is not None:
             self.set_checkpoint(envelope.checkpoint)
+        if envelope.recovery_checkpoint is not None:
+            self.set_recovery_checkpoint(envelope.recovery_checkpoint)
+        if envelope.conflict is not None:
+            self.record_conflict(envelope.conflict)
+        if envelope.fill_load_provenance is not None:
+            self.record_fill_load_provenance(envelope.fill_load_provenance)
 
     def find_latest_zero_crossing(self) -> datetime | None:
         """
@@ -166,32 +407,113 @@ class AccountJournal:
                 latest_zero_fill = f.trade_at
 
         candidates = [t for t in (latest_zero_snap, latest_zero_fill) if t is not None]
+        if self._recovery_checkpoint is not None:
+            candidates.extend(
+                episode.closed_at
+                for episode in self._recovery_checkpoint.projection.archived_episodes
+                if episode.closed_at is not None
+            )
         return max(candidates, default=None)
 
     def read_cut(self, cut: datetime | None = None) -> AccountFacts:
         """Reads immutable AccountFacts bounded by cut (all events <= cut)."""
+        if cut is not None and (cut.tzinfo is None or cut.utcoffset() is None):
+            raise ValueError("cut must be timezone-aware")
         if cut is None:
             fills = tuple(self._fills_by_id.values())
             snapshots = tuple(self._snapshots)
             boundaries = tuple(self._boundaries)
+            conflicts = tuple(self._conflicts)
+            fact_conflicts = tuple(self._fact_conflicts)
+            recovery_checkpoint = self._recovery_checkpoint
+            checkpoint = self._checkpoint
+            cursor_provenance = self._fill_cursor_provenance
+            fill_load_provenance = self._fill_load_provenance
         else:
             fills = tuple(f for f in self._fills_by_id.values() if f.trade_at <= cut)
             snapshots = tuple(s for s in self._snapshots if s.observed_at <= cut)
             boundaries = tuple(b for b in self._boundaries if b.submitted_at <= cut)
-
-        # Build coverage interval
-        coverage = self._coverage
-        if coverage is None and fills:
-            min_time = min(f.trade_at for f in fills)
-            max_time = max(f.trade_at for f in fills)
-            if cut is not None and cut > max_time:
-                max_time = cut
-            coverage = FactCoverageInterval(
-                start_at=min_time,
-                end_at=max_time,
-                has_known_gaps=False,
-                status=FactCoverageStatus.PENDING,
+            conflicts = tuple(f for f in self._conflicts if f.trade_at <= cut)
+            fact_conflicts = tuple(
+                conflict
+                for conflict in self._fact_conflicts
+                if conflict.event_at is None or conflict.event_at <= cut
             )
+            recovery_checkpoint = (
+                self._recovery_checkpoint
+                if self._recovery_checkpoint is not None
+                and self._recovery_checkpoint.event_cut <= cut
+                else None
+            )
+            checkpoint = (
+                self._checkpoint
+                if self._checkpoint is not None and self._checkpoint.event_cut <= cut
+                else None
+            )
+            cursor_provenance = (
+                self._fill_cursor_provenance
+                if self._fill_cursor_provenance is not None
+                and self._fill_cursor_provenance.last_checked_at <= cut
+                else None
+            )
+            fill_load_provenance = (
+                self._fill_load_provenance
+                if self._fill_load_provenance is not None
+                and self._fill_load_provenance.observed_at <= cut
+                else None
+            )
+
+        coverage = self._coverage
+        if cut is not None:
+            if coverage is not None and (
+                coverage.evidence_observed_at is None
+                or coverage.evidence_observed_at > cut
+                or (
+                    coverage.checkpoint_event_cut is not None
+                    and coverage.checkpoint_event_cut > cut
+                )
+            ):
+                coverage = None
+            elif coverage is not None:
+                if coverage.start_at > cut:
+                    coverage = None
+                elif coverage.end_at > cut:
+                    coverage = FactCoverageInterval(
+                        start_at=coverage.start_at,
+                        end_at=cut,
+                        has_known_gaps=coverage.has_known_gaps,
+                        source_cursor=coverage.source_cursor,
+                        status=coverage.status,
+                        confirmed_revision=coverage.confirmed_revision,
+                        stream_scope=coverage.stream_scope,
+                        evidence_observed_at=coverage.evidence_observed_at,
+                        checkpoint_id=coverage.checkpoint_id,
+                        checkpoint_event_cut=coverage.checkpoint_event_cut,
+                        load_provenance=coverage.load_provenance,
+                        page_exhausted=coverage.page_exhausted,
+                        not_truncated=coverage.not_truncated,
+                    )
+
+        has_late_events = (
+            self._has_late_events
+            or any(
+                fill.trade_id in self._late_trade_ids for fill in (*fills, *conflicts)
+            )
+            or bool(recovery_checkpoint and recovery_checkpoint.has_late_events)
+        )
+        late_fills = tuple(
+            fill
+            for fill in (*fills, *conflicts)
+            if fill.trade_id in self._late_trade_ids
+        )
+        has_synthetic_fills = (
+            self._has_synthetic_fills
+            or any(
+                bool((fill.raw_payload or {}).get("synthetic_from_order", False))
+                for fill in fills
+            )
+            or bool(recovery_checkpoint and recovery_checkpoint.has_synthetic_fills)
+        )
 
         return AccountFacts(
             position_key=self._position_key,
@@ -199,6 +521,34 @@ class AccountJournal:
             snapshots=snapshots,
             exit_boundaries=boundaries,
             coverage=coverage,
-            checkpoint=self._checkpoint,
-            has_synthetic_fills=False,
+            checkpoint=checkpoint,
+            has_synthetic_fills=has_synthetic_fills,
+            conflicting_fills=conflicts,
+            has_late_events=has_late_events,
+            stream_scope=self._stream_scope,
+            recovery_checkpoint=recovery_checkpoint,
+            fact_conflicts=fact_conflicts,
+            integrity_issues=tuple(self._integrity_issues),
+            late_fills=late_fills,
+            prefix_facts_complete=self._prefix_facts_complete,
+            fill_cursor_provenance=cursor_provenance,
+            fill_load_provenance=fill_load_provenance,
         )
+
+
+def _same_fill(first: AccountFillEvent, second: AccountFillEvent) -> bool:
+    return (
+        first.environment == second.environment
+        and first.account_label == second.account_label
+        and first.symbol == second.symbol
+        and first.trade_id == second.trade_id
+        and first.order_id == second.order_id
+        and first.side.upper() == second.side.upper()
+        and first.price == second.price
+        and first.quantity == second.quantity
+        and first.realized_pnl == second.realized_pnl
+        and first.fee == second.fee
+        and first.fee_asset == second.fee_asset
+        and first.trade_at == second.trade_at
+        and first.raw_payload == second.raw_payload
+    )

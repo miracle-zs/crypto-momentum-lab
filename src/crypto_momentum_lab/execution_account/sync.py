@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from inspect import signature
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -10,7 +11,10 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillLoadScan,
+    AccountFillPageScan,
     AccountFillReconciliationCursor,
+    AccountFillSourceAnchor,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
     AccountReconciliationRun,
@@ -59,7 +63,9 @@ class ReadOnlyAccountClient(Protocol):
     async def fetch_balances(self) -> tuple[AccountBalanceSnapshot, ...]:
         pass
 
-    async def fetch_positions(self) -> tuple[AccountPositionSnapshot, ...]:
+    async def fetch_positions(
+        self, *, include_flat: bool = False
+    ) -> tuple[AccountPositionSnapshot, ...]:
         pass
 
     async def fetch_open_orders(self) -> tuple[AccountOpenOrderSnapshot, ...]:
@@ -76,6 +82,16 @@ class ReadOnlyAccountClient(Protocol):
         from_id_by_symbol: Mapping[str, int] | None = None,
         start_time_by_symbol: Mapping[str, int] | None = None,
     ) -> tuple[AccountFillEvent, ...]:
+        pass
+
+    async def fetch_fills_with_provenance(
+        self,
+        symbol: str,
+        *,
+        start_time_ms: int,
+        checked_through: datetime,
+        max_pages_per_window: int = 10,
+    ) -> tuple[tuple[AccountFillEvent, ...], AccountFillPageScan]:
         pass
 
 
@@ -148,6 +164,9 @@ class ExecutionAccountSyncConfig:
     recent_fill_cursors: Mapping[str, AccountFillReconciliationCursor] = field(
         default_factory=dict
     )
+    fill_source_anchors: Mapping[tuple[str, str], AccountFillSourceAnchor] = field(
+        default_factory=dict
+    )
     historical_fill_reconciliation_interval_seconds: float = 6 * 60 * 60
     # A historical sweep is deliberately incremental.  Active symbols are
     # always included; this only bounds the closed-symbol backlog so a
@@ -186,6 +205,17 @@ class ExecutionAccountSyncConfig:
                 raise ValueError(
                     "recent_fill_cursors must match the sync account scope"
                 )
+        for identity, anchor in self.fill_source_anchors.items():
+            if len(identity) != 2:
+                raise ValueError("fill_source_anchors keys must be (symbol, side)")
+            symbol, side = (part.strip().upper() for part in identity)
+            if not symbol or not side:
+                raise ValueError("fill_source_anchors keys must not be empty")
+            if (symbol, side) != (
+                anchor.symbol.strip().upper(),
+                anchor.position_side.strip().upper(),
+            ):
+                raise ValueError("fill_source_anchors keys must match anchor identity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +271,7 @@ class ExecutionAccountSyncResult:
     new_fill_keys: frozenset[FillKey] = frozenset()
     fill_count_by_symbol: tuple[tuple[str, int], ...] = ()
     fill_cursor_updates: tuple[AccountFillReconciliationCursor, ...] = ()
+    fill_load_scans: tuple[AccountFillLoadScan, ...] = ()
     fills_catching_up: bool = False
 
 
@@ -638,7 +669,10 @@ class ExecutionAccountSyncService:
 
             balances = await self._client.fetch_balances()
             previous_active_position_keys = set(self._active_position_keys)
-            positions = await self._client.fetch_positions()
+            positions = tuple(
+                _position_cut_for_trade_scan(item)
+                for item in await _fetch_positions_for_reconciliation(self._client)
+            )
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
@@ -650,6 +684,9 @@ class ExecutionAccountSyncService:
             }
             active_fill_symbols.update(
                 order.symbol.strip().upper() for order in open_orders
+            )
+            active_fill_symbols.update(
+                symbol for symbol, _side in self._config.fill_source_anchors
             )
             self._tracked_fill_symbols.update(active_fill_symbols)
             tracked_fill_symbols = self._fill_symbols_for_reconciliation(
@@ -694,28 +731,113 @@ class ExecutionAccountSyncService:
                     continue
                 if symbol not in start_time_by_symbol:
                     start_time_by_symbol[symbol] = historical_start_at
-            fills = (
+            fills_by_key: dict[FillKey, AccountFillEvent] = {}
+            fill_load_scans: list[AccountFillLoadScan] = []
+            scan_fetcher = getattr(self._client, "fetch_fills_with_provenance", None)
+            if include_fills and callable(scan_fetcher):
+                for position in positions:
+                    symbol = position.symbol.strip().upper()
+                    side = position.position_side.strip().upper()
+                    source_anchor = self._config.fill_source_anchors.get(
+                        (symbol, side)
+                    )
+                    if source_anchor is not None:
+                        source_anchor_id = source_anchor.checkpoint_id
+                        source_anchor_cut = source_anchor.event_cut
+                        source_anchor_kind = "recovery_checkpoint"
+                        source_stream_id = source_anchor.stream_id
+                        source_stream_epoch = source_anchor.stream_epoch
+                        if source_anchor_cut >= position.observed_at:
+                            continue
+                    elif position.position_amt == Decimal("0"):
+                        from crypto_momentum_lab.domain.execution.recovery_codec import (
+                            PositionRecoveryCodec,
+                        )
+
+                        source_anchor_id = (
+                            PositionRecoveryCodec.stable_snapshot_anchor_id(position)
+                        )
+                        source_anchor_cut = position.observed_at
+                        source_anchor_kind = "zero_snapshot"
+                        source_stream_id = None
+                        source_stream_epoch = None
+                    else:
+                        # A non-flat snapshot alone cannot invent the missing
+                        # cost basis, batch identities, or fill history.
+                        continue
+                    origin_ms = int(source_anchor_cut.timestamp() * 1000)
+                    if origin_ms > int(position.observed_at.timestamp() * 1000):
+                        continue
+                    scoped_fills, page_scan = await scan_fetcher(
+                        symbol,
+                        start_time_ms=origin_ms,
+                        checked_through=position.observed_at,
+                    )
+                    for fill in scoped_fills:
+                        if fill.trade_at <= position.observed_at:
+                            fills_by_key[(fill.symbol, fill.trade_id)] = fill
+                    fill_load_scans.append(
+                        AccountFillLoadScan(
+                            environment=config.environment,
+                            account_label=config.account_label,
+                            symbol=symbol,
+                            position_side=side,
+                            page_scan=page_scan,
+                            observed_at=position.observed_at,
+                            source_anchor_id=source_anchor_id,
+                            source_anchor_event_cut=source_anchor_cut,
+                            source_anchor_kind=source_anchor_kind,
+                            source_stream_id=source_stream_id,
+                            source_stream_epoch=source_stream_epoch,
+                        )
+                    )
+
+            # The older cursor path still imports real trade rows for symbols
+            # without a verified cut, but it never emits completeness proof.
+            complete_scan_symbols = {
+                item.symbol
+                for item in fill_load_scans
+                if item.page_scan.page_exhausted and not item.page_scan.truncated
+            }
+            fallback_symbols = tuple(
+                sorted(set(tracked_fill_symbols) - complete_scan_symbols)
+            )
+            fallback_from_ids = {
+                symbol: cursor
+                for symbol, cursor in from_id_by_symbol.items()
+                if symbol in fallback_symbols
+            }
+            fallback_start_times = {
+                symbol: cursor
+                for symbol, cursor in start_time_by_symbol.items()
+                if symbol in fallback_symbols
+            }
+            fallback_fills = (
                 await self._client.fetch_recent_fills(
-                    tracked_fill_symbols,
-                    from_id_by_symbol=from_id_by_symbol,
-                    start_time_by_symbol=start_time_by_symbol,
+                    fallback_symbols,
+                    from_id_by_symbol=fallback_from_ids,
+                    start_time_by_symbol=fallback_start_times,
                 )
-                if include_fills and tracked_fill_symbols
+                if include_fills and fallback_symbols
                 else ()
+            )
+            for fill in fallback_fills:
+                fills_by_key[(fill.symbol, fill.trade_id)] = fill
+            fills = tuple(
+                sorted(
+                    fills_by_key.values(),
+                    key=lambda item: (item.trade_at, item.symbol, item.trade_id),
+                )
             )
             incomplete_fill_symbols: set[str] = set(
                 getattr(self._client, "incomplete_fill_symbols", frozenset())
             )
-            fills_catching_up = bool(incomplete_fill_symbols)
-            fill_keys = _fill_keys(fills)
-            new_fill_keys = frozenset(
-                key
-                for key in fill_keys
-                if (
-                    (key[0] in previous_fill_cursors or key[0] in newly_active_symbols)
-                    and key not in self._known_fill_keys
-                )
+            fills_catching_up = bool(incomplete_fill_symbols) or any(
+                not scan.page_scan.page_exhausted or scan.page_scan.truncated
+                for scan in fill_load_scans
             )
+            fill_keys = _fill_keys(fills)
+            new_fill_keys = frozenset(key for key in fill_keys if key not in self._known_fill_keys)
             fill_count_by_symbol = _fill_counts_by_symbol(fills)
             next_fill_cursors = (
                 _advance_fill_cursors(
@@ -766,7 +888,9 @@ class ExecutionAccountSyncService:
                 snapshot=AccountSnapshot(
                     config=account_config,
                     balances=balances,
-                    positions=active_positions,
+                    # Keep every explicit V2 row. Absence in a response is
+                    # never converted into a zero position.
+                    positions=positions,
                     open_orders=open_orders,
                 ),
                 fill_count=len(fills),
@@ -775,6 +899,7 @@ class ExecutionAccountSyncService:
                 new_fill_keys=new_fill_keys,
                 fill_count_by_symbol=fill_count_by_symbol,
                 fill_cursor_updates=fill_cursor_updates,
+                fill_load_scans=tuple(fill_load_scans),
                 fills_catching_up=fills_catching_up,
             )
             assert result.snapshot is not None
@@ -1202,6 +1327,32 @@ class ExecutionAccountSyncService:
         self._last_persisted_process_state = state
         self._last_persisted_process_state_reason = reason
         self._last_persisted_process_state_at = observed_at
+
+
+async def _fetch_positions_for_reconciliation(
+    client: ReadOnlyAccountClient,
+) -> tuple[AccountPositionSnapshot, ...]:
+    fetch_positions = client.fetch_positions
+    try:
+        supports_explicit_flat_rows = "include_flat" in signature(
+            fetch_positions
+        ).parameters
+    except (TypeError, ValueError):
+        supports_explicit_flat_rows = False
+    if supports_explicit_flat_rows:
+        return await fetch_positions(include_flat=True)
+    # Adapters without V2's explicit flat rows remain usable for paper/tests,
+    # but cannot establish a live zero-position anchor.
+    return await fetch_positions()
+
+
+def _position_cut_for_trade_scan(
+    snapshot: AccountPositionSnapshot,
+) -> AccountPositionSnapshot:
+    """Align account facts to Binance's millisecond trade-query boundary."""
+    cut_ms = int(snapshot.observed_at.timestamp() * 1000)
+    cut = datetime.fromtimestamp(cut_ms / 1000, tz=UTC)
+    return replace(snapshot, observed_at=cut)
 
 
 def _balance_value(balance: AccountBalanceSnapshot) -> BalanceValue:

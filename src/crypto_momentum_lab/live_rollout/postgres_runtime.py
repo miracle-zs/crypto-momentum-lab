@@ -50,7 +50,10 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextReader,
     LiveDaemonRuntimeContext,
 )
-from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+from crypto_momentum_lab.live_rollout.exits import (
+    ManagedLivePosition,
+    managed_live_positions_from_views,
+)
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.order_identity_adapter import (
     LegacyOrderIdentityAdapter,
@@ -470,6 +473,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_snapshot: AccountSnapshot | None = None
         self._realtime_account_state: ExecutionAccountStatus | None = None
         self._realtime_account_sequence = 0
+        self._execution_book: Any | None = None
         self._rules_load_tasks: dict[
             str,
             asyncio.Task[SymbolTradingRules],
@@ -506,11 +510,14 @@ class PostgresLiveContextProvider(LiveContextReader):
                     abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
                 )
             ):
-                return replace(
+                return await self._with_execution_book(
+                    replace(
                     current_context,
                     now=now,
                     gate_context=replace(current_context.gate_context, now=now),
                     trading_rules={state.symbol: symbol_rules},
+                    ),
+                    state,
                 )
 
         async with self._context_load_guard():
@@ -547,7 +554,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                         abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
                     )
                 ):
-                    return replace(
+                    return await self._with_execution_book(
+                        replace(
                         current_context,
                         now=now,
                         gate_context=replace(
@@ -555,8 +563,61 @@ class PostgresLiveContextProvider(LiveContextReader):
                             now=now,
                         ),
                         trading_rules={state.symbol: symbol_rules},
+                        ),
+                        state,
                     )
-            return await self._load_context(state)
+            return await self._with_execution_book(
+                await self._load_context(state), state
+            )
+
+    def set_execution_book(self, execution_book: Any) -> None:
+        """Use the restored ExecutionBook as the provider's position source."""
+        if execution_book is None:
+            raise ValueError("execution_book is required")
+        self._execution_book = execution_book
+        self.invalidate_cache()
+
+    async def _with_execution_book(
+        self,
+        context: LiveDaemonRuntimeContext,
+        state: MarketState15s,
+    ) -> LiveDaemonRuntimeContext:
+        book = self._execution_book
+        if book is None:
+            return context
+        views = await book.list_position_views(
+            environment="live",
+            account_label=self._account_label,
+            event_cut=state.bucket_end,
+        )
+        managed = managed_live_positions_from_views(
+            views,
+            unresolved_orders=context.unresolved_orders,
+        )
+        active_symbols = frozenset(position.symbol for position in managed)
+        book_position_symbols = frozenset(
+            view.key.symbol
+            for view in views
+            if view.total_quantity > 0
+            or view.unallocated_quantity > 0
+            or (
+                view.reconciliation_gap is not None
+                and view.reconciliation_gap != 0
+            )
+        )
+        # Old context classification remains useful for pending order and
+        # ownership hazards, but a symbol with Book-backed lots is no longer
+        # classified from legacy order/fill reconstruction.
+        unmanaged = frozenset(context.unmanaged_position_symbols) - (
+            active_symbols | book_position_symbols
+        )
+        unmanaged |= book_position_symbols - active_symbols
+        return replace(
+            context,
+            open_position_symbols=book_position_symbols,
+            managed_positions=managed,
+            unmanaged_position_symbols=unmanaged,
+        )
 
     def _context_load_guard(self) -> asyncio.Lock:
         lock = getattr(self, "_context_load_lock", None)
@@ -1159,6 +1220,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
+            build_managed_positions=self._execution_book is None,
         )
         return (
             process_at,
@@ -1317,6 +1379,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
+            build_managed_positions=self._execution_book is None,
         )
         return (
             snapshot.config.observed_at,
@@ -1600,6 +1663,7 @@ def _classify_live_positions_detailed(
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
     coverage_by_symbol: Mapping[str, CoverageEvidence] | None = None,
+    build_managed_positions: bool = True,
 ) -> tuple[
     tuple[ManagedLivePosition, ...],
     frozenset[str],
@@ -1776,16 +1840,20 @@ def _classify_live_positions_detailed(
                 ):
                     closing_filled_draining = True
         closing_filled = closing_filled_strict or closing_filled_draining
-        batches = _build_position_batches(
-            position=position,
-            side=side,
-            position_side=position_side,
-            matching_orders=matching_orders,
-            fill_times=fill_times,
-            fill_prices=fill_prices,
-            account_fills=account_fills,
-            since_time=resolved_since,
-            coverage_evidence=((coverage_by_symbol or {}).get(position.symbol)),
+        batches = (
+            _build_position_batches(
+                position=position,
+                side=side,
+                position_side=position_side,
+                matching_orders=matching_orders,
+                fill_times=fill_times,
+                fill_prices=fill_prices,
+                account_fills=account_fills,
+                since_time=resolved_since,
+                coverage_evidence=((coverage_by_symbol or {}).get(position.symbol)),
+            )
+            if build_managed_positions
+            else ()
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
@@ -1909,11 +1977,7 @@ async def _load_exit_batch_ids(
     sessions: async_sessionmaker[AsyncSession],
     orders: Sequence[ExchangeOrderRow],
 ) -> dict[str, str]:
-    bindings, _legacy_order_ids = await _load_exit_batch_bindings(
-        sessions,
-        orders,
-    )
-    return bindings
+    return await _load_exit_batch_bindings(sessions, orders)
 
 
 async def _load_exit_batch_bindings(

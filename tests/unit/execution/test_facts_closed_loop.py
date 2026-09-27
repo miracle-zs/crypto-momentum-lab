@@ -42,10 +42,11 @@ def _fill(
     side: str = "BUY",
     symbol: str = "SANDUSDT",
     is_synthetic: bool = False,
+    account_label: str = "account-3",
 ) -> AccountFillEvent:
     return AccountFillEvent(
         environment="live",
-        account_label="account-3",
+        account_label=account_label,
         symbol=symbol,
         trade_id=trade_id,
         order_id="ord_1",
@@ -68,10 +69,11 @@ def _snapshot(
     price: str,
     when: datetime,
     symbol: str = "SANDUSDT",
+    account_label: str = "account-3",
 ) -> AccountPositionSnapshot:
     return AccountPositionSnapshot(
         environment="live",
-        account_label="account-3",
+        account_label=account_label,
         symbol=symbol,
         position_side="LONG",
         position_amt=Decimal(qty),
@@ -286,7 +288,14 @@ def test_ake_external_close_and_reopen_lifecycle_via_journal_and_book() -> None:
 
     # Sep 20 Buy 944 @ 0.105886
     journal.append_fill(
-        _fill("t_sep20_buy", "944", "0.105886", t_sep20_buy, symbol="AKEUSDT")
+        _fill(
+            "t_sep20_buy",
+            "944",
+            "0.105886",
+            t_sep20_buy,
+            symbol="AKEUSDT",
+            account_label="primary",
+        )
     )
     # Sep 20 External Sell 944 @ 0.103064 (position drops to 0)
     journal.append_fill(
@@ -297,14 +306,28 @@ def test_ake_external_close_and_reopen_lifecycle_via_journal_and_book() -> None:
             t_sep20_sell,
             side="SELL",
             symbol="AKEUSDT",
+            account_label="primary",
         )
     )
     # Sep 25 New Buy 2618 @ 0.038197
     journal.append_fill(
-        _fill("t_sep25_buy", "2618", "0.038197", t_sep25_buy, symbol="AKEUSDT")
+        _fill(
+            "t_sep25_buy",
+            "2618",
+            "0.038197",
+            t_sep25_buy,
+            symbol="AKEUSDT",
+            account_label="primary",
+        )
     )
     journal.record_snapshot(
-        _snapshot("2618", "0.038197", t_sep25_buy, symbol="AKEUSDT")
+        _snapshot(
+            "2618",
+            "0.038197",
+            t_sep25_buy,
+            symbol="AKEUSDT",
+            account_label="primary",
+        )
     )
     journal.set_coverage(
         FactCoverageInterval(

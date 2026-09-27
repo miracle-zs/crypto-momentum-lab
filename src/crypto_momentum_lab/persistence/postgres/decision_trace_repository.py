@@ -51,149 +51,267 @@ class PostgresDecisionTraceRepository:
         """Batch-persists DecisionTraces and their market revision refs."""
         if not traces:
             return
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    # Diagnostic plane: do not block on synchronous commit
+                    await session.execute(text("SET LOCAL synchronous_commit = OFF"))
+                    await self.save_decision_traces_in_session(
+                        session, traces, require_revision_payload=False
+                    )
+        except Exception as exc:
+            log.warning(
+                "save_decision_traces_failed", count=len(traces), error=str(exc)
+            )
+            raise
 
-        trace_rows: list[dict[str, Any]] = []
-        revision_rows: list[dict[str, Any]] = []
+    async def save_decision_traces_in_session(
+        self,
+        session: AsyncSession,
+        traces: Sequence[DecisionTrace],
+        *,
+        require_revision_payload: bool = True,
+    ) -> None:
+        """Persist complete immutable traces using the caller's transaction.
+
+        This entrypoint is for the durable decision unit of work. It never
+        commits and never changes ``synchronous_commit``. Existing identifiers
+        are accepted only when every persisted field and referenced market
+        revision matches byte-for-byte at the JSON value level.
+        """
+        if not traces:
+            return
 
         now_utc = datetime.now(UTC)
-
+        trace_rows_by_id: dict[str, dict[str, Any]] = {}
+        revision_rows_by_id: dict[str, dict[str, Any]] = {}
+        embedded_revision_ids: set[str] = set()
         for trace in traces:
             payload = dict(trace.trace_payload)
             if trace.frame_digest and "frame_digest" not in payload:
                 payload["frame_digest"] = trace.frame_digest
             if trace.input_hash and "input_hash" not in payload:
                 payload["input_hash"] = trace.input_hash
+            trace_row = {
+                "decision_id": trace.decision_id,
+                "strategy_name": trace.strategy_name,
+                "account_label": trace.account_label,
+                "decision_time": trace.decision_time,
+                "intent_produced": trace.intent_produced,
+                "intent_id": trace.intent_id,
+                "rejection_reason": trace.rejection_reason,
+                "evaluated_revision_ids": [
+                    ref.revision_id for ref in trace.evaluated_market_refs
+                ],
+                "trace_payload": payload,
+                "created_at": now_utc,
+            }
+            previous_trace = trace_rows_by_id.get(trace.decision_id)
+            if previous_trace is not None and any(
+                previous_trace[name] != trace_row[name]
+                for name in trace_row
+                if name != "created_at"
+            ):
+                raise ValueError(
+                    f"DecisionTrace {trace.decision_id} conflicts within one commit"
+                )
+            trace_rows_by_id.setdefault(trace.decision_id, trace_row)
 
-            rev_ids = [r.revision_id for r in trace.evaluated_market_refs]
-            trace_rows.append(
-                {
-                    "decision_id": trace.decision_id,
-                    "strategy_name": trace.strategy_name,
-                    "account_label": trace.account_label,
-                    "decision_time": trace.decision_time,
-                    "intent_produced": trace.intent_produced,
-                    "intent_id": trace.intent_id,
-                    "rejection_reason": trace.rejection_reason,
-                    "evaluated_revision_ids": rev_ids,
-                    "trace_payload": payload,
-                    "created_at": now_utc,
-                }
-            )
-
-            # If payload has embedded market_state, create ref row if missing
             embedded_state = payload.get("market_state")
             for ref in trace.evaluated_market_refs:
+                has_market_payload = isinstance(embedded_state, dict)
                 ref_payload = (
                     dict(embedded_state)
-                    if isinstance(embedded_state, dict)
-                    else {
-                        "symbol": ref.symbol,
-                        "bucket_start": ref.bucket_start.isoformat(),
-                        "bucket_end": ref.bucket_end.isoformat(),
-                        "content_hash": ref.content_hash,
-                        "synthetic_placeholder": False,
-                    }
+                    if has_market_payload
+                    else {"reference_only": True}
                 )
-                lineage = {
-                    "source_epoch": ref.source_epoch,
-                }
+                lineage = {"source_epoch": ref.source_epoch}
                 if ref.observed_at is not None:
                     lineage["observed_at"] = ref.observed_at.isoformat()
-
-                vis_mode = (
-                    ref.visibility_mode.value
-                    if hasattr(ref.visibility_mode, "value")
-                    else str(ref.visibility_mode)
+                visibility = getattr(ref.visibility_mode, "value", ref.visibility_mode)
+                ref_row = {
+                    "revision_id": ref.revision_id,
+                    "scope": ref.scope,
+                    "symbol": ref.symbol,
+                    "interval": ref.interval,
+                    "bucket_start": ref.bucket_start,
+                    "bucket_end": ref.bucket_end,
+                    "content_hash": ref.content_hash,
+                    "published_at": ref.published_at,
+                    "source_epoch": ref.source_epoch,
+                    "visibility_mode": str(visibility),
+                    "is_canonical": str(visibility) == "canonical",
+                    "payload": ref_payload,
+                    "lineage": lineage,
+                }
+                previous_ref = revision_rows_by_id.get(ref.revision_id)
+                previous_has_payload = ref.revision_id in embedded_revision_ids
+                identity_fields = (
+                    "scope",
+                    "symbol",
+                    "interval",
+                    "bucket_start",
+                    "bucket_end",
+                    "content_hash",
+                    "published_at",
+                    "source_epoch",
+                    "visibility_mode",
+                    "is_canonical",
                 )
-                revision_rows.append(
-                    {
-                        "revision_id": ref.revision_id,
-                        "scope": ref.scope,
-                        "symbol": ref.symbol,
-                        "interval": ref.interval,
-                        "bucket_start": ref.bucket_start,
-                        "bucket_end": ref.bucket_end,
-                        "content_hash": ref.content_hash,
-                        "published_at": ref.published_at,
-                        "source_epoch": ref.source_epoch,
-                        "visibility_mode": vis_mode,
-                        "is_canonical": vis_mode == "canonical",
-                        "payload": ref_payload,
-                        "lineage": lineage,
-                    }
+                if previous_ref is not None and (
+                    any(
+                        previous_ref[name] != ref_row[name]
+                        for name in identity_fields
+                    )
+                    or (
+                        has_market_payload
+                        and previous_has_payload
+                        and previous_ref["payload"] != ref_row["payload"]
+                    )
+                ):
+                    raise ValueError(
+                        f"MarketRevisionRef {ref.revision_id} conflicts within one commit"
+                    )
+                if previous_ref is None or (
+                    has_market_payload and not previous_has_payload
+                ):
+                    revision_rows_by_id[ref.revision_id] = ref_row
+                if has_market_payload:
+                    embedded_revision_ids.add(ref.revision_id)
+
+        trace_rows = list(trace_rows_by_id.values())
+        incoming_trace_ids = list(trace_rows_by_id)
+        trace_values = (
+            "strategy_name",
+            "account_label",
+            "decision_time",
+            "intent_produced",
+            "intent_id",
+            "rejection_reason",
+            "evaluated_revision_ids",
+            "trace_payload",
+        )
+        incoming_by_id = {row["decision_id"]: row for row in trace_rows}
+        incoming_revisions = revision_rows_by_id
+        existing_revisions = (
+            await session.execute(
+                select(MarketRevisionRefRow).where(
+                    MarketRevisionRefRow.revision_id.in_(incoming_revisions)
                 )
-
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    # Diagnostic plane: do not block on synchronous commit
-                    await session.execute(text("SET LOCAL synchronous_commit = OFF"))
-
-                    # Check for conflicting existing records to enforce
-                    # immutable audit trail
-                    incoming_ids = [t.decision_id for t in traces]
-                    stmt_check = select(DecisionTraceRow).where(
-                        DecisionTraceRow.decision_id.in_(incoming_ids)
-                    )
-                    existing_rows = (await session.execute(stmt_check)).scalars().all()
-                    incoming_by_id = {t.decision_id: t for t in traces}
-                    for existing in existing_rows:
-                        incoming = incoming_by_id.get(existing.decision_id)
-                        if incoming is not None:
-                            diffs = []
-                            existing_input_hash = str(
-                                (existing.trace_payload or {}).get("input_hash", "")
-                            )
-                            if (
-                                incoming.input_hash
-                                and incoming.input_hash != existing_input_hash
-                            ):
-                                diffs.append(
-                                    f"input_hash ({existing_input_hash} vs "
-                                    f"{incoming.input_hash})"
-                                )
-                            if incoming.intent_produced != existing.intent_produced:
-                                diffs.append(
-                                    f"intent_produced ({existing.intent_produced} vs "
-                                    f"{incoming.intent_produced})"
-                                )
-                            if incoming.intent_id != existing.intent_id:
-                                diffs.append(
-                                    f"intent_id ({existing.intent_id} vs "
-                                    f"{incoming.intent_id})"
-                                )
-                            if incoming.rejection_reason != existing.rejection_reason:
-                                diffs.append(
-                                    f"rejection_reason ({existing.rejection_reason} vs "
-                                    f"{incoming.rejection_reason})"
-                                )
-                            if diffs:
-                                conflict_details = ", ".join(diffs)
-                                raise ValueError(
-                                    f"Immutable audit conflict: DecisionTrace "
-                                    f"'{existing.decision_id}' already exists with "
-                                    f"conflicting contents: {conflict_details}"
-                                )
-
-                    if revision_rows:
-                        stmt_rev = (
-                            insert(MarketRevisionRefRow)
-                            .values(revision_rows)
-                            .on_conflict_do_nothing(index_elements=["revision_id"])
-                        )
-                        await session.execute(stmt_rev)
-
-                    stmt_trace = (
-                        insert(DecisionTraceRow)
-                        .values(trace_rows)
-                        .on_conflict_do_nothing(index_elements=["decision_id"])
-                    )
-                    await session.execute(stmt_trace)
-        except Exception as exc:
-            log.warning(
-                "save_decision_traces_failed", count=len(traces), error=str(exc)
             )
-            raise
+        ).scalars().all()
+        revision_values = (
+            "scope",
+            "symbol",
+            "interval",
+            "bucket_start",
+            "bucket_end",
+            "content_hash",
+            "published_at",
+            "source_epoch",
+            "visibility_mode",
+            "is_canonical",
+            "payload",
+            "lineage",
+        )
+        existing_revision_ids: set[str] = set()
+        ref_identity_values = revision_values[:10]
+        for existing in existing_revisions:
+            incoming = incoming_revisions[existing.revision_id]
+            existing_revision_ids.add(existing.revision_id)
+            compare_payload = existing.revision_id in embedded_revision_ids
+            if any(
+                getattr(existing, name) != incoming[name]
+                for name in (
+                    revision_values if compare_payload else ref_identity_values
+                )
+            ):
+                raise ValueError(
+                    "Immutable audit conflict: MarketRevisionRef "
+                    f"'{existing.revision_id}' already exists with conflicting contents"
+                )
+
+        missing_reference_only = {
+            revision_id
+            for revision_id in incoming_revisions
+            if revision_id not in embedded_revision_ids
+            and revision_id not in existing_revision_ids
+        }
+        if missing_reference_only and require_revision_payload:
+            raise ValueError(
+                "DecisionTrace references market revisions with no durable payload: "
+                + ", ".join(sorted(missing_reference_only))
+            )
+        missing_revisions = [
+            row
+            for row in revision_rows_by_id.values()
+            if row["revision_id"] not in existing_revision_ids
+            and (
+                row["revision_id"] in embedded_revision_ids
+                or not require_revision_payload
+            )
+        ]
+        if missing_revisions:
+            await session.execute(
+                insert(MarketRevisionRefRow)
+                .values(missing_revisions)
+                .on_conflict_do_nothing(index_elements=["revision_id"])
+            )
+        await session.execute(
+            insert(DecisionTraceRow)
+            .values(trace_rows)
+            .on_conflict_do_nothing(index_elements=["decision_id"])
+        )
+
+        # Re-read after inserts. PostgreSQL waits on a concurrent uniqueness
+        # conflict; this statement then observes the winner and validates it.
+        persisted_traces = (
+            await session.execute(
+                select(DecisionTraceRow).where(
+                    DecisionTraceRow.decision_id.in_(incoming_trace_ids)
+                )
+            )
+        ).scalars().all()
+        persisted_trace_ids = {row.decision_id for row in persisted_traces}
+        if persisted_trace_ids != set(incoming_trace_ids):
+            raise ValueError("DecisionTrace insert did not persist every decision")
+        for existing in persisted_traces:
+            incoming = incoming_by_id[existing.decision_id]
+            if any(getattr(existing, name) != incoming[name] for name in trace_values):
+                raise ValueError(
+                    "Immutable audit conflict: DecisionTrace "
+                    f"'{existing.decision_id}' already exists with conflicting contents"
+                )
+
+        if missing_revisions:
+            persisted_revisions = (
+                await session.execute(
+                    select(MarketRevisionRefRow).where(
+                        MarketRevisionRefRow.revision_id.in_(
+                            [row["revision_id"] for row in missing_revisions]
+                        )
+                    )
+                )
+            ).scalars().all()
+            persisted_revision_ids = {row.revision_id for row in persisted_revisions}
+            if persisted_revision_ids != {
+                row["revision_id"] for row in missing_revisions
+            }:
+                raise ValueError("MarketRevisionRef insert did not persist every ref")
+            for existing in persisted_revisions:
+                incoming = incoming_revisions[existing.revision_id]
+                if any(
+                    getattr(existing, name) != incoming[name]
+                    for name in (
+                        revision_values
+                        if existing.revision_id in embedded_revision_ids
+                        else ref_identity_values
+                    )
+                ):
+                    raise ValueError(
+                        "Immutable audit conflict: MarketRevisionRef "
+                        f"'{existing.revision_id}' has conflicting contents"
+                    )
 
     async def load_decision_trace(self, decision_id: str) -> DecisionTrace | None:
         """Loads a DecisionTrace and resolves its evaluated MarketRevisionRefs."""

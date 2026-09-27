@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -887,6 +887,8 @@ def create_authoritative_decision_filter(
     on_decision_result: Callable[..., None] | None = None,
     trace_recorder: Callable[[DecisionTrace], None] | None = None,
     effective_policy: EffectivePolicy | None = None,
+    clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
+    source_epoch_provider: Callable[[MarketState15s], str] | None = None,
 ) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
     """Authoritative decision filter wrapping DecisionEngine for runtime loops.
 
@@ -903,6 +905,24 @@ def create_authoritative_decision_filter(
     if target_notional <= Decimal("0"):
         raise ValueError("target_notional must be explicitly configured and positive")
     notional = target_notional
+
+    def _clock_sequence(state: MarketState15s) -> int:
+        sequence = (
+            1
+            if clock_sequence_provider is None
+            else clock_sequence_provider(state)
+        )
+        if sequence <= 0:
+            raise ValueError("decision clock sequence must be positive")
+        return sequence
+
+    def _source_epoch(state: MarketState15s) -> str:
+        epoch = (
+            None
+            if source_epoch_provider is None
+            else source_epoch_provider(state)
+        )
+        return epoch or f"ep_{getattr(state, 'environment', None) or 'live'}"
 
     def _reject_all(
         decision: StrategyDecision,
@@ -956,9 +976,9 @@ def create_authoritative_decision_filter(
                     dec_input = build_decision_input(
                         state=state,
                         frozen=frozen,
-                        clock_sequence=1,
+                        clock_sequence=_clock_sequence(state),
                         scope=scope_to_use,
-                        source_epoch=f"ep_{scope_to_use}",
+                        source_epoch=_source_epoch(state),
                         policy=policy,
                     )
                     dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
@@ -1018,9 +1038,9 @@ def create_authoritative_decision_filter(
         dec_input = build_decision_input(
             state=state,
             frozen=frozen,
-            clock_sequence=1,
+            clock_sequence=_clock_sequence(state),
             scope=scope_to_use,
-            source_epoch=f"ep_{scope_to_use}",
+            source_epoch=_source_epoch(state),
             policy=base_policy,
         )
 
@@ -1028,6 +1048,14 @@ def create_authoritative_decision_filter(
         new_rejections: list[StrategyRejection] = list(decision.rejections)
 
         for cand in decision.candidates:
+            # Pin every approved intent to the exact Book projection used by
+            # this decision. Live submission carries this token to
+            # ExecutionBook.act, whose CAS rejects any intervening account
+            # fact update.
+            candidate_features = dict(cand.features)
+            candidate_features["projection_version"] = pos_view.projection_version
+            candidate_features["position_side"] = pos_view.key.position_side.value
+            cand = replace(cand, features=candidate_features)
             policy = (
                 replace(
                     effective_policy,
@@ -1097,6 +1125,106 @@ def create_authoritative_decision_filter(
             signals=decision.signals,
             candidates=tuple(filtered_candidates),
             rejections=tuple(new_rejections),
+            checkpoint=decision.checkpoint,
+        )
+
+    return _filter
+
+
+def create_authoritative_async_decision_filter(
+    strategy_name: str,
+    *,
+    fact_provider: Callable[
+        [MarketState15s, Any | None], Awaitable[FrozenDecisionInputs | None]
+    ],
+    durable_decision_commit: Callable[
+        [DecisionTrace, DecisionResult, DecisionInput], Awaitable[object]
+    ],
+    target_notional: Decimal | None = None,
+    effective_policy: EffectivePolicy | None = None,
+    clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
+    source_epoch_provider: Callable[[MarketState15s], str] | None = None,
+) -> Callable[
+    [StrategyDecision, MarketState15s], Awaitable[StrategyDecision]
+]:
+    """Build the live filter that waits for each durable decision commit.
+
+    The synchronous filter remains the API for paper and research callers.
+    This live adapter evaluates one candidate at a time, waits for its durable
+    trace/policy/exit commit, then asks for the next frozen input so its policy
+    state and revision reflect the commit that just completed.
+    """
+
+    async def evaluate_one(
+        decision: StrategyDecision,
+        state: MarketState15s,
+        candidate_side: Any | None,
+    ) -> StrategyDecision:
+        frozen = await fact_provider(state, candidate_side)
+        if frozen is not None and candidate_side is not None:
+            # The immutable strategy candidate is still a proposal. Bind its
+            # execution identity to the exact authoritative view before the
+            # synchronous domain evaluator sees or traces it.
+            frozen_view = frozen.position_view
+            candidates = tuple(
+                replace(
+                    item,
+                    features={
+                        **item.features,
+                        "projection_version": frozen_view.projection_version,
+                        "position_side": frozen_view.key.position_side.value,
+                    },
+                )
+                if item.side == candidate_side
+                else item
+                for item in decision.candidates
+            )
+            decision = replace(decision, candidates=candidates)
+        traces: list[DecisionTrace] = []
+        observations: list[tuple[DecisionResult, DecisionInput]] = []
+        sync_filter = create_authoritative_decision_filter(
+            strategy_name,
+            target_notional=target_notional,
+            fact_provider=lambda _state: frozen,
+            on_decision_result=lambda result, decision_input: observations.append(
+                (result, decision_input)
+            ),
+            trace_recorder=traces.append,
+            effective_policy=effective_policy,
+            clock_sequence_provider=clock_sequence_provider,
+            source_epoch_provider=source_epoch_provider,
+        )
+        filtered = sync_filter(decision, state)
+        if len(traces) != len(observations):
+            raise RuntimeError(
+                "decision trace and result callbacks produced different counts"
+            )
+        for trace, (result, decision_input) in zip(traces, observations, strict=True):
+            await durable_decision_commit(trace, result, decision_input)
+        return filtered
+
+    async def _filter(
+        decision: StrategyDecision,
+        state: MarketState15s,
+    ) -> StrategyDecision:
+        if not decision.candidates:
+            return await evaluate_one(decision, state, None)
+
+        filtered_candidates: list[OrderIntentCandidate] = []
+        rejections: list[StrategyRejection] = list(decision.rejections)
+        for candidate in decision.candidates:
+            single_candidate = replace(
+                decision,
+                candidates=(candidate,),
+                rejections=(),
+            )
+            filtered = await evaluate_one(single_candidate, state, candidate.side)
+            filtered_candidates.extend(filtered.candidates)
+            rejections.extend(filtered.rejections)
+        return StrategyDecision(
+            signals=decision.signals,
+            candidates=tuple(filtered_candidates),
+            rejections=tuple(rejections),
             checkpoint=decision.checkpoint,
         )
 

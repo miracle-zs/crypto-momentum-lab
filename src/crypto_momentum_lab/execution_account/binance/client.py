@@ -18,6 +18,7 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillPageScan,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
@@ -54,6 +55,8 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
+_FILL_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+_FILL_SCAN_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 
 
 class _EndpointMetric(TypedDict):
@@ -580,6 +583,155 @@ class BinanceUsdMPrivateReadClient:
                 key=lambda fill: (fill.trade_at, fill.symbol, fill.trade_id),
             )
         )
+
+    async def fetch_fills_with_provenance(
+        self,
+        symbol: str,
+        *,
+        start_time_ms: int,
+        checked_through: datetime,
+        max_pages_per_window: int = 10,
+    ) -> tuple[tuple[AccountFillEvent, ...], AccountFillPageScan]:
+        """Fetch a bounded time range and report whether every page was read.
+
+        Binance limits time-based trade queries to seven-day windows and only
+        exposes the most recent three months. A complete response for one
+        bounded window is not enough to claim earlier account history; callers
+        must supply a previously verified position anchor at ``start_time_ms``.
+        """
+        normalized_symbol = _normalize_symbols((symbol,))[0]
+        if type(start_time_ms) is not int or start_time_ms < 0:
+            raise ValueError("start_time_ms must be a non-negative integer")
+        if checked_through.tzinfo is None or checked_through.utcoffset() is None:
+            raise ValueError("checked_through must be timezone-aware")
+        if max_pages_per_window <= 0:
+            raise ValueError("max_pages_per_window must be positive")
+        end_time_ms = math.ceil(checked_through.timestamp() * 1000)
+        if start_time_ms > end_time_ms:
+            raise ValueError("fill scan start must not follow its checked-through cut")
+
+        if start_time_ms < end_time_ms - _FILL_SCAN_RETENTION_MS:
+            return (), AccountFillPageScan(
+                symbol=normalized_symbol,
+                load_id=_fill_scan_load_id(normalized_symbol, start_time_ms, end_time_ms, ()),
+                scan_origin_start_time_ms=start_time_ms,
+                next_from_id=None,
+                page_count=0,
+                page_exhausted=False,
+                truncated=True,
+                checked_through=None,
+            )
+
+        fills: dict[str, AccountFillEvent] = {}
+        page_count = 0
+        cursor_after: int | None = None
+        last_complete_cut_ms: int | None = None
+        truncated = False
+        window_start_ms = start_time_ms
+
+        while window_start_ms <= end_time_ms:
+            window_end_ms = min(
+                window_start_ms + _FILL_SCAN_WINDOW_MS - 1,
+                end_time_ms,
+            )
+            window_page_count = 0
+            cursor: int | None = None
+            window_complete = False
+
+            while window_page_count < max_pages_per_window:
+                params: dict[str, str | int | float | bool | None] = {
+                    "symbol": normalized_symbol,
+                    "limit": 1000,
+                }
+                if cursor is None:
+                    params.update(
+                        {"startTime": window_start_ms, "endTime": window_end_ms}
+                    )
+                else:
+                    # Binance disallows combining fromId with a time window.
+                    # Trade ids are monotone; stop once the bounded window is
+                    # crossed and keep the following time window separate.
+                    params["fromId"] = cursor
+                payload = await self._signed_get("/fapi/v1/userTrades", params)
+                items = _require_sequence_of_mappings(payload)
+                page_count += 1
+                window_page_count += 1
+                if not items:
+                    window_complete = True
+                    break
+
+                parsed: list[AccountFillEvent] = []
+                max_trade_id: int | None = None
+                crossed_window_end = False
+                for item in items:
+                    fill = _account_fill_from_trade_item(
+                        item,
+                        environment=self._environment,
+                        account_label=self._account_label,
+                        fallback_symbol=normalized_symbol,
+                    )
+                    fill_time_ms = int(fill.trade_at.timestamp() * 1000)
+                    if fill_time_ms > window_end_ms:
+                        crossed_window_end = True
+                        break
+                    if fill_time_ms >= window_start_ms:
+                        parsed.append(fill)
+                    if fill.trade_id.isdigit():
+                        trade_id = int(fill.trade_id)
+                        max_trade_id = (
+                            trade_id
+                            if max_trade_id is None
+                            else max(max_trade_id, trade_id)
+                        )
+                for fill in parsed:
+                    fills[fill.trade_id] = fill
+
+                if crossed_window_end or len(items) < 1000:
+                    window_complete = True
+                    break
+                if max_trade_id is None:
+                    truncated = True
+                    break
+                cursor = max_trade_id + 1
+
+            if truncated:
+                cursor_after = cursor
+                break
+            if not window_complete:
+                truncated = True
+                cursor_after = cursor
+                break
+            last_complete_cut_ms = window_end_ms
+            window_start_ms = window_end_ms + 1
+
+        page_exhausted = not truncated and last_complete_cut_ms == end_time_ms
+        checked_cut = checked_through if page_exhausted else (
+            None
+            if last_complete_cut_ms is None
+            else datetime.fromtimestamp(last_complete_cut_ms / 1000, tz=UTC)
+        )
+        ordered_fills = tuple(
+            sorted(
+                fills.values(),
+                key=lambda fill: (fill.trade_at, fill.symbol, fill.trade_id),
+            )
+        )
+        scan = AccountFillPageScan(
+            symbol=normalized_symbol,
+            load_id=_fill_scan_load_id(
+                normalized_symbol,
+                start_time_ms,
+                end_time_ms,
+                ordered_fills,
+            ),
+            scan_origin_start_time_ms=start_time_ms,
+            next_from_id=cursor_after,
+            page_count=page_count,
+            page_exhausted=page_exhausted,
+            truncated=truncated,
+            checked_through=checked_cut,
+        )
+        return ordered_fills, scan
 
     async def start_user_data_stream(self) -> str:
         """Create a Binance USD-M Futures listen key for account events."""
@@ -1334,6 +1486,53 @@ def _normalize_fill_cursors(
             raise ValueError("fill cursors must be non-negative")
         normalized[symbol] = raw_cursor
     return normalized
+
+
+def _account_fill_from_trade_item(
+    item: Mapping[str, object],
+    *,
+    environment: str,
+    account_label: str,
+    fallback_symbol: str,
+) -> AccountFillEvent:
+    symbol = str(item.get("symbol", fallback_symbol)).strip().upper()
+    if symbol != fallback_symbol:
+        raise ValueError("Binance userTrades response contained another symbol")
+    return AccountFillEvent(
+        environment=environment,
+        account_label=account_label,
+        symbol=symbol,
+        trade_id=str(item.get("id", "")),
+        order_id=str(item.get("orderId", "")),
+        side=str(item.get("side", "")),
+        price=_decimal(item.get("price", "0")),
+        quantity=_decimal(item.get("qty", "0")),
+        realized_pnl=_decimal(item.get("realizedPnl", "0")),
+        fee=_decimal(item.get("commission", "0")),
+        fee_asset=str(item.get("commissionAsset", "")),
+        trade_at=datetime.fromtimestamp(
+            int(str(item.get("time", 0))) / 1000,
+            tz=UTC,
+        ),
+        raw_payload=_json_mapping(item),
+    )
+
+
+def _fill_scan_load_id(
+    symbol: str,
+    start_time_ms: int,
+    end_time_ms: int,
+    fills: tuple[AccountFillEvent, ...],
+) -> str:
+    payload = "\x1f".join(
+        (
+            symbol,
+            str(start_time_ms),
+            str(end_time_ms),
+            *(f"{fill.trade_id}:{fill.order_id}:{fill.quantity}:{fill.price}" for fill in fills),
+        )
+    )
+    return "fillscan_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _require_mapping(value: object) -> dict[str, object]:

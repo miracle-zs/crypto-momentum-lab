@@ -14,18 +14,26 @@ Provides strict identity types:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+import hashlib
+import json
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
+    AccountFillReconciliationCursor,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import StrategySide
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        PositionRecoveryCheckpoint,
+    )
 
 
 class FactCoverageStatus(StrEnum):
@@ -53,16 +61,63 @@ class CoverageEvidence:
     fill_checked_through: datetime | None = None
     checkpoint_id: str | None = None
     checkpoint_event_cut: datetime | None = None
+    stream_scope: AccountFactStreamScope | None = None
+    evidence_observed_at: datetime | None = None
+    page_exhausted: bool = False
+    not_truncated: bool = False
+    load_provenance: AccountFillLoadProvenance | None = None
 
-    def proves_complete(self, start: datetime, end: datetime) -> bool:
-        if self.fill_load_start is None or self.fill_checked_through is None:
+    def proves_complete(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        expected_scope: AccountFactStreamScope | None = None,
+    ) -> bool:
+        if (
+            self.fill_load_start is None
+            or self.fill_checked_through is None
+            or type(self.page_exhausted) is not bool
+            or type(self.not_truncated) is not bool
+            or not self.page_exhausted
+            or not self.not_truncated
+            or self.load_provenance is None
+        ):
             return False
         if self.checkpoint_id is None or self.checkpoint_event_cut is None:
             return False
+        if not self.checkpoint_id.strip():
+            return False
+        if (
+            self.checkpoint_event_cut.tzinfo is None
+            or self.checkpoint_event_cut.utcoffset() is None
+        ):
+            return False
+        provenance = self.load_provenance
+        origin_start = provenance.origin_start_at
         return (
-            self.fill_load_start <= start
+            provenance.is_complete
+            and self.stream_scope == provenance.stream_scope
+            and (expected_scope is None or provenance.stream_scope == expected_scope)
+            and origin_start is not None
+            and origin_start == self.fill_load_start
+            and provenance.source_anchor_event_cut <= start
+            and self.fill_load_start <= provenance.source_anchor_event_cut
+            and self.fill_load_start <= start
             and self.fill_checked_through >= end
             and self.checkpoint_event_cut >= end
+            and provenance.checked_through is not None
+            and provenance.checked_through >= end
+            and self.evidence_observed_at == provenance.observed_at
+            and provenance.checked_through == self.checkpoint_event_cut
+            and provenance.checked_through == provenance.observed_at
+            and self.page_exhausted == provenance.page_exhausted
+            and self.not_truncated == (not provenance.truncated)
+            and self.fill_checked_through == provenance.checked_through
+            and (expected_scope is None or self.stream_scope == expected_scope)
+            and self.evidence_observed_at is not None
+            and self.evidence_observed_at.tzinfo is not None
+            and self.evidence_observed_at.utcoffset() is not None
         )
 
 
@@ -71,6 +126,7 @@ def compose_fact_coverage(
     *,
     start: datetime,
     end: datetime,
+    expected_scope: AccountFactStreamScope | None = None,
 ) -> FactCoverageInterval:
     """Build coverage only from proven evidence — never from empty attributes.
 
@@ -82,7 +138,11 @@ def compose_fact_coverage(
     if end < start:
         raise ValueError("coverage end must not precede start")
 
-    if evidence is not None and evidence.proves_complete(start, end):
+    if evidence is not None and evidence.proves_complete(
+        start,
+        end,
+        expected_scope=expected_scope,
+    ):
         checked_through = evidence.fill_checked_through
         checkpoint_cut = evidence.checkpoint_event_cut
         load_start = evidence.fill_load_start
@@ -95,6 +155,13 @@ def compose_fact_coverage(
             source_cursor=evidence.fill_cursor_id,
             status=FactCoverageStatus.CONFIRMED,
             confirmed_revision=None,
+            stream_scope=evidence.stream_scope,
+            evidence_observed_at=evidence.evidence_observed_at,
+            checkpoint_id=evidence.checkpoint_id,
+            checkpoint_event_cut=evidence.checkpoint_event_cut,
+            load_provenance=evidence.load_provenance,
+            page_exhausted=evidence.page_exhausted,
+            not_truncated=evidence.not_truncated,
         )
 
     return FactCoverageInterval(
@@ -103,6 +170,33 @@ def compose_fact_coverage(
         source_cursor=(evidence.fill_cursor_id if evidence is not None else None),
         status=FactCoverageStatus.PENDING,
         confirmed_revision=None,
+        stream_scope=(evidence.stream_scope if evidence is not None else None),
+        evidence_observed_at=(
+            evidence.evidence_observed_at if evidence is not None else None
+        ),
+        checkpoint_id=(
+            evidence.checkpoint_id
+            if evidence is not None
+            and isinstance(evidence.checkpoint_id, str)
+            and evidence.checkpoint_id.strip()
+            and evidence.checkpoint_event_cut is not None
+            and evidence.checkpoint_event_cut.tzinfo is not None
+            and evidence.checkpoint_event_cut.utcoffset() is not None
+            else None
+        ),
+        checkpoint_event_cut=(
+            evidence.checkpoint_event_cut
+            if evidence is not None
+            and isinstance(evidence.checkpoint_id, str)
+            and evidence.checkpoint_id.strip()
+            and evidence.checkpoint_event_cut is not None
+            and evidence.checkpoint_event_cut.tzinfo is not None
+            and evidence.checkpoint_event_cut.utcoffset() is not None
+            else None
+        ),
+        load_provenance=(evidence.load_provenance if evidence is not None else None),
+        page_exhausted=(evidence.page_exhausted if evidence is not None else False),
+        not_truncated=(evidence.not_truncated if evidence is not None else False),
     )
 
 
@@ -175,6 +269,11 @@ class PositionKey:
                 "position_side",
                 FuturesPositionSide(self.position_side),
             )
+        if any(
+            ":" in value
+            for value in (self.environment, self.account_label, self.symbol)
+        ):
+            raise ValueError("position key fields must not contain ':'")
 
     @property
     def canonical_id(self) -> str:
@@ -182,6 +281,180 @@ class PositionKey:
             f"{self.environment}:{self.account_label}:{self.symbol}:"
             f"{self.position_side.value}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFactStreamScope:
+    """Identity of the source stream that supplied account facts.
+
+    ``stream_epoch`` distinguishes independent source continuity windows. A
+    checkpoint from another epoch may still seed a quantity projection, but it
+    cannot prove coverage for this scope by itself.
+    """
+
+    environment: str
+    account_label: str
+    symbol: str
+    position_side: FuturesPositionSide
+    stream_id: str
+    stream_epoch: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "environment",
+            "account_label",
+            "symbol",
+            "stream_id",
+            "stream_epoch",
+        ):
+            if not getattr(self, name).strip():
+                raise ValueError(f"{name} must not be empty")
+        if not isinstance(self.position_side, FuturesPositionSide):
+            object.__setattr__(
+                self,
+                "position_side",
+                FuturesPositionSide(self.position_side),
+            )
+
+    @classmethod
+    def for_position_key(
+        cls,
+        key: PositionKey,
+        *,
+        stream_id: str,
+        stream_epoch: str,
+    ) -> AccountFactStreamScope:
+        return cls(
+            environment=key.environment,
+            account_label=key.account_label,
+            symbol=key.symbol,
+            position_side=key.position_side,
+            stream_id=stream_id,
+            stream_epoch=stream_epoch,
+        )
+
+    def matches(self, key: PositionKey) -> bool:
+        return (
+            self.environment == key.environment
+            and self.account_label == key.account_label
+            and self.symbol == key.symbol
+            and self.position_side == key.position_side
+        )
+
+    @property
+    def canonical_id(self) -> str:
+        return json.dumps(
+            [
+                self.environment,
+                self.account_label,
+                self.symbol,
+                self.position_side.value,
+                self.stream_id,
+                self.stream_epoch,
+            ],
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFillLoadProvenance:
+    """Durable continuity proof for paginated account-fill reconciliation.
+
+    A scan origin alone does not establish historical completeness. Coverage
+    also requires a trusted source anchor, an exhausted non-truncated page
+    chain, and an exact checked-through cut.
+    """
+
+    stream_scope: AccountFactStreamScope
+    load_id: str
+    scan_origin_from_id: int | None
+    scan_origin_start_time_ms: int | None
+    request_from_id: int | None
+    next_from_id: int | None
+    page_count: int
+    page_exhausted: bool
+    truncated: bool
+    checked_through: datetime | None
+    observed_at: datetime
+    source_anchor_id: str
+    source_anchor_event_cut: datetime
+    source_anchor_kind: str
+
+    def __post_init__(self) -> None:
+        if not self.load_id.strip():
+            raise ValueError("fill load id must not be empty")
+        if not self.source_anchor_id.strip():
+            raise ValueError("fill scan requires a source anchor")
+        if self.source_anchor_kind not in {"zero_snapshot", "recovery_checkpoint"}:
+            raise ValueError("unsupported fill scan source anchor kind")
+        if (self.scan_origin_from_id is None) == (
+            self.scan_origin_start_time_ms is None
+        ):
+            raise ValueError("fill scan requires exactly one source origin")
+        for name, value in (
+            ("scan_origin_from_id", self.scan_origin_from_id),
+            ("scan_origin_start_time_ms", self.scan_origin_start_time_ms),
+            ("request_from_id", self.request_from_id),
+            ("next_from_id", self.next_from_id),
+        ):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or null")
+        if type(self.page_count) is not int or self.page_count < 0:
+            raise ValueError("fill scan page_count must be a non-negative integer")
+        if type(self.page_exhausted) is not bool or type(self.truncated) is not bool:
+            raise ValueError("fill scan pagination flags must be booleans")
+        if self.page_exhausted and (self.truncated or self.next_from_id is not None):
+            raise ValueError("exhausted fill scan cannot be truncated or have a cursor")
+        if self.page_exhausted and self.page_count == 0:
+            raise ValueError("exhausted fill scan must record at least one page")
+        if self.checked_through is not None and (
+            self.checked_through.tzinfo is None
+            or self.checked_through.utcoffset() is None
+        ):
+            raise ValueError("fill scan checked_through must be timezone-aware")
+        for name, value in (
+            ("observed_at", self.observed_at),
+            ("source_anchor_event_cut", self.source_anchor_event_cut),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"fill scan {name} must be timezone-aware")
+        if self.checked_through is not None and self.checked_through > self.observed_at:
+            raise ValueError("fill scan checked_through is after its observation")
+
+    @property
+    def is_complete(self) -> bool:
+        return (
+            self.page_exhausted
+            and not self.truncated
+            and self.next_from_id is None
+            and self.checked_through is not None
+        )
+
+    @property
+    def origin_start_at(self) -> datetime | None:
+        if self.scan_origin_start_time_ms is None:
+            return None
+        return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
+            milliseconds=self.scan_origin_start_time_ms
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFactConflict:
+    """A persisted fact identity or payload conflict that blocks authority."""
+
+    event_kind: str
+    event_id: str
+    details: str
+    event_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.event_kind.strip():
+            raise ValueError("event_kind must not be empty")
+        if not self.event_id.strip():
+            raise ValueError("event_id must not be empty")
+        if self.event_at is not None and self.event_at.tzinfo is None:
+            raise ValueError("event_at must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +467,13 @@ class FactCoverageInterval:
     source_cursor: str | None = None
     status: FactCoverageStatus = FactCoverageStatus.CONFIRMED
     confirmed_revision: int | None = None
+    stream_scope: AccountFactStreamScope | None = None
+    evidence_observed_at: datetime | None = None
+    checkpoint_id: str | None = None
+    checkpoint_event_cut: datetime | None = None
+    load_provenance: AccountFillLoadProvenance | None = None
+    page_exhausted: bool = False
+    not_truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.start_at.tzinfo is None:
@@ -202,6 +482,39 @@ class FactCoverageInterval:
             raise ValueError("end_at must be timezone-aware")
         if self.end_at < self.start_at:
             raise ValueError("end_at must not precede start_at")
+        if self.evidence_observed_at is not None and (
+            self.evidence_observed_at.tzinfo is None
+            or self.evidence_observed_at.utcoffset() is None
+        ):
+            raise ValueError("evidence_observed_at must be timezone-aware")
+        if (self.checkpoint_id is None) != (self.checkpoint_event_cut is None):
+            raise ValueError(
+                "coverage checkpoint id and event cut must appear together"
+            )
+        if self.checkpoint_id is not None and not self.checkpoint_id.strip():
+            raise ValueError("coverage checkpoint id must not be empty")
+        if self.checkpoint_event_cut is not None and (
+            self.checkpoint_event_cut.tzinfo is None
+            or self.checkpoint_event_cut.utcoffset() is None
+        ):
+            raise ValueError("coverage checkpoint cut must be timezone-aware")
+        if (
+            type(self.page_exhausted) is not bool
+            or type(self.not_truncated) is not bool
+        ):
+            raise ValueError("coverage pagination flags must be booleans")
+        if self.load_provenance is not None:
+            if self.stream_scope != self.load_provenance.stream_scope:
+                raise ValueError("coverage load provenance scope mismatch")
+            if (
+                self.evidence_observed_at is not None
+                and self.load_provenance.observed_at > self.evidence_observed_at
+            ):
+                raise ValueError("coverage predates its load provenance")
+            if self.page_exhausted != self.load_provenance.page_exhausted:
+                raise ValueError("coverage pagination exhaustion mismatch")
+            if self.not_truncated == self.load_provenance.truncated:
+                raise ValueError("coverage truncation status mismatch")
         if not isinstance(self.status, FactCoverageStatus):
             object.__setattr__(
                 self,
@@ -211,15 +524,35 @@ class FactCoverageInterval:
 
     def covers(self, point_in_time: datetime) -> bool:
         """Returns True if point_in_time is within interval without known gaps."""
-        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
+        if not self._is_authoritative():
             return False
         return self.start_at <= point_in_time <= self.end_at
 
     def covers_range(self, start: datetime, end: datetime) -> bool:
         """Returns True if [start, end] is within interval without known gaps."""
-        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
+        if not self._is_authoritative():
             return False
         return self.start_at <= start and end <= self.end_at
+
+    @property
+    def is_authoritative(self) -> bool:
+        """Whether this coverage can authorize the exact scoped live stream."""
+        return self._is_authoritative()
+
+    def _is_authoritative(self) -> bool:
+        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
+            return False
+        if self.load_provenance is None:
+            return self.stream_scope is None or self.stream_scope.environment != "live"
+        return (
+            self.page_exhausted
+            and self.not_truncated
+            and self.load_provenance.is_complete
+            and self.stream_scope == self.load_provenance.stream_scope
+            and self.load_provenance.source_anchor_event_cut <= self.start_at
+            and self.load_provenance.checked_through is not None
+            and self.load_provenance.checked_through >= self.end_at
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,38 +610,104 @@ class AccountFacts:
     coverage: FactCoverageInterval | None = None
     checkpoint: PositionCheckpoint | None = None
     has_synthetic_fills: bool = False
+    conflicting_fills: tuple[AccountFillEvent, ...] = ()
+    has_late_events: bool = False
+    stream_scope: AccountFactStreamScope | None = None
+    recovery_checkpoint: PositionRecoveryCheckpoint | None = None
+    fact_conflicts: tuple[AccountFactConflict, ...] = ()
+    integrity_issues: tuple[str, ...] = ()
+    late_fills: tuple[AccountFillEvent, ...] = ()
+    fill_cursor_provenance: AccountFillReconciliationCursor | None = None
+    fill_load_provenance: AccountFillLoadProvenance | None = None
+    prefix_facts_complete: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.prefix_facts_complete) is not bool:
+            raise ValueError("prefix_facts_complete must be a boolean")
+        if (
+            self.fill_load_provenance is None
+            and self.coverage is not None
+            and self.coverage.load_provenance is not None
+        ):
+            object.__setattr__(
+                self, "fill_load_provenance", self.coverage.load_provenance
+            )
+        if self.fill_load_provenance is not None and (
+            self.fill_load_provenance.stream_scope != self.stream_scope
+        ):
+            raise ValueError("fill load provenance scope does not match account facts")
+        if self.coverage is not None:
+            if (
+                self.stream_scope is not None
+                and self.coverage.stream_scope != self.stream_scope
+            ):
+                raise ValueError("coverage scope does not match account facts")
 
     def compute_facts_hash(self) -> str:
-        """Deterministic cryptographic hash representing fact cut."""
-        import hashlib
+        """Hash every input field that can change identity or projection."""
 
-        hasher = hashlib.sha256()
-        hasher.update(self.position_key.canonical_id.encode())
-        for f in sorted(self.fills, key=lambda x: (x.trade_at, x.trade_id)):
-            f_str = (
-                f"{f.trade_id}:{f.quantity}:{f.price}:{f.side}:{f.trade_at.isoformat()}"
+        def canonical(value: object) -> object:
+            if isinstance(value, StrEnum):
+                return value.value
+            if isinstance(value, Decimal):
+                exact = format(value, "f")
+                if "." in exact:
+                    exact = exact.rstrip("0").rstrip(".")
+                return "0" if exact in {"", "-0"} else exact
+            if isinstance(value, datetime):
+                return value.astimezone(UTC).isoformat()
+            if is_dataclass(value):
+                return {
+                    field.name: canonical(getattr(value, field.name))
+                    for field in fields(value)
+                }
+            if isinstance(value, dict):
+                return {
+                    str(key): canonical(item)
+                    for key, item in sorted(
+                        value.items(), key=lambda pair: str(pair[0])
+                    )
+                }
+            if isinstance(value, tuple | list):
+                return [canonical(item) for item in value]
+            return value
+
+        def unordered(values: tuple[object, ...]) -> list[object]:
+            canonical_values = [canonical(item) for item in values]
+            return sorted(
+                canonical_values,
+                key=lambda item: json.dumps(
+                    item,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             )
-            hasher.update(f_str.encode())
-        for s in sorted(self.snapshots, key=lambda x: x.observed_at):
-            s_str = f"{s.observed_at.isoformat()}:{s.position_amt}:{s.entry_price}"
-            hasher.update(s_str.encode())
-        for b in sorted(
-            self.exit_boundaries, key=lambda x: (x.submitted_at, x.order_id)
-        ):
-            b_str = f"{b.order_id}:{b.submitted_at.isoformat()}"
-            hasher.update(b_str.encode())
-        if self.coverage is not None:
-            cov = self.coverage
-            c_str = (
-                f"{cov.start_at.isoformat()}:{cov.end_at.isoformat()}:"
-                f"{cov.status.value}"
-            )
-            hasher.update(c_str.encode())
-        if self.checkpoint is not None:
-            chk = self.checkpoint
-            chk_str = f"{chk.checkpoint_id}:{chk.event_cut.isoformat()}"
-            hasher.update(chk_str.encode())
-        return hasher.hexdigest()
+
+        fact_material = {
+            "position_key": canonical(self.position_key),
+            "stream_scope": canonical(self.stream_scope),
+            "fills": unordered(self.fills),
+            "conflicting_fills": unordered(self.conflicting_fills),
+            "snapshots": unordered(self.snapshots),
+            "exit_boundaries": unordered(self.exit_boundaries),
+            "coverage": canonical(self.coverage),
+            "legacy_checkpoint": canonical(self.checkpoint),
+            "recovery_checkpoint": canonical(self.recovery_checkpoint),
+            "has_synthetic_fills": self.has_synthetic_fills,
+            "has_late_events": self.has_late_events,
+            "fact_conflicts": unordered(self.fact_conflicts),
+            "integrity_issues": sorted(self.integrity_issues),
+            "late_fills": unordered(self.late_fills),
+            "fill_cursor_provenance": canonical(self.fill_cursor_provenance),
+            "fill_load_provenance": canonical(self.fill_load_provenance),
+            "prefix_facts_complete": self.prefix_facts_complete,
+        }
+        encoded = json.dumps(
+            fact_material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +827,7 @@ class PositionLedgerProjection:
     discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
     projection_version: str | None = None
+    stream_scope: AccountFactStreamScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +865,7 @@ class PositionView:
     discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
     zero_position_snapshot_confirmed: bool = False
+    stream_scope: AccountFactStreamScope | None = None
 
     @property
     def total_quantity(self) -> Decimal:
@@ -474,7 +875,16 @@ class PositionView:
     def is_ready_for_trade(self) -> bool:
         has_confirmed_coverage = (
             self.coverage is not None
+            and self.coverage.is_authoritative
             and self.coverage.status == FactCoverageStatus.CONFIRMED
+            and (
+                self.stream_scope is None
+                or self.coverage.stream_scope == self.stream_scope
+            )
+            and (
+                self.stream_scope is None
+                or self.coverage.evidence_observed_at is not None
+            )
         )
         return (
             self.health_status == PositionHealthStatus.READY

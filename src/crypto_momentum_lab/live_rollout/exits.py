@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.execution import (
     PositionKey,
     PositionLedgerBatch,
     PositionLedgerProjection,
+    PositionView,
 )
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -157,6 +158,102 @@ class ManagedLivePosition:
             )
             for batch in self.batches
         )
+
+
+def managed_live_positions_from_views(
+    views: tuple[PositionView, ...],
+    *,
+    unresolved_orders: tuple[object, ...] = (),
+) -> tuple[ManagedLivePosition, ...]:
+    """Adapt authoritative Book batches for existing operational consumers.
+
+    The adapter never synthesizes lots from snapshots or account aggregates.
+    Batch identity, boundary time, and projection version all come from the
+    exact PositionView that decision and execution paths read.
+    """
+    positions: list[ManagedLivePosition] = []
+    for view in views:
+        active_batches = tuple(batch for batch in view.batches if batch.quantity > 0)
+        if not active_batches:
+            continue
+        episode = view.active_episode
+        if episode is None:
+            # A quantity without a classified episode cannot safely select the
+            # reduce side for an exit order.
+            continue
+
+        recovery_by_batch: dict[str, object] = {}
+        for order in unresolved_orders:
+            plan = getattr(order, "plan", None)
+            if plan is None or not plan.reduce_only or plan.symbol != view.key.symbol:
+                continue
+            if plan.position_side != view.key.position_side:
+                continue
+            allocated_ids = {item.batch_id for item in plan.allocations}
+            if plan.batch_id:
+                allocated_ids.add(plan.batch_id)
+            for batch in active_batches:
+                if batch.batch_id in allocated_ids:
+                    previous = recovery_by_batch.get(batch.batch_id)
+                    if previous is None or order.updated_at > previous.updated_at:
+                        recovery_by_batch[batch.batch_id] = order
+
+        managed_batches: list[ManagedLivePositionBatch] = []
+        for batch in active_batches:
+            recovery = recovery_by_batch.get(batch.batch_id)
+            plan = None if recovery is None else recovery.plan
+            remaining = (
+                None
+                if recovery is None
+                else max(Decimal("0"), plan.quantity - recovery.executed_quantity)
+            )
+            managed_batches.append(
+                ManagedLivePositionBatch(
+                    batch_id=batch.batch_id,
+                    quantity=batch.quantity,
+                    entry_price=batch.entry_price,
+                    opened_at=batch.opened_at,
+                    exit_order_submitted_at=batch.exit_order_submitted_at,
+                    recovery_order_client_id=(
+                        None if recovery is None else plan.client_order_id
+                    ),
+                    recovery_order_plan=plan,
+                    recovery_order_remaining_quantity=remaining,
+                    closing_order_filled=False,
+                    entry_order_count=1,
+                    entry_client_order_ids=(
+                        frozenset({batch.client_order_id})
+                        if batch.client_order_id
+                        else frozenset()
+                    ),
+                    projection_version=view.projection_version,
+                )
+            )
+        quantity = sum((batch.quantity for batch in managed_batches), Decimal("0"))
+        if quantity <= 0:
+            continue
+        entry_price = sum(
+            (batch.entry_price * batch.quantity for batch in managed_batches),
+            Decimal("0"),
+        ) / quantity
+        positions.append(
+            ManagedLivePosition(
+                symbol=view.key.symbol,
+                side=episode.side,
+                position_side=view.key.position_side,
+                quantity=quantity,
+                entry_price=entry_price,
+                opened_at=min(batch.opened_at for batch in managed_batches),
+                batch_id=(
+                    managed_batches[0].batch_id
+                    if len(managed_batches) == 1
+                    else None
+                ),
+                batches=tuple(managed_batches),
+                projection_version=view.projection_version,
+            )
+        )
+    return tuple(sorted(positions, key=lambda item: (item.symbol, item.position_side)))
 
 
 @dataclass(frozen=True, slots=True)

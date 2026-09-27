@@ -27,7 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
-    create_authoritative_decision_filter,
+    create_authoritative_async_decision_filter,
 )
 from crypto_momentum_lab.domain.execution import (
     ExecutionBook,
@@ -67,6 +67,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionResult,
     OrderExecutionStateMachine,
     PreparedOrderSubmission,
     SubmitPolicy,
@@ -221,8 +222,12 @@ from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
     WebSocketMarketQuoteVolumeSource,
 )
-from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
-    PostgresDecisionTraceRepository,
+from crypto_momentum_lab.persistence.postgres.account_journal_store import (
+    PostgresAccountJournalStore,
+)
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+    AsyncPostgresDecisionUnitOfWork,
+    AsyncPostgresExecutionUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -503,29 +508,13 @@ async def run_live_daemon(
         ownership_registry.register("volume_cache", volume_cache.stop)
         await volume_cache.start()
         signal_repository = PostgresLiveSignalRepository(observability_factory)
-        decision_trace_repository = PostgresDecisionTraceRepository(
-            observability_factory
-        )
-        from crypto_momentum_lab.domain.operational.retention_authority import (
-            RetentionAuthority,
-        )
-        from crypto_momentum_lab.persistence.postgres.retention_repository import (
-            AsyncPostgresRetentionRepository,
-        )
-
-        retention_authority = RetentionAuthority(
-            repository=AsyncPostgresRetentionRepository(observability_factory)
-        )
+        decision_unit_of_work = AsyncPostgresDecisionUnitOfWork(execution_factory)
         fact_source = LiveDecisionFactSource(
             account_label,
-            trace_repository=decision_trace_repository,
             strategy_name=strategy_name,
-            retention_authority=retention_authority,
+            decision_unit_of_work=decision_unit_of_work,
+            hedge_mode=hedge_mode,
         )
-        try:
-            await fact_source.restore()
-        except Exception as fs_rest_err:
-            log.warning("decision_fact_source_restore_failed", error=str(fs_rest_err))
         ownership_registry.register("decision_fact_source", fact_source.drain)
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
@@ -764,28 +753,18 @@ async def run_live_daemon(
         reservation_repository = AsyncPostgresPositionReservationRepository(
             execution_factory, strategy_name=strategy_name
         )
-        active_reservations: tuple[Any, ...] = ()
-        try:
-            active_reservations = (
-                await reservation_repository.load_active_reservations()
-            )
-            log.info(
-                "active_position_reservations_recovered",
-                count=len(active_reservations),
-                strategy_name=strategy_name,
-            )
-        except Exception as res_err:
-            log.warning("position_reservations_recovery_failed", error=str(res_err))
-
         domain_coordinator = ExecutionCoordinator()
-        if active_reservations:
-            for r in active_reservations:
-                domain_coordinator.register_reservation(r)
-
+        execution_unit_of_work = AsyncPostgresExecutionUnitOfWork(
+            execution_factory,
+            journal_store=PostgresAccountJournalStore(),
+            order_repository=order_repository,
+            reservation_repository=reservation_repository,
+        )
         execution_book = ExecutionBook(
             coordinator=domain_coordinator,
             reservation_repository=reservation_repository,
             command_repository=order_repository,
+            execution_unit_of_work=execution_unit_of_work,
         )
         # An incomplete recovery must fail startup before order submission.
         await execution_book.restore(account_label=account_label)
@@ -796,14 +775,15 @@ async def run_live_daemon(
             reservation_repository=reservation_repository,
             domain_coordinator=domain_coordinator,
             execution_book=execution_book,
-            initial_reservations=active_reservations,
         )
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
-        await _bootstrap_execution_position_facts(client, execution_coordinator)
+        fact_source.set_execution_book(execution_book)
+        context_provider.set_execution_book(execution_book)
+        heartbeat_context_provider.set_execution_book(execution_book)
 
-        async def _handle_decision_exit(cmd: TradeCommand) -> None:
+        async def _handle_decision_exit(cmd: TradeCommand) -> OrderExecutionResult:
             allocs = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
@@ -827,9 +807,10 @@ async def run_live_daemon(
                 allocations=allocs,
                 projection_version=cmd.expected_projection_version,
             )
-            await execution_coordinator.submit(plan)
+            return await execution_coordinator.submit(plan)
 
         fact_source.set_exit_handler(_handle_decision_exit)
+        await fact_source.restore()
 
         assert execution_coordinator is not None
         assert client is not None
@@ -1218,12 +1199,14 @@ async def run_live_daemon(
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
-                decision_filter=create_authoritative_decision_filter(
+                decision_filter=create_authoritative_async_decision_filter(
                     strategy_name,
                     fact_provider=fact_source.build,
-                    on_decision_result=fact_source.on_decision_result,
-                    trace_recorder=fact_source.record_trace,
+                    durable_decision_commit=fact_source.commit_decision,
                     effective_policy=runtime_plan.effective_policy,
+                    clock_sequence_provider=lambda state: max(
+                        1, state.source_event_count
+                    ),
                 ),
                 decision_fact_binder=fact_source.bind_context,
                 readiness_provider=lambda: (
@@ -1421,11 +1404,33 @@ async def run_live_daemon(
         async def _on_account_snapshot_combined(event: AccountEvent) -> None:
             # The account channel owns and awaits fact ingestion. Publish the
             # ready context only after the execution projection has accepted it.
-            if event.account_snapshot is not None and execution_coordinator is not None:
+            if (
+                execution_coordinator is not None
+                and (event.account_snapshot is not None or event.fills)
+            ):
                 await execution_coordinator.observe_account_snapshot(
                     event.account_snapshot,
                     symbols=event.symbols,
+                    fills=event.fills,
+                    stream_id="account_event_hub",
+                    stream_epoch=event.stream_epoch,
+                    sequence=event.sequence,
+                    evidence_id=event.event_id,
+                    hedge_mode=hedge_mode,
                 )
+                if event.stream_epoch is None or event.sequence <= 0:
+                    raise ValueError(
+                        "durable account event is missing stream epoch or sequence"
+                    )
+                fact_source.bind_account_stream(
+                    stream_id="account_event_hub",
+                    stream_epoch=event.stream_epoch,
+                    sequence=event.sequence,
+                )
+                # A durable accepted exit is dispatchable only after the
+                # account facts for the current Hub epoch have reached the
+                # restored Book and its original projection token still wins.
+                await fact_source.recover_pending_exits()
             control_plane_runtime.on_account_snapshot(event)
 
         account_event_runtime = LiveAccountEventRuntime(

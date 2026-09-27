@@ -29,6 +29,9 @@ from websockets.exceptions import ConnectionClosed
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
+    AccountFillEvent,
+    AccountFillLoadScan,
+    AccountFillPageScan,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
     ExecutionAccountStatus,
@@ -118,6 +121,8 @@ class AccountEvent:
     reason: str | None = None
     has_fill: bool = False
     trade_id: str | None = None
+    fills: tuple[AccountFillEvent, ...] = ()
+    fill_load_scans: tuple[AccountFillLoadScan, ...] = ()
     exchange_event_at: datetime | None = field(default=None, compare=False)
     exchange_update_id: int | None = field(default=None, compare=False)
     exchange_previous_update_id: int | None = field(default=None, compare=False)
@@ -214,6 +219,18 @@ class AccountEvent:
             event_scope = (self.environment, self.account_label)
             if delta_scope is not None and delta_scope != event_scope:
                 raise ValueError("account delta scope does not match account event")
+        if any(
+            fill.environment != self.environment
+            or fill.account_label != self.account_label
+            for fill in self.fills
+        ):
+            raise ValueError("account-event fills do not match account scope")
+        if any(
+            scan.environment != self.environment
+            or scan.account_label != self.account_label
+            for scan in self.fill_load_scans
+        ):
+            raise ValueError("account-event fill scans do not match account scope")
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +425,16 @@ class AccountEventHub:
 
     def publish(self, event: AccountEvent) -> None:
         """Publish without waiting on a consumer or database operation."""
+        seen_before_event = set(self._seen_fill_keys)
+        fresh_fills: list[AccountFillEvent] = []
+        for fill in event.fills:
+            fill_key = (fill.symbol, fill.trade_id)
+            if fill_key in self._seen_fill_keys:
+                continue
+            self._remember_fill_key(fill_key)
+            fresh_fills.append(fill)
+        if len(fresh_fills) != len(event.fills):
+            event = replace(event, fills=tuple(fresh_fills))
         if event.has_fill and event.symbol is not None and event.trade_id is not None:
             fill_key = (event.symbol, event.trade_id)
             if (
@@ -415,8 +442,9 @@ class AccountEventHub:
                 and fill_key in self._seen_fill_keys
             ):
                 return
-            duplicate_fill = fill_key in self._seen_fill_keys
-            self._remember_fill_key(fill_key)
+            duplicate_fill = fill_key in seen_before_event
+            if fill_key not in self._seen_fill_keys:
+                self._remember_fill_key(fill_key)
             if duplicate_fill:
                 # Keep the order/status notification for consumers, but do not
                 # count a REST-replayed fill twice in live latency telemetry.
@@ -1234,6 +1262,11 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "reason": event.reason,
             "has_fill": event.has_fill,
             "trade_id": event.trade_id,
+            "fills": [_encode_account_fill(fill) for fill in event.fills],
+            "fill_load_scans": [
+                _encode_account_fill_load_scan(scan)
+                for scan in event.fill_load_scans
+            ],
             "exchange_event_at": (
                 None
                 if event.exchange_event_at is None
@@ -1285,6 +1318,22 @@ def decode_account_event(
     sequence = _optional_non_negative_int(payload, "sequence")
     stream_epoch = _optional_string(payload, "stream_epoch")
     account_state = _optional_account_state(payload)
+    fills = tuple(
+        _decode_account_fill(
+            item,
+            expected_environment=environment,
+            expected_account_label=account_label,
+        )
+        for item in _optional_list(payload, "fills")
+    )
+    fill_load_scans = tuple(
+        _decode_account_fill_load_scan(
+            item,
+            expected_environment=environment,
+            expected_account_label=account_label,
+        )
+        for item in _optional_list(payload, "fill_load_scans")
+    )
     snapshot_kind = _optional_snapshot_kind(payload)
     snapshot_payload = payload.get("account_snapshot")
     account_snapshot = (
@@ -1320,6 +1369,8 @@ def decode_account_event(
         reason=_optional_string(payload, "reason"),
         has_fill=_optional_bool(payload, "has_fill"),
         trade_id=_optional_string(payload, "trade_id"),
+        fills=fills,
+        fill_load_scans=fill_load_scans,
         exchange_event_at=(
             None
             if payload.get("exchange_event_at") is None
@@ -1472,6 +1523,131 @@ def _encode_open_order_snapshot(order: AccountOpenOrderSnapshot) -> dict[str, ob
         "reduce_only": order.reduce_only,
         "observed_at": order.observed_at.isoformat(),
     }
+
+
+def _encode_account_fill(fill: AccountFillEvent) -> dict[str, object]:
+    return {
+        "environment": fill.environment,
+        "account_label": fill.account_label,
+        "symbol": fill.symbol,
+        "trade_id": fill.trade_id,
+        "order_id": fill.order_id,
+        "side": fill.side,
+        "price": str(fill.price),
+        "quantity": str(fill.quantity),
+        "realized_pnl": str(fill.realized_pnl),
+        "fee": str(fill.fee),
+        "fee_asset": fill.fee_asset,
+        "trade_at": fill.trade_at.isoformat(),
+        "raw_payload": fill.raw_payload,
+    }
+
+
+def _decode_account_fill(
+    value: object,
+    *,
+    expected_environment: str,
+    expected_account_label: str,
+) -> AccountFillEvent:
+    payload = _require_mapping(value, "account-event fills[]")
+    _require_snapshot_scope(
+        payload,
+        expected_environment=expected_environment,
+        expected_account_label=expected_account_label,
+    )
+
+
+def _encode_account_fill_load_scan(
+    scan: AccountFillLoadScan,
+) -> dict[str, object]:
+    page = scan.page_scan
+    return {
+        "environment": scan.environment,
+        "account_label": scan.account_label,
+        "symbol": scan.symbol,
+        "position_side": scan.position_side,
+        "page_scan": {
+            "symbol": page.symbol,
+            "load_id": page.load_id,
+            "scan_origin_start_time_ms": page.scan_origin_start_time_ms,
+            "next_from_id": page.next_from_id,
+            "page_count": page.page_count,
+            "page_exhausted": page.page_exhausted,
+            "truncated": page.truncated,
+            "checked_through": (
+                None if page.checked_through is None else page.checked_through.isoformat()
+            ),
+        },
+        "observed_at": scan.observed_at.isoformat(),
+        "source_anchor_id": scan.source_anchor_id,
+        "source_anchor_event_cut": scan.source_anchor_event_cut.isoformat(),
+        "source_anchor_kind": scan.source_anchor_kind,
+        "source_stream_id": scan.source_stream_id,
+        "source_stream_epoch": scan.source_stream_epoch,
+    }
+
+
+def _decode_account_fill_load_scan(
+    value: object,
+    *,
+    expected_environment: str,
+    expected_account_label: str,
+) -> AccountFillLoadScan:
+    payload = _require_mapping(value, "account-event fill_load_scans[]")
+    _require_snapshot_scope(
+        payload,
+        expected_environment=expected_environment,
+        expected_account_label=expected_account_label,
+    )
+    page_payload = _mapping_field(payload, "page_scan")
+    checked_through_value = page_payload.get("checked_through")
+    page = AccountFillPageScan(
+        symbol=_require_string(page_payload, "symbol"),
+        load_id=_require_string(page_payload, "load_id"),
+        scan_origin_start_time_ms=_required_int(page_payload, "scan_origin_start_time_ms"),
+        next_from_id=_optional_int_value(page_payload, "next_from_id"),
+        page_count=_required_int(page_payload, "page_count"),
+        page_exhausted=_required_bool(page_payload, "page_exhausted"),
+        truncated=_required_bool(page_payload, "truncated"),
+        checked_through=(
+            None
+            if checked_through_value is None
+            else _parse_datetime(
+                {"checked_through": checked_through_value}, "checked_through"
+            )
+        ),
+    )
+    return AccountFillLoadScan(
+        environment=expected_environment,
+        account_label=expected_account_label,
+        symbol=_require_string(payload, "symbol"),
+        position_side=_require_string(payload, "position_side"),
+        page_scan=page,
+        observed_at=_parse_datetime(payload, "observed_at"),
+        source_anchor_id=_require_string(payload, "source_anchor_id"),
+        source_anchor_event_cut=_parse_datetime(payload, "source_anchor_event_cut"),
+        source_anchor_kind=_require_string(payload, "source_anchor_kind"),
+        source_stream_id=_optional_string(payload, "source_stream_id"),
+        source_stream_epoch=_optional_string(payload, "source_stream_epoch"),
+    )
+    raw_payload = payload.get("raw_payload", {})
+    if not isinstance(raw_payload, dict):
+        raise AccountEventHubProtocolError("fill raw_payload must be an object")
+    return AccountFillEvent(
+        environment=expected_environment,
+        account_label=expected_account_label,
+        symbol=_require_string(payload, "symbol"),
+        trade_id=_require_string(payload, "trade_id"),
+        order_id=_require_string(payload, "order_id"),
+        side=_require_string(payload, "side"),
+        price=_required_decimal(payload, "price"),
+        quantity=_required_decimal(payload, "quantity"),
+        realized_pnl=_required_decimal(payload, "realized_pnl"),
+        fee=_required_decimal(payload, "fee"),
+        fee_asset=_require_string(payload, "fee_asset"),
+        trade_at=_parse_datetime(payload, "trade_at"),
+        raw_payload={str(key): item for key, item in raw_payload.items()},
+    )
 
 
 def _decode_account_snapshot(
@@ -1711,6 +1887,16 @@ def _required_list(
     return value
 
 
+def _optional_list(
+    payload: dict[str, object],
+    field_name: str,
+) -> list[object]:
+    value = payload.get(field_name, [])
+    if not isinstance(value, list):
+        raise AccountEventHubProtocolError(f"{field_name} must be an array")
+    return value
+
+
 def _required_string_list(
     payload: dict[str, object],
     field_name: str,
@@ -1772,6 +1958,15 @@ def _optional_int_value(
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise AccountEventHubProtocolError(
             f"{field_name} must be a non-negative integer or null"
+        )
+    return value
+
+
+def _required_int(payload: dict[str, object], field_name: str) -> int:
+    value = payload.get(field_name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AccountEventHubProtocolError(
+            f"{field_name} must be a non-negative integer"
         )
     return value
 

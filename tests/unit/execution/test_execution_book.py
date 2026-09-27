@@ -273,6 +273,11 @@ async def test_execution_book_fails_closed_when_acceptance_persistence_fails() -
             scope=scope,
             observed_at=t0,
             snapshot=flat,
+            coverage=FactCoverageInterval(
+                start_at=t0,
+                end_at=t0,
+                status=FactCoverageStatus.CONFIRMED,
+            ),
         )
     )
     view = await book.read(scope)
@@ -955,6 +960,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
             fee_asset="USDT",
             trade_at=_dt(10, 1),
             raw_payload={
+                "positionSide": "LONG",
                 "is_cumulative": True,
                 "cum_qty": "1",
                 "cum_quote": "100",

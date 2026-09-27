@@ -143,6 +143,104 @@ class AccountFillReconciliationCursor:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountFillSourceAnchor:
+    """Previously verified position cut used to start a bounded fill scan."""
+
+    symbol: str
+    position_side: str
+    checkpoint_id: str
+    event_cut: datetime
+    stream_id: str
+    stream_epoch: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.symbol, "symbol")
+        _require_non_empty(self.position_side, "position_side")
+        _require_non_empty(self.checkpoint_id, "checkpoint_id")
+        _require_non_empty(self.stream_id, "stream_id")
+        _require_non_empty(self.stream_epoch, "stream_epoch")
+        _require_aware(self.event_cut, "event_cut")
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFillPageScan:
+    """Transport metadata for a bounded, paginated REST trade scan."""
+
+    symbol: str
+    load_id: str
+    scan_origin_start_time_ms: int
+    next_from_id: int | None
+    page_count: int
+    page_exhausted: bool
+    truncated: bool
+    checked_through: datetime | None
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.symbol, "symbol")
+        _require_non_empty(self.load_id, "load_id")
+        if type(self.scan_origin_start_time_ms) is not int or self.scan_origin_start_time_ms < 0:
+            raise ValueError("scan_origin_start_time_ms must be a non-negative integer")
+        if self.next_from_id is not None and (
+            type(self.next_from_id) is not int or self.next_from_id < 0
+        ):
+            raise ValueError("next_from_id must be a non-negative integer or null")
+        if type(self.page_count) is not int or self.page_count < 0:
+            raise ValueError("page_count must be a non-negative integer")
+        if type(self.page_exhausted) is not bool or type(self.truncated) is not bool:
+            raise ValueError("pagination flags must be booleans")
+        if self.page_exhausted and (self.truncated or self.next_from_id is not None):
+            raise ValueError("exhausted scan cannot be truncated or have a cursor")
+        if self.page_exhausted and self.page_count == 0:
+            raise ValueError("exhausted scan must contain at least one page")
+        if self.checked_through is not None:
+            _require_aware(self.checked_through, "checked_through")
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFillLoadScan:
+    """Per-side source proof carried over the account-event transport."""
+
+    environment: str
+    account_label: str
+    symbol: str
+    position_side: str
+    page_scan: AccountFillPageScan
+    observed_at: datetime
+    source_anchor_id: str
+    source_anchor_event_cut: datetime
+    source_anchor_kind: str
+    source_stream_id: str | None = None
+    source_stream_epoch: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_common(self.environment, self.account_label)
+        _require_non_empty(self.symbol, "symbol")
+        _require_non_empty(self.position_side, "position_side")
+        _require_non_empty(self.source_anchor_id, "source_anchor_id")
+        _require_aware(self.observed_at, "observed_at")
+        _require_aware(self.source_anchor_event_cut, "source_anchor_event_cut")
+        if self.page_scan.symbol.strip().upper() != self.symbol.strip().upper():
+            raise ValueError("fill scan symbol does not match source scope")
+        if self.source_anchor_kind not in {"zero_snapshot", "recovery_checkpoint"}:
+            raise ValueError("unsupported fill scan source anchor kind")
+        if (self.source_stream_id is None) != (self.source_stream_epoch is None):
+            raise ValueError("source stream id and epoch must be supplied together")
+        if self.source_anchor_kind == "recovery_checkpoint" and (
+            self.source_stream_id is None
+            or self.source_stream_epoch is None
+        ):
+            raise ValueError("recovery checkpoint anchor requires its source stream")
+        if self.source_anchor_kind == "zero_snapshot" and (
+            self.source_stream_id is not None
+        ):
+            raise ValueError("zero snapshot anchor belongs to the target stream")
+        if self.page_scan.page_exhausted and (
+            self.page_scan.checked_through != self.observed_at
+        ):
+            raise ValueError("complete fill scan must reach its observed source cut")
+
+
+@dataclass(frozen=True, slots=True)
 class AccountFundingEvent:
     environment: str
     account_label: str

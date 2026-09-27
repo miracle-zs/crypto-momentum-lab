@@ -37,7 +37,9 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.execution.execution_book import (
     Blocked,
     CommandConflict,
+    EvidenceConflict,
     ExecutionBook,
+    ExecutionCumulativeOrderReport,
     ExecutionRequest,
     StaleView,
 )
@@ -418,13 +420,28 @@ class OrderExecutionCoordinator:
 
     async def observe_account_snapshot(
         self,
-        snapshot: AccountPositionSnapshot | AccountSnapshot,
+        snapshot: AccountPositionSnapshot | AccountSnapshot | None,
         symbols: tuple[str, ...] | frozenset[str] = (),
+        *,
+        fills: tuple[AccountFillEvent, ...] = (),
+        stream_id: str | None = None,
+        stream_epoch: str | None = None,
+        sequence: int | None = None,
+        evidence_id: str | None = None,
+        hedge_mode: bool | None = None,
     ) -> None:
         """Feed authoritative exchange account snapshot into ExecutionBook."""
         if self._execution_book is None:
             return
-        if isinstance(snapshot, AccountPositionSnapshot):
+        if self._execution_book.has_execution_unit_of_work and (
+            not stream_id or not stream_epoch or sequence is None or sequence <= 0
+        ):
+            raise ValueError(
+                "durable account evidence requires source stream, epoch, and sequence"
+            )
+        if snapshot is None:
+            positions = ()
+        elif isinstance(snapshot, AccountPositionSnapshot):
             positions = (snapshot,)
         elif isinstance(snapshot, AccountSnapshot):
             if not isinstance(snapshot.config, AccountConfigSnapshot):
@@ -437,6 +454,9 @@ class OrderExecutionCoordinator:
                     "AccountSnapshot config scope does not match coordinator"
                 )
             positions = snapshot.positions
+            if hedge_mode is not None and hedge_mode != snapshot.config.hedge_mode:
+                raise ValueError("hedge_mode does not match AccountSnapshot config")
+            hedge_mode = snapshot.config.hedge_mode
         else:
             raise TypeError(
                 "snapshot must be AccountPositionSnapshot or AccountSnapshot"
@@ -444,6 +464,7 @@ class OrderExecutionCoordinator:
 
         # `symbols` describes event context, not proof that an omitted position
         # is flat. Only explicit exchange position rows are ingested here.
+        positions_by_key: dict[PositionKey, AccountPositionSnapshot] = {}
         for pos in positions:
             if not isinstance(pos, AccountPositionSnapshot):
                 raise TypeError(
@@ -462,32 +483,84 @@ class OrderExecutionCoordinator:
                 symbol=pos.symbol,
                 position_side=FuturesPositionSide(side_str),
             )
+            positions_by_key[scope.to_position_key()] = pos
+
+        fills_by_key: dict[PositionKey, list[AccountFillEvent]] = {}
+        for fill in fills:
+            if (
+                fill.environment != "live"
+                or fill.account_label != self._account_label
+            ):
+                raise ValueError("account fill scope does not match coordinator")
+            raw_position_side = fill.raw_payload.get("positionSide")
+            if raw_position_side is None:
+                if hedge_mode is not False:
+                    raise ValueError(
+                        "account fill is missing positionSide and one-way mode "
+                        "was not proven"
+                    )
+                position_side = FuturesPositionSide.BOTH
+            else:
+                try:
+                    position_side = FuturesPositionSide(
+                        str(raw_position_side).strip().upper()
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"account fill has invalid positionSide {raw_position_side!r}"
+                    ) from error
+            key = PositionKey(
+                environment=fill.environment,
+                account_label=fill.account_label,
+                symbol=fill.symbol,
+                position_side=position_side,
+            )
+            fills_by_key.setdefault(key, []).append(fill)
+
+        for key in sorted(
+            positions_by_key.keys() | fills_by_key.keys(),
+            key=lambda item: item.canonical_id,
+        ):
+            pos = positions_by_key.get(key)
+            scoped_fills = tuple(fills_by_key.get(key, ()))
+            observed_at = (
+                pos.observed_at
+                if pos is not None
+                else max(fill.trade_at for fill in scoped_fills)
+                if scoped_fills
+                else datetime.now(UTC)
+            )
             identity = "\x1f".join(
                 (
-                    pos.environment,
-                    pos.account_label,
-                    pos.symbol,
-                    side_str,
-                    pos.observed_at.isoformat(timespec="microseconds"),
-                    str(pos.position_amt),
-                    str(pos.entry_price),
-                    str(pos.mark_price),
-                    str(pos.unrealized_pnl),
-                    str(pos.notional),
-                    str(pos.leverage),
-                    str(pos.margin_type),
+                    evidence_id or "snapshot",
+                    key.canonical_id,
+                    ",".join(fill.trade_id for fill in scoped_fills),
+                    "" if pos is None else pos.observed_at.isoformat(),
+                    "" if pos is None else str(pos.position_amt),
                 )
             )
-            evidence_id = (
-                "snapshot_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            scoped_evidence_id = (
+                "account_"
+                + hashlib.sha256(identity.encode("utf-8")).hexdigest()
             )
-            ev = ExecutionEvidence(
-                evidence_id=evidence_id,
-                scope=scope,
-                observed_at=pos.observed_at,
-                snapshot=pos,
+            execution_scope = ExecutionScope(
+                environment=key.environment,
+                account_label=key.account_label,
+                symbol=key.symbol,
+                position_side=key.position_side,
             )
-            await self._execution_book.observe(ev)
+            await self._execution_book.observe(
+                ExecutionEvidence(
+                    evidence_id=scoped_evidence_id,
+                    scope=execution_scope,
+                    observed_at=observed_at,
+                    fills=scoped_fills,
+                    snapshot=pos,
+                    stream_id=stream_id,
+                    stream_epoch=stream_epoch,
+                    sequence=sequence,
+                )
+            )
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if self._reservation_repository is None or self._execution_book is None:
@@ -503,15 +576,16 @@ class OrderExecutionCoordinator:
                 )
                 current_view = await self._execution_book.read(scope)
                 proj_ver = getattr(plan, "projection_version", None)
-                token = (
-                    proj_ver
-                    if (proj_ver and proj_ver == current_view.projection_version)
-                    else (
-                        current_view.projection_version
-                        if current_view.is_ready_for_trade
-                        else "*"
+                if not isinstance(proj_ver, str) or not proj_ver.strip():
+                    raise OrderPreSubmissionError(
+                        f"entry {plan.client_order_id} has no Book projection token"
                     )
-                )
+                if proj_ver != current_view.projection_version:
+                    raise OrderPreSubmissionError(
+                        f"entry {plan.client_order_id} was built from stale position "
+                        f"projection {proj_ver}; current projection is "
+                        f"{current_view.projection_version}"
+                    )
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,
                     scope=scope,
@@ -519,7 +593,7 @@ class OrderExecutionCoordinator:
                     strategy_version=getattr(plan, "strategy_version", "v1"),
                     run_id=getattr(plan, "run_id", self._account_label),
                     decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
-                    expected_view_token=token,
+                    expected_view_token=proj_ver,
                     expected_projection_version=proj_ver,
                     action=TradeCommandType.ENTRY,
                     requested_quantity=Decimal(str(plan.quantity)),
@@ -583,11 +657,16 @@ class OrderExecutionCoordinator:
             )
             current_view = await self._execution_book.read(scope)
             proj_ver = getattr(plan, "projection_version", None)
-            token = (
-                proj_ver
-                if (proj_ver and proj_ver == current_view.projection_version)
-                else "*"
-            )
+            if not isinstance(proj_ver, str) or not proj_ver.strip():
+                raise OrderPreSubmissionError(
+                    f"exit {plan.client_order_id} has no Book projection token"
+                )
+            if proj_ver != current_view.projection_version:
+                raise OrderPreSubmissionError(
+                    f"exit {plan.client_order_id} was allocated from stale position "
+                    f"projection {proj_ver}; current projection is "
+                    f"{current_view.projection_version}"
+                )
 
             allocations = getattr(plan, "allocations", ())
             batch_quantities = getattr(plan, "batch_quantities", None)
@@ -614,7 +693,7 @@ class OrderExecutionCoordinator:
                 strategy_version=getattr(plan, "strategy_version", "v1"),
                 run_id=getattr(plan, "run_id", self._account_label),
                 decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
-                expected_view_token=token,
+                expected_view_token=proj_ver,
                 expected_projection_version=proj_ver,
                 action=TradeCommandType.EXIT,
                 requested_quantity=Decimal(str(plan.quantity)),
@@ -741,53 +820,54 @@ class OrderExecutionCoordinator:
                 "position_side": position_side,
             },
         )
-        fill_ev = None
-        if cumulative_quantity > Decimal("0"):
-            fill_ev = AccountFillEvent(
-                environment="live",
-                account_label=self._account_label,
-                symbol=plan.symbol,
-                trade_id=(
-                    f"cumulative:{scope.to_position_key().canonical_id}:"
-                    f"{res.client_order_id}:{cumulative_quantity}"
-                ),
-                order_id=res.client_order_id,
-                side=plan.side,
-                price=average_price if average_price is not None else Decimal("0"),
-                quantity=cumulative_quantity,
-                realized_pnl=Decimal("0"),
-                fee=Decimal("0"),
-                fee_asset="USDT",
-                trade_at=now_dt,
-                raw_payload={
-                    "is_cumulative": True,
-                    "cum_qty": str(cumulative_quantity),
-                    "cum_quote": str(cumulative_quote),
-                    "reduce_only": plan.reduce_only,
-                    "client_order_id": plan.client_order_id,
-                },
-            )
         try:
+            stream_id: str | None = None
+            stream_epoch: str | None = None
+            if self._execution_book.has_execution_unit_of_work:
+                current_view = await self._execution_book.read(scope)
+                stream_scope = current_view.stream_scope
+                if stream_scope is None:
+                    raise RuntimeError(
+                        "cumulative order report has no restored Book stream identity"
+                    )
+                stream_id = stream_scope.stream_id
+                stream_epoch = stream_scope.stream_epoch
             result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=order_ev.event_id,
                     scope=scope,
                     observed_at=now_dt,
                     order_event=order_ev,
-                    fill=fill_ev,
+                    stream_id=stream_id,
+                    stream_epoch=stream_epoch,
+                    cumulative_order=ExecutionCumulativeOrderReport(
+                        order_id=res.client_order_id,
+                        cumulative_quantity=cumulative_quantity,
+                        cumulative_quote=cumulative_quote,
+                        observed_at=now_dt,
+                    ),
                 )
             )
-        except Exception as observe_err:
-            try:
-                await self._execution_book.mark_unknown(
-                    res.client_order_id,
-                    reason=f"exchange result could not be persisted: {observe_err}",
-                )
-            except Exception as transition_err:
+            if isinstance(result, EvidenceConflict):
                 raise RuntimeError(
-                    "exchange returned a result, fact persistence failed, and the "
-                    f"UNKNOWN outbox transition also failed: {transition_err}"
-                ) from transition_err
+                    "cumulative order evidence was rejected: " + result.reason
+                )
+        except Exception as observe_err:
+            if self._execution_book.get_outbox(res.client_order_id) is not None:
+                try:
+                    await self._execution_book.mark_unknown(
+                        res.client_order_id,
+                        reason=(
+                            "exchange result could not be persisted: "
+                            f"{observe_err}"
+                        ),
+                    )
+                except Exception as transition_err:
+                    raise RuntimeError(
+                        "exchange returned a result, fact persistence failed, and "
+                        "the UNKNOWN outbox transition also failed: "
+                        f"{transition_err}"
+                    ) from transition_err
             raise
         if getattr(result, "recovery_required", False):
             raise RuntimeError(

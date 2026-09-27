@@ -11,20 +11,24 @@ Derives position batches and lifecycle episodes strictly from immutable facts
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
+    AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
+    AccountFactStreamScope,
     BatchReductionAttribution,
     DiscrepancyKind,
     ExitOrderSubmissionFact,
     ExternalReductionFact,
+    FactCoverageInterval,
     FactCoverageStatus,
     PositionDiscrepancy,
     PositionEpisode,
@@ -32,6 +36,11 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionLedgerBatch,
     PositionLedgerProjection,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    PositionRecoveryCheckpoint,
+    StreamCheckpointAdoption,
+    compute_checkpoint_chain_hash,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 
@@ -48,7 +57,193 @@ class PositionLedger:
         self._position_key = position_key
         self._system_order_ids = system_order_ids
 
-    def project(self, facts: AccountFacts) -> PositionLedgerProjection:
+    def create_recovery_checkpoint(
+        self,
+        facts: AccountFacts,
+        *,
+        source_revision: int,
+        event_cut: datetime | None = None,
+        checkpoint_id: str | None = None,
+        stream_adoption: StreamCheckpointAdoption | None = None,
+    ) -> PositionRecoveryCheckpoint:
+        """Create a versioned, complete projection checkpoint from real facts."""
+        if facts.position_key.canonical_id != self._position_key.canonical_id:
+            raise ValueError("Facts position key does not match ledger key")
+        if facts.stream_scope is None or not facts.stream_scope.matches(
+            self._position_key
+        ):
+            raise ValueError("checkpoint creation requires an exact stream scope")
+        if type(source_revision) is not int or source_revision < 0:
+            raise ValueError("source_revision must be a non-negative integer")
+        if (
+            facts.has_synthetic_fills
+            or facts.has_late_events
+            or facts.conflicting_fills
+            or facts.fact_conflicts
+            or facts.integrity_issues
+        ):
+            raise ValueError("checkpoint source contains unresolved integrity issues")
+
+        candidate_times = [
+            *(fill.trade_at for fill in facts.fills),
+            *(snapshot.observed_at for snapshot in facts.snapshots),
+            *(boundary.submitted_at for boundary in facts.exit_boundaries),
+        ]
+        if event_cut is None:
+            if not candidate_times:
+                raise ValueError("cannot checkpoint without an observed fact cut")
+            event_cut = max(candidate_times)
+        if event_cut.tzinfo is None or event_cut.utcoffset() is None:
+            raise ValueError("event_cut must be timezone-aware")
+        if (
+            stream_adoption is not None
+            and stream_adoption.target_event_cut != event_cut
+        ):
+            raise ValueError("checkpoint cut does not match stream adoption target")
+
+        if stream_adoption is not None and facts.prefix_facts_complete:
+            raise ValueError("stream adoption requires suffix-only facts")
+        if stream_adoption is not None and facts.recovery_checkpoint is not None:
+            raise ValueError(
+                "stream adoption cannot replace an existing target checkpoint"
+            )
+        parent = (
+            stream_adoption.parent_checkpoint
+            if stream_adoption is not None
+            else facts.recovery_checkpoint
+            if not facts.prefix_facts_complete
+            else None
+        )
+        parent_fields: dict[str, object] = {}
+        if not facts.prefix_facts_complete:
+            if parent is None:
+                raise ValueError(
+                    "rolling checkpoint requires a validated parent recovery checkpoint"
+                )
+            parent_error = (
+                _stream_adoption_error(facts, stream_adoption)
+                if stream_adoption is not None
+                else _checkpoint_error(facts, parent)
+            )
+            if parent_error is not None:
+                raise ValueError(f"parent recovery checkpoint rejected: {parent_error}")
+            if parent.event_cut >= event_cut:
+                raise ValueError("rolling checkpoint cut must advance beyond parent")
+            if any(fill.trade_at <= parent.event_cut for fill in facts.fills):
+                raise ValueError("rolling checkpoint suffix contains a late fill")
+            if (
+                facts.has_late_events
+                or facts.has_synthetic_fills
+                or facts.conflicting_fills
+                or facts.fact_conflicts
+                or facts.integrity_issues
+            ):
+                raise ValueError(
+                    "rolling checkpoint suffix contains unresolved integrity issues"
+                )
+
+        if (
+            parent is None
+            and not facts.fills
+            and not facts.conflicting_fills
+            and not facts.fact_conflicts
+            and not _has_verified_flat_snapshot_anchor(facts, event_cut)
+        ):
+            raise ValueError(
+                "an empty new stream requires a verified flat snapshot and complete "
+                "source-anchored fill coverage"
+            )
+
+        prefix = _facts_at_cut(
+            facts,
+            event_cut,
+            coverage=facts.coverage,
+            stream_scope=facts.stream_scope,
+            has_synthetic_fills=facts.has_synthetic_fills,
+            has_late_events=facts.has_late_events,
+            integrity_issues=facts.integrity_issues,
+            recovery_checkpoint=None,
+        )
+        if parent is not None:
+            suffix = _facts_after_checkpoint(prefix, parent.event_cut)
+            suffix_facts_hash = suffix.compute_facts_hash()
+            facts_hash = compute_checkpoint_chain_hash(
+                scope=facts.stream_scope,
+                parent_stream_scope=parent.stream_scope,
+                event_cut=event_cut,
+                parent_checkpoint_id=parent.checkpoint_id,
+                parent_facts_hash=parent.facts_hash,
+                parent_projection_digest=parent.projection_digest,
+                parent_event_cut=parent.event_cut,
+                suffix_facts_hash=suffix_facts_hash,
+            )
+            parent_fields = {
+                "parent_checkpoint_id": parent.checkpoint_id,
+                "parent_stream_scope": parent.stream_scope,
+                "parent_facts_hash": parent.facts_hash,
+                "parent_projection_digest": parent.projection_digest,
+                "parent_event_cut": parent.event_cut,
+                "suffix_facts_hash": suffix_facts_hash,
+            }
+        else:
+            facts_hash = prefix.compute_facts_hash()
+        projection_facts = (
+            replace(
+                prefix,
+                recovery_checkpoint=(None if stream_adoption is not None else parent),
+                prefix_facts_complete=False,
+            )
+            if parent is not None
+            else prefix
+        )
+        projection = self.project(
+            projection_facts,
+            stream_adoption=stream_adoption,
+        )
+        if projection.event_cut is not None and projection.event_cut > event_cut:
+            raise ValueError("projection contains facts after checkpoint cut")
+        if stream_adoption is not None and (
+            not projection.is_comparable
+            or projection.health_status != PositionHealthStatus.READY
+            or projection.reconciliation_gap != Decimal("0")
+            or projection.unallocated_quantity != Decimal("0")
+        ):
+            raise ValueError(
+                "adopted suffix does not reconcile to a complete projection"
+            )
+        has_synthetic = prefix.has_synthetic_fills or any(
+            _is_synthetic_fill(fill) for fill in prefix.fills
+        )
+        has_conflicts = bool(prefix.conflicting_fills or prefix.fact_conflicts)
+        stable_checkpoint_id = checkpoint_id or _checkpoint_identity(
+            facts.stream_scope,
+            event_cut,
+            source_revision,
+            facts_hash,
+            projection,
+        )
+        return PositionRecoveryCheckpoint(
+            checkpoint_id=stable_checkpoint_id,
+            key=self._position_key,
+            stream_scope=facts.stream_scope,
+            event_cut=event_cut,
+            projection=projection,
+            facts_hash=facts_hash,
+            source_revision=source_revision,
+            coverage=prefix.coverage,
+            has_conflicts=has_conflicts,
+            has_synthetic_fills=has_synthetic,
+            has_late_events=prefix.has_late_events,
+            integrity_issues=prefix.integrity_issues,
+            **parent_fields,
+        )
+
+    def project(
+        self,
+        facts: AccountFacts,
+        *,
+        stream_adoption: StreamCheckpointAdoption | None = None,
+    ) -> PositionLedgerProjection:
         """Project the current ledger state by replaying all fills in AccountFacts."""
         if facts.position_key.canonical_id != self._position_key.canonical_id:
             raise ValueError(
@@ -56,54 +251,162 @@ class PositionLedger:
                 f"ledger key {self._position_key.canonical_id}"
             )
 
-        # 1. Deduplicate fills by trade_id and detect conflicting duplicate trade IDs
+        # 1. Reject facts that cannot be assigned to this exact position leg,
+        # then deduplicate immutable exchange fills and retain every conflict.
         deduped_fills: dict[str, AccountFillEvent] = {}
-        conflicting_fills: list[AccountFillEvent] = []
+        conflicting_fills: list[AccountFillEvent] = list(facts.conflicting_fills)
+        identity_issues = list(facts.integrity_issues)
         for fill in facts.fills:
+            if _is_synthetic_fill(fill):
+                continue
+            if (
+                fill.environment != self._position_key.environment
+                or fill.account_label != self._position_key.account_label
+                or fill.symbol != self._position_key.symbol
+            ):
+                identity_issues.append(
+                    f"Fill {fill.trade_id} account/symbol scope does not match "
+                    "position key"
+                )
+                continue
+            raw_position_side = (fill.raw_payload or {}).get("positionSide") or (
+                fill.raw_payload or {}
+            ).get("position_side")
+            if raw_position_side is not None:
+                if (
+                    str(raw_position_side).upper()
+                    != self._position_key.position_side.value
+                ):
+                    identity_issues.append(
+                        f"Fill {fill.trade_id} positionSide does not match position key"
+                    )
+                    continue
+            elif self._position_key.position_side != FuturesPositionSide.BOTH:
+                identity_issues.append(
+                    f"Fill {fill.trade_id} has no positionSide for "
+                    "side-specific position"
+                )
+                continue
             if fill.trade_id in deduped_fills:
                 existing = deduped_fills[fill.trade_id]
-                if (
-                    existing.quantity != fill.quantity
-                    or existing.price != fill.price
-                    or existing.side.upper() != fill.side.upper()
-                ):
+                if not _same_fill(existing, fill):
                     conflicting_fills.append(fill)
             else:
                 deduped_fills[fill.trade_id] = fill
 
-        has_synthetic_fills = getattr(facts, "has_synthetic_fills", False) or any(
-            bool(
-                (getattr(f, "raw_payload", None) or {}).get(
-                    "synthetic_from_order", False
-                )
-            )
-            for f in facts.fills
+        has_synthetic_fills = facts.has_synthetic_fills or any(
+            _is_synthetic_fill(fill) for fill in facts.fills
         )
 
-        sorted_fills = sorted(
+        all_sorted_fills = sorted(
             deduped_fills.values(),
             key=lambda f: (f.trade_at, f.trade_id),
         )
 
-        active_episode: PositionEpisode | None = None
-        archived_episodes: list[PositionEpisode] = []
-        diagnostics: list[str] = []
-        high_watermark: datetime | None = None
+        if stream_adoption is not None and facts.recovery_checkpoint is not None:
+            raise ValueError("stream adoption cannot replace an existing checkpoint")
+        checkpoint = facts.recovery_checkpoint
+        if stream_adoption is not None:
+            checkpoint_error = _stream_adoption_error(facts, stream_adoption)
+            checkpoint = stream_adoption.parent_checkpoint
+        else:
+            checkpoint_error = _checkpoint_error(facts, checkpoint)
+        checkpoint_usable = checkpoint is not None and checkpoint_error is None
+        if checkpoint_usable and checkpoint is not None:
+            if any(fill.trade_at <= checkpoint.event_cut for fill in facts.late_fills):
+                checkpoint_usable = False
+                checkpoint_error = (
+                    "late fill arrived at or before recovery checkpoint cut"
+                )
+
+        if checkpoint_usable and checkpoint is not None:
+            sorted_fills = [
+                fill
+                for fill in all_sorted_fills
+                if fill.trade_at > checkpoint.event_cut
+            ]
+        elif not facts.prefix_facts_complete:
+            sorted_fills = []
+        else:
+            sorted_fills = all_sorted_fills
+
+        seed_projection = (
+            checkpoint.projection if checkpoint_usable and checkpoint else None
+        )
+        active_episode: PositionEpisode | None = (
+            seed_projection.active_episode if seed_projection is not None else None
+        )
+        archived_episodes: list[PositionEpisode] = (
+            list(seed_projection.archived_episodes)
+            if seed_projection is not None
+            else []
+        )
+        diagnostics: list[str] = (
+            list(seed_projection.diagnostics) if seed_projection is not None else []
+        )
+        high_watermark: datetime | None = (
+            seed_projection.high_watermark_trade_at
+            if seed_projection is not None
+            else None
+        )
         episode_counter = 0
 
         # Ephemeral mutable state for active episode
-        current_batches: list[PositionLedgerBatch] = []
-        current_reductions: list[ExternalReductionFact] = []
-        cum_bought = Decimal("0")
-        cum_sold = Decimal("0")
-        peak_qty = Decimal("0")
+        current_batches: list[PositionLedgerBatch] = (
+            list(active_episode.batches) if active_episode is not None else []
+        )
+        current_reductions: list[ExternalReductionFact] = (
+            list(active_episode.reductions) if active_episode is not None else []
+        )
+        cum_bought = (
+            active_episode.cumulative_bought
+            if active_episode is not None
+            else Decimal("0")
+        )
+        cum_sold = (
+            active_episode.cumulative_sold
+            if active_episode is not None
+            else Decimal("0")
+        )
+        peak_qty = (
+            active_episode.peak_quantity if active_episode is not None else Decimal("0")
+        )
         batch_counter = 0
 
+        if active_episode is not None:
+            episode_counter = _episode_counter(active_episode.episode_id)
+            batch_counter = max(
+                (_batch_counter(batch.batch_id) for batch in current_batches),
+                default=0,
+            )
+        elif archived_episodes:
+            episode_counter = max(
+                (_episode_counter(ep.episode_id) for ep in archived_episodes),
+                default=0,
+            )
+
         # Sort exit boundaries chronologically
+        scoped_boundaries = []
+        for boundary in facts.exit_boundaries:
+            if (
+                boundary.symbol != self._position_key.symbol
+                or boundary.position_side != self._position_key.position_side
+            ):
+                identity_issues.append(
+                    f"Exit boundary {boundary.order_id} has mismatched position scope"
+                )
+                continue
+            scoped_boundaries.append(boundary)
         sorted_boundaries = sorted(
-            facts.exit_boundaries,
+            scoped_boundaries,
             key=lambda fact: (fact.submitted_at, fact.order_id),
         )
+        if checkpoint_usable and checkpoint is not None:
+            sorted_boundaries = [
+                boundary
+                for boundary in sorted_boundaries
+                if boundary.submitted_at > checkpoint.event_cut
+            ]
         boundary_idx = 0
 
         def apply_exit_boundary(boundary: ExitOrderSubmissionFact) -> None:
@@ -177,12 +480,6 @@ class PositionLedger:
                     and fill_side != "SELL"
                 ):
                     continue
-                if facts.snapshots:
-                    obs_amt = facts.snapshots[0].position_amt
-                    if obs_amt > 0 and fill_side != "BUY":
-                        continue
-                    if obs_amt < 0 and fill_side != "SELL":
-                        continue
                 episode_counter += 1
                 side = StrategySide.LONG if fill_side == "BUY" else StrategySide.SHORT
                 ep_id = (
@@ -533,15 +830,60 @@ class PositionLedger:
         )
 
         # 4. Consistent Cut Reconciliation with observation snapshots
-        unallocated_quantity = Decimal("0")
-        reconciliation_gap = Decimal("0")
-        health_status = PositionHealthStatus.READY
-        is_comparable = True
-        discrepancy: PositionDiscrepancy | None = None
+        unallocated_quantity = (
+            seed_projection.unallocated_quantity
+            if seed_projection is not None
+            else Decimal("0")
+        )
+        reconciliation_gap = (
+            seed_projection.reconciliation_gap
+            if seed_projection is not None
+            else Decimal("0")
+        )
+        health_status = (
+            seed_projection.health_status
+            if seed_projection is not None
+            else PositionHealthStatus.READY
+        )
+        is_comparable = (
+            seed_projection.is_comparable if seed_projection is not None else True
+        )
+        discrepancy: PositionDiscrepancy | None = (
+            seed_projection.discrepancy if seed_projection is not None else None
+        )
+        if not facts.prefix_facts_complete and not checkpoint_usable:
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.append(
+                "Historical prefix is unavailable and no valid checkpoint can "
+                "seed the position"
+            )
+        reconciliation_snapshots_list: list[AccountPositionSnapshot] = []
+        for snapshot in facts.snapshots:
+            if (
+                snapshot.environment != self._position_key.environment
+                or snapshot.account_label != self._position_key.account_label
+                or snapshot.symbol != self._position_key.symbol
+                or snapshot.position_side.upper()
+                != self._position_key.position_side.value
+            ):
+                identity_issues.append(
+                    f"Snapshot at {snapshot.observed_at.isoformat()} has "
+                    "mismatched position scope"
+                )
+                continue
+            if (
+                checkpoint is not None
+                and checkpoint_usable
+                and snapshot.observed_at <= checkpoint.event_cut
+            ):
+                continue
+            reconciliation_snapshots_list.append(snapshot)
+        reconciliation_snapshots = tuple(reconciliation_snapshots_list)
 
-        if facts.snapshots:
+        if reconciliation_snapshots:
             latest_snapshot = max(
-                facts.snapshots,
+                reconciliation_snapshots,
                 key=lambda s: s.observed_at,
             )
             snap_time = latest_snapshot.observed_at
@@ -672,24 +1014,100 @@ class PositionLedger:
                     event_cut=high_watermark,
                 )
 
-        if has_synthetic_fills and total_active_qty > Decimal("0"):
+        if facts.fact_conflicts:
+            health_status = PositionHealthStatus.CONFLICT
+            is_comparable = False
+            conflict_summary = "; ".join(
+                f"{item.event_kind}:{item.event_id}: {item.details}"
+                for item in facts.fact_conflicts
+            )
+            diagnostics.append(f"Conflicting account facts: {conflict_summary}")
+            if discrepancy is None:
+                event_at = next(
+                    (
+                        conflict.event_at
+                        for conflict in facts.fact_conflicts
+                        if conflict.event_at is not None
+                    ),
+                    high_watermark or datetime(1970, 1, 1, tzinfo=UTC),
+                )
+                raw_hash = (
+                    f"{self._position_key.canonical_id}:fact_conflict:"
+                    f"{conflict_summary}"
+                )
+                disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                discrepancy = PositionDiscrepancy(
+                    discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                    key=self._position_key,
+                    kind=DiscrepancyKind.IDENTITY_MISMATCH,
+                    first_seen_at=event_at,
+                    last_seen_at=event_at,
+                    count=len(facts.fact_conflicts),
+                    input_hash=disc_hash,
+                    details=conflict_summary,
+                    event_cut=high_watermark,
+                )
+
+        if identity_issues:
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.extend(identity_issues)
+
+        if facts.has_late_events or facts.late_fills:
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.append(
+                "Late account facts require checkpoint rebuild and reconciliation"
+            )
+
+        if checkpoint is not None and checkpoint_error is not None:
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.append(f"Recovery checkpoint rejected: {checkpoint_error}")
+
+        if facts.checkpoint is not None and checkpoint is None:
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diagnostics.append(
+                "Legacy quantity checkpoint is not a replayable recovery checkpoint"
+            )
+
+        if has_synthetic_fills or (
+            checkpoint is not None and checkpoint.has_synthetic_fills
+        ):
             health_status = PositionHealthStatus.INCOMPLETE
             is_comparable = False
             diag_msg = "Synthetic fills present; non-authoritative input"
             diagnostics.append(diag_msg)
-            if discrepancy is None:
-                now_dt = datetime.now(UTC) if high_watermark is None else high_watermark
+            synthetic_times = [
+                fill.trade_at for fill in facts.fills if _is_synthetic_fill(fill)
+            ]
+            synthetic_at = min(synthetic_times, default=None)
+            observed_cut = (
+                synthetic_at
+                or high_watermark
+                or (checkpoint.event_cut if checkpoint is not None else None)
+                or max(
+                    (snapshot.observed_at for snapshot in facts.snapshots),
+                    default=None,
+                )
+            )
+            if observed_cut is not None:
                 raw_hash = f"{self._position_key.canonical_id}:synthetic_fill"
                 disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
                 discrepancy = PositionDiscrepancy(
                     discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
                     key=self._position_key,
                     kind=DiscrepancyKind.INPUT_MISSING,
-                    first_seen_at=now_dt,
-                    last_seen_at=now_dt,
+                    first_seen_at=observed_cut,
+                    last_seen_at=observed_cut,
                     count=1,
                     input_hash=disc_hash,
-                    details=diag_msg,
+                    details=(
+                        f"{diag_msg}; previous discrepancy: {discrepancy.details}"
+                        if discrepancy is not None
+                        else diag_msg
+                    ),
                     event_cut=high_watermark,
                 )
 
@@ -698,7 +1116,10 @@ class PositionLedger:
                 facts.coverage.has_known_gaps
                 or facts.coverage.status == FactCoverageStatus.GAP_DETECTED
             ):
-                health_status = PositionHealthStatus.INCOMPLETE
+                health_status = _escalate_status(
+                    health_status,
+                    PositionHealthStatus.INCOMPLETE,
+                )
                 diag_msg = "Fact coverage interval has known gaps or gap detected"
                 diagnostics.append(diag_msg)
                 if discrepancy is None:
@@ -716,15 +1137,33 @@ class PositionLedger:
                         event_cut=high_watermark,
                     )
             elif facts.coverage.status == FactCoverageStatus.PENDING:
-                health_status = PositionHealthStatus.CATCHING_UP
+                health_status = _escalate_status(
+                    health_status,
+                    PositionHealthStatus.CATCHING_UP,
+                )
                 is_comparable = False
                 diag_msg = "Fact coverage interval is unconfirmed/pending verification"
                 diagnostics.append(diag_msg)
+            elif facts.stream_scope is not None and (
+                facts.coverage.stream_scope != facts.stream_scope
+                or facts.coverage.evidence_observed_at is None
+            ):
+                health_status = _escalate_status(
+                    health_status,
+                    PositionHealthStatus.CATCHING_UP,
+                )
+                is_comparable = False
+                diagnostics.append(
+                    "Fact coverage does not prove this exact stream scope and epoch"
+                )
             elif (
                 final_active_episode is not None
                 and facts.coverage.start_at > final_active_episode.opened_at
             ):
-                health_status = PositionHealthStatus.INCOMPLETE
+                health_status = _escalate_status(
+                    health_status,
+                    PositionHealthStatus.INCOMPLETE,
+                )
                 diag_msg = (
                     f"Fact coverage start ({facts.coverage.start_at.isoformat()}) "
                     "does not cover active episode opened_at("
@@ -745,9 +1184,25 @@ class PositionLedger:
                         details=diag_msg,
                         event_cut=high_watermark,
                     )
+            elif high_watermark is not None and facts.coverage.end_at < high_watermark:
+                health_status = _escalate_status(
+                    health_status,
+                    PositionHealthStatus.CATCHING_UP,
+                )
+                is_comparable = False
+                diagnostics.append(
+                    "Fact coverage ends before the latest applied fill watermark"
+                )
+        elif facts.stream_scope is not None:
+            health_status = _escalate_status(
+                health_status,
+                PositionHealthStatus.CATCHING_UP,
+            )
+            is_comparable = False
+            diagnostics.append("No durable coverage evidence exists for stream scope")
 
         facts_hash = facts.compute_facts_hash()
-        version_id = f"pv_{self._position_key.symbol}_{facts_hash[:12]}"
+        version_id = f"pv_{facts_hash[:60]}"
 
         return PositionLedgerProjection(
             position_key=self._position_key,
@@ -764,4 +1219,416 @@ class PositionLedger:
             discrepancy=discrepancy,
             is_comparable=is_comparable,
             projection_version=version_id,
+            stream_scope=facts.stream_scope,
         )
+
+
+def _checkpoint_identity(
+    scope: AccountFactStreamScope,
+    event_cut: datetime,
+    source_revision: int,
+    facts_hash: str,
+    projection: PositionLedgerProjection,
+) -> str:
+    from crypto_momentum_lab.domain.execution.recovery_codec import (
+        PositionRecoveryCodec,
+    )
+
+    projection_payload = PositionRecoveryCodec.encode_projection(projection)
+    projection_bytes = json.dumps(
+        projection_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    projection_hash = hashlib.sha256(projection_bytes).hexdigest()
+    identity = json.dumps(
+        [
+            scope.canonical_id,
+            event_cut.isoformat(),
+            source_revision,
+            facts_hash,
+            projection_hash,
+        ],
+        separators=(",", ":"),
+    ).encode()
+    return f"prc_{hashlib.sha256(identity).hexdigest()}"
+
+
+def _same_fill(first: AccountFillEvent, second: AccountFillEvent) -> bool:
+    return (
+        first.environment == second.environment
+        and first.account_label == second.account_label
+        and first.symbol == second.symbol
+        and first.trade_id == second.trade_id
+        and first.order_id == second.order_id
+        and first.side.upper() == second.side.upper()
+        and first.price == second.price
+        and first.quantity == second.quantity
+        and first.realized_pnl == second.realized_pnl
+        and first.fee == second.fee
+        and first.fee_asset == second.fee_asset
+        and first.trade_at == second.trade_at
+        and first.raw_payload == second.raw_payload
+    )
+
+
+def _is_synthetic_fill(fill: AccountFillEvent) -> bool:
+    return bool((fill.raw_payload or {}).get("synthetic_from_order", False))
+
+
+def _checkpoint_error(
+    facts: AccountFacts,
+    checkpoint: PositionRecoveryCheckpoint | None,
+) -> str | None:
+    if checkpoint is None:
+        return None
+    if checkpoint.key.canonical_id != facts.position_key.canonical_id:
+        return "position key mismatch"
+    if checkpoint.stream_scope != facts.stream_scope:
+        return "stream scope or epoch mismatch"
+    if checkpoint.has_conflicts:
+        return "checkpoint contains unresolved conflicts"
+    if checkpoint.has_synthetic_fills:
+        return "checkpoint contains non-authoritative synthetic fills"
+    if checkpoint.has_late_events:
+        return "checkpoint contains late fills"
+    if any(fill.trade_at <= checkpoint.event_cut for fill in facts.late_fills):
+        return "late fill arrived at or before checkpoint cut"
+
+    if facts.prefix_facts_complete:
+        prefix = _facts_at_cut(
+            facts,
+            checkpoint.event_cut,
+            coverage=checkpoint.coverage,
+            stream_scope=checkpoint.stream_scope,
+            has_synthetic_fills=checkpoint.has_synthetic_fills,
+            has_late_events=checkpoint.has_late_events,
+            integrity_issues=checkpoint.integrity_issues,
+            recovery_checkpoint=None,
+        )
+        if checkpoint.parent_checkpoint_id is None:
+            if prefix.compute_facts_hash() != checkpoint.facts_hash:
+                return "prefix facts hash mismatch"
+        else:
+            assert checkpoint.parent_event_cut is not None
+            assert checkpoint.suffix_facts_hash is not None
+            suffix = _facts_after_checkpoint(prefix, checkpoint.parent_event_cut)
+            if suffix.compute_facts_hash() != checkpoint.suffix_facts_hash:
+                return "checkpoint suffix facts hash mismatch"
+            expected_hash = compute_checkpoint_chain_hash(
+                scope=checkpoint.stream_scope,
+                parent_stream_scope=(
+                    checkpoint.parent_stream_scope or checkpoint.stream_scope
+                ),
+                event_cut=checkpoint.event_cut,
+                parent_checkpoint_id=checkpoint.parent_checkpoint_id,
+                parent_facts_hash=checkpoint.parent_facts_hash or "",
+                parent_projection_digest=checkpoint.parent_projection_digest or "",
+                parent_event_cut=checkpoint.parent_event_cut,
+                suffix_facts_hash=checkpoint.suffix_facts_hash,
+                schema_version=checkpoint.schema_version,
+            )
+            if expected_hash != checkpoint.facts_hash:
+                return "checkpoint parent chain hash mismatch"
+    return None
+
+
+def _stream_adoption_error(
+    facts: AccountFacts,
+    adoption: StreamCheckpointAdoption,
+) -> str | None:
+    parent = adoption.parent_checkpoint
+    provenance = adoption.fill_load_provenance
+    if facts.stream_scope != adoption.target_scope:
+        return "target stream scope mismatch"
+    if facts.position_key.canonical_id != parent.key.canonical_id:
+        return "parent position key mismatch"
+    if not adoption.target_scope.matches(facts.position_key):
+        return "target position key mismatch"
+    if adoption.target_scope == parent.stream_scope:
+        return "target stream epoch is not new"
+    if (
+        parent.has_conflicts
+        or parent.has_synthetic_fills
+        or parent.has_late_events
+        or parent.integrity_issues
+    ):
+        return "parent checkpoint contains unresolved facts"
+    if (
+        parent.coverage is None
+        or parent.coverage.stream_scope != parent.stream_scope
+        or not parent.coverage.is_authoritative
+        or not parent.coverage.covers(parent.event_cut)
+    ):
+        return "parent checkpoint source coverage is not verified"
+    if (
+        provenance.stream_scope != adoption.target_scope
+        or provenance.source_anchor_kind != "recovery_checkpoint"
+        or provenance.source_anchor_id != parent.checkpoint_id
+        or provenance.source_anchor_event_cut != parent.event_cut
+        or provenance.scan_origin_start_time_ms is None
+        or provenance.origin_start_at is None
+        or provenance.origin_start_at > parent.event_cut
+        or provenance.request_from_id is not None
+        or not provenance.is_complete
+        or provenance.checked_through != adoption.target_event_cut
+        or provenance.observed_at != adoption.target_event_cut
+    ):
+        return "new stream suffix provenance is incomplete or misbound"
+    coverage = facts.coverage
+    if (
+        coverage is None
+        or coverage.status != FactCoverageStatus.CONFIRMED
+        or not coverage.is_authoritative
+        or coverage.stream_scope != adoption.target_scope
+        or coverage.load_provenance != provenance
+        or facts.fill_load_provenance != provenance
+        or coverage.checkpoint_event_cut != adoption.target_event_cut
+        or coverage.checkpoint_id is None
+        or not coverage.covers_range(parent.event_cut, adoption.target_event_cut)
+    ):
+        return "new stream suffix is not covered through the adoption cut"
+    if (
+        facts.has_synthetic_fills
+        or facts.has_late_events
+        or facts.conflicting_fills
+        or facts.fact_conflicts
+        or facts.integrity_issues
+    ):
+        return "new stream suffix contains unresolved facts"
+    if any(fill.trade_at <= parent.event_cut for fill in facts.fills):
+        return "new stream suffix contains fills at or before parent cut"
+    if any(snapshot.observed_at <= parent.event_cut for snapshot in facts.snapshots):
+        return "new stream suffix contains snapshots at or before parent cut"
+    if any(
+        boundary.submitted_at <= parent.event_cut for boundary in facts.exit_boundaries
+    ):
+        return "new stream suffix contains boundaries at or before parent cut"
+    if not any(
+        snapshot.environment == facts.position_key.environment
+        and snapshot.account_label == facts.position_key.account_label
+        and snapshot.symbol == facts.position_key.symbol
+        and snapshot.position_side == facts.position_key.position_side.value
+        and snapshot.observed_at == adoption.target_event_cut
+        for snapshot in facts.snapshots
+    ):
+        return "new stream adoption requires a snapshot at its target cut"
+    if (
+        not parent.projection.is_comparable
+        or parent.projection.health_status != PositionHealthStatus.READY
+        or parent.projection.reconciliation_gap != Decimal("0")
+        or parent.projection.unallocated_quantity != Decimal("0")
+    ):
+        return "parent checkpoint projection is not fully reconciled"
+    return None
+
+
+def _facts_at_cut(
+    facts: AccountFacts,
+    cut: datetime,
+    *,
+    coverage: FactCoverageInterval | None,
+    stream_scope: AccountFactStreamScope | None,
+    has_synthetic_fills: bool | None = None,
+    has_late_events: bool | None = None,
+    integrity_issues: tuple[str, ...] | None = None,
+    recovery_checkpoint: PositionRecoveryCheckpoint | None = None,
+) -> AccountFacts:
+    selected_coverage = coverage
+    selected_scope = stream_scope
+    if selected_coverage is not None and (
+        (
+            selected_coverage.evidence_observed_at is not None
+            and selected_coverage.evidence_observed_at > cut
+        )
+        or (
+            selected_coverage.checkpoint_event_cut is not None
+            and selected_coverage.checkpoint_event_cut > cut
+        )
+        or (
+            selected_coverage.load_provenance is not None
+            and selected_coverage.load_provenance.observed_at > cut
+        )
+    ):
+        selected_coverage = None
+    if selected_coverage is not None:
+        if selected_coverage.start_at > cut:
+            selected_coverage = None
+        elif selected_coverage.end_at > cut:
+            selected_coverage = replace(selected_coverage, end_at=cut)
+
+    fills = tuple(fill for fill in facts.fills if fill.trade_at <= cut)
+    conflicts = tuple(fill for fill in facts.conflicting_fills if fill.trade_at <= cut)
+    fact_conflicts = tuple(
+        conflict
+        for conflict in facts.fact_conflicts
+        if conflict.event_at is None or conflict.event_at <= cut
+    )
+    late_fills = tuple(fill for fill in facts.late_fills if fill.trade_at <= cut)
+    return replace(
+        facts,
+        fills=fills,
+        snapshots=tuple(s for s in facts.snapshots if s.observed_at <= cut),
+        exit_boundaries=tuple(
+            b for b in facts.exit_boundaries if b.submitted_at <= cut
+        ),
+        coverage=selected_coverage,
+        checkpoint=(
+            facts.checkpoint
+            if facts.checkpoint is not None and facts.checkpoint.event_cut <= cut
+            else None
+        ),
+        has_synthetic_fills=(
+            has_synthetic_fills
+            if has_synthetic_fills is not None
+            else any(_is_synthetic_fill(fill) for fill in fills)
+        ),
+        conflicting_fills=conflicts,
+        has_late_events=(
+            has_late_events if has_late_events is not None else bool(late_fills)
+        ),
+        stream_scope=selected_scope,
+        recovery_checkpoint=recovery_checkpoint,
+        fact_conflicts=fact_conflicts,
+        integrity_issues=(
+            integrity_issues if integrity_issues is not None else facts.integrity_issues
+        ),
+        late_fills=late_fills,
+        fill_cursor_provenance=(
+            facts.fill_cursor_provenance
+            if facts.fill_cursor_provenance is not None
+            and facts.fill_cursor_provenance.last_checked_at <= cut
+            else None
+        ),
+        fill_load_provenance=(
+            facts.fill_load_provenance
+            if facts.fill_load_provenance is not None
+            and facts.fill_load_provenance.observed_at <= cut
+            else None
+        ),
+    )
+
+
+def _facts_after_checkpoint(
+    facts: AccountFacts,
+    parent_event_cut: datetime,
+) -> AccountFacts:
+    """Return the exact event-time suffix represented after a checkpoint cut.
+
+    Coverage and integrity state remain attached because they describe the
+    suffix's authority. Immutable trade/snapshot/boundary facts at the parent's
+    inclusive cut belong to the parent projection and are excluded here.
+    """
+    if parent_event_cut.tzinfo is None or parent_event_cut.utcoffset() is None:
+        raise ValueError("parent checkpoint cut must be timezone-aware")
+    return replace(
+        facts,
+        fills=tuple(fill for fill in facts.fills if fill.trade_at > parent_event_cut),
+        snapshots=tuple(
+            snapshot
+            for snapshot in facts.snapshots
+            if snapshot.observed_at > parent_event_cut
+        ),
+        exit_boundaries=tuple(
+            boundary
+            for boundary in facts.exit_boundaries
+            if boundary.submitted_at > parent_event_cut
+        ),
+        checkpoint=(
+            facts.checkpoint
+            if facts.checkpoint is not None
+            and facts.checkpoint.event_cut > parent_event_cut
+            else None
+        ),
+        conflicting_fills=tuple(
+            fill for fill in facts.conflicting_fills if fill.trade_at > parent_event_cut
+        ),
+        fact_conflicts=tuple(
+            conflict
+            for conflict in facts.fact_conflicts
+            if conflict.event_at is None or conflict.event_at > parent_event_cut
+        ),
+        late_fills=tuple(
+            fill for fill in facts.late_fills if fill.trade_at > parent_event_cut
+        ),
+        fill_cursor_provenance=(
+            facts.fill_cursor_provenance
+            if facts.fill_cursor_provenance is not None
+            and facts.fill_cursor_provenance.last_checked_at > parent_event_cut
+            else None
+        ),
+        fill_load_provenance=(
+            facts.fill_load_provenance
+            if facts.fill_load_provenance is not None
+            and facts.fill_load_provenance.observed_at > parent_event_cut
+            else None
+        ),
+        recovery_checkpoint=None,
+        prefix_facts_complete=False,
+    )
+
+
+def _has_verified_flat_snapshot_anchor(
+    facts: AccountFacts,
+    event_cut: datetime,
+) -> bool:
+    coverage = facts.coverage
+    provenance = facts.fill_load_provenance
+    if (
+        coverage is None
+        or provenance is None
+        or coverage.status != FactCoverageStatus.CONFIRMED
+        or not coverage.is_authoritative
+        or coverage.stream_scope != facts.stream_scope
+        or coverage.checkpoint_event_cut != event_cut
+        or not coverage.covers(event_cut)
+        or provenance != coverage.load_provenance
+        or provenance.source_anchor_kind != "zero_snapshot"
+        or provenance.source_anchor_event_cut != event_cut
+        or provenance.checked_through != event_cut
+        or provenance.observed_at != event_cut
+        or coverage.checkpoint_id != provenance.source_anchor_id
+    ):
+        return False
+    from crypto_momentum_lab.domain.execution.recovery_codec import (
+        PositionRecoveryCodec,
+    )
+
+    return any(
+        snapshot.environment == facts.position_key.environment
+        and snapshot.account_label == facts.position_key.account_label
+        and snapshot.symbol == facts.position_key.symbol
+        and snapshot.position_side == facts.position_key.position_side.value
+        and snapshot.position_amt == Decimal("0")
+        and snapshot.observed_at == event_cut
+        and PositionRecoveryCodec.stable_snapshot_anchor_id(snapshot)
+        == provenance.source_anchor_id
+        for snapshot in facts.snapshots
+    )
+
+
+def _episode_counter(episode_id: str) -> int:
+    try:
+        return int(episode_id.rsplit("_", maxsplit=1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _batch_counter(batch_id: str) -> int:
+    try:
+        return int(batch_id.rsplit("_b", maxsplit=1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _escalate_status(
+    current: PositionHealthStatus,
+    requested: PositionHealthStatus,
+) -> PositionHealthStatus:
+    severity = {
+        PositionHealthStatus.READY: 0,
+        PositionHealthStatus.CATCHING_UP: 1,
+        PositionHealthStatus.INCOMPLETE: 2,
+        PositionHealthStatus.CONFLICT: 3,
+    }
+    return current if severity[current] >= severity[requested] else requested

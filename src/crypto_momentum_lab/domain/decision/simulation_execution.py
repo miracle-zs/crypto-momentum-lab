@@ -141,7 +141,10 @@ class SimulationExecutionAdapter:
             fee=fee,
             fee_asset="USDT",
             trade_at=fill_time,
-            raw_payload={"fill_model": model.model_version},
+            raw_payload={
+                "fill_model": model.model_version,
+                "positionSide": journal.position_key.position_side.value,
+            },
         )
         journal.append_fill(fill_event)
 
@@ -151,7 +154,7 @@ class SimulationExecutionAdapter:
                 environment=journal.position_key.environment,
                 account_label=journal.position_key.account_label,
                 symbol=intent.symbol,
-                position_side="LONG" if intent.side == StrategySide.LONG else "SHORT",
+                position_side=journal.position_key.position_side.value,
                 position_amt=quantity,
                 entry_price=exec_price,
                 mark_price=exec_price,
@@ -191,6 +194,8 @@ class SimulationExecutionAdapter:
         """Executes an exit TradeCommand against reserved lots."""
         if command.command_type != TradeCommandType.EXIT:
             raise ValueError("execute_exit requires EXIT command_type")
+        if command.position_key.canonical_id != journal.position_key.canonical_id:
+            raise ValueError("Exit command position key does not match account journal")
 
         model = fill_model or self._fill_model
         state = envelope.state
@@ -268,7 +273,10 @@ class SimulationExecutionAdapter:
             fee=fee,
             fee_asset="USDT",
             trade_at=fill_time,
-            raw_payload={"fill_model": model.model_version},
+            raw_payload={
+                "fill_model": model.model_version,
+                "positionSide": journal.position_key.position_side.value,
+            },
         )
         journal.append_fill(fill_event)
 
@@ -278,11 +286,7 @@ class SimulationExecutionAdapter:
                 environment=journal.position_key.environment,
                 account_label=journal.position_key.account_label,
                 symbol=command.position_key.symbol,
-                position_side=str(
-                    command.position_key.position_side.value
-                    if hasattr(command.position_key.position_side, "value")
-                    else command.position_key.position_side
-                ),
+                position_side=journal.position_key.position_side.value,
                 position_amt=Decimal("0.00"),
                 entry_price=Decimal("0.00"),
                 mark_price=exec_price,

@@ -23,6 +23,19 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from crypto_momentum_lab.persistence.postgres.base import Base
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+    DurableDecisionExitRow,
+    DurablePolicyCommitRow,
+    DurablePolicyStateRow,
+    ExecutionBookHeadRow,
+    ExecutionEvidenceReceiptRow,
+    ExecutionOrderWatermarkRow,
+    ExecutionTradeIdentityRow,
+)
+from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+    PositionFactJournalEventRow,
+    PositionRecoveryCheckpointRow,
+)
 
 
 class ContractMetadataRow(Base):

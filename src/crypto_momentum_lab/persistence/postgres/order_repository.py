@@ -1132,6 +1132,45 @@ class PostgresOrderRepository:
                 )
                 await session.execute(stmt)
 
+    async def upsert_execution_command_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        command_id: str,
+        client_order_id: str | None,
+        command: str,
+        status: str,
+        requested_at: datetime,
+        details: dict[str, JsonValue],
+    ) -> None:
+        """Upsert an outbox state without committing the caller's transaction."""
+        normalized_details = jsonable(details)
+        existing = await session.get(
+            ExecutionCommandRow, command_id, with_for_update=True
+        )
+        if existing is None:
+            session.add(
+                ExecutionCommandRow(
+                    command_id=command_id,
+                    client_order_id=client_order_id,
+                    command=command,
+                    status=status,
+                    requested_at=requested_at,
+                    details=normalized_details,
+                )
+            )
+            return
+        if (
+            existing.client_order_id != client_order_id
+            or existing.command != command
+            or existing.requested_at != requested_at
+        ):
+            raise ValueError(
+                f"execution command {command_id} conflicts with its durable identity"
+            )
+        existing.status = status
+        existing.details = normalized_details
+
     async def load_active_execution_commands(
         self,
         account_label: str | None = None,

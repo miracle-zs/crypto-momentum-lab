@@ -842,6 +842,7 @@ def _account_event_from_user_data(
         reason=result.status.value,
         has_fill=has_fill,
         trade_id=trade_id,
+        fills=result.new_fills,
         exchange_event_at=event.exchange_event_at,
         exchange_update_id=event.exchange_update_id,
         exchange_previous_update_id=event.exchange_previous_update_id,
@@ -881,6 +882,7 @@ def _account_event_from_snapshot(
         account_state=result.status,
         snapshot_kind="full",
         account_snapshot=snapshot,
+        fills=result.new_fills,
     )
 
 
@@ -915,6 +917,7 @@ def _account_event_from_reconciled_fill(
         reason="rest_reconciliation",
         has_fill=True,
         trade_id=fill.trade_id,
+        fills=(fill,),
         account_state=result.status,
     )
 
