@@ -645,6 +645,8 @@ async def sync_continuously(
                 fill: AccountFillEvent,
                 result: ExecutionAccountSyncResult,
             ) -> None:
+                if result.snapshot is None:
+                    return
                 account_event_hub.publish(
                     _account_event_from_reconciled_fill(
                         fill,
@@ -652,6 +654,18 @@ async def sync_continuously(
                         environment=environment,
                         account_label=account_label,
                     )
+                )
+
+            def _handle_sync_error(error: Exception) -> None:
+                log.error(
+                    "execution_account_sync_failed",
+                    error=str(error),
+                    error_type=type(error).__name__,
+                    exc_info=error,
+                )
+                typer.echo(
+                    f"Execution account sync failed: {type(error).__name__}: {error}",
+                    err=True,
                 )
 
             daemon = UserDataAccountSyncDaemon(
@@ -663,10 +677,7 @@ async def sync_continuously(
                     ),
                     snapshot_interval_seconds=interval_seconds,
                 ),
-                on_error=lambda error: typer.echo(
-                    f"Execution account sync failed: {type(error).__name__}",
-                    err=True,
-                ),
+                on_error=_handle_sync_error,
                 on_event_applied=publish_account_event,
                 on_snapshot=publish_account_snapshot,
                 on_heartbeat=health_callback,

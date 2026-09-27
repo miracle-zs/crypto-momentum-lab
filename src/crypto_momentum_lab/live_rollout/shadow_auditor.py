@@ -25,6 +25,8 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocation,
+    ExitAllocationPlan,
     ExitAllocator,
     ExitPolicyMode,
     TradeCommand,
@@ -260,6 +262,75 @@ class LiveExecutionShadowAuditor:
                 else None
             )
 
+            allocation_plan: ExitAllocationPlan | None = None
+            expected_projection_version: str | None = None
+            if candidate.reduce_only:
+                expected_projection_version = (
+                    getattr(legacy_plan, "projection_version", None)
+                    or (
+                        str(candidate.features["projection_version"]).strip()
+                        if candidate.features.get("projection_version")
+                        else None
+                    )
+                )
+                legacy_allocs = getattr(legacy_plan, "allocations", ()) or ()
+                legacy_batch_id = getattr(legacy_plan, "batch_id", None) or (
+                    str(candidate.features["batch_id"]).strip()
+                    if candidate.features.get("batch_id")
+                    else None
+                )
+                legacy_batch_quantities = getattr(legacy_plan, "batch_quantities", None)
+                if not legacy_allocs and legacy_batch_id:
+                    legacy_allocs = (
+                        ExitAllocation(
+                            batch_id=legacy_batch_id,
+                            allocated_quantity=req_qty,
+                        ),
+                    )
+                elif legacy_allocs:
+                    alloc_total = sum(
+                        (a.allocated_quantity for a in legacy_allocs),
+                        start=Decimal("0"),
+                    )
+                    if alloc_total != req_qty:
+                        if len(legacy_allocs) == 1:
+                            legacy_allocs = (
+                                ExitAllocation(
+                                    batch_id=legacy_allocs[0].batch_id,
+                                    allocated_quantity=req_qty,
+                                ),
+                            )
+                        else:
+                            adjusted: list[ExitAllocation] = []
+                            rem = req_qty
+                            for a in legacy_allocs:
+                                if rem <= Decimal("0"):
+                                    break
+                                take = min(a.allocated_quantity, rem)
+                                adjusted.append(
+                                    ExitAllocation(
+                                        batch_id=a.batch_id,
+                                        allocated_quantity=take,
+                                    )
+                                )
+                                rem -= take
+                            if rem > Decimal("0") and adjusted:
+                                last = adjusted[-1]
+                                adjusted[-1] = ExitAllocation(
+                                    batch_id=last.batch_id,
+                                    allocated_quantity=last.allocated_quantity + rem,
+                                )
+                            legacy_allocs = tuple(adjusted)
+                if legacy_allocs:
+                    allocation_plan = ExitAllocationPlan(
+                        position_key=position_key,
+                        allocations=legacy_allocs,
+                        total_allocated_quantity=req_qty,
+                        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
+                        projection_version=expected_projection_version,
+                        batch_quantities=legacy_batch_quantities,
+                    )
+
             cmd = TradeCommand(
                 command_id=candidate.candidate_id,
                 position_key=position_key,
@@ -273,6 +344,8 @@ class LiveExecutionShadowAuditor:
                 requested_quantity=req_qty,
                 limit_price=candidate.limit_price,
                 reduce_only=candidate.reduce_only,
+                allocation_plan=allocation_plan,
+                expected_projection_version=expected_projection_version,
                 idempotency_key=idempotency_key,
                 created_at=candidate.created_at,
             )
@@ -385,6 +458,11 @@ class LiveExecutionShadowAuditor:
                     mismatches["symbol"] = {
                         "legacy": legacy_plan.symbol,
                         "shadow": shadow_result.plan.symbol,
+                    }
+                if shadow_result.plan.batch_id != legacy_plan.batch_id:
+                    mismatches["batch_id"] = {
+                        "legacy": legacy_plan.batch_id,
+                        "shadow": shadow_result.plan.batch_id,
                     }
 
                 if mismatches:

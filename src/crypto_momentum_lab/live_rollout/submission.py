@@ -372,7 +372,29 @@ class LiveCandidateSubmission:
             and shadow_audit.is_concordant
             and shadow_audit.shadow_plan is not None
         ):
-            plan = shadow_audit.shadow_plan
+            shadow_plan = shadow_audit.shadow_plan
+            if isinstance(plan, OrderExecutionPlan):
+                if not shadow_plan.allocations and plan.allocations:
+                    shadow_plan = replace(shadow_plan, allocations=plan.allocations)
+                if shadow_plan.batch_id is None and plan.batch_id is not None:
+                    shadow_plan = replace(shadow_plan, batch_id=plan.batch_id)
+                if (
+                    shadow_plan.projection_version is None
+                    and plan.projection_version is not None
+                ):
+                    shadow_plan = replace(
+                        shadow_plan,
+                        projection_version=plan.projection_version,
+                    )
+                if (
+                    shadow_plan.batch_quantities is None
+                    and plan.batch_quantities is not None
+                ):
+                    shadow_plan = replace(
+                        shadow_plan,
+                        batch_quantities=plan.batch_quantities,
+                    )
+            plan = shadow_plan
         if isinstance(plan, QuantizationRejection):
             return None
         if (

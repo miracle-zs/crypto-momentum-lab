@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from crypto_momentum_lab.domain.execution import (
+    ExitAllocation,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -143,6 +144,40 @@ class TradeCommandExecutor:
             if command.allocation_plan and command.allocation_plan.allocations
             else ()
         )
+        if allocations:
+            alloc_sum = sum(
+                (a.allocated_quantity for a in allocations),
+                start=Decimal("0"),
+            )
+            if alloc_sum != quantized_quantity:
+                if len(allocations) == 1:
+                    allocations = (
+                        ExitAllocation(
+                            batch_id=allocations[0].batch_id,
+                            allocated_quantity=quantized_quantity,
+                        ),
+                    )
+                else:
+                    adjusted: list[ExitAllocation] = []
+                    remaining = quantized_quantity
+                    for a in allocations:
+                        if remaining <= Decimal("0"):
+                            break
+                        take = min(a.allocated_quantity, remaining)
+                        adjusted.append(
+                            ExitAllocation(
+                                batch_id=a.batch_id,
+                                allocated_quantity=take,
+                            )
+                        )
+                        remaining -= take
+                    if remaining > Decimal("0") and adjusted:
+                        last = adjusted[-1]
+                        adjusted[-1] = ExitAllocation(
+                            batch_id=last.batch_id,
+                            allocated_quantity=last.allocated_quantity + remaining,
+                        )
+                    allocations = tuple(adjusted)
         batch_id = (
             allocations[0].batch_id
             if len(allocations) == 1

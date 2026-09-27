@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import ExitAllocation, OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -398,4 +398,123 @@ def test_shadow_auditor_tracks_audit_failure(monkeypatch) -> None:
     assert metrics["sample_volume"] == 1
     assert metrics["failure_count"] == 1
     assert metrics["failure_rate"] == 1.0
+
+
+def test_shadow_auditor_audit_submission_reduce_only_exit_allocations() -> None:
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    candidate = replace(
+        _intent(),
+        candidate_id="cand-exit-1",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        created_at=now,
+        expires_at=now + timedelta(minutes=1),
+        reduce_only=True,
+        features={
+            "batch_id": "BTCUSDT:LONG:cml_entry_1",
+            "projection_version": "proj_v42",
+        },
+    )
+    alloc = ExitAllocation(
+        batch_id="BTCUSDT:LONG:cml_entry_1",
+        allocated_quantity=Decimal("0.05"),
+    )
+    legacy_plan = OrderExecutionPlan(
+        intent_id="cand-exit-1",
+        run_id="test-run",
+        client_order_id=deterministic_client_order_id("test-run", "cand-exit-1"),
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("0.05"),
+        price=None,
+        reduce_only=True,
+        created_at=now,
+        position_side=FuturesPositionSide.BOTH,
+        quantized=True,
+        batch_id="BTCUSDT:LONG:cml_entry_1",
+        allocations=(alloc,),
+        projection_version="proj_v42",
+    )
+
+    result = LiveExecutionShadowAuditor.audit_submission(
+        candidate=candidate,
+        rules=_rules(),
+        reference_price=Decimal("50000"),
+        legacy_plan=legacy_plan,
+        run_id="test-run",
+        hedge_mode=False,
+        requested_quantity=Decimal("0.05"),
+    )
+
+    assert result.success is True
+    assert result.is_concordant is True
+    assert result.shadow_plan is not None
+    assert result.shadow_plan.batch_id == "BTCUSDT:LONG:cml_entry_1"
+    assert len(result.shadow_plan.allocations) == 1
+    assert result.shadow_plan.allocations[0].batch_id == "BTCUSDT:LONG:cml_entry_1"
+    assert result.shadow_plan.allocations[0].allocated_quantity == Decimal("0.05")
+    assert result.shadow_plan.projection_version == "proj_v42"
+
+
+def test_shadow_auditor_audit_submission_detects_batch_mismatch() -> None:
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    candidate = replace(
+        _intent(),
+        candidate_id="cand-exit-2",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        created_at=now,
+        expires_at=now + timedelta(minutes=1),
+        reduce_only=True,
+        features={
+            "batch_id": "BTCUSDT:LONG:batch_cand_A",
+        },
+    )
+    alloc = ExitAllocation(
+        batch_id="BTCUSDT:LONG:batch_cand_B",
+        allocated_quantity=Decimal("0.05"),
+    )
+    legacy_plan = OrderExecutionPlan(
+        intent_id="cand-exit-2",
+        run_id="test-run",
+        client_order_id=deterministic_client_order_id("test-run", "cand-exit-2"),
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("0.05"),
+        price=None,
+        reduce_only=True,
+        created_at=now,
+        position_side=FuturesPositionSide.BOTH,
+        quantized=True,
+        batch_id="BTCUSDT:LONG:batch_cand_B",
+        allocations=(alloc,),
+    )
+
+    # Candidate specifies batch_A but legacy_plan was forced to batch_B
+    # The auditor should flag attribute mismatch when batch_id diverges
+    candidate_different_features = replace(
+        candidate,
+        features={"batch_id": "BTCUSDT:LONG:batch_cand_A"},
+    )
+    # When legacy_plan has batch_B, if candidate features passed batch_A,
+    # let's verify divergence is detected
+    result = LiveExecutionShadowAuditor.audit_submission(
+        candidate=candidate_different_features,
+        rules=_rules(),
+        reference_price=Decimal("50000"),
+        legacy_plan=replace(legacy_plan, batch_id="BTCUSDT:LONG:batch_cand_DIFFERENT"),
+        run_id="test-run",
+        hedge_mode=False,
+        requested_quantity=Decimal("0.05"),
+    )
+
+    assert result.success is True
+    assert result.is_concordant is False
+    assert "batch_id" in result.details
+
+
 
