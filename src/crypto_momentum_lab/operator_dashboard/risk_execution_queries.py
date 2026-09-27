@@ -11,6 +11,7 @@ import re
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from uuid import UUID
 
 import structlog
 from sqlalchemy import func, select
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.universe.models import MembershipStatus
 from crypto_momentum_lab.operator_dashboard.schemas import RiskExecutionResponse
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -196,11 +198,15 @@ class RiskExecutionQueries:
                         .order_by(UniverseSnapshotRow.observed_at.desc())
                         .limit(1)
                     )
-                    if snapshot_id is not None and isinstance(snapshot_id, (str, int)):
+                    if snapshot_id is not None and isinstance(
+                        snapshot_id, (str, int, UUID)
+                    ):
                         monitored = (
                             await session.scalars(
                                 select(MonitoringMembershipRow.symbol).where(
-                                    MonitoringMembershipRow.snapshot_id == snapshot_id
+                                    MonitoringMembershipRow.snapshot_id == snapshot_id,
+                                    MonitoringMembershipRow.status
+                                    != MembershipStatus.EXTENDED.value,
                                 )
                             )
                         ).all()
@@ -269,7 +275,8 @@ class RiskExecutionQueries:
         elif required_symbols:
             missing_symbols = sorted(required_symbols - set(symbol_times.keys()))
             coverage_complete = len(missing_symbols) == 0
-            coverage_scope = f"{len(symbol_times)}/{len(required_symbols)} covered"
+            covered_count = len(required_symbols & set(symbol_times.keys()))
+            coverage_scope = f"{covered_count}/{len(required_symbols)} covered"
         else:
             missing_symbols = []
             coverage_complete = bool(symbol_times)
@@ -278,8 +285,16 @@ class RiskExecutionQueries:
             )
 
         if symbol_times:
-            # Multi-symbol worst-case freshness: determined by the oldest symbol
-            worst_market_time = min(symbol_times.values())
+            # Multi-symbol worst-case freshness:
+            # When required_symbols is specified, freshness is determined by
+            # the oldest required symbol.
+            # When unconstrained, freshness is determined by the latest active
+            # market data.
+            worst_market_time = (
+                min(symbol_times.values())
+                if required_symbols
+                else max(symbol_times.values())
+            )
             observed_at = worst_market_time
             data_age_seconds = round(
                 max(0.0, (now - worst_market_time).total_seconds()), 1

@@ -1687,6 +1687,46 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
     assert resp.coverage_scope == "2/2 covered"
 
 
+async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_extended() -> None:
+    """Snapshot UUIDs and active target memberships are loaded without falling back to all historical symbols."""
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
+
+    now = datetime.now(UTC)
+    btc_time = now - timedelta(seconds=12)
+    test_snapshot_id = uuid4()
+
+    scalars_mock = MagicMock()
+    # halts, decisions, orders, then monitoring memberships
+    scalars_mock.all.side_effect = [
+        [],  # halts
+        [],  # decisions
+        [],  # orders
+        ["BTCUSDT"],  # monitored symbols (filtered out extended)
+    ]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = test_snapshot_id  # UUID snapshot id!
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [("BTCUSDT", btc_time)]
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock)
+    resp = await queries.risk_execution()
+
+    assert resp.status == OperationalStatus.READY
+    assert resp.source_status == "LIVE"
+    assert resp.observed_at == btc_time
+    assert resp.required_symbols == ["BTCUSDT"]
+    assert resp.coverage_scope == "1/1 covered"
+
+
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     """F04: When coverage query fails, API MUST return only safe error code & trace ID without raw exception text."""
     from unittest.mock import AsyncMock, MagicMock

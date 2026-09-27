@@ -452,9 +452,7 @@ class OrderExecutionCoordinator:
             elif getattr(plan, "batch_id", None):
                 target_batch_ids = (str(plan.batch_id),)
                 if batch_quantities is None:
-                    batch_quantities = {
-                        str(plan.batch_id): Decimal(str(plan.quantity))
-                    }
+                    batch_quantities = {str(plan.batch_id): Decimal(str(plan.quantity))}
             else:
                 raise OrderPreSubmissionError(
                     f"Exit order {plan.client_order_id} has no allocated batches "
