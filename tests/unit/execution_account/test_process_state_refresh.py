@@ -58,13 +58,13 @@ async def test_same_state_is_not_repersisted_within_refresh_window() -> None:
     )
     await service._save_state(
         ExecutionAccountStatus.READY_READONLY,
-        config=_config_at(t0 + timedelta(minutes=1)),
+        config=_config_at(t0 + timedelta(seconds=30)),
     )
     assert len(repo.states) == 1
 
     await service._save_state(
         ExecutionAccountStatus.READY_READONLY,
-        config=_config_at(t0 + timedelta(minutes=6)),
+        config=_config_at(t0 + timedelta(seconds=70)),
     )
     assert len(repo.states) == 2
 
