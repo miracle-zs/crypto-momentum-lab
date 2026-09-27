@@ -104,6 +104,7 @@ class LiveRunOptions:
     entry_policy_enforce: bool | None
     acknowledge_missing_shadow_preflight: bool
     persist_exchange_operations: str | None
+    target_notional: str | None = None
     max_concurrency_per_symbol: int | None = None
 
 
@@ -356,6 +357,7 @@ def resolve_live_runtime_config(
     candle_grace_decision_profit_pct = options.candle_grace_decision_profit_pct
     candle_grace_profit_pct = options.candle_grace_profit_pct
     persist_exchange_operations = options.persist_exchange_operations
+    target_notional = options.target_notional
     strategy_config_hash = options.strategy_config_hash
     git_commit_hash = options.git_commit_hash
     migration_revision = options.migration_revision
@@ -405,6 +407,11 @@ def resolve_live_runtime_config(
             "submit,cancel"
             if persist_exchange_operations is None
             else persist_exchange_operations
+        )
+        target_notional = (
+            target_notional
+            or values.get("CML_LIVE_TARGET_NOTIONAL", "").strip()
+            or "100.00"
         )
         profile = resolve_live_profile_options(
             impulse_window_buckets=options.impulse_window_buckets,
@@ -491,6 +498,11 @@ def resolve_live_runtime_config(
             execution_inputs.persist_exchange_operations,
             "--persist-exchange-operations",
         )
+        target_notional = resolve_manifest_decimal_option(
+            target_notional,
+            execution_inputs.target_notional,
+            "--target-notional",
+        )
 
         configured_git_commit = (
             options.git_commit_hash.strip()
@@ -553,6 +565,7 @@ def resolve_live_runtime_config(
         or entry_long_only is None
         or entry_leverage is None
         or margin_type is None
+        or target_notional is None
         or candle_grace_bars is None
         or candle_grace_decision_profit_pct is None
         or candle_grace_profit_pct is None
@@ -562,10 +575,13 @@ def resolve_live_runtime_config(
     try:
         candle_decision_profit = Decimal(candle_grace_decision_profit_pct)
         candle_profit = Decimal(candle_grace_profit_pct)
+        target_notional_decimal = Decimal(target_notional)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise LiveRuntimeOptionsError(
             f"live execution decimal option is invalid: {error}"
         ) from error
+    if target_notional_decimal <= 0:
+        raise LiveRuntimeOptionsError("target_notional must be greater than zero")
 
     return LiveRuntimeConfig(
         databases=LiveRuntimeDatabases(
@@ -616,6 +632,7 @@ def resolve_live_runtime_config(
             entry_policy_enforce=entry_policy_enforce,
         ),
         execution=LiveRuntimeExecution(
+            target_notional=target_notional_decimal,
             hedge_mode=hedge_mode,
             exit_mode=exit_mode,
             entry_long_only=entry_long_only,

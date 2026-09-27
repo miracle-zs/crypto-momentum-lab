@@ -1405,6 +1405,13 @@ def run_command(
             ),
         ),
     ] = None,
+    target_notional: Annotated[
+        str | None,
+        typer.Option(
+            "--target-notional",
+            help="Target notional per position in quote currency (USDT).",
+        ),
+    ] = None,
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -1483,6 +1490,7 @@ def run_command(
                     acknowledge_missing_shadow_preflight
                 ),
                 persist_exchange_operations=persist_exchange_operations,
+                target_notional=target_notional,
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
             ),
             credentials=credentials,

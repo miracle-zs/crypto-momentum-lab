@@ -160,7 +160,7 @@ class SizingModel(Protocol):
 class FixedNotionalSizingModel:
     """Fixed notional sizing baseline with lot quantization and margin check."""
 
-    target_notional: Decimal = Decimal("500.00")
+    target_notional: Decimal
     max_leverage: Decimal = Decimal("5.0")
     max_slippage_budget_bps: Decimal = Decimal("10.0")
     resize_tolerance: Decimal = Decimal("0.05")

@@ -54,6 +54,7 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
             entry_policy_enforce=False,
         ),
         execution=LiveRuntimeExecution(
+            target_notional=Decimal("100.00"),
             hedge_mode=False,
             exit_mode=PositionExitMode.CANDLE_15M,
             entry_long_only=True,

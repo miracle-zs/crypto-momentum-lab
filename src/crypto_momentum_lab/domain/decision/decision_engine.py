@@ -328,7 +328,7 @@ class EffectivePolicy:
     entry_threshold: Decimal = Decimal("65000.00")
     short_entry_threshold: Decimal | None = None
     order_type: EntryType = EntryType.MARKET
-    target_notional: Decimal = Decimal("500.00")
+    target_notional: Decimal = Decimal("100.00")
     max_open_positions: int = 4
     exit_policy: PositionExitPolicy = field(default_factory=PositionExitPolicy)
     cooldown_duration: timedelta = timedelta(minutes=15)
@@ -895,7 +895,14 @@ def create_authoritative_decision_filter(
     explicit reason instead of being approved on an empty READY view.
     """
     engine = DecisionEngine()
-    notional = target_notional or Decimal("500.00")
+    if target_notional is None:
+        if effective_policy is not None:
+            target_notional = effective_policy.target_notional
+        else:
+            target_notional = Decimal("100.00")
+    if target_notional <= Decimal("0"):
+        raise ValueError("target_notional must be explicitly configured and positive")
+    notional = target_notional
 
     def _reject_all(
         decision: StrategyDecision,

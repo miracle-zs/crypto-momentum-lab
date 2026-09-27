@@ -64,6 +64,7 @@ class LiveRuntimeStrategyInputs:
 class LiveRuntimeExecutionInputs:
     """Account-scoped order and exit settings owned by the manifest."""
 
+    target_notional: Decimal
     hedge_mode: bool
     entry_long_only: bool
     entry_leverage: int
@@ -98,6 +99,7 @@ _ENV_REFERENCE = re.compile(
 )
 
 _DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
+    target_notional=Decimal("100.00"),
     hedge_mode=True,
     entry_long_only=True,
     entry_leverage=1,
@@ -453,11 +455,16 @@ def _execution_inputs(
             or (isinstance(raw_concurrency, str) and not raw_concurrency.strip())
             else _integer(raw_concurrency, f"{field}.max_concurrency_per_symbol")
         )
-        if max_concurrency_per_symbol is not None and max_concurrency_per_symbol <= 0:
-            raise RuntimeManifestError(
-                f"{field}.max_concurrency_per_symbol must be positive"
-            )
+        raw_target_notional = config.get("target_notional")
+        target_notional = (
+            _decimal(raw_target_notional, f"{field}.target_notional")
+            if raw_target_notional is not None
+            else Decimal("100.00")
+        )
+        if target_notional <= 0:
+            raise RuntimeManifestError(f"{field}.target_notional must be positive")
         return LiveRuntimeExecutionInputs(
+            target_notional=target_notional,
             hedge_mode=hedge_mode,
             entry_long_only=entry_long_only,
             entry_leverage=entry_leverage,

@@ -154,6 +154,7 @@ class LiveRuntimeStrategy:
 
 @dataclass(frozen=True, slots=True)
 class LiveRuntimeExecution:
+    target_notional: Decimal
     hedge_mode: bool
     exit_mode: PositionExitMode
     entry_long_only: bool

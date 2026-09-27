@@ -150,10 +150,15 @@ class RuntimePlanCompiler:
             "override" if "entry_threshold" in user_overrides else "default"
         )
 
-        target_notional = user_overrides.get("target_notional", Decimal("500.00"))
-        sources["target_notional"] = (
-            "override" if "target_notional" in user_overrides else "default"
-        )
+        target_notional_raw = user_overrides.get("target_notional")
+        if target_notional_raw is None:
+            target_notional = Decimal("100.00")
+            sources["target_notional"] = "default"
+        else:
+            target_notional = Decimal(str(target_notional_raw))
+            sources["target_notional"] = "override"
+        if target_notional <= Decimal("0"):
+            raise ValueError("target_notional must be positive")
 
         order_type_str = user_overrides.get("order_type", "market")
         order_type = EntryType.LIMIT if order_type_str == "limit" else EntryType.MARKET
@@ -187,17 +192,25 @@ class RuntimePlanCompiler:
             json.dumps(exec_payload, sort_keys=True).encode()
         ).hexdigest()
 
+        max_order_notional_raw = user_overrides.get("max_order_notional")
+        max_order_notional = (
+            Decimal(str(max_order_notional_raw))
+            if max_order_notional_raw is not None
+            else target_notional
+        )
+        max_gross_notional_raw = user_overrides.get("max_gross_notional")
+        max_gross_notional = (
+            Decimal(str(max_gross_notional_raw))
+            if max_gross_notional_raw is not None
+            else target_notional * Decimal("4")
+        )
         risk_payload = {
             "max_open_positions": int(user_overrides.get("max_open_positions", 4)),
             "max_account_drawdown": str(
                 user_overrides.get("max_account_drawdown", "0.10")
             ),
-            "max_gross_notional": str(
-                user_overrides.get("max_gross_notional", "2000.00")
-            ),
-            "max_order_notional": str(
-                user_overrides.get("max_order_notional", "500.00")
-            ),
+            "max_gross_notional": str(max_gross_notional),
+            "max_order_notional": str(max_order_notional),
         }
         risk_hash = hashlib.sha256(
             json.dumps(risk_payload, sort_keys=True).encode()

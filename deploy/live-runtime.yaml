@@ -31,6 +31,7 @@ accounts:
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
     execution_config:
+      target_notional: "${CML_LIVE_TARGET_NOTIONAL:-100.00}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE:-5}"
@@ -67,6 +68,7 @@ accounts:
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
     execution_config:
+      target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_2:-100.00}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}"
@@ -104,6 +106,7 @@ accounts:
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
     execution_config:
+      target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_3:-100.00}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}"
@@ -141,6 +144,7 @@ accounts:
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
     execution_config:
+      target_notional: "${CML_LIVE_TARGET_NOTIONAL_ACCOUNT_4:-100.00}"
       hedge_mode: true
       entry_long_only: true
       entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}"

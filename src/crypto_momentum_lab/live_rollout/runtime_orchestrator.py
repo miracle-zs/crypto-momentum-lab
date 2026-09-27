@@ -629,18 +629,28 @@ async def run_live_daemon(
         )
         order_event_runtime = LiveOrderEventRuntime(telemetry=telemetry)
 
+        target_notional = getattr(config.execution, "target_notional", None)
+        if target_notional is None:
+            target_notional = getattr(config.strategy, "target_notional_usdt", None)
+        if target_notional is None or target_notional <= 0:
+            raise ValueError(
+                "target_notional must be explicitly configured and > 0, "
+                f"got {target_notional}"
+            )
+
         plan_overrides = {
-            "target_notional": getattr(config.strategy, "target_notional_usdt", None)
-            or Decimal("500.00"),
+            "target_notional": target_notional,
             "order_type": "market"
             if getattr(config.strategy, "market_orders", False)
             else "limit",
             "max_open_positions": getattr(risk_config, "max_open_positions", 4),
             "max_gross_notional": getattr(
-                risk_config, "max_gross_notional", Decimal("2000.00")
+                risk_config,
+                "max_gross_notional",
+                target_notional * getattr(risk_config, "max_open_positions", 4),
             ),
             "max_order_notional": getattr(
-                risk_config, "max_order_notional", Decimal("500.00")
+                risk_config, "max_order_notional", target_notional
             ),
             "max_holding_seconds": getattr(config.strategy, "max_holding_seconds", None)
             or 1200,

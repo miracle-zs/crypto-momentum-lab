@@ -725,9 +725,12 @@ def execute_policy_transition(
                     rejection_reason="direction_not_permitted_by_position_mode",
                     transition_time=clock_time,
                 )
-            target_notional: Decimal = getattr(
-                policy_artifact, "target_notional", Decimal("500.00")
-            )
+            target_notional_val = getattr(policy_artifact, "target_notional", None)
+            if target_notional_val is None or target_notional_val <= Decimal("0"):
+                raise ValueError(
+                    "policy_artifact must provide an explicit positive target_notional"
+                )
+            target_notional: Decimal = target_notional_val
             order_type: EntryType = getattr(
                 policy_artifact, "order_type", EntryType.MARKET
             )
@@ -760,9 +763,12 @@ def execute_policy_transition(
                     rejection_reason="direction_not_permitted_by_position_mode",
                     transition_time=clock_time,
                 )
-            target_notional = getattr(
-                policy_artifact, "target_notional", Decimal("500.00")
-            )
+            target_notional_val = getattr(policy_artifact, "target_notional", None)
+            if target_notional_val is None or target_notional_val <= Decimal("0"):
+                raise ValueError(
+                    "policy_artifact must provide an explicit positive target_notional"
+                )
+            target_notional = target_notional_val
             order_type = getattr(policy_artifact, "order_type", EntryType.MARKET)
             cand = OrderIntentCandidate(
                 candidate_id=f"intent_{decision_id}",
