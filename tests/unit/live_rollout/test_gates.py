@@ -61,6 +61,20 @@ def test_live_gate_accepts_complete_preflight_context() -> None:
     assert decision.reasons == ()
 
 
+def test_live_gate_accepts_unlimited_approval_for_bounded_risk_config() -> None:
+    approval = replace(
+        _context().approval,
+        approved_notional_cap=None,
+        approved_max_open_positions=None,
+        approved_max_daily_loss=None,
+    )
+
+    decision = evaluate_live_gate(replace(_context(), approval=approval))
+
+    assert decision.status is LiveGateStatus.APPROVED
+    assert decision.reasons == ()
+
+
 def test_live_gate_rejects_permanent_unbounded_approval() -> None:
     config = replace(
         _risk_config(),

@@ -162,15 +162,18 @@ def _decimal_limit_is_covered(
     required: Decimal | None,
     approved: Decimal | None,
 ) -> bool:
-    if approved is None:
+    # ``None`` on an approval represents an explicit unlimited cap. A missing
+    # runtime limit is different: it leaves risk unbounded and must fail closed.
+    if required is None:
         return False
-    return required is not None and required <= approved
+    return approved is None or required <= approved
 
 
 def _integer_limit_is_covered(
     required: int | None,
     approved: int | None,
 ) -> bool:
-    if approved is None:
+    # Keep unlimited approvals distinct from an unbounded runtime configuration.
+    if required is None:
         return False
-    return required is not None and required <= approved
+    return approved is None or required <= approved
