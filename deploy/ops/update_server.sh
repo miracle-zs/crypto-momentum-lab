@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard]
+Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard] [--execution-accounts-only]
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
@@ -35,6 +35,9 @@ retired paper containers are archived, stopped, and removed during the update.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
 the target runtime while preserving their existing limits and operator fields;
 it requires --live and an explicit git-ref.
+--execution-accounts-only is a recovery rollout for already-running read-only
+Live execution-account services. It requires --live and an explicit git-ref,
+does not refresh approvals, and leaves strategy and Paper services untouched.
 --sync-dashboard forces updating CML_DASHBOARD_IMAGE to the target commit image;
 by default, dashboard images referencing an ancestor repository commit are also
 automatically advanced, while custom non-repo images remain preserved.
@@ -60,6 +63,7 @@ target_ref="origin/main"
 target_ref_set=0
 live_update=0
 refresh_approvals=0
+execution_accounts_only=0
 sync_dashboard="${CML_SYNC_DASHBOARD:-0}"
 while (( $# > 0 )); do
   case "$1" in
@@ -68,6 +72,9 @@ while (( $# > 0 )); do
       ;;
     --refresh-approvals)
       refresh_approvals=1
+      ;;
+    --execution-accounts-only)
+      execution_accounts_only=1
       ;;
     --sync-dashboard)
       sync_dashboard=1
@@ -105,6 +112,22 @@ fi
 if [[ "$refresh_approvals" == 1 && "$target_ref_set" == 0 ]]; then
   echo "--refresh-approvals requires an explicit git-ref" >&2
   usage >&2
+  exit 64
+fi
+
+if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
+  echo "--execution-accounts-only requires --live" >&2
+  exit 64
+fi
+
+if [[ "$execution_accounts_only" == 1 && "$target_ref_set" == 0 ]]; then
+  echo "--execution-accounts-only requires an explicit git-ref" >&2
+  usage >&2
+  exit 64
+fi
+
+if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
+  echo "--execution-accounts-only cannot be combined with --refresh-approvals" >&2
   exit 64
 fi
 
@@ -173,7 +196,7 @@ if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s 
   "$live_stop_timeout" \
   "$deploy_operation_timeout" "$deploy_build_timeout" \
   "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
-  "$crash_log_directory" "$sync_dashboard" \
+  "$crash_log_directory" "$sync_dashboard" "$execution_accounts_only" \
   <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
@@ -194,6 +217,7 @@ dashboard_required="${14}"
 dashboard_proxy_url="${15}"
 crash_log_directory="${16}"
 sync_dashboard="${17:-0}"
+execution_accounts_only="${18:-0}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -222,6 +246,18 @@ if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
 fi
 if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
   echo "Invalid sync dashboard flag: $sync_dashboard" >&2
+  exit 64
+fi
+if [[ "$execution_accounts_only" != 0 && "$execution_accounts_only" != 1 ]]; then
+  echo "Invalid execution-accounts-only flag: $execution_accounts_only" >&2
+  exit 64
+fi
+if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
+  echo "Execution-account-only rollout requires --live" >&2
+  exit 64
+fi
+if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
+  echo "Execution-account-only rollout cannot refresh approvals" >&2
   exit 64
 fi
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
@@ -1624,6 +1660,39 @@ if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
   fi
 else
   echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
+fi
+
+if [[ "$execution_accounts_only" == 1 ]]; then
+  execution_account_services=()
+  for pair in "${live_pairs[@]}"; do
+    IFS=: read -r _account execution_service _strategy_service <<<"$pair"
+    if is_live_service_active "$execution_service"; then
+      execution_account_services+=("$execution_service")
+    fi
+  done
+  if (( ${#execution_account_services[@]} == 0 )); then
+    echo "No running Live execution-account services; none were started" >&2
+    exit 1
+  fi
+
+  deploy_phase=execution-accounts-only
+  write_deploy_state running "$deploy_phase"
+  account_only_started_at="$(date +%s)"
+  echo "update read-only execution-account wave (${#execution_account_services[@]} services)"
+  live_up_and_wait_parallel \
+    "$live_wait_timeout" "$live_concurrency" "${execution_account_services[@]}"
+  for service in "${execution_account_services[@]}"; do
+    verify_service_target_timed "$service"
+  done
+  echo "phase=execution-accounts-only elapsed_seconds=$(( $(date +%s) - account_only_started_at ))"
+  echo "strategy_services=unchanged paper_services=unchanged"
+
+  # Keep a resumable deployment record at the last common prerequisite phase.
+  # A subsequent normal --live run will continue with approvals and the full
+  # strategy preflight after account readiness has recovered.
+  deploy_phase=volume-init
+  write_deploy_state running "$deploy_phase"
+  exit 0
 fi
 
 # Check the Live approval binding before restarting any non-Live service. This
