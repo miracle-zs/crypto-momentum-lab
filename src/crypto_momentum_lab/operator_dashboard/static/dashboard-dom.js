@@ -50,13 +50,34 @@ export function restoreViewState(root, state) {
   const previousBehavior = documentElement.style.scrollBehavior;
   documentElement.style.scrollBehavior = "auto";
   view.scrollTo(state.pageX, state.pageY);
+  if (typeof view.scrollTo === "function" && (view.scrollX !== state.pageX || view.scrollY !== state.pageY)) {
+    try {
+      view.scrollTo({ left: state.pageX, top: state.pageY, behavior: "instant" });
+    } catch {
+      // Ignore browsers lacking scrollTo options
+    }
+  }
   documentElement.style.scrollBehavior = previousBehavior;
 }
 
 export function replaceChildrenFromHtml(root, html) {
   const state = captureViewState(root);
+  const previousMinHeight = root.style.minHeight;
+  if (root.offsetHeight > 0) {
+    root.style.minHeight = `${root.offsetHeight}px`;
+  }
   root.replaceChildren(fragmentFromHtml(root.ownerDocument, html));
+  void root.offsetHeight;
   restoreViewState(root, state);
+  const view = root.ownerDocument.defaultView;
+  if (typeof view?.requestAnimationFrame === "function") {
+    view.requestAnimationFrame(() => {
+      root.style.minHeight = previousMinHeight;
+      restoreViewState(root, state);
+    });
+  } else {
+    root.style.minHeight = previousMinHeight;
+  }
 }
 
 export function replaceElementFromHtml(element, html) {

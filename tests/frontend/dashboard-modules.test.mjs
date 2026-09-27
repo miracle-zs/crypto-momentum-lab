@@ -72,6 +72,55 @@ test("heartbeat-only account updates do not rebuild the active section", () => {
   assert.equal(sectionRenderKey("account", first), sectionRenderKey("account", second));
 });
 
+test("overview account heartbeats do not rebuild the section", () => {
+  const first = {
+    status: "READY",
+    services: [{ name: "market-data", status: "READY", age_seconds: 5, observed_at: "2026-09-27T05:00:00Z" }],
+    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:00Z", lease_expires_at: "2026-10-01T00:00:00Z", status: "READY" }],
+  };
+  const second = {
+    ...first,
+    services: [{ name: "market-data", status: "READY", age_seconds: 20, observed_at: "2026-09-27T05:00:15Z" }],
+    account_statuses: [{ account_label: "primary", observed_at: "2026-09-27T05:00:15Z", lease_expires_at: "2026-10-01T00:00:00Z", status: "READY" }],
+  };
+
+  assert.equal(sectionRenderKey("overview", first), sectionRenderKey("overview", second));
+});
+
+test("risk heartbeat updates do not rebuild the section", () => {
+  const first = {
+    status: "READY",
+    data_age_seconds: 2.5,
+    observed_at: "2026-09-27T05:00:00Z",
+    active_halts: [],
+  };
+  const second = {
+    ...first,
+    data_age_seconds: 17.5,
+    observed_at: "2026-09-27T05:00:15Z",
+  };
+
+  assert.equal(sectionRenderKey("risk", first), sectionRenderKey("risk", second));
+});
+
+test("collector heartbeat updates do not rebuild the section", () => {
+  const first = {
+    status: "READY",
+    checkpoint_age_seconds: 10,
+    parquet_latest_age_seconds: 15,
+    pending_spool_oldest_age_seconds: 2,
+    stream_id: "research",
+  };
+  const second = {
+    ...first,
+    checkpoint_age_seconds: 25,
+    parquet_latest_age_seconds: 30,
+    pending_spool_oldest_age_seconds: 17,
+  };
+
+  assert.equal(sectionRenderKey("collector", first), sectionRenderKey("collector", second));
+});
+
 test("strategy account heartbeats refresh cards without rebuilding the page", () => {
   const first = {
     status: "READY",

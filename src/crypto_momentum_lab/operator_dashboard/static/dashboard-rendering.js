@@ -16,6 +16,21 @@ export function sectionRenderKey(id, data) {
       delete service.age_seconds;
       delete service.observed_at;
     }
+    for (const account of snapshot.account_statuses || []) {
+      delete account.observed_at;
+      delete account.lease_expires_at;
+    }
+  }
+
+  if (id === "risk") {
+    delete snapshot.data_age_seconds;
+    delete snapshot.observed_at;
+  }
+
+  if (id === "collector") {
+    delete snapshot.checkpoint_age_seconds;
+    delete snapshot.parquet_latest_age_seconds;
+    delete snapshot.pending_spool_oldest_age_seconds;
   }
 
   if (id === "account") {
