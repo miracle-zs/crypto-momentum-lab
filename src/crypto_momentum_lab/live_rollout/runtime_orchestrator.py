@@ -1716,9 +1716,19 @@ def _is_transient_live_runtime_error(error: Exception) -> bool:
 
 
 def _is_order_identity_conflict(error: Exception) -> bool:
-    return (
-        isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
-    )
+    if isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE:
+        return True
+    msg = str(error)
+    if "already exists in terminal status" in msg or "already bound to a different order" in msg:
+        return True
+    if "ReservationConflictError" in type(error).__name__:
+        return True
+    if "OrderPreSubmissionError" in type(error).__name__ and "already exists" in msg:
+        return True
+    cause = getattr(error, "__cause__", None)
+    if cause is not None and isinstance(cause, Exception):
+        return _is_order_identity_conflict(cause)
+    return False
 
 
 def _hub_cursor_from_checkpoint(

@@ -121,11 +121,11 @@ class LiveExitChannelRuntime:
                         if order_identity_conflict
                         else type(error).__name__
                     )
-                    if (
-                        order_identity_conflict
-                        and self._on_exit_failure is not None
-                    ):
-                        self._on_exit_failure(quote.symbol, failure)
+                    if order_identity_conflict:
+                        if hasattr(self._daemon, "note_order_identity_conflict"):
+                            self._daemon.note_order_identity_conflict(quote.symbol)
+                        if self._on_exit_failure is not None:
+                            self._on_exit_failure(quote.symbol, failure)
                     log.warning(
                         "live_market_quote_processing_degraded",
                         symbol=quote.symbol,
@@ -193,6 +193,8 @@ class LiveExitChannelRuntime:
                 except Exception as error:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON
+                        if hasattr(self._daemon, "note_order_identity_conflict"):
+                            self._daemon.note_order_identity_conflict(event.candle.symbol)
                         break
                     if not self._is_transient_error(error):
                         raise
@@ -296,6 +298,8 @@ class LiveExitChannelRuntime:
                 except Exception as error:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON
+                        if hasattr(self._daemon, "note_order_identity_conflict"):
+                            self._daemon.note_order_identity_conflict(state.symbol)
                         if self._on_exit_failure is not None:
                             self._on_exit_failure(state.symbol, failure)
                         retry_delay = min(

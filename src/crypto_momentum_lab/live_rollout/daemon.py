@@ -484,6 +484,10 @@ class LiveStrategyDaemon:
     def managed_position_symbols(self) -> frozenset[str]:
         return self._context_runtime.managed_position_symbols
 
+    def note_order_identity_conflict(self, symbol: str) -> None:
+        if self._exit_manager is not None:
+            self._exit_manager.note_order_identity_conflict(symbol)
+
     @property
     def checkpoint_coordinator(self) -> LiveCheckpointCoordinator:
         return self._checkpoint_coordinator

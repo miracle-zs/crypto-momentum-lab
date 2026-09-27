@@ -245,11 +245,18 @@ class LiveExitProcessor:
                     state=state,
                     context=context,
                 )
-            except ValueError as error:
-                if (
-                    self._exit_manager is not None
-                    and str(error)
-                    == "client order ID is already bound to a different order"
+            except Exception as error:
+                if self._exit_manager is not None and (
+                    (
+                        isinstance(error, ValueError)
+                        and str(error)
+                        == "client order ID is already bound to a different order"
+                    )
+                    or "already exists in terminal status" in str(error)
+                    or "already exists" in str(error)
+                    or "already bound to a different order" in str(error)
+                    or "ReservationConflictError" in type(error).__name__
+                    or "OrderPreSubmissionError" in type(error).__name__
                 ):
                     self._exit_manager.note_order_identity_conflict(state.symbol)
                 raise
@@ -626,13 +633,27 @@ class LiveExitProcessor:
         if failure is not None:
             return None, context, failure
         for attempt in range(2):
-            result = await self._submission.execute(
-                request.candidate,
-                requested_quantity=request.quantity,
-                state=state,
-                context=context,
-                reference_price=reference_price,
-            )
+            try:
+                result = await self._submission.execute(
+                    request.candidate,
+                    requested_quantity=request.quantity,
+                    state=state,
+                    context=context,
+                    reference_price=reference_price,
+                )
+            except Exception as error:
+                if self._exit_manager is not None and (
+                    "already exists in terminal status" in str(error)
+                    or "already exists" in str(error)
+                    or "already bound to a different order" in str(error)
+                    or "ReservationConflictError" in type(error).__name__
+                    or "OrderPreSubmissionError" in type(error).__name__
+                ):
+                    self._exit_manager.note_order_identity_conflict(
+                        request.candidate.symbol
+                    )
+                    return None, context, "order_identity_conflict"
+                raise
             if result is not None or self._context_is_current(context):
                 return result, context, None
             if attempt == 1:
@@ -799,13 +820,27 @@ class LiveExitProcessor:
                     request.fallback_candidate,
                     fallback_quantity,
                 )
-                result = await self._submission.execute(
-                    fallback_candidate,
-                    requested_quantity=fallback_quantity,
-                    state=state,
-                    context=context,
-                    reference_price=reference_price,
-                )
+                try:
+                    result = await self._submission.execute(
+                        fallback_candidate,
+                        requested_quantity=fallback_quantity,
+                        state=state,
+                        context=context,
+                        reference_price=reference_price,
+                    )
+                except Exception as error:
+                    if self._exit_manager is not None and (
+                        "already exists in terminal status" in str(error)
+                        or "already exists" in str(error)
+                        or "already bound to a different order" in str(error)
+                        or "ReservationConflictError" in type(error).__name__
+                        or "OrderPreSubmissionError" in type(error).__name__
+                    ):
+                        self._exit_manager.note_order_identity_conflict(
+                            fallback_candidate.symbol
+                        )
+                        return approved, submitted, "order_identity_conflict"
+                    raise
                 if result is None:
                     continue
                 if invalidate_context:

@@ -55,3 +55,32 @@ def test_grace_timeout_identity_changes_after_conflict_epoch() -> None:
     assert after_conflict.candidate.candidate_id != first.candidate.candidate_id
     assert after_conflict.candidate.symbol == first.candidate.symbol
     assert after_conflict.quantity == first.quantity
+
+
+def test_order_identity_conflict_detector() -> None:
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ReservationConflictError,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderPreSubmissionError,
+    )
+    from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
+        _is_order_identity_conflict,
+    )
+
+    err1 = ReservationConflictError(
+        "reservation res_cml_1_0 already exists in terminal status RELEASED"
+    )
+    assert _is_order_identity_conflict(err1)
+
+    err2 = OrderPreSubmissionError(
+        f"Failed to create position reservation for cml_1: {err1}"
+    )
+    assert _is_order_identity_conflict(err2)
+
+    nested = Exception("outer")
+    nested.__cause__ = err2
+    assert _is_order_identity_conflict(nested)
+
+    assert not _is_order_identity_conflict(ValueError("some random error"))
+
