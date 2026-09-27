@@ -381,7 +381,7 @@ class OrderExecutionCoordinator:
     @property
     def is_execution_book_enabled(self) -> bool:
         raw = os.environ.get(
-            "CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4"
+            "CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all"
         ).strip()
         if raw.lower() in ("all", "*", "true", "1"):
             return True

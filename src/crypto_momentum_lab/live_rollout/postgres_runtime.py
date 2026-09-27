@@ -2476,6 +2476,8 @@ def _build_position_batches(
             fills=matching_fills,
             observation=observation,
             coverage=coverage,
+            fill_times=fill_times,
+            fill_prices=fill_prices,
         )
         ledger = PositionLedger(position_key)
         shadow_projection = ledger.project(facts)
@@ -2499,42 +2501,44 @@ def _build_position_batches(
         ).lower() in {"1", "true", "yes"}
         if is_primary_enabled:
             ledger_is_ready = (
-                shadow_projection.health_status == PositionHealthStatus.READY
+                shadow_projection.health_status
+                in (PositionHealthStatus.READY, PositionHealthStatus.CATCHING_UP)
                 and shadow_projection.total_active_quantity
                 == abs(position.position_amt)
                 and shadow_projection.reconciliation_gap == Decimal("0")
                 and shadow_projection.unallocated_quantity == Decimal("0")
             )
-            # Prevent toxic fallback when legacy lot reconstruction is contaminated by
-            # pre-zero orders,
-            # but ledger is strictly consistent and matches exchange observation entry
-            # price.
-            legacy_price_contaminated = (
-                not diff_report.is_concordant
-                and diff_report.category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                and position.entry_price > Decimal("0")
-                and len(shadow_projection.active_batches) > 0
-                and abs(
-                    shadow_projection.active_batches[0].entry_price
-                    - position.entry_price
+            if ledger_is_ready:
+                active_limit_orders = [
+                    order
+                    for order in matching_orders
+                    if getattr(order, "plan", None) is not None
+                    and getattr(order.plan, "reduce_only", False)
+                    and getattr(order, "order_type", None) == "LIMIT"
+                    and not getattr(getattr(order, "state", None), "terminal", False)
+                ]
+                active_market_orders = any(
+                    getattr(order, "plan", None) is not None
+                    and getattr(order.plan, "reduce_only", False)
+                    and getattr(order, "order_type", None) == "MARKET"
+                    and not getattr(getattr(order, "state", None), "terminal", False)
+                    for order in matching_orders
                 )
-                < Decimal("0.0001")
-                and (
-                    not result.batches
-                    or abs(result.batches[0].entry_price - position.entry_price)
-                    > Decimal("0.001")
+                recovery_order = max(
+                    active_limit_orders,
+                    key=lambda order: (order.created_at, order.updated_at),
+                    default=None,
                 )
-            )
-            if ledger_is_ready and (
-                diff_report.is_concordant or legacy_price_contaminated
-            ):
+                recovery_remaining = None
+                if recovery_order is not None and recovery_order.plan is not None:
+                    recovery_remaining = max(
+                        Decimal("0"),
+                        recovery_order.plan.quantity - recovery_order.executed_quantity,
+                    )
+
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
-                        batch_id=(
-                            result.batches[idx].batch_id
-                            if (diff_report.is_concordant and idx < len(result.batches))
-                            else ab.batch_id
-                        ),
+                        batch_id=ab.batch_id,
                         quantity=ab.quantity,
                         entry_price=ab.entry_price,
                         opened_at=ab.opened_at,
@@ -2542,53 +2546,31 @@ def _build_position_batches(
                             ab.exit_order_submitted_at
                             if ab.exit_order_submitted_at is not None
                             else (
-                                result.batches[idx].exit_order_submitted_at
-                                if idx < len(result.batches)
+                                recovery_order.created_at
+                                if recovery_order is not None
                                 else None
                             )
                         ),
                         recovery_order_client_id=(
-                            result.batches[idx].recovery_order_client_id
-                            if idx < len(result.batches)
-                            else None
+                            None
+                            if recovery_order is None or recovery_order.plan is None
+                            else recovery_order.plan.client_order_id
                         ),
                         recovery_order_plan=(
-                            result.batches[idx].recovery_order_plan
-                            if idx < len(result.batches)
-                            else None
+                            None if recovery_order is None else recovery_order.plan
                         ),
-                        recovery_order_remaining_quantity=(
-                            result.batches[idx].recovery_order_remaining_quantity
-                            if idx < len(result.batches)
-                            else None
-                        ),
-                        closing_order_filled=(
-                            result.batches[idx].closing_order_filled
-                            if idx < len(result.batches)
-                            else False
-                        ),
-                        legacy_attribution=(
-                            result.batches[idx].legacy_attribution
-                            if idx < len(result.batches)
-                            else False
-                        ),
-                        entry_order_count=(
-                            result.batches[idx].entry_order_count
-                            if idx < len(result.batches)
-                            else 1
-                        ),
+                        recovery_order_remaining_quantity=recovery_remaining,
+                        closing_order_filled=active_market_orders,
+                        legacy_attribution=False,
+                        entry_order_count=1,
                         entry_client_order_ids=(
-                            result.batches[idx].entry_client_order_ids
-                            if idx < len(result.batches)
-                            else (
-                                frozenset({ab.client_order_id})
-                                if ab.client_order_id
-                                else frozenset()
-                            )
+                            frozenset({ab.client_order_id})
+                            if ab.client_order_id
+                            else frozenset()
                         ),
                         projection_version=shadow_projection.projection_version,
                     )
-                    for idx, ab in enumerate(shadow_projection.active_batches)
+                    for ab in shadow_projection.active_batches
                 )
                 log.info(
                     "position_ledger_primary_active",
@@ -2598,6 +2580,7 @@ def _build_position_batches(
                     concordant=diff_report.is_concordant,
                 )
                 return ledger_batches
+
             log.warning(
                 "position_ledger_primary_fallback",
                 symbol=position.symbol,

@@ -132,6 +132,9 @@ class PositionLedger:
                 fill.raw_payload.get("is_system", False)
             )
             fill_side = fill.side.upper()
+            fill_client_order_id = getattr(fill, "client_order_id", None) or (
+                fill.raw_payload or {}
+            ).get("client_order_id")
 
             # Advance and apply boundaries that occurred before this fill
             # (or at the same time if exit fill)
@@ -189,7 +192,7 @@ class PositionLedger:
                     entry_price=fill.price,
                     opened_at=fill.trade_at,
                     order_id=fill.order_id,
-                    client_order_id=None,
+                    client_order_id=fill_client_order_id,
                     is_external=not is_system,
                     exit_order_submitted_at=None,
                 )
@@ -239,7 +242,7 @@ class PositionLedger:
                             entry_price=fill.price,
                             opened_at=fill.trade_at,
                             order_id=fill.order_id,
-                            client_order_id=None,
+                            client_order_id=fill_client_order_id,
                             is_external=not is_system,
                             exit_order_submitted_at=None,
                         )
@@ -341,6 +344,7 @@ class PositionLedger:
                                 entry_price=fill.price,
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
+                                client_order_id=fill_client_order_id,
                                 is_external=not is_system,
                                 exit_order_submitted_at=None,
                             )
@@ -381,7 +385,7 @@ class PositionLedger:
                             entry_price=fill.price,
                             opened_at=fill.trade_at,
                             order_id=fill.order_id,
-                            client_order_id=None,
+                            client_order_id=fill_client_order_id,
                             is_external=not is_system,
                             exit_order_submitted_at=None,
                         )
@@ -476,6 +480,7 @@ class PositionLedger:
                                 entry_price=fill.price,
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
+                                client_order_id=fill_client_order_id,
                                 is_external=not is_system,
                                 exit_order_submitted_at=None,
                             )

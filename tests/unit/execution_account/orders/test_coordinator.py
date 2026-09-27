@@ -1369,8 +1369,22 @@ async def test_account_4_gray_cutover_activation(
         backend=backend,
         account_label="account-4",
     )
-    assert not coord_primary.is_execution_book_enabled
+    # Default is now "all"
+    assert coord_primary.is_execution_book_enabled
     assert coord_4.is_execution_book_enabled
+
+    # Explicit gray filter override
+    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4")
+    coord_gray_primary = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    coord_gray_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+    )
+    assert not coord_gray_primary.is_execution_book_enabled
+    assert coord_gray_4.is_execution_book_enabled
 
     # Configurable via environment variable
     monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-2,account-3")
@@ -1394,29 +1408,23 @@ async def test_account_4_gray_cutover_activation(
 
     await coord_primary.aclose()
     await coord_4.aclose()
+    await coord_gray_primary.aclose()
+    await coord_gray_4.aclose()
     await coord_custom.aclose()
     await coord_all_primary.aclose()
     await coord_all_4.aclose()
 
 
 @pytest.mark.asyncio
-async def test_account_4_prohibits_synthetic_batches() -> None:
+async def test_account_4_prohibits_synthetic_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
 
     backend = BlockingBackend()
     repo = InMemoryPositionReservationRepository()
-    coord_4 = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="account-4",
-        reservation_repository=repo,
-    )
-    coord_primary = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-        reservation_repository=repo,
-    )
 
     synth_plan = OrderExecutionPlan(
         intent_id="intent-synth",
@@ -1432,6 +1440,32 @@ async def test_account_4_prohibits_synthetic_batches() -> None:
         created_at=NOW,
         quantized=True,
         batch_id="batch_BTCUSDT_BOTH",
+    )
+
+    # Under new default "all", all accounts prohibit synthetic batches
+    coord_all = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    with pytest.raises(
+        OrderPreSubmissionError,
+        match="prohibited",
+    ):
+        await coord_all.submit(synth_plan)
+    await coord_all.aclose()
+
+    # Under explicit gray filter "account-4", only account-4 prohibits
+    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4")
+    coord_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+        reservation_repository=repo,
+    )
+    coord_primary = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
     )
 
     # account-4 must strictly prohibit synthetic batch IDs

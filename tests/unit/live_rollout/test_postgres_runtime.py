@@ -826,7 +826,8 @@ def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
     assert unmanaged == frozenset()
     assert len(managed[0].batches) == 1
     batch = managed[0].batches[0]
-    assert batch.batch_id == "BTCUSDT:LONG:current-entry"
+    assert batch.batch_id.startswith("ep_BTCUSDT_")
+    assert "current-entry" in batch.entry_client_order_ids
     assert batch.quantity == Decimal("266")
     assert batch.opened_at == current_at
 
@@ -1948,7 +1949,8 @@ def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> Non
     assert len(managed) == 1
     assert managed[0].symbol == "MARSCOINUSDT"
     assert len(managed[0].batches) == 1
-    assert managed[0].batches[0].batch_id == "MARSCOINUSDT:LONG:marscoin-new-entry"
+    assert managed[0].batches[0].batch_id.startswith("ep_MARSCOINUSDT_")
+    assert "marscoin-new-entry" in managed[0].batches[0].entry_client_order_ids
     assert managed[0].batches[0].quantity == Decimal("1077")
     assert managed[0].batches[0].opened_at == day6
 

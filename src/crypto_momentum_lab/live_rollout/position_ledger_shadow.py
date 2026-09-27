@@ -9,7 +9,7 @@ Operates strictly in read-only shadow mode:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution import (
     ManagedLivePositionBatch,
     PositionObservation,
@@ -87,6 +88,8 @@ class LegacyOrderIdentityAdapter:
         fills: Sequence[AccountFillEvent] = (),
         observation: PositionObservation | None = None,
         coverage: FactCoverageInterval | None = None,
+        fill_times: Mapping[str, datetime] | None = None,
+        fill_prices: Mapping[str, Decimal] | None = None,
     ) -> AccountFacts:
         """Construct normalized AccountFacts from legacy inputs.
 
@@ -130,11 +133,67 @@ class LegacyOrderIdentityAdapter:
         if not fill_list and orders:
             has_synthetic = True
             for ord_idx, order in enumerate(orders):
-                if order.executed_quantity > 0:
-                    oid = (
-                        order.exchange_order_id
-                        or order.client_order_id
-                        or "unknown"
+                oid = (
+                    order.exchange_order_id
+                    or order.client_order_id
+                    or "unknown"
+                )
+                fill_dt = (
+                    (fill_times.get(oid) if fill_times else None)
+                    or (
+                        fill_times.get(order.exchange_order_id)
+                        if fill_times and order.exchange_order_id
+                        else None
+                    )
+                    or (
+                        fill_times.get(order.client_order_id)
+                        if fill_times and order.client_order_id
+                        else None
+                    )
+                    or order.created_at
+                )
+                has_observed_fill = (
+                    order.executed_quantity > 0
+                    or (
+                        getattr(order, "state", None)
+                        in {
+                            ExchangeOrderState.PARTIALLY_FILLED,
+                            ExchangeOrderState.FILLED,
+                        }
+                    )
+                    or (
+                        fill_times is not None
+                        and any(
+                            k in fill_times
+                            for k in (oid, order.exchange_order_id, order.client_order_id)
+                            if k
+                        )
+                    )
+                )
+                if has_observed_fill:
+                    qty = (
+                        order.executed_quantity
+                        if order.executed_quantity > 0
+                        else order.quantity
+                    )
+                    prc = (
+                        order.price
+                        or (fill_prices.get(oid) if fill_prices else None)
+                        or (
+                            fill_prices.get(order.exchange_order_id)
+                            if fill_prices and order.exchange_order_id
+                            else None
+                        )
+                        or (
+                            fill_prices.get(order.client_order_id)
+                            if fill_prices and order.client_order_id
+                            else None
+                        )
+                        or (
+                            observation.entry_price
+                            if observation and observation.entry_price > 0
+                            else Decimal("1.0")
+                        )
                     )
                     fill_list.append(
                         AccountFillEvent(
@@ -144,15 +203,16 @@ class LegacyOrderIdentityAdapter:
                             trade_id=f"syn_t_{ord_idx}_{oid}",
                             order_id=oid if oid != "unknown" else f"ord_{ord_idx}",
                             side=order.side,
-                            price=order.price or Decimal("1.0"),
-                            quantity=order.executed_quantity,
+                            price=prc,
+                            quantity=qty,
                             realized_pnl=Decimal("0.0"),
                             fee=Decimal("0.0"),
                             fee_asset="USDT",
-                            trade_at=order.created_at,
+                            trade_at=fill_dt,
                             raw_payload={
                                 "synthetic_from_order": True,
                                 "is_system": True,
+                                "client_order_id": order.client_order_id,
                             },
                         )
                     )

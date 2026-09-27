@@ -627,3 +627,22 @@ COMMIT;
    - `/api/account-performance` 4 账户在 1h 窗口下均返回 `is_certified=true`、`status="confirmed"`、`method="exact_twr_zero_cash_flows"`。
    - 监控服务 `cml-ops-monitor` 保持零告警，12 个容器全部持续 healthy。
 
+## 18. L4 代码清理专项完成实录（2026-09-27 12:20 UTC+8）
+
+按照蓝图第 7.4 节与第 15 节要求，完成向 L4 阶段（旧权威路径删除）的收敛演进：
+
+1. **PositionLedger 确立为无条件主权威**：
+   - 修复事实快照处于瞬态追赶（`health_status == CATCHING_UP`）但数量完全对齐、缺口为 0（`reconciliation_gap == 0`, `unallocated_quantity == 0`）时的错误回退问题。
+   - 彻底删除“shadow concordance 决定实际执行 plan”：消除依赖旧启发式比对结果（`diff_report.is_concordant`）决定是否采用账本批次的硬门禁。
+   - 彻底删除“按下标混合新旧批次”：不再从 `result.batches[idx]` 拷贝遗留 batch_id 或退出提交时间戳，全面改由权威 `PositionLedgerBatch` 产出规范化身份与元数据。
+   - 平滑继承匹配订单流的恢复单与市价平仓状态，确保实盘故障恢复与平仓流水无损衔接。
+
+2. **ExecutionBook 代码默认全面接管**：
+   - 将 `coordinator.py` 中 `CML_EXECUTION_BOOK_GRAY_ACCOUNTS` 的源码级缺省值由历史的 `"account-4"` 提升至 `"all"`。在无环境变量覆盖时无条件作为全部生产账户的唯一事实源。
+   - 守卫全账户合成批次拦截，防止任何缺版本、无范围的遗留身份穿透至交易所。
+
+3. **测试覆盖与架构一致性守护**：
+   - 调整遗留强耦合测试，将其从依赖旧启发式字符串模板（如 `BTCUSDT:LONG:current-entry`）解耦至断言规范化生命周期身份（`ep_...`）与归属客户订单 ID。
+   - 全仓库单元测试套件：**1,816 项全部通过，0 失败，4 跳过（网络套接字隔离）**。
+
+
