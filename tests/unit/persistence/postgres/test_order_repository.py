@@ -212,3 +212,68 @@ async def test_positive_cumulative_quantity_requires_positive_quote() -> None:
 
     with pytest.raises(ValueError, match="zero quote with positive quantity"):
         await repository.load_execution_order_watermarks("account-a")
+
+
+@pytest.mark.asyncio
+async def test_unpriced_intermediate_event_followed_by_priced_event_recovers() -> None:
+    command = _command("intermediate", scope=_scope())
+    events = [
+        SimpleNamespace(
+            client_order_id=command.client_order_id,
+            details={
+                "account_label": "account-a",
+                "symbol": "BTCUSDT",
+                "position_side": "both",
+                "executed_quantity": "2",
+                "average_price": "0",
+            },
+        ),
+        SimpleNamespace(
+            client_order_id=command.client_order_id,
+            details={
+                "account_label": "account-a",
+                "symbol": "BTCUSDT",
+                "position_side": "both",
+                "executed_quantity": "2",
+                "average_price": "50000",
+            },
+        ),
+    ]
+    repository = _repository(commands=[command], events=events)
+    rows = await repository.load_execution_order_watermarks("account-a")
+
+    assert len(rows) == 1
+    assert rows[0]["cumulative_filled_quantity"] == Decimal("2")
+    assert rows[0]["cumulative_filled_quote"] == Decimal("100000")
+
+
+@pytest.mark.asyncio
+async def test_matching_fill_and_event_with_rounding_difference_reconciles() -> None:
+    command = _command("rounding", scope=_scope())
+    events = [
+        SimpleNamespace(
+            client_order_id=command.client_order_id,
+            details={
+                "account_label": "account-a",
+                "symbol": "BTCUSDT",
+                "position_side": "both",
+                "executed_quantity": "3",
+                "cumulative_quote_quantity": "300.00",
+            },
+        ),
+    ]
+    fills = [
+        SimpleNamespace(
+            client_order_id=command.client_order_id,
+            quantity=Decimal("3"),
+            price=Decimal("100.001"),
+        ),
+    ]
+    repository = _repository(commands=[command], events=events, fills=fills)
+    rows = await repository.load_execution_order_watermarks("account-a")
+
+    assert len(rows) == 1
+    assert rows[0]["cumulative_filled_quantity"] == Decimal("3")
+    # Prefers the fill watermark (3 * 100.001 = 300.003)
+    assert rows[0]["cumulative_filled_quote"] == Decimal("300.003")
+

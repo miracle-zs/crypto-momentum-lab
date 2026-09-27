@@ -585,8 +585,9 @@ class ExecutionBook:
                         quote,
                     )
             except Exception as err:
+                log.error("restore_watermarks_failed", error=str(err))
                 raise RuntimeError(
-                    "Failed to restore cumulative fill watermarks"
+                    f"Failed to restore cumulative fill watermarks: {err}"
                 ) from err
 
         if self._reservation_repo is not None:

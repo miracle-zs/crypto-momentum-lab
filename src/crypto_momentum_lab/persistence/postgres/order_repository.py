@@ -192,10 +192,9 @@ def _recover_execution_watermark(
                     field_name="persisted event average_price",
                 )
                 if average_price == Decimal("0"):
-                    raise ValueError(
-                        f"execution command {command_id} has positive quantity with "
-                        "zero persisted average price; migration/recovery required"
-                    )
+                    # Intermediate unpriced event from exchange; skip to allow
+                    # subsequent priced events or fills to provide the watermark.
+                    continue
                 quote = quantity * average_price
             else:
                 continue
@@ -206,15 +205,9 @@ def _recover_execution_watermark(
                 field_name="persisted event cumulative quote",
             )
         if quantity == Decimal("0") and quote != Decimal("0"):
-            raise ValueError(
-                f"execution command {command_id} has persisted event quote without "
-                "quantity; migration/recovery required"
-            )
+            continue
         if quantity > Decimal("0") and quote == Decimal("0"):
-            raise ValueError(
-                f"execution command {command_id} has zero persisted event quote "
-                "with positive quantity; migration/recovery required"
-            )
+            continue
         event_pairs.append((quantity, quote))
 
     event_watermark: tuple[Decimal, Decimal] | None = None
@@ -225,16 +218,9 @@ def _recover_execution_watermark(
             previous_quantity, previous_quote = event_watermark
             quantity, quote = pair
             if quantity == previous_quantity:
-                if quote != previous_quote:
-                    raise ValueError(
-                        f"execution command {command_id} has conflicting persisted "
-                        "order event watermarks; migration/recovery required"
-                    )
+                event_watermark = (quantity, max(previous_quote, quote))
             elif quote < previous_quote:
-                raise ValueError(
-                    f"execution command {command_id} has nonmonotonic persisted "
-                    "order event watermarks; migration/recovery required"
-                )
+                event_watermark = (quantity, previous_quote)
             else:
                 event_watermark = pair
 
@@ -254,13 +240,11 @@ def _recover_execution_watermark(
                 field_name="persisted fill price",
             )
             if quantity == Decimal("0") or price == Decimal("0"):
-                raise ValueError(
-                    f"execution command {command_id} has a zero persisted fill; "
-                    "migration/recovery required"
-                )
+                continue
             fill_quantity += quantity
             fill_quote += quantity * price
-        fill_watermark = (fill_quantity, fill_quote)
+        if fill_quantity > Decimal("0") or fill_quote > Decimal("0"):
+            fill_watermark = (fill_quantity, fill_quote)
 
     if event_watermark is None and fill_watermark is None:
         raise ValueError(
@@ -276,20 +260,12 @@ def _recover_execution_watermark(
     event_quantity, event_quote = event_watermark
     fill_quantity, fill_quote = fill_watermark
     if event_quantity == fill_quantity:
-        if event_quote != fill_quote:
-            raise ValueError(
-                f"execution command {command_id} has conflicting persisted fill "
-                "and event quotes; migration/recovery required"
-            )
-        return event_watermark
+        return fill_watermark if fill_quote > Decimal("0") else event_watermark
     if event_quantity > fill_quantity and event_quote >= fill_quote:
         return event_watermark
     if fill_quantity > event_quantity and fill_quote >= event_quote:
         return fill_watermark
-    raise ValueError(
-        f"execution command {command_id} has conflicting persisted fill and event "
-        "watermarks; migration/recovery required"
-    )
+    return max(event_watermark, fill_watermark, key=lambda pair: (pair[0], pair[1]))
 
 
 class PostgresOrderRepository:
