@@ -390,54 +390,64 @@ class ExecutionBook:
                             symbol=symbol,
                             position_side=position_side,
                         )
-                        side = StrategySide(_required_text(dtls, "side"))
-                        order_type = EntryType(
-                            _required_text(dtls, "order_type").lower()
-                        )
-                        command_type = TradeCommandType(
-                            _required_text(cmd_data, "command").lower()
-                        )
-                        quantity = Decimal(_required_text(dtls, "quantity"))
-                        if not quantity.is_finite() or quantity <= Decimal("0"):
-                            raise ValueError(
-                                "execution command quantity must be positive"
+                        try:
+                            side = StrategySide(_required_text(dtls, "side"))
+                            order_type = EntryType(
+                                _required_text(dtls, "order_type").lower()
                             )
-                        if "reduce_only" not in dtls or not isinstance(
-                            dtls["reduce_only"], bool
-                        ):
-                            raise ValueError(
-                                "execution command reduce_only must be persisted "
-                                "as bool"
+                            command_type = TradeCommandType(
+                                _required_text(cmd_data, "command").lower()
                             )
-                        raw_res_ids = dtls.get("reservations")
-                        if not isinstance(raw_res_ids, (list, tuple)) or any(
-                            not isinstance(res_id, str) or not res_id
-                            for res_id in raw_res_ids
-                        ):
-                            raise ValueError(
-                                "execution command reservation links are missing "
-                                "or invalid"
+                            quantity = Decimal(_required_text(dtls, "quantity"))
+                            if not quantity.is_finite() or quantity <= Decimal("0"):
+                                raise ValueError(
+                                    "execution command quantity must be positive"
+                                )
+                            if "reduce_only" not in dtls or not isinstance(
+                                dtls["reduce_only"], bool
+                            ):
+                                raise ValueError(
+                                    "execution command reduce_only must be persisted "
+                                    "as bool"
+                                )
+                            raw_res_ids = dtls.get("reservations")
+                            if not isinstance(raw_res_ids, (list, tuple)) or any(
+                                not isinstance(res_id, str) or not res_id
+                                for res_id in raw_res_ids
+                            ):
+                                raise ValueError(
+                                    "execution command reservation links are missing "
+                                    "or invalid"
+                                )
+                            request_id = _required_text(dtls, "request_id")
+                            requested_at = cmd_data.get("requested_at")
+                            if (
+                                not isinstance(requested_at, datetime)
+                                or requested_at.tzinfo is None
+                            ):
+                                raise ValueError(
+                                    "execution command requested_at must be "
+                                    "timezone-aware"
+                                )
+                            attempt_count = dtls.get("attempt_count")
+                            if not isinstance(attempt_count, int) or attempt_count < 0:
+                                raise ValueError(
+                                    "execution command attempt_count is missing "
+                                    "or invalid"
+                                )
+                            limit_price_val = dtls.get("limit_price")
+                            limit_price = (
+                                Decimal(str(limit_price_val))
+                                if limit_price_val is not None
+                                else None
                             )
-                        request_id = _required_text(dtls, "request_id")
-                        requested_at = cmd_data.get("requested_at")
-                        if (
-                            not isinstance(requested_at, datetime)
-                            or requested_at.tzinfo is None
-                        ):
-                            raise ValueError(
-                                "execution command requested_at must be timezone-aware"
+                        except (KeyError, ValueError, TypeError) as parse_err:
+                            log.warning(
+                                "skipping_unparseable_active_execution_command",
+                                command_id=cid,
+                                error=str(parse_err),
                             )
-                        attempt_count = dtls.get("attempt_count")
-                        if not isinstance(attempt_count, int) or attempt_count < 0:
-                            raise ValueError(
-                                "execution command attempt_count is missing or invalid"
-                            )
-                        limit_price_val = dtls.get("limit_price")
-                        limit_price = (
-                            Decimal(str(limit_price_val))
-                            if limit_price_val is not None
-                            else None
-                        )
+                            continue
 
                         cmd = TradeCommand(
                             command_id=cid,

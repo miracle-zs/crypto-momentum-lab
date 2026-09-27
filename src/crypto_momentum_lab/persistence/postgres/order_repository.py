@@ -1161,9 +1161,32 @@ class PostgresOrderRepository:
         account_label: str | None = None,
     ) -> tuple[dict[str, Any], ...]:
         async with self._session_factory() as session:
-            query = select(ExecutionCommandRow).where(
-                ExecutionCommandRow.status.in_(
-                    ["prepared", "dispatching", "acknowledged", "unknown"]
+            query = (
+                select(ExecutionCommandRow)
+                .outerjoin(
+                    ExchangeOrderRow,
+                    (
+                        ExecutionCommandRow.client_order_id
+                        == ExchangeOrderRow.client_order_id
+                    ),
+                )
+                .where(
+                    ExecutionCommandRow.status.in_(
+                        ["prepared", "dispatching", "acknowledged", "unknown"]
+                    ),
+                    or_(
+                        ExchangeOrderRow.state.is_(None),
+                        ExchangeOrderRow.state.not_in(
+                            [
+                                "filled",
+                                "canceled",
+                                "rejected",
+                                "expired",
+                                "absent_reconciled",
+                                "suppressed",
+                            ]
+                        ),
+                    ),
                 )
             )
             rows = (
