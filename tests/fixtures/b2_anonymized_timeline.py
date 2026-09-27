@@ -8,7 +8,8 @@ Captures the complete sequence of events from 2026-09-19 to 2026-09-20:
 - Subsequent exits and dust remaining
 - External dust close
 
-Used as an authoritative verification fixture for PositionLedger and batch reconstruction.
+Used as an authoritative verification fixture for PositionLedger and batch
+reconstruction.
 """
 
 from __future__ import annotations
@@ -262,7 +263,6 @@ def get_b2_system_order_facts(
                 price=entry.price,
                 plan=None,
                 exit_batch_id=None,
-                legacy_exit_attribution=False,
             )
         )
     return tuple(facts)

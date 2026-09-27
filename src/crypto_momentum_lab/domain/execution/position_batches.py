@@ -25,7 +25,6 @@ class ManagedLivePositionBatch:
     recovery_order_plan: OrderExecutionPlan | None = None
     recovery_order_remaining_quantity: Decimal | None = None
     closing_order_filled: bool = False
-    legacy_attribution: bool = False
     entry_order_count: int = 1
     entry_client_order_ids: frozenset[str] = frozenset()
     projection_version: str | None = None
@@ -80,7 +79,6 @@ class PositionOrderFact:
     price: Decimal | None
     plan: OrderExecutionPlan | None = None
     exit_batch_id: str | None = None
-    legacy_exit_attribution: bool = False
 
 
 @dataclass(frozen=True, slots=True)

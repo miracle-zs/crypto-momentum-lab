@@ -17,7 +17,6 @@ implementation retains the ordering and fail-closed invariants.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -27,7 +26,14 @@ from typing import Protocol, cast
 import structlog
 
 from crypto_momentum_lab.domain.execution import (
+    ExitAllocation,
+    ExitAllocationPlan,
+    ExitPolicyMode,
+    FuturesPositionSide,
     OrderExecutionPlan,
+    PositionKey,
+    TradeCommand,
+    TradeCommandType,
     count_active_symbol_batch_concurrency,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -35,18 +41,20 @@ from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
+    StrategySide,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.quantization import (
-    QuantizationRejection,
     SymbolTradingRules,
-    quantize_order_plan,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
+)
+from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
+    TradeCommandExecutor,
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.entry_lane import (
@@ -57,10 +65,6 @@ from crypto_momentum_lab.live_rollout.limits import (
     FixedLiveLimits,
     LiveLimitContext,
     evaluate_fixed_live_limits,
-)
-from crypto_momentum_lab.live_rollout.shadow_auditor import (
-    LiveExecutionShadowAuditor,
-    ShadowAuditResult,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
@@ -348,55 +352,36 @@ class LiveCandidateSubmission:
             execution_reference_price = state.mark_price or state.close_price
         if rules is None or execution_reference_price is None:
             return None
-        plan = quantize_order_plan(
-            executable_candidate,
-            rules,
-            reference_price=execution_reference_price,
-            resize_tolerance=self._config.resize_tolerance,
-            hedge_mode=self._config.hedge_mode,
-            requested_quantity=requested_quantity,
-        )
-        shadow_audit = self._shadow_evaluate_trade_command(
+        trade_command = self._build_trade_command(
             candidate=executable_candidate,
-            rules=rules,
             reference_price=execution_reference_price,
             requested_quantity=requested_quantity,
-            legacy_plan=plan,
-            context=context,
         )
-        is_executor_primary = os.environ.get(
-            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", "1"
-        ).lower() in {"1", "true", "yes"}
-        if (
-            is_executor_primary
-            and shadow_audit.is_concordant
-            and shadow_audit.shadow_plan is not None
-        ):
-            shadow_plan = shadow_audit.shadow_plan
-            if isinstance(plan, OrderExecutionPlan):
-                if not shadow_plan.allocations and plan.allocations:
-                    shadow_plan = replace(shadow_plan, allocations=plan.allocations)
-                if shadow_plan.batch_id is None and plan.batch_id is not None:
-                    shadow_plan = replace(shadow_plan, batch_id=plan.batch_id)
-                if (
-                    shadow_plan.projection_version is None
-                    and plan.projection_version is not None
-                ):
-                    shadow_plan = replace(
-                        shadow_plan,
-                        projection_version=plan.projection_version,
-                    )
-                if (
-                    shadow_plan.batch_quantities is None
-                    and plan.batch_quantities is not None
-                ):
-                    shadow_plan = replace(
-                        shadow_plan,
-                        batch_quantities=plan.batch_quantities,
-                    )
-            plan = shadow_plan
-        if isinstance(plan, QuantizationRejection):
+        if trade_command is None:
             return None
+
+        execution_result = TradeCommandExecutor.plan_execution(
+            trade_command,
+            rules,
+            run_id=self._config.run_id,
+            reference_price=execution_reference_price,
+            hedge_mode=self._config.hedge_mode,
+        )
+        if execution_result.plan is None:
+            return None
+        plan = execution_result.plan
+
+        if (
+            requested_quantity is None
+            and executable_candidate.desired_notional is not None
+            and executable_candidate.desired_notional > 0
+        ):
+            actual_notional = plan.quantity * execution_reference_price
+            resize_fraction = (
+                executable_candidate.desired_notional - actual_notional
+            ).copy_abs() / executable_candidate.desired_notional
+            if resize_fraction > self._config.resize_tolerance:
+                return None
         if (
             not executable_candidate.reduce_only
             and self._config.entry_order_type is EntryType.LIMIT
@@ -583,24 +568,98 @@ class LiveCandidateSubmission:
                     )
         return result
 
-    def _shadow_evaluate_trade_command(
+    def _build_trade_command(
         self,
         *,
         candidate: OrderIntentCandidate,
-        rules: SymbolTradingRules,
         reference_price: Decimal,
         requested_quantity: Decimal | None,
-        legacy_plan: OrderExecutionPlan | QuantizationRejection,
-        context: LiveDaemonRuntimeContext,
-    ) -> ShadowAuditResult:
-        return LiveExecutionShadowAuditor.audit_submission(
-            candidate=candidate,
-            rules=rules,
-            reference_price=reference_price,
-            legacy_plan=legacy_plan,
-            run_id=self._config.run_id,
-            hedge_mode=self._config.hedge_mode,
-            requested_quantity=requested_quantity,
+    ) -> TradeCommand | None:
+        raw_position_side = candidate.features.get("position_side")
+        if isinstance(raw_position_side, str) and raw_position_side.strip():
+            position_side = FuturesPositionSide(raw_position_side.strip().upper())
+        elif self._config.hedge_mode:
+            position_side = (
+                FuturesPositionSide.LONG
+                if candidate.side is StrategySide.LONG
+                else FuturesPositionSide.SHORT
+            )
+        else:
+            position_side = FuturesPositionSide.BOTH
+
+        account_label = getattr(candidate, "account_label", None) or "primary"
+        position_key = PositionKey(
+            environment="live",
+            account_label=account_label,
+            symbol=candidate.symbol,
+            position_side=position_side,
+        )
+
+        sizing_price = (
+            candidate.limit_price
+            if candidate.limit_price is not None and candidate.limit_price > 0
+            else reference_price
+        )
+        if requested_quantity is None:
+            if candidate.desired_notional is None or sizing_price <= 0:
+                return None
+            req_qty = candidate.desired_notional / sizing_price
+        else:
+            req_qty = requested_quantity
+
+        raw_idempotency = candidate.features.get("idempotency_key")
+        idempotency_key = (
+            str(raw_idempotency)
+            if isinstance(raw_idempotency, str) and raw_idempotency.strip()
+            else None
+        )
+
+        allocation_plan: ExitAllocationPlan | None = None
+        expected_projection_version: str | None = None
+        if candidate.reduce_only:
+            expected_projection_version = (
+                str(candidate.features["projection_version"]).strip()
+                if candidate.features.get("projection_version")
+                else None
+            )
+            raw_batch_id = candidate.features.get("batch_id")
+            legacy_batch_id = str(raw_batch_id).strip() if raw_batch_id else None
+            legacy_allocs = (
+                (
+                    ExitAllocation(
+                        batch_id=legacy_batch_id,
+                        allocated_quantity=req_qty,
+                    ),
+                )
+                if legacy_batch_id
+                else ()
+            )
+            if legacy_allocs:
+                allocation_plan = ExitAllocationPlan(
+                    position_key=position_key,
+                    allocations=legacy_allocs,
+                    total_allocated_quantity=req_qty,
+                    policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
+                    projection_version=expected_projection_version,
+                )
+
+        return TradeCommand(
+            command_id=candidate.candidate_id,
+            position_key=position_key,
+            command_type=(
+                TradeCommandType.EXIT
+                if candidate.reduce_only
+                else TradeCommandType.ENTRY
+            ),
+            side=candidate.side,
+            order_type=candidate.entry_type,
+            requested_quantity=req_qty,
+            limit_price=candidate.limit_price,
+            reduce_only=candidate.reduce_only,
+            allocation_plan=allocation_plan,
+            expected_projection_version=expected_projection_version,
+            idempotency_key=idempotency_key,
+            created_at=candidate.created_at,
         )
 
 

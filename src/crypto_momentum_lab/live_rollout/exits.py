@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -12,9 +11,15 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 
 from crypto_momentum_lab.domain.execution import (
+    ExitAllocator,
+    ExitPolicyMode,
     FuturesPositionSide,
     ManagedLivePositionBatch,
     OrderExecutionPlan,
+    PositionEpisode,
+    PositionKey,
+    PositionLedgerBatch,
+    PositionLedgerProjection,
 )
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -24,10 +29,6 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategySide,
-)
-from crypto_momentum_lab.live_rollout.shadow_auditor import (
-    LiveExecutionShadowAuditor,
-    ShadowAuditResult,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -793,21 +794,12 @@ class LiveExitManager:
             if state is None:
                 raise ValueError("state or created_at is required")
             created_at = state.bucket_end
-        shadow_audit = self._shadow_evaluate_exit_allocation(
+        order_quantity = self._allocate_exit_quantity(
             position=position,
             order_quantity=order_quantity,
             reference_price=reference_price,
             reason=reason,
         )
-        is_executor_primary = os.environ.get(
-            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", "1"
-        ).lower() in {"1", "true", "yes"}
-        if (
-            is_executor_primary
-            and shadow_audit.is_concordant
-            and shadow_audit.shadow_command is not None
-        ):
-            order_quantity = shadow_audit.shadow_command.requested_quantity
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -844,20 +836,94 @@ class LiveExitManager:
             quantity=order_quantity,
         )
 
-    def _shadow_evaluate_exit_allocation(
+    def _allocate_exit_quantity(
         self,
         *,
         position: ManagedLivePosition,
         order_quantity: Decimal,
         reference_price: Decimal,
         reason: str,
-    ) -> ShadowAuditResult:
-        return LiveExecutionShadowAuditor.audit_exit_allocation(
-            position=position,
-            order_quantity=order_quantity,
+        hedge_mode: bool = False,
+    ) -> Decimal:
+        pos_side = getattr(position, "position_side", None)
+        if isinstance(pos_side, FuturesPositionSide):
+            position_side = pos_side
+        elif isinstance(pos_side, str) and pos_side.strip():
+            position_side = FuturesPositionSide(pos_side.strip().upper())
+        elif hedge_mode:
+            position_side = (
+                FuturesPositionSide.LONG
+                if position.side is StrategySide.LONG
+                else FuturesPositionSide.SHORT
+            )
+        else:
+            position_side = FuturesPositionSide.BOTH
+
+        position_key = PositionKey(
+            environment="live",
+            account_label=getattr(position, "account_label", "primary"),
+            symbol=position.symbol,
+            position_side=position_side,
+        )
+
+        batches: tuple[PositionLedgerBatch, ...] = (
+            tuple(
+                PositionLedgerBatch(
+                    batch_id=b.batch_id or f"b_{idx}",
+                    episode_id="shadow_ep",
+                    quantity=b.quantity,
+                    original_quantity=b.quantity,
+                    entry_price=b.entry_price,
+                    opened_at=b.opened_at,
+                )
+                for idx, b in enumerate(position.batches)
+            )
+            if position.batches
+            else (
+                PositionLedgerBatch(
+                    batch_id=position.batch_id or "batch_default",
+                    episode_id="shadow_ep",
+                    quantity=position.quantity,
+                    original_quantity=position.quantity,
+                    entry_price=position.entry_price,
+                    opened_at=position.opened_at,
+                ),
+            )
+        )
+
+        episode = PositionEpisode(
+            episode_id="shadow_ep",
+            position_key=position_key,
+            side=position.side,
+            opened_at=position.opened_at,
+            batches=batches,
+        )
+        projection = PositionLedgerProjection(
+            position_key=position_key,
+            active_episode=episode,
+            active_batches=batches,
+            total_active_quantity=sum(
+                (b.quantity for b in batches), start=Decimal("0")
+            ),
+            unallocated_quantity=Decimal("0"),
+            reconciliation_gap=Decimal("0"),
+            high_watermark_trade_at=position.opened_at,
+        )
+        cmd = ExitAllocator.create_exit_command(
+            projection,
+            requested_quantity=order_quantity,
+            target_batch_ids=(position.batch_id,) if position.batch_id else None,
+            policy=(
+                ExitPolicyMode.TARGET_BATCHES_ONLY
+                if (position.batch_id or order_quantity < position.quantity)
+                else ExitPolicyMode.FULL_POSITION_CLOSE
+            ),
             reference_price=reference_price,
             reason=reason,
         )
+        if cmd is not None and cmd.requested_quantity > 0:
+            return cmd.requested_quantity
+        return order_quantity
 
     def _build_request(
         self,

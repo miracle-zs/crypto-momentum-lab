@@ -52,7 +52,7 @@ from crypto_momentum_lab.live_rollout.context import (
 )
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
-from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+from crypto_momentum_lab.live_rollout.order_identity_adapter import (
     LegacyOrderIdentityAdapter,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
@@ -1126,9 +1126,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.price,
                         )
         active = [row for row in rows if row.position_amt != 0]
-        exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
-            self._sessions, orders
-        )
+        exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
         if active or (
             reconciliation is not None
@@ -1157,7 +1155,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
             exit_batch_ids=exit_batch_ids,
-            legacy_exit_order_ids=legacy_exit_order_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
@@ -1270,9 +1267,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.quantity,
                             exchange_fill.price,
                         )
-        exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
-            self._sessions, orders
-        )
+        exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
         try:
             async with self._sessions() as session:
@@ -1318,7 +1313,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
             exit_batch_ids=exit_batch_ids,
-            legacy_exit_order_ids=legacy_exit_order_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
@@ -1566,7 +1560,6 @@ def _classify_live_positions(
     entry_fill_times: Mapping[str, datetime] | None = None,
     entry_fill_prices: Mapping[str, Decimal] | None = None,
     exit_batch_ids: Mapping[str, str] | None = None,
-    legacy_exit_order_ids: frozenset[str] = frozenset(),
     order_identity_events: Mapping[
         str,
         Sequence[ExchangeOrderEventRow],
@@ -1583,7 +1576,6 @@ def _classify_live_positions(
         entry_fill_times=entry_fill_times,
         entry_fill_prices=entry_fill_prices,
         exit_batch_ids=exit_batch_ids,
-        legacy_exit_order_ids=legacy_exit_order_ids,
         order_identity_events=order_identity_events,
         account_fill_quantities=account_fill_quantities,
         coverage_by_symbol=coverage_by_symbol,
@@ -1599,7 +1591,6 @@ def _classify_live_positions_detailed(
     entry_fill_times: Mapping[str, datetime] | None = None,
     entry_fill_prices: Mapping[str, Decimal] | None = None,
     exit_batch_ids: Mapping[str, str] | None = None,
-    legacy_exit_order_ids: frozenset[str] = frozenset(),
     order_identity_events: Mapping[
         str,
         Sequence[ExchangeOrderEventRow],
@@ -1660,7 +1651,7 @@ def _classify_live_positions_detailed(
         order_identity_events=identity_events,
         account_fill_quantities=fill_quantities,
     )
-    if exit_batch_ids or legacy_exit_order_ids:
+    if exit_batch_ids:
         position_orders = tuple(
             replace(
                 order,
@@ -1668,9 +1659,6 @@ def _classify_live_positions_detailed(
                     None
                     if exit_batch_ids is None
                     else exit_batch_ids.get(order.client_order_id or "")
-                ),
-                legacy_exit_attribution=(
-                    order.client_order_id in legacy_exit_order_ids
                 ),
             )
             for order in position_orders
@@ -1931,13 +1919,12 @@ async def _load_exit_batch_ids(
 async def _load_exit_batch_bindings(
     sessions: async_sessionmaker[AsyncSession],
     orders: Sequence[ExchangeOrderRow],
-) -> tuple[dict[str, str], frozenset[str]]:
+) -> dict[str, str]:
     intent_clients = {
         order.intent_id: order.client_order_id for order in orders if order.reduce_only
     }
     if not intent_clients:
-        return {}, frozenset()
-    legacy_order_ids = set(intent_clients.values())
+        return {}
     async with sessions() as session:
         rows = (
             await session.execute(
@@ -1953,8 +1940,7 @@ async def _load_exit_batch_bindings(
         if isinstance(batch_id, str) and batch_id:
             client_order_id = intent_clients[intent_id]
             result[client_order_id] = batch_id
-            legacy_order_ids.discard(client_order_id)
-    return result, frozenset(legacy_order_ids)
+    return result
 
 
 def _normalise_position_orders(
@@ -2094,7 +2080,6 @@ def _repair_legacy_exit_batch_bindings(
             replace(
                 order,
                 exit_batch_id=_batch_id_for_entry(target),
-                legacy_exit_attribution=False,
             )
         )
     return tuple(repaired), frozenset(unresolved)
@@ -2511,7 +2496,6 @@ def _build_position_batches(
                         ),
                         recovery_order_remaining_quantity=recovery_remaining,
                         closing_order_filled=active_market_orders,
-                        legacy_attribution=False,
                         entry_order_count=1,
                         entry_client_order_ids=(
                             frozenset({ab.client_order_id})

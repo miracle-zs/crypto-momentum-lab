@@ -192,9 +192,7 @@ async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
     assert state_machine.events == ["exchange"]
 
 
-async def test_submission_strictly_obeys_requested_quantity_without_implicit_dust_expansion() -> (
-    None
-):
+async def test_submission_strictly_obeys_requested_quantity() -> None:
     repository = RecordingPreparedRepository()
     coordinator = RecordingCoordinator()
     submission = _submission(
@@ -204,7 +202,7 @@ async def test_submission_strictly_obeys_requested_quantity_without_implicit_dus
     # Total position on BTCUSDT is 0.0007 BTC.
     # Caller requests 0.0004 BTC.
     # Submission layer must NEVER silently absorb dust or inflate requested quantities!
-    # Sizing/dust absorption decisions belong strictly to ExitAllocator at the decision layer.
+    # Sizing/dust absorption decisions belong strictly to ExitAllocator.
     pos = ManagedLivePosition(
         symbol="BTCUSDT",
         side=StrategySide.LONG,
@@ -441,7 +439,8 @@ async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> Non
     )
     assert res2 is not None
 
-    # 3. Position has 1 batch with entry_order_count = 2 (max reached!) -> 3rd order REJECTED!
+    # 3. Position has 1 batch with entry_order_count = 2 (max reached!)
+    # -> 3rd order REJECTED!
     b1_full = ManagedLivePositionBatch(
         batch_id="btc-b1",
         quantity=Decimal("0.002"),
@@ -468,7 +467,8 @@ async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> Non
     )
     assert res3 is None  # Blocked!
 
-    # 4. Batch 1 submits exit order (exit_order_submitted_at set, even if not filled) -> batch ended, new batch 1st order ALLOWED!
+    # 4. Batch 1 submits exit order (exit_order_submitted_at set)
+    # -> batch ended, new batch 1st order ALLOWED!
     b1_exited = replace(b1_full, exit_order_submitted_at=NOW + timedelta(minutes=5))
     pos_btc_exited = replace(pos_btc_2, batches=(b1_exited,))
     context3 = replace(context0, managed_positions=(pos_btc_exited,))

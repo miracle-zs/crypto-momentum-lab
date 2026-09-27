@@ -72,7 +72,6 @@ def _make_projection(
     )
 
 
-
 def test_trade_command_and_allocation_plan_invariants() -> None:
     """TradeCommand enforces exact quantity conservation with its ExitAllocationPlan."""
     plan = ExitAllocationPlan(
@@ -101,9 +100,7 @@ def test_trade_command_and_allocation_plan_invariants() -> None:
     assert cmd.requested_quantity == Decimal("0.5")
 
     # Mismatched requested_quantity raises ValueError
-    with pytest.raises(
-        ValueError, match="requested_quantity 0.6 must strictly match"
-    ):
+    with pytest.raises(ValueError, match="requested_quantity 0.6 must strictly match"):
         TradeCommand(
             command_id="cmd-2",
             position_key=POS_KEY_LONG,
@@ -116,9 +113,7 @@ def test_trade_command_and_allocation_plan_invariants() -> None:
         )
 
     # Mismatched position_key raises ValueError
-    with pytest.raises(
-        ValueError, match="allocation_plan position_key does not match"
-    ):
+    with pytest.raises(ValueError, match="allocation_plan position_key does not match"):
         TradeCommand(
             command_id="cmd-3",
             position_key=POS_KEY_SHORT,
@@ -354,7 +349,10 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
     from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
         TradeCommandExecutor,
     )
-    from crypto_momentum_lab.execution_account.orders.quantization import SymbolTradingRules
+    from crypto_momentum_lab.execution_account.orders.quantization import (
+        SymbolTradingRules,
+    )
+
     rules = SymbolTradingRules(
         symbol="BTCUSDT",
         tick_size=Decimal("0.10"),
@@ -431,5 +429,3 @@ def test_exit_allocator_respects_active_reservations() -> None:
     assert plan.allocations[0].allocated_quantity == Decimal("0.2")
     assert plan.allocations[1].batch_id == "b2"
     assert plan.allocations[1].allocated_quantity == Decimal("0.8")
-
-

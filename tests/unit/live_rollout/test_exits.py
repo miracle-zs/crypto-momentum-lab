@@ -673,7 +673,7 @@ def _long_position() -> ManagedLivePosition:
     )
 
 
-async def test_live_exit_manager_runs_shadow_exit_allocation(
+async def test_live_exit_manager_uses_exit_allocator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from crypto_momentum_lab.domain.execution.trade_command import ExitAllocator

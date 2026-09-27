@@ -340,7 +340,8 @@ async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
     with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
         await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
-    # But an EXIT command (reduce_only=True) CAN still enter because headroom is reserved for exits!
+    # An EXIT command (reduce_only=True) CAN still enter
+    # because headroom is reserved for exits!
     exit_task = asyncio.create_task(
         coordinator.submit(_plan("BTCUSDT", reduce_only=True))
     )
@@ -374,7 +375,7 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     # Sleep longer than max_queue_wait_seconds
     await asyncio.sleep(0.08)
 
-    # Unblock the worker; the entry command waited > 0.05s so it should fail with timeout
+    # Unblock the worker; the entry command waited > 0.05s so it fails with timeout
     backend.release_query.set()
     await block_task
 
@@ -431,7 +432,7 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
     await backend.query_started.wait()
 
     # Entry command submitted while worker is hung.
-    # The caller must time out within max_queue_wait_seconds without waiting forever for worker
+    # The caller must time out within max_queue_wait_seconds
     with pytest.raises(
         OrderPreSubmissionError, match="waited .* in queue exceeding limit"
     ):
@@ -470,7 +471,7 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
     with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
         await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
-    # But cancel_order for a non-reduce_only entry order MUST still succeed using exit priority!
+    # But cancel_order for entry order MUST still succeed using exit priority!
     non_reduce_only_plan = _plan("BTCUSDT", reduce_only=False)
     cancel_task = asyncio.create_task(coordinator.cancel_order(non_reduce_only_plan))
     await asyncio.sleep(0.01)
@@ -1285,7 +1286,6 @@ async def test_cancel_order_releases_all_allocations_for_command() -> None:
 
 
 async def test_terminal_order_with_zero_fill_releases_active_reservations() -> None:
-    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
     class InMemoryReservationRepo:
@@ -1392,9 +1392,7 @@ async def test_coordinator_execution_book_integration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_account_4_gray_cutover_activation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_account_4_gray_cutover_activation() -> None:
     backend = BlockingBackend()
     coord_primary = OrderExecutionCoordinator(
         backend=backend,
@@ -1404,56 +1402,16 @@ async def test_account_4_gray_cutover_activation(
         backend=backend,
         account_label="account-4",
     )
-    # Default is now "all"
+    # ExecutionBook is unconditionally authoritative across all accounts
     assert coord_primary.is_execution_book_enabled
     assert coord_4.is_execution_book_enabled
 
-    # Explicit gray filter override
-    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4")
-    coord_gray_primary = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-    )
-    coord_gray_4 = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="account-4",
-    )
-    assert not coord_gray_primary.is_execution_book_enabled
-    assert coord_gray_4.is_execution_book_enabled
-
-    # Configurable via environment variable
-    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-2,account-3")
-    coord_custom = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="account-2",
-    )
-    assert coord_custom.is_execution_book_enabled
-    # All accounts wildcard activation
-    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all")
-    coord_all_primary = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-    )
-    coord_all_4 = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="account-4",
-    )
-    assert coord_all_primary.is_execution_book_enabled
-    assert coord_all_4.is_execution_book_enabled
-
     await coord_primary.aclose()
     await coord_4.aclose()
-    await coord_gray_primary.aclose()
-    await coord_gray_4.aclose()
-    await coord_custom.aclose()
-    await coord_all_primary.aclose()
-    await coord_all_4.aclose()
 
 
 @pytest.mark.asyncio
-async def test_account_4_prohibits_synthetic_batches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_account_4_prohibits_synthetic_batches() -> None:
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1477,7 +1435,6 @@ async def test_account_4_prohibits_synthetic_batches(
         batch_id="batch_BTCUSDT_BOTH",
     )
 
-    # Under new default "all", all accounts prohibit synthetic batches
     coord_all = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -1490,32 +1447,17 @@ async def test_account_4_prohibits_synthetic_batches(
         await coord_all.submit(synth_plan)
     await coord_all.aclose()
 
-    # Under explicit gray filter "account-4", only account-4 prohibits
-    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4")
     coord_4 = OrderExecutionCoordinator(
         backend=backend,
         account_label="account-4",
         reservation_repository=repo,
     )
-    coord_primary = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-        reservation_repository=repo,
-    )
-
-    # account-4 must strictly prohibit synthetic batch IDs
     with pytest.raises(
         OrderPreSubmissionError,
         match="prohibited",
     ):
         await coord_4.submit(synth_plan)
-
-    # Non-gray primary account must allow synthetic batch ID
-    res = await coord_primary.submit(synth_plan)
-    assert res.state == ExchangeOrderState.ACKNOWLEDGED
-
     await coord_4.aclose()
-    await coord_primary.aclose()
 
 
 @pytest.mark.asyncio
@@ -1688,7 +1630,7 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
 
 
 async def test_cumulative_executed_quantity_settlement_watermark() -> None:
-    """Verifies Blueprint §7.2: cumulative fill reports 3 -> 3 -> 5 only consume 5, not 11."""
+    """Verifies §7.2: cumulative fill reports 3 -> 3 -> 5 only consume 5, not 11."""
     from crypto_momentum_lab.domain.execution import PositionKey, PositionReservation
 
     key = PositionKey(

@@ -112,6 +112,7 @@ class ExecutionRequest:
     target_batch_ids: tuple[str, ...] = ()
     batch_quantities: Mapping[str, Decimal] | None = None
     exit_policy_mode: ExitPolicyMode = ExitPolicyMode.CONSOLIDATE_ELIGIBLE
+    expected_projection_version: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -616,19 +617,43 @@ class ExecutionBook:
                         try:
                             existing = await _maybe_await(loader(res.reservation_id))
                             if existing is not None:
+                                if (
+                                    existing.batch_id != res.batch_id
+                                    or existing.reserved_quantity
+                                    != res.reserved_quantity
+                                    or existing.position_key != res.position_key
+                                ):
+                                    return CommandConflict(
+                                        request_id=command.command_id,
+                                        reason=(
+                                            f"Reservation {res.reservation_id} already "
+                                            f"exists with different parameters "
+                                            f"(batch_id={existing.batch_id}, "
+                                            f"quantity={existing.reserved_quantity}) "
+                                            f"that does not match requested "
+                                            f"(batch_id={res.batch_id}, "
+                                            f"quantity={res.reserved_quantity})"
+                                        ),
+                                    )
                                 continue
+                        except ReservationConflictError:
+                            raise
                         except Exception:
                             pass
                     to_save.append(res)
 
                 if to_save:
                     expected_ver = (
-                        None
-                        if request.expected_view_token in ("*", "pv_initial")
-                        else request.expected_view_token
+                        request.expected_projection_version
+                        if request.expected_projection_version is not None
+                        else (
+                            None
+                            if request.expected_view_token in ("*", "pv_initial")
+                            else request.expected_view_token
+                        )
                     )
-                    if callable(saver):
-                        try:
+                    try:
+                        if callable(saver):
                             await _maybe_await(
                                 saver(
                                     tuple(to_save),
@@ -636,19 +661,22 @@ class ExecutionBook:
                                     batch_quantities=batch_quantities_dict,
                                 )
                             )
-                        except Exception:
-                            pass
-                    elif callable(single_saver):
-                        for res in to_save:
-                            try:
+                        elif callable(single_saver):
+                            for res in to_save:
                                 await _maybe_await(
                                     single_saver(
                                         res,
                                         expected_projection_version=expected_ver,
                                     )
                                 )
-                            except Exception:
-                                pass
+                    except Exception as save_err:
+                        return CommandConflict(
+                            request_id=command.command_id,
+                            reason=(
+                                f"Reservation already exists or save conflict: "
+                                f"{save_err}"
+                            ),
+                        )
         else:
             command = TradeCommand(
                 command_id=request.request_id,

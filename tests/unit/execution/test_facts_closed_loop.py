@@ -290,7 +290,14 @@ def test_ake_external_close_and_reopen_lifecycle_via_journal_and_book() -> None:
     )
     # Sep 20 External Sell 944 @ 0.103064 (position drops to 0)
     journal.append_fill(
-        _fill("t_sep20_sell", "944", "0.103064", t_sep20_sell, side="SELL", symbol="AKEUSDT")
+        _fill(
+            "t_sep20_sell",
+            "944",
+            "0.103064",
+            t_sep20_sell,
+            side="SELL",
+            symbol="AKEUSDT",
+        )
     )
     # Sep 25 New Buy 2618 @ 0.038197
     journal.append_fill(

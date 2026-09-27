@@ -1564,9 +1564,6 @@ def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> Non
         [_position(symbol="MARSCOINUSDT", position_amt=Decimal("1077"))],
         orders,
         exit_batch_ids={},
-        legacy_exit_order_ids=frozenset(
-            {"marscoin-canceled-exit", "marscoin-full-flatten"}
-        ),
     )
 
     assert unmanaged == frozenset()

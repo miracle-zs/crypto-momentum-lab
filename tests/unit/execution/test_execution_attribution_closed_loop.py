@@ -181,7 +181,9 @@ def test_transactional_reservation_prevents_concurrent_double_dipping() -> None:
     assert res_a[0].active_quantity == Decimal("0.8")
 
     # Available remaining on batch_1 is now 1.0 - 0.8 = 0.2
-    assert coordinator.get_available_batch_quantity(view, batch_1.batch_id) == Decimal("0.2")
+    assert coordinator.get_available_batch_quantity(view, batch_1.batch_id) == Decimal(
+        "0.2"
+    )
 
     # Command B: concurrent attempt to reserve 0.5 of batch_1 must fail!
     cmd_b = ExitAllocator.create_exit_command(
@@ -284,7 +286,9 @@ def test_reservation_fill_reconciliation_and_release() -> None:
     assert res.active_quantity == Decimal("0.0")
 
     # 3. Available quantity restored to 1.0 (no active reservations remaining)
-    assert coordinator.get_available_batch_quantity(view, batch_1.batch_id) == Decimal("1.0")
+    assert coordinator.get_available_batch_quantity(view, batch_1.batch_id) == Decimal(
+        "1.0"
+    )
 
 
 def test_execution_readiness_error_on_degraded_view() -> None:

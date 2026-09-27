@@ -14,7 +14,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
 )
-from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+from crypto_momentum_lab.live_rollout.order_identity_adapter import (
     LegacyOrderIdentityAdapter,
 )
 from tests.fixtures.b2_anonymized_timeline import (

@@ -253,7 +253,9 @@ def test_reservation_release_on_cancellation_updates_repository() -> None:
     )
 
 
-def test_postgres_position_reservation_repository_sync_contract_with_coordinator() -> None:
+def test_postgres_position_reservation_repository_sync_contract_with_coordinator() -> (
+    None
+):
     """Regression test: PostgresPositionReservationRepository must match synchronous ExecutionCoordinator protocol."""
     from unittest.mock import patch
 
@@ -316,9 +318,9 @@ def test_postgres_position_reservation_repository_sync_contract_with_coordinator
 
         # Restart coordinator against the same Postgres repository
         coord2 = ExecutionCoordinator(repository=pg_repo)
-        assert coord2.get_available_batch_quantity(
-            view, "batch_sand_001"
-        ) == Decimal("1200.0")
+        assert coord2.get_available_batch_quantity(view, "batch_sand_001") == Decimal(
+            "1200.0"
+        )
 
         # Reconcile fill
         coord2.reconcile_fill(res_id, Decimal("800.0"))
@@ -326,4 +328,3 @@ def test_postgres_position_reservation_repository_sync_contract_with_coordinator
     assert loaded is not None
     assert loaded.consumed_quantity == Decimal("800.0")
     assert loaded.active_quantity == Decimal("0")
-

@@ -177,7 +177,9 @@ def test_trade_command_executor_limit_price_and_hedge_mode() -> None:
     )
     assert result_one_way.plan is not None
     assert result_one_way.plan.position_side == FuturesPositionSide.BOTH
-    assert result_one_way.plan.price == Decimal("50123.40")  # tick_size 0.10 ROUND_DOWN for BUY
+    assert result_one_way.plan.price == Decimal(
+        "50123.40"
+    )  # tick_size 0.10 ROUND_DOWN for BUY
     assert result_one_way.plan.client_order_id == "custom-order-id-1"
 
     # In Hedge mode:
@@ -215,4 +217,3 @@ def test_trade_command_executor_limit_sell_price_rounding_up() -> None:
     assert result.plan.side == "SELL"
     # tick_size 0.10: 50123.41 ROUND_UP -> 50123.50
     assert result.plan.price == Decimal("50123.50")
-

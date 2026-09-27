@@ -408,9 +408,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
         raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "3.0"},
     )
     app1 = await book.observe(
-        ExecutionEvidence(
-            evidence_id="ev_c1", scope=scope, observed_at=t0, fill=f_cum1
-        )
+        ExecutionEvidence(evidence_id="ev_c1", scope=scope, observed_at=t0, fill=f_cum1)
     )
     assert isinstance(app1, Applied)
     assert app1.consumed_quantity == Decimal("3.0")
@@ -437,9 +435,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
         raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "3.0"},
     )
     app2 = await book.observe(
-        ExecutionEvidence(
-            evidence_id="ev_c2", scope=scope, observed_at=t0, fill=f_cum2
-        )
+        ExecutionEvidence(evidence_id="ev_c2", scope=scope, observed_at=t0, fill=f_cum2)
     )
     assert isinstance(app2, Applied)
     assert app2.consumed_quantity == Decimal("0")
@@ -466,9 +462,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
         raw_payload={"positionSide": "LONG", "is_cumulative": True, "cum_qty": "5.0"},
     )
     app3 = await book.observe(
-        ExecutionEvidence(
-            evidence_id="ev_c3", scope=scope, observed_at=t0, fill=f_cum3
-        )
+        ExecutionEvidence(evidence_id="ev_c3", scope=scope, observed_at=t0, fill=f_cum3)
     )
     assert isinstance(app3, Applied)
     assert app3.consumed_quantity == Decimal("2.0")
@@ -599,4 +593,3 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
     outbox = book.get_outbox("cmd-exit-partial")
     assert outbox is not None
     assert outbox.state == DispatchState.TERMINAL
-

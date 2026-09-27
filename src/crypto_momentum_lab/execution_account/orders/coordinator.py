@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -31,8 +30,6 @@ from crypto_momentum_lab.domain.execution import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.execution.execution_book import (
-    Accepted,
-    AlreadyAccepted,
     Blocked,
     CommandConflict,
     ExecutionBook,
@@ -41,7 +38,6 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
-    ReservationConflictError,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -361,11 +357,9 @@ class OrderExecutionCoordinator:
         )
         if self._domain_coordinator is None and self._execution_book is not None:
             self._domain_coordinator = self._execution_book.coordinator
-        self._active_reservations: dict[str, PositionReservation] = {}
         self._settled_cumulative_quantities: dict[str, Decimal] = {}
         if initial_reservations:
             for r in initial_reservations:
-                self._active_reservations[r.reservation_id] = r
                 if self._domain_coordinator is not None:
                     self._domain_coordinator.register_reservation(r)
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
@@ -390,30 +384,15 @@ class OrderExecutionCoordinator:
 
     @property
     def is_execution_book_enabled(self) -> bool:
-        raw = os.environ.get("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all").strip()
-        if raw.lower() in ("all", "*", "true", "1"):
-            return True
-        gray_accounts = raw.split(",")
-        return self._account_label in {a.strip() for a in gray_accounts if a.strip()}
+        return True
 
     def get_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
         """Returns currently tracked active reservations."""
-        if self.is_execution_book_enabled and self._execution_book is not None:
+        if self._execution_book is not None:
             return self._execution_book.get_active_reservations(key)
-        if key is None:
-            return tuple(
-                r
-                for r in self._active_reservations.values()
-                if r.active_quantity > Decimal("0")
-            )
-        return tuple(
-            r
-            for r in self._active_reservations.values()
-            if r.active_quantity > Decimal("0")
-            and r.position_key.canonical_id == key.canonical_id
-        )
+        return ()
 
     def block_entry_submissions(self) -> None:
         """Reject queued/future entries and drain the one already in flight."""
@@ -432,258 +411,119 @@ class OrderExecutionCoordinator:
         await self._entry_submissions_idle.wait()
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
-        if not plan.reduce_only or self._reservation_repository is None:
+        if not plan.reduce_only:
             return
-        key = PositionKey(
-            environment="live",
-            account_label=self._account_label,
-            symbol=plan.symbol,
-            position_side=plan.position_side,
-        )
-        proj_ver = getattr(plan, "projection_version", None)
-        try:
-            active_res = await _maybe_await(
-                self._reservation_repository.load_active_reservations(key)
-            )
-            existing_by_id = {
-                r.reservation_id: r
-                for r in active_res
-                if r.command_id == plan.client_order_id
-            }
+        if self._reservation_repository is None or self._execution_book is None:
+            return
 
-            target_reservations: list[PositionReservation] = []
+        batch_str = getattr(plan, "batch_id", None)
+        if batch_str and (
+            str(batch_str).startswith(f"batch_{plan.symbol}_")
+            or str(batch_str) in ("batch_default", "batch_synthetic")
+        ):
+            raise OrderPreSubmissionError(
+                f"Account {self._account_label}: "
+                f"synthetic batch {batch_str} is prohibited"
+            )
+
+        try:
+            scope = ExecutionScope(
+                environment="live",
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            current_view = await self._execution_book.read(scope)
+            proj_ver = getattr(plan, "projection_version", None)
+            token = (
+                proj_ver
+                if (proj_ver and proj_ver == current_view.projection_version)
+                else "*"
+            )
+
             allocations = getattr(plan, "allocations", ())
+            batch_quantities = getattr(plan, "batch_quantities", None)
             if allocations:
-                for idx, alloc in enumerate(allocations):
-                    target_reservations.append(
-                        PositionReservation(
-                            reservation_id=f"res_{plan.client_order_id}_{idx}",
-                            command_id=plan.client_order_id,
-                            position_key=key,
-                            batch_id=alloc.batch_id,
-                            reserved_quantity=alloc.allocated_quantity,
-                        )
-                    )
+                target_batch_ids = tuple(a.batch_id for a in allocations)
+                if batch_quantities is None:
+                    batch_quantities = {
+                        a.batch_id: a.allocated_quantity for a in allocations
+                    }
             elif getattr(plan, "batch_id", None):
-                batch_str = str(plan.batch_id)
-                if self.is_execution_book_enabled and (
-                    batch_str.startswith(f"batch_{plan.symbol}_")
-                    or batch_str in ("batch_default", "batch_synthetic")
-                ):
-                    raise OrderPreSubmissionError(
-                        f"Account {self._account_label} in ExecutionBook gray "
-                        f"cutover: synthetic batch {batch_str} is prohibited"
-                    )
-                target_reservations.append(
-                    PositionReservation(
-                        reservation_id=f"res_{plan.client_order_id}",
-                        command_id=plan.client_order_id,
-                        position_key=key,
-                        batch_id=batch_str,
-                        reserved_quantity=Decimal(str(plan.quantity)),
-                    )
-                )
+                target_batch_ids = (str(plan.batch_id),)
+                if batch_quantities is None:
+                    batch_quantities = {
+                        str(plan.batch_id): Decimal(str(plan.quantity))
+                    }
             else:
                 raise OrderPreSubmissionError(
-                    f"Exit order {plan.client_order_id} has no allocated "
-                    "batches or batch_id; cannot invent synthetic batch"
+                    f"Exit order {plan.client_order_id} has no allocated batches "
+                    f"or batch_id; cannot invent synthetic batch"
                 )
 
-            # Sync active existing reservations into memory cache and domain
-            # coordinator. Reject retries whose identity drifted from the plan.
-            for r in existing_by_id.values():
-                target = next(
-                    (
-                        t
-                        for t in target_reservations
-                        if t.reservation_id == r.reservation_id
-                    ),
-                    None,
-                )
-                if target is not None and (
-                    r.batch_id != target.batch_id
-                    or r.reserved_quantity != target.reserved_quantity
-                ):
-                    raise ReservationConflictError(
-                        f"active reservation {r.reservation_id} batch "
-                        f"{r.batch_id} qty {r.reserved_quantity} does not "
-                        f"match retry plan batch {target.batch_id} qty "
-                        f"{target.reserved_quantity}"
-                    )
-                self._active_reservations[r.reservation_id] = r
-                if self._domain_coordinator is not None:
-                    self._domain_coordinator.register_reservation(r)
-
-            # Identify which reservations still need to be persisted
-            needed = [
-                r for r in target_reservations if r.reservation_id not in existing_by_id
-            ]
-
-            # Determine batch quantities for capacity enforcement
-            batch_quantities = getattr(plan, "batch_quantities", None)
-            if batch_quantities is None:
-                allocations = getattr(plan, "allocations", ())
-                if allocations:
-                    batch_quantities = {
-                        alloc.batch_id: alloc.allocated_quantity
-                        for alloc in allocations
-                    }
-                elif target_reservations:
-                    first_res = target_reservations[0]
-                    batch_quantities = {first_res.batch_id: first_res.reserved_quantity}
-
-            saved_new: list[PositionReservation] = []
-            try:
-                saver = getattr(self._reservation_repository, "save_reservations", None)
-                if callable(saver) and needed:
-                    await _maybe_await(
-                        saver(
-                            tuple(needed),
-                            expected_projection_version=proj_ver,
-                            batch_quantities=batch_quantities,
-                        )
-                    )
-                    for res in needed:
-                        saved_new.append(res)
-                        self._active_reservations[res.reservation_id] = res
-                        if self._domain_coordinator is not None:
-                            self._domain_coordinator.register_reservation(res)
-                else:
-                    for res in needed:
-                        try:
-                            batch_limit = (
-                                batch_quantities.get(res.batch_id)
-                                if batch_quantities
-                                else None
-                            )
-                            await _maybe_await(
-                                self._reservation_repository.save_reservation(
-                                    res,
-                                    expected_projection_version=proj_ver,
-                                    batch_quantity=batch_limit,
-                                )
-                            )
-                        except ReservationConflictError:
-                            loaded = await _maybe_await(
-                                self._reservation_repository.load_reservation(
-                                    res.reservation_id
-                                )
-                            )
-                            if loaded is None or loaded.active_quantity <= Decimal("0"):
-                                raise
-                            if (
-                                loaded.position_key.canonical_id
-                                != res.position_key.canonical_id
-                                or loaded.command_id != res.command_id
-                                or loaded.batch_id != res.batch_id
-                                or loaded.reserved_quantity != res.reserved_quantity
-                            ):
-                                raise
-                            res = loaded
-                        saved_new.append(res)
-                        self._active_reservations[res.reservation_id] = res
-                        if self._domain_coordinator is not None:
-                            self._domain_coordinator.register_reservation(res)
-
-                if self.is_execution_book_enabled:
-                    scope = ExecutionScope(
-                        environment="live",
-                        account_label=self._account_label,
-                        symbol=plan.symbol,
-                        position_side=plan.position_side,
-                    )
-                    current_view = await self._execution_book.read(scope)
-                    token = (
-                        proj_ver
-                        if (proj_ver and proj_ver == current_view.projection_version)
-                        else "*"
-                    )
-                    req = ExecutionRequest(
-                        request_id=plan.client_order_id,
-                        scope=scope,
-                        strategy_name=getattr(plan, "strategy_name", "live_strategy"),
-                        strategy_version=getattr(plan, "strategy_version", "v1"),
-                        run_id=getattr(plan, "run_id", self._account_label),
-                        decision_ref=getattr(
-                            plan, "decision_ref", plan.client_order_id
-                        ),
-                        expected_view_token=token,
-                        action=(
-                            TradeCommandType.EXIT
-                            if plan.reduce_only
-                            else TradeCommandType.ENTRY
-                        ),
-                        requested_quantity=Decimal(str(plan.quantity)),
-                        order_type=(
-                            str(plan.order_type.value)
-                            if hasattr(plan.order_type, "value")
-                            else str(plan.order_type)
-                        ),
-                        limit_price=(
-                            Decimal(str(plan.price)) if plan.price is not None else None
-                        ),
-                        reduce_only=plan.reduce_only,
-                        target_batch_ids=tuple(r.batch_id for r in target_reservations),
-                        batch_quantities=batch_quantities,
-                        exit_policy_mode=getattr(
-                            plan,
-                            "exit_policy_mode",
-                            ExitPolicyMode.CONSOLIDATE_ELIGIBLE,
-                        ),
-                        created_at=plan.created_at,
-                    )
-                    act_res = await self._execution_book.act(req)
-                    if isinstance(act_res, Blocked):
-                        raise OrderPreSubmissionError(
-                            f"ExecutionBook blocked request: {act_res.reason}"
-                        )
-                    if isinstance(act_res, StaleView):
-                        raise OrderPreSubmissionError(
-                            f"ExecutionBook stale view: {act_res.reason}"
-                        )
-                    if isinstance(act_res, CommandConflict):
-                        raise OrderPreSubmissionError(
-                            f"ExecutionBook command conflict: {act_res.reason}"
-                        )
-                    if isinstance(act_res, (Accepted, AlreadyAccepted)):
-                        for r in act_res.receipt.reservations:
-                            self._active_reservations[r.reservation_id] = r
-            except Exception as save_err:
-                # Atomicity rollback: release any newly created reservations
-                for saved in saved_new:
-                    try:
-                        released = saved.release(saved.active_quantity)
-                        await _maybe_await(
-                            self._reservation_repository.update_reservation(
-                                released,
-                                release_reason="reservation_partial_failure_rollback",
-                            )
-                        )
-                    except Exception:
-                        pass
-                    self._active_reservations.pop(saved.reservation_id, None)
-                    if self._domain_coordinator is not None:
-                        self._domain_coordinator.unregister_reservation(
-                            saved.reservation_id
-                        )
-                raise save_err
-        except Exception as res_err:
+            req = ExecutionRequest(
+                request_id=plan.client_order_id,
+                scope=scope,
+                strategy_name=getattr(plan, "strategy_name", "live_strategy"),
+                strategy_version=getattr(plan, "strategy_version", "v1"),
+                run_id=getattr(plan, "run_id", self._account_label),
+                decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
+                expected_view_token=token,
+                expected_projection_version=proj_ver,
+                action=TradeCommandType.EXIT,
+                requested_quantity=Decimal(str(plan.quantity)),
+                order_type=(
+                    str(plan.order_type.value)
+                    if hasattr(plan.order_type, "value")
+                    else str(plan.order_type)
+                ),
+                limit_price=(
+                    Decimal(str(plan.price)) if plan.price is not None else None
+                ),
+                reduce_only=True,
+                target_batch_ids=target_batch_ids,
+                batch_quantities=batch_quantities,
+                exit_policy_mode=getattr(
+                    plan,
+                    "exit_policy_mode",
+                    ExitPolicyMode.TARGET_BATCHES_ONLY,
+                ),
+                created_at=plan.created_at,
+            )
+            act_res = await self._execution_book.act(req)
+        except Exception as err:
             log.error(
                 "order_reservation_creation_failed_refusing_submission",
                 client_order_id=plan.client_order_id,
-                error=str(res_err),
+                error=str(err),
             )
             raise OrderPreSubmissionError(
                 f"Failed to create position reservation for "
-                f"{plan.client_order_id}: {res_err}"
-            ) from res_err
+                f"{plan.client_order_id}: {err}"
+            ) from err
+
+        if isinstance(act_res, Blocked):
+            raise OrderPreSubmissionError(
+                f"Failed to create position reservation for "
+                f"{plan.client_order_id}: {act_res.reason}"
+            )
+        if isinstance(act_res, StaleView):
+            raise OrderPreSubmissionError(
+                f"Failed to create position reservation (stale view) for "
+                f"{plan.client_order_id}: {act_res.reason}"
+            )
+        if isinstance(act_res, CommandConflict):
+            raise OrderPreSubmissionError(
+                f"Failed to create position reservation (command conflict) for "
+                f"{plan.client_order_id}: {act_res.reason}"
+            )
 
     async def _release_reservation_if_present(
         self,
         plan: OrderExecutionPlan,
         reason: str = "preparation_or_execution_failed",
     ) -> None:
-        if not plan.reduce_only or self._reservation_repository is None:
+        if not plan.reduce_only:
             return
         try:
             key = PositionKey(
@@ -692,23 +532,38 @@ class OrderExecutionCoordinator:
                 symbol=plan.symbol,
                 position_side=plan.position_side,
             )
-            active_res = await _maybe_await(
-                self._reservation_repository.load_active_reservations(key)
-            )
+            active_res = list(self.get_active_reservations(key))
+            if self._reservation_repository is not None:
+                try:
+                    repo_res = await _maybe_await(
+                        self._reservation_repository.load_active_reservations(key)
+                    )
+                    existing_ids = {r.reservation_id for r in active_res}
+                    for r in repo_res:
+                        if r.reservation_id not in existing_ids:
+                            active_res.append(r)
+                            if self._domain_coordinator is not None:
+                                try:
+                                    self._domain_coordinator.register_reservation(r)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
             for r in active_res:
                 if r.command_id == plan.client_order_id and r.active_quantity > Decimal(
                     "0"
                 ):
-                    released = r.release(r.active_quantity)
-                    await _maybe_await(
-                        self._reservation_repository.update_reservation(
-                            released, release_reason=reason
-                        )
-                    )
-                    self._active_reservations.pop(r.reservation_id, None)
                     if self._domain_coordinator is not None:
-                        self._domain_coordinator.unregister_reservation(
-                            r.reservation_id
+                        released = self._domain_coordinator.release_reservation(
+                            r.reservation_id, r.active_quantity
+                        )
+                    else:
+                        released = r.release(r.active_quantity)
+                    if self._reservation_repository is not None:
+                        await _maybe_await(
+                            self._reservation_repository.update_reservation(
+                                released, release_reason=reason
+                            )
                         )
         except Exception as rel_err:
             log.warning(
@@ -722,7 +577,7 @@ class OrderExecutionCoordinator:
         plan: OrderExecutionPlan,
         res: OrderExecutionResult,
     ) -> None:
-        if not plan.reduce_only or self._reservation_repository is None or res is None:
+        if not plan.reduce_only or res is None:
             return
         is_terminal = res.state in {
             ExchangeOrderState.FILLED,
@@ -740,78 +595,74 @@ class OrderExecutionCoordinator:
                 symbol=plan.symbol,
                 position_side=plan.position_side,
             )
-            active_res = await _maybe_await(
-                self._reservation_repository.load_active_reservations(key)
-            )
+            active_res = list(self.get_active_reservations(key))
+            if self._reservation_repository is not None:
+                try:
+                    repo_res = await _maybe_await(
+                        self._reservation_repository.load_active_reservations(key)
+                    )
+                    existing_ids = {r.reservation_id for r in active_res}
+                    for r in repo_res:
+                        if r.reservation_id not in existing_ids:
+                            active_res.append(r)
+                            if self._domain_coordinator is not None:
+                                try:
+                                    self._domain_coordinator.register_reservation(r)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
             order_key = plan.client_order_id or str(res.exchange_order_id or "")
             cum_executed = Decimal(str(res.executed_quantity))
-            if order_key in self._settled_cumulative_quantities:
-                prev_settled = self._settled_cumulative_quantities[order_key]
-            else:
-                prev_settled = sum(
-                    (
-                        r.consumed_quantity
-                        for r in active_res
-                        if r.command_id == plan.client_order_id
-                    ),
-                    Decimal("0"),
-                )
+            prev_settled = self._settled_cumulative_quantities.get(
+                order_key, Decimal("0")
+            )
 
             delta_to_consume = max(Decimal("0"), cum_executed - prev_settled)
-            consumed_by_id: dict[str, PositionReservation] = {}
             if delta_to_consume > Decimal("0"):
-                remaining_to_consume = delta_to_consume
+                remaining = delta_to_consume
                 for r in active_res:
                     if (
                         r.command_id == plan.client_order_id
                         and r.active_quantity > Decimal("0")
-                        and remaining_to_consume > Decimal("0")
+                        and remaining > Decimal("0")
                     ):
-                        qty_to_consume = min(remaining_to_consume, r.active_quantity)
-                        updated = r.consume(qty_to_consume)
-                        await _maybe_await(
-                            self._reservation_repository.update_reservation(updated)
-                        )
-                        consumed_by_id[r.reservation_id] = updated
-                        if updated.active_quantity <= Decimal("0"):
-                            self._active_reservations.pop(r.reservation_id, None)
-                            if self._domain_coordinator is not None:
-                                self._domain_coordinator.unregister_reservation(
-                                    r.reservation_id
-                                )
+                        qty = min(remaining, r.active_quantity)
+                        if self._domain_coordinator is not None:
+                            updated = self._domain_coordinator.reconcile_fill(
+                                r.reservation_id, qty
+                            )
                         else:
-                            self._active_reservations[r.reservation_id] = updated
-                            if self._domain_coordinator is not None:
-                                self._domain_coordinator.update_reservation(updated)
-                        remaining_to_consume -= qty_to_consume
-                        if remaining_to_consume <= Decimal("0"):
-                            break
-                settled_now = delta_to_consume - remaining_to_consume
+                            updated = r.consume(qty)
+                        if self._reservation_repository is not None:
+                            await _maybe_await(
+                                self._reservation_repository.update_reservation(updated)
+                            )
+                        remaining -= qty
+                settled_now = delta_to_consume - remaining
                 self._settled_cumulative_quantities[order_key] = (
                     prev_settled + settled_now
                 )
 
-            # On terminal state, release any residual unconsumed reservations
             if is_terminal:
-                for r in active_res:
-                    if r.command_id == plan.client_order_id:
-                        latest = consumed_by_id.get(
-                            r.reservation_id,
-                            self._active_reservations.get(r.reservation_id, r),
-                        )
-                        if latest is not None and latest.active_quantity > Decimal("0"):
-                            released = latest.release(latest.active_quantity)
+                for r in self.get_active_reservations(key):
+                    if (
+                        r.command_id == plan.client_order_id
+                        and r.active_quantity > Decimal("0")
+                    ):
+                        if self._domain_coordinator is not None:
+                            released = self._domain_coordinator.release_reservation(
+                                r.reservation_id, r.active_quantity
+                            )
+                        else:
+                            released = r.release(r.active_quantity)
+                        if self._reservation_repository is not None:
                             await _maybe_await(
                                 self._reservation_repository.update_reservation(
                                     released,
                                     release_reason=f"order_finished_residual_release_{res.state.value}",
                                 )
                             )
-                            self._active_reservations.pop(r.reservation_id, None)
-                            if self._domain_coordinator is not None:
-                                self._domain_coordinator.unregister_reservation(
-                                    r.reservation_id
-                                )
                 self._settled_cumulative_quantities.pop(order_key, None)
         except Exception as consume_err:
             log.warning(
@@ -1007,44 +858,11 @@ class OrderExecutionCoordinator:
                 operation=lambda: self._backend.cancel_order(plan),
             ),
         )
-        if (
-            plan.reduce_only
-            and self._reservation_repository is not None
-            and result.state
-            in (ExchangeOrderState.CANCELED, ExchangeOrderState.ABSENT_RECONCILED)
+        if plan.reduce_only and result.state in (
+            ExchangeOrderState.CANCELED,
+            ExchangeOrderState.ABSENT_RECONCILED,
         ):
-            try:
-                key = PositionKey(
-                    environment="live",
-                    account_label=self._account_label,
-                    symbol=plan.symbol,
-                    position_side=plan.position_side,
-                )
-                active_res = await _maybe_await(
-                    self._reservation_repository.load_active_reservations(key)
-                )
-                for r in active_res:
-                    if (
-                        r.command_id == plan.client_order_id
-                        and r.active_quantity > Decimal("0")
-                    ):
-                        updated = r.release(r.active_quantity)
-                        await _maybe_await(
-                            self._reservation_repository.update_reservation(
-                                updated, release_reason="order_cancelled"
-                            )
-                        )
-                        self._active_reservations.pop(r.reservation_id, None)
-                        if self._domain_coordinator is not None:
-                            self._domain_coordinator.unregister_reservation(
-                                r.reservation_id
-                            )
-            except Exception as cancel_err:
-                log.warning(
-                    "order_reservation_release_on_cancel_failed",
-                    client_order_id=plan.client_order_id,
-                    error=str(cancel_err),
-                )
+            await self._release_reservation_if_present(plan, reason="order_cancelled")
 
         await self._observe_order_result_in_execution_book(plan, result)
         return result
