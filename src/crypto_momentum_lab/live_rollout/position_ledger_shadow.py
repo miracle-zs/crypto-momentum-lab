@@ -1,28 +1,20 @@
-"""Shadow projection comparator and legacy adapters for PositionLedger.
+"""Legacy order identity adapters for PositionLedger.
 
-Operates strictly in read-only shadow mode:
-1. Runs PositionLedger projection in parallel with legacy rebuild_position_batches;
-2. Produces structured divergence diagnostics without mutating state;
-3. Never affects live order execution or submission paths.
+Adapts legacy execution order facts and observations into AccountFacts
+for authoritative PositionLedger projection.
 """
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
-
-import structlog
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution import (
-    ManagedLivePositionBatch,
     PositionObservation,
     PositionOrderFact,
 )
@@ -32,49 +24,10 @@ from crypto_momentum_lab.domain.execution.position_batches import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
-    DiscrepancyKind,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
-    PositionDiscrepancy,
-    PositionHealthStatus,
     PositionKey,
-    PositionLedgerProjection,
 )
-
-log = structlog.get_logger()
-
-
-class ShadowDiffCategory(StrEnum):
-    EXACT_MATCH = "exact_match"
-    EXTERNAL_FILL_DETECTED = "external_fill_detected"
-    BATCH_COUNT_MISMATCH = "batch_count_mismatch"
-    QUANTITY_MISMATCH = "quantity_mismatch"
-    ZERO_CROSSING_DIVERGENCE = "zero_crossing_divergence"
-    LOT_ATTRIBUTION_MISMATCH = "lot_attribution_mismatch"
-    RECONCILIATION_GAP_DETECTED = "reconciliation_gap_detected"
-    UNALLOCATED_QUANTITY_DETECTED = "unallocated_quantity_detected"
-
-
-@dataclass(frozen=True, slots=True)
-class ShadowDiffReport:
-    """Audit report comparing legacy batch rebuild with PositionLedger v2."""
-
-    position_key: PositionKey
-    category: ShadowDiffCategory
-    legacy_batch_count: int
-    ledger_batch_count: int
-    legacy_total_quantity: Decimal
-    ledger_total_quantity: Decimal
-    oldest_batch_age_diff_seconds: float
-    details: str
-    reconciliation_gap: Decimal = Decimal("0")
-    unallocated_quantity: Decimal = Decimal("0")
-    health_status: PositionHealthStatus = PositionHealthStatus.READY
-    discrepancy: PositionDiscrepancy | None = None
-
-    @property
-    def is_concordant(self) -> bool:
-        return self.category is ShadowDiffCategory.EXACT_MATCH
 
 
 class LegacyOrderIdentityAdapter:
@@ -213,6 +166,7 @@ class LegacyOrderIdentityAdapter:
                                 "synthetic_from_order": True,
                                 "is_system": True,
                                 "client_order_id": order.client_order_id,
+                                "reduce_only": order.reduce_only,
                             },
                         )
                     )
@@ -267,194 +221,3 @@ class LegacyOrderIdentityAdapter:
             coverage=coverage,
             has_synthetic_fills=has_synthetic,
         )
-
-
-class PositionLedgerShadowComparator:
-    """Compares legacy batch reconstruction against PositionLedger projection."""
-
-    @staticmethod
-    def compare(
-        *,
-        position_key: PositionKey,
-        legacy_batches: Sequence[ManagedLivePositionBatch],
-        ledger_projection: PositionLedgerProjection,
-    ) -> ShadowDiffReport:
-        """Compare legacy batches with ledger batches and return audit report."""
-        legacy_count = len(legacy_batches)
-        ledger_count = len(ledger_projection.active_batches)
-
-        legacy_total_qty = sum(
-            (b.quantity for b in legacy_batches),
-            start=Decimal("0"),
-        )
-        ledger_total_qty = ledger_projection.total_active_quantity
-
-        # Oldest batch timestamp diff
-        age_diff_sec = 0.0
-        if legacy_batches and ledger_projection.active_batches:
-            legacy_oldest = min(b.opened_at for b in legacy_batches)
-            ledger_oldest = min(b.opened_at for b in ledger_projection.active_batches)
-            age_diff_sec = abs((legacy_oldest - ledger_oldest).total_seconds())
-
-        has_external_reduction = any(
-            bool(ep.reductions and any(not r.is_system for r in ep.reductions))
-            for ep in (ledger_projection.active_episode,)
-            if ep is not None
-        )
-
-        category = ShadowDiffCategory.EXACT_MATCH
-        details = "Exact match between legacy rebuild and PositionLedger v2"
-
-        if ledger_projection.reconciliation_gap != Decimal("0"):
-            category = ShadowDiffCategory.RECONCILIATION_GAP_DETECTED
-            details = (
-                f"Ledger reconciliation gap is non-zero: "
-                f"gap={ledger_projection.reconciliation_gap}"
-            )
-        elif ledger_projection.unallocated_quantity != Decimal("0"):
-            category = ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED
-            details = (
-                f"Ledger unallocated quantity is non-zero: "
-                f"unallocated={ledger_projection.unallocated_quantity}"
-            )
-        elif legacy_total_qty != ledger_total_qty:
-            category = ShadowDiffCategory.QUANTITY_MISMATCH
-            details = (
-                f"Total quantity mismatch: legacy={legacy_total_qty}, "
-                f"ledger={ledger_total_qty}"
-            )
-        elif legacy_count != ledger_count:
-            if has_external_reduction:
-                category = ShadowDiffCategory.EXTERNAL_FILL_DETECTED
-                details = (
-                    f"External fill presence caused lot attribution divergence: "
-                    f"legacy_count={legacy_count}, ledger_count={ledger_count}"
-                )
-            else:
-                category = ShadowDiffCategory.BATCH_COUNT_MISMATCH
-                details = (
-                    f"Batch count mismatch: legacy={legacy_count}, "
-                    f"ledger={ledger_count}"
-                )
-        elif age_diff_sec > 1.0:
-            category = ShadowDiffCategory.ZERO_CROSSING_DIVERGENCE
-            details = (
-                f"Oldest batch timestamp diverged by {age_diff_sec:.3f}s "
-                f"(indicates different zero-crossing or lookback anchor)"
-            )
-        else:
-            sorted_legacy = sorted(
-                legacy_batches, key=lambda b: (b.opened_at, str(b.batch_id))
-            )
-            sorted_ledger = sorted(
-                ledger_projection.active_batches,
-                key=lambda b: (b.opened_at, str(b.batch_id)),
-            )
-            for idx, (leg_b, led_b) in enumerate(
-                zip(sorted_legacy, sorted_ledger, strict=True)
-            ):
-                if leg_b.quantity != led_b.quantity:
-                    category = ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                    details = (
-                        f"Batch quantity mismatch at index {idx}: "
-                        f"legacy={leg_b.quantity}, ledger={led_b.quantity}"
-                    )
-                    break
-                if leg_b.entry_price != led_b.entry_price:
-                    category = ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                    details = (
-                        f"Batch entry_price mismatch at index {idx}: "
-                        f"legacy={leg_b.entry_price}, ledger={led_b.entry_price}"
-                    )
-                    break
-                batch_age_diff = abs(
-                    (leg_b.opened_at - led_b.opened_at).total_seconds()
-                )
-                if batch_age_diff > 1.0:
-                    category = ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                    details = (
-                        f"Batch opened_at mismatch at index {idx}: "
-                        f"diff={batch_age_diff:.3f}s (> 1.0s)"
-                    )
-                    break
-                leg_exit_sub = leg_b.exit_order_submitted_at
-                led_exit_sub = led_b.exit_order_submitted_at
-                if (leg_exit_sub is None) != (led_exit_sub is None):
-                    category = ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                    details = (
-                        f"Batch exit_order_submitted_at existence mismatch "
-                        f"at index {idx}: legacy={leg_exit_sub}, ledger={led_exit_sub}"
-                    )
-                    break
-                if leg_exit_sub is not None and led_exit_sub is not None:
-                    if abs((leg_exit_sub - led_exit_sub).total_seconds()) > 1.0:
-                        category = ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-                        details = (
-                            f"Batch exit_order_submitted_at timestamp mismatch "
-                            f"at index {idx}: legacy={leg_exit_sub}, "
-                            f"ledger={led_exit_sub}"
-                        )
-                        break
-
-        discrepancy: PositionDiscrepancy | None = None
-        if category != ShadowDiffCategory.EXACT_MATCH:
-            kind = DiscrepancyKind.BOUNDARY_MISMATCH
-            if category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH:
-                kind = (
-                    DiscrepancyKind.PRICE_MISMATCH
-                    if "entry_price" in details
-                    else DiscrepancyKind.IDENTITY_MISMATCH
-                )
-            elif category in {
-                ShadowDiffCategory.QUANTITY_MISMATCH,
-                ShadowDiffCategory.RECONCILIATION_GAP_DETECTED,
-            }:
-                kind = DiscrepancyKind.QUANTITY_MISMATCH
-            elif category == ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED:
-                kind = DiscrepancyKind.INPUT_MISSING
-            elif category == ShadowDiffCategory.ZERO_CROSSING_DIVERGENCE:
-                kind = DiscrepancyKind.TIME_MISALIGNED
-
-            now_dt = datetime.now(UTC)
-            raw_hash = f"{position_key.canonical_id}:{category.value}:{details}"
-            disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
-            discrepancy = PositionDiscrepancy(
-                discrepancy_id=f"disc_{position_key.symbol}_{disc_hash}",
-                key=position_key,
-                kind=kind,
-                first_seen_at=now_dt,
-                last_seen_at=now_dt,
-                count=1,
-                input_hash=disc_hash,
-                details=details,
-                event_cut=ledger_projection.event_cut,
-            )
-
-        report = ShadowDiffReport(
-            position_key=position_key,
-            category=category,
-            legacy_batch_count=legacy_count,
-            ledger_batch_count=ledger_count,
-            legacy_total_quantity=legacy_total_qty,
-            ledger_total_quantity=ledger_total_qty,
-            oldest_batch_age_diff_seconds=age_diff_sec,
-            details=details,
-            reconciliation_gap=ledger_projection.reconciliation_gap,
-            unallocated_quantity=ledger_projection.unallocated_quantity,
-            health_status=ledger_projection.health_status,
-            discrepancy=discrepancy,
-        )
-
-        log.info(
-            "position_ledger_shadow_comparison",
-            symbol=position_key.symbol,
-            category=category.value,
-            concordant=report.is_concordant,
-            legacy_count=legacy_count,
-            ledger_count=ledger_count,
-            details=details,
-            health_status=ledger_projection.health_status.value,
-            discrepancy_id=discrepancy.discrepancy_id if discrepancy else None,
-        )
-
-        return report

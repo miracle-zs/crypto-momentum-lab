@@ -3,14 +3,12 @@
 Tests:
 1. SAND mixed-cut reconciliation consistency (308ms race condition avoidance);
 2. AKE external close episode isolation (pre-zero lot does not contaminate entry price);
-3. PositionHealthStatus & DiscrepancyKind state transitions and deterministic audit hashing;
+3. PositionHealthStatus & DiscrepancyKind transitions and audit hashing;
 4. True discrepancy detection vs transient stream lag.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
-
-import pytest
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -24,11 +22,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionDiscrepancy,
     PositionHealthStatus,
     PositionKey,
-)
-from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
-    PositionLedgerShadowComparator,
-    ShadowDiffCategory,
 )
 
 
@@ -87,7 +80,7 @@ def _snapshot(
 
 
 def test_sand_mixed_cut_reconciliation_consistency() -> None:
-    """Validate that temporal discrepancies in partial fills do not generate spurious gaps.
+    """Validate that temporal discrepancies in partial fills avoid spurious gaps.
 
     Reproduces the exact SANDUSDT on-site sequence:
     - 07:25:20.591: BUY 1403
@@ -146,7 +139,7 @@ def test_sand_true_cut_divergence_detected() -> None:
 
 
 def test_ake_external_close_episode_isolation() -> None:
-    """Validate that an external close completely bounds an episode and prevents cost contamination.
+    """Validate external close bounds episode and prevents cost contamination.
 
     Reproduces the exact AKEUSDT scenario:
     - 09-20 10:21: BUY 944 @ 0.105886
@@ -215,7 +208,7 @@ def test_ake_external_close_episode_isolation() -> None:
     assert proj.total_active_quantity == Decimal("2618")
     assert len(proj.active_batches) == 1
 
-    # 2. Entry price must NOT be contaminated by 0.105886 (should be exactly 0.038197, NOT 0.0561359)
+    # 2. Entry price must NOT be contaminated by 0.105886 (should be 0.038197)
     active_batch = proj.active_batches[0]
     assert active_batch.quantity == Decimal("2618")
     assert active_batch.entry_price == Decimal("0.038197")
@@ -230,7 +223,7 @@ def test_ake_external_close_episode_isolation() -> None:
 
 
 def test_position_health_status_and_discrepancy_model() -> None:
-    """Validate structure and immutability of PositionHealthStatus and PositionDiscrepancy."""
+    """Validate structure and immutability of PositionHealthStatus."""
     assert PositionHealthStatus.READY == "READY"
     assert PositionHealthStatus.CATCHING_UP == "CATCHING_UP"
     assert PositionHealthStatus.INCOMPLETE == "INCOMPLETE"

@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -20,10 +19,8 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
-    PositionHistory,
     PositionObservation,
     PositionOrderFact,
-    rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
@@ -57,7 +54,6 @@ from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
     LegacyOrderIdentityAdapter,
-    PositionLedgerShadowComparator,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -2411,30 +2407,6 @@ def _build_position_batches(
         entry_price=position.entry_price,
         observed_at=getattr(position, "observed_at", None),
     )
-    is_primary_enabled = os.environ.get(
-        "CML_POSITION_LEDGER_PRIMARY_ENABLED", "1"
-    ).lower() in {"1", "true", "yes"}
-
-    if not is_primary_enabled:
-        history = PositionHistory(
-            orders=matching_orders,
-            fill_times=fill_times,
-            fill_prices=fill_prices,
-        )
-        result = rebuild_position_batches(observation, history)
-        for diag in result.diagnostics:
-            if diag.kind == "reassigned":
-                log.warning(
-                    "live_exit_batch_binding_reassigned",
-                    symbol=diag.symbol,
-                    client_order_id=diag.client_order_id,
-                    bound_batch_id=diag.bound_batch_id,
-                    fallback_batch_id=diag.target_batch_id,
-                    filled_quantity=str(diag.filled_quantity),
-                    reassigned_quantity=str(diag.reassigned_quantity),
-                )
-        return result.batches
-
     # Authoritative PositionLedger projection: builds primary batches
     # with zero-gap reconciliation.
     try:
@@ -2483,36 +2455,6 @@ def _build_position_batches(
         )
         ledger = PositionLedger(position_key)
         shadow_projection = ledger.project(facts)
-
-        # Read-only shadow comparison against legacy rebuild
-        # (retained solely for diagnostic logs)
-        try:
-            history = PositionHistory(
-                orders=matching_orders,
-                fill_times=fill_times,
-                fill_prices=fill_prices,
-            )
-            legacy_result = rebuild_position_batches(observation, history)
-            diff_report = PositionLedgerShadowComparator.compare(
-                position_key=position_key,
-                legacy_batches=legacy_result.batches,
-                ledger_projection=shadow_projection,
-            )
-            if not diff_report.is_concordant:
-                log.info(
-                    "shadow_position_ledger_divergence",
-                    symbol=position.symbol,
-                    category=diff_report.category.value,
-                    legacy_count=diff_report.legacy_batch_count,
-                    ledger_count=diff_report.ledger_batch_count,
-                    details=diff_report.details,
-                )
-        except Exception as shadow_exc:
-            log.debug(
-                "shadow_position_ledger_comparison_skipped",
-                symbol=position.symbol,
-                error=str(shadow_exc),
-            )
 
         active_limit_orders = [
             order
@@ -2579,45 +2521,6 @@ def _build_position_batches(
                         projection_version=shadow_projection.projection_version,
                     )
                 )
-
-        target_abs = abs(position.position_amt)
-        current_ledger_qty = sum(
-            (b.quantity for b in ledger_batches_list), Decimal("0")
-        )
-        if current_ledger_qty < target_abs:
-            gap_qty = target_abs - current_ledger_qty
-            gap_opened_at = getattr(position, "observed_at", None) or datetime.now(
-                tz=UTC
-            )
-            gap_batch_id = f"ep_{position.symbol}_gap_{int(gap_opened_at.timestamp())}"
-            ledger_batches_list.append(
-                ManagedLivePositionBatch(
-                    batch_id=gap_batch_id,
-                    quantity=gap_qty,
-                    entry_price=position.entry_price,
-                    opened_at=gap_opened_at,
-                    exit_order_submitted_at=(
-                        recovery_order.created_at
-                        if recovery_order is not None
-                        else None
-                    ),
-                    recovery_order_client_id=(
-                        None
-                        if recovery_order is None or recovery_order.plan is None
-                        else recovery_order.plan.client_order_id
-                    ),
-                    recovery_order_plan=(
-                        None if recovery_order is None else recovery_order.plan
-                    ),
-                    recovery_order_remaining_quantity=recovery_remaining,
-                    closing_order_filled=active_market_orders,
-                    legacy_attribution=False,
-                    entry_order_count=1,
-                    entry_client_order_ids=frozenset(),
-                    projection_version=shadow_projection.projection_version,
-                )
-            )
-
         ledger_batches = tuple(ledger_batches_list)
         log.info(
             "position_ledger_primary_active",
@@ -2661,37 +2564,6 @@ def _order_entry_time(
     fill_times: Mapping[str, datetime],
 ) -> datetime:
     return _entry_fill_at(order, fill_times) or order.updated_at
-
-
-def _entry_fill_quantity(
-    order: _PositionOrder,
-    fill_times: Mapping[str, datetime],
-) -> Decimal:
-    if order.executed_quantity > 0:
-        return order.executed_quantity
-    if order.state is ExchangeOrderState.FILLED:
-        return order.quantity
-    if (
-        order.state is ExchangeOrderState.PARTIALLY_FILLED
-        and _entry_fill_at(order, fill_times) is not None
-    ):
-        return order.quantity
-    return Decimal("0")
-
-
-def _entry_price(
-    order: _PositionOrder,
-    fill_prices: Mapping[str, Decimal],
-    fallback: Decimal,
-) -> Decimal:
-    for identifier in (order.exchange_order_id, order.client_order_id):
-        if identifier is not None and identifier in fill_prices:
-            price = fill_prices[identifier]
-            if price > 0:
-                return price
-    if order.price is not None and order.price > 0:
-        return order.price
-    return fallback
 
 
 def _batch_id_for_entry(order: _PositionOrder) -> str:

@@ -44,10 +44,7 @@ from crypto_momentum_lab.domain.execution.position_batches import (
     PositionHistory,
     PositionObservation,
     PositionOrderFact,
-    PositionRebuildResult,
-    RebuildDiagnostic,
     count_active_symbol_batch_concurrency,
-    rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
     PositionBook,
@@ -103,9 +100,6 @@ __all__ = [
     "PositionHistory",
     "PositionObservation",
     "PositionOrderFact",
-    "PositionRebuildResult",
-    "RebuildDiagnostic",
-    "rebuild_position_batches",
     "count_active_symbol_batch_concurrency",
     "PositionKey",
     "PositionHealthStatus",

@@ -2,16 +2,20 @@
 
 Verifies:
 1. Exact quantity conservation across all 8 phases of the incident.
-2. Current batch reconstruction behavior when external close orders are omitted vs included.
+2. PositionLedger projection when external close orders are captured.
 3. Zero-crossing boundary behavior: pre-zero entries must not taint post-zero batches.
-4. Foundation expectations for PositionLedger v2.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import (
-    PositionHistory,
-    rebuild_position_batches,
+from crypto_momentum_lab.domain.execution import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionKey,
+)
+from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+    LegacyOrderIdentityAdapter,
 )
 from tests.fixtures.b2_anonymized_timeline import (
     B2_TIMELINE,
@@ -67,50 +71,52 @@ def test_b2_system_order_facts_exclude_external_trades() -> None:
     assert "b2_ext_ord_837473466" not in order_ids
 
 
-def test_b2_post_zero_rebuild_with_current_logic() -> None:
-    """Demonstrate batch reconstruction for post-zero position (amt=172).
+def test_b2_post_zero_projection_with_position_ledger() -> None:
+    """Demonstrate PositionLedger projection for post-zero position (amt=172).
 
-    When observation is 172 (right after post-zero buy of 172) and history
-    only contains system orders (buys 120, 127, 127, exit 120, buy 172):
-    Total buy qty in system history is 374 + 172 = 546.
-    System sells = 120. Net in system orders = 426.
-    Observed position = 172.
-    Current rebuild_position_batches trims 426 down to 172 using FIFO.
+    When observation is 172 (right after post-zero buy of 172) and complete fills
+    include the external manual close of 254:
+    PositionLedger cleanly closes Episode 1 at the zero crossing, and begins
+    Episode 2 with exactly 172 units at the clean entry price and timestamp.
     """
-    from datetime import UTC, datetime
-    system_orders = get_b2_system_order_facts()
-    # Take orders up to post-zero buy (indices 0..4: buy 120, buy 127, buy 127, sell 120, buy 172)
-    orders_up_to_post_zero = system_orders[:5]
-
+    key = PositionKey("live", "account-3", "B2USDT", FuturesPositionSide.BOTH)
+    system_orders = get_b2_system_order_facts()[:5]
+    all_fills = get_b2_account_fill_events()[:6]
     obs = get_b2_position_observation(position_amt=Decimal("172"))
-    history = PositionHistory(orders=orders_up_to_post_zero)
 
-    result = rebuild_position_batches(obs, history)
+    facts = LegacyOrderIdentityAdapter.to_account_facts(
+        position_key=key,
+        orders=system_orders,
+        fills=all_fills,
+        observation=obs,
+    )
+    ledger = PositionLedger(key)
+    proj = ledger.project(facts)
 
-    # Reconstructed batch quantity should match the observation (172)
-    total_batch_qty = sum(b.quantity for b in result.batches)
-    assert total_batch_qty == Decimal("172")
-
-    # With FIFO reconciliation (fixed in e88c069), the newest batch (172) is preserved
-    # instead of the stale pre-zero batches
-    assert len(result.batches) == 1
-    assert result.batches[0].quantity == Decimal("172")
-    assert result.batches[0].opened_at == datetime(2026, 9, 19, 15, 59, 30, tzinfo=UTC)
+    assert proj.total_active_quantity == Decimal("172")
+    assert len(proj.active_batches) == 1
+    assert proj.active_batches[0].quantity == Decimal("172")
+    assert proj.active_batches[0].opened_at == datetime(
+        2026, 9, 19, 15, 59, 30, tzinfo=UTC
+    )
 
 
-def test_b2_dust_state_rebuild_contract() -> None:
-    """Verify batch reconstruction at the 7-coin dust remainder state.
-
-    At phase 7, observation is 7.
-    All system orders up to phase 7 are passed.
-    """
+def test_b2_dust_state_projection_contract() -> None:
+    """Verify PositionLedger projection at the 7-coin dust remainder state."""
+    key = PositionKey("live", "account-3", "B2USDT", FuturesPositionSide.BOTH)
     system_orders = get_b2_system_order_facts()
+    all_fills = get_b2_account_fill_events()[:11]
     obs = get_b2_position_observation(position_amt=Decimal("7"))
-    history = PositionHistory(orders=system_orders)
 
-    result = rebuild_position_batches(obs, history)
+    facts = LegacyOrderIdentityAdapter.to_account_facts(
+        position_key=key,
+        orders=system_orders,
+        fills=all_fills,
+        observation=obs,
+    )
+    ledger = PositionLedger(key)
+    proj = ledger.project(facts)
 
-    total_batch_qty = sum(b.quantity for b in result.batches)
-    assert total_batch_qty == Decimal("7")
-    assert len(result.batches) == 1
-    assert result.batches[0].quantity == Decimal("7")
+    assert proj.total_active_quantity == Decimal("7")
+    assert len(proj.active_batches) == 1
+    assert proj.active_batches[0].quantity == Decimal("7")

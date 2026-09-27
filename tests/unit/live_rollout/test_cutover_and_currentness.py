@@ -1,14 +1,19 @@
-"""Unit tests for context currentness verification and primary cutover paths."""
+"""Unit tests for context currentness and PositionLedger batch construction."""
 
-import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide
+from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.execution import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
+    PositionOrderFact,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
@@ -78,7 +83,7 @@ def test_is_context_current_accepts_matching_realtime_snapshot() -> None:
     )
 
 
-def test_build_position_batches_respects_cutover_flag() -> None:
+def test_build_position_batches_primary_ledger() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     position = SimpleNamespace(
         environment="live",
@@ -86,13 +91,6 @@ def test_build_position_batches_respects_cutover_flag() -> None:
         symbol="BTCUSDT",
         position_amt=Decimal("10"),
         entry_price=Decimal("60000"),
-    )
-
-    from crypto_momentum_lab.domain.execution.order_state import (
-        ExchangeOrderState,
-    )
-    from crypto_momentum_lab.domain.execution.position_batches import (
-        PositionOrderFact,
     )
 
     # Order that generated the position
@@ -112,118 +110,22 @@ def test_build_position_batches_respects_cutover_flag() -> None:
         price=Decimal("60000"),
     )
 
-    # 1. Default (flag disabled / not set): returns legacy rebuilt batches
-    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "0"}):
-        batches = _build_position_batches(
-            position=position,  # type: ignore[arg-type]
-            side=StrategySide.LONG,
-            position_side=FuturesPositionSide.BOTH,
-            matching_orders=[order],  # type: ignore[arg-type]
-            fill_times={"e_1": t0},
-            fill_prices={"e_1": Decimal("60000")},
-        )
-        assert len(batches) == 1
-        assert batches[0].quantity == Decimal("10")
-        assert isinstance(batches[0], ManagedLivePositionBatch)
-
-    # 2. Cutover enabled: returns PositionLedger active batches
-    # mapped to ManagedLivePositionBatch
-    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
-        batches = _build_position_batches(
-            position=position,  # type: ignore[arg-type]
-            side=StrategySide.LONG,
-            position_side=FuturesPositionSide.BOTH,
-            matching_orders=[order],  # type: ignore[arg-type]
-            fill_times={"e_1": t0},
-            fill_prices={"e_1": Decimal("60000")},
-        )
-        assert len(batches) == 1
-        assert batches[0].quantity == Decimal("10")
-        assert batches[0].entry_price == Decimal("60000")
-        assert batches[0].opened_at == t0
-        assert isinstance(batches[0], ManagedLivePositionBatch)
-
-
-def test_position_ledger_shadow_comparator_detects_lot_attribution_mismatch() -> None:
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionKey,
-        PositionLedgerBatch,
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
-        PositionLedgerShadowComparator,
-        ShadowDiffCategory,
-    )
-
-    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
-    t1 = datetime(2026, 9, 20, 11, 0, tzinfo=UTC)
-    position_key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
+    batches = _build_position_batches(
+        position=position,  # type: ignore[arg-type]
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.BOTH,
+        matching_orders=[order],  # type: ignore[arg-type]
+        fill_times={"e_1": t0},
+        fill_prices={"e_1": Decimal("60000")},
     )
-
-    # Legacy: 7 @ 100, 10 @ 200 (total 17)
-    legacy_batches = (
-        ManagedLivePositionBatch(
-            batch_id="b1",
-            quantity=Decimal("7"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-        ManagedLivePositionBatch(
-            batch_id="b2",
-            quantity=Decimal("10"),
-            entry_price=Decimal("200"),
-            opened_at=t1,
-        ),
-    )
-
-    # Ledger: 5 @ 100, 12 @ 200 (total 17)
-    ledger_batches = (
-        PositionLedgerBatch(
-            batch_id="b1",
-            episode_id="ep1",
-            quantity=Decimal("5"),
-            original_quantity=Decimal("5"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-        PositionLedgerBatch(
-            batch_id="b2",
-            episode_id="ep1",
-            quantity=Decimal("12"),
-            original_quantity=Decimal("12"),
-            entry_price=Decimal("200"),
-            opened_at=t1,
-        ),
-    )
-
-    projection = PositionLedgerProjection(
-        position_key=position_key,
-        active_episode=None,
-        active_batches=ledger_batches,
-        total_active_quantity=Decimal("17"),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=t1,
-    )
-
-    report = PositionLedgerShadowComparator.compare(
-        position_key=position_key,
-        legacy_batches=legacy_batches,
-        ledger_projection=projection,
-    )
-
-    # In Round 5 critique, this was misidentified as exact_match=True.
-    # Now it must be detected as LOT_ATTRIBUTION_MISMATCH with is_concordant=False.
-    assert report.is_concordant is False
-    assert report.category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
-    assert "Batch quantity mismatch at index 0" in report.details
+    assert len(batches) == 1
+    assert batches[0].quantity == Decimal("10")
+    assert batches[0].entry_price == Decimal("60000")
+    assert batches[0].opened_at == t0
+    assert isinstance(batches[0], ManagedLivePositionBatch)
 
 
-def test_build_position_batches_short_position_cutover() -> None:
+def test_build_position_batches_short_position() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     # Short position: position_amt is negative in exchange snapshot
     position = SimpleNamespace(
@@ -232,13 +134,6 @@ def test_build_position_batches_short_position_cutover() -> None:
         symbol="BTCUSDT",
         position_amt=Decimal("-10"),
         entry_price=Decimal("60000"),
-    )
-
-    from crypto_momentum_lab.domain.execution.order_state import (
-        ExchangeOrderState,
-    )
-    from crypto_momentum_lab.domain.execution.position_batches import (
-        PositionOrderFact,
     )
 
     # SELL order that opened the short position
@@ -258,146 +153,22 @@ def test_build_position_batches_short_position_cutover() -> None:
         price=Decimal("60000"),
     )
 
-    # When cutover is enabled, short position with negative position_amt
-    # should NOT trigger quantity mismatch fallback and successfully
-    # return ledger batches
-    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
-        batches = _build_position_batches(
-            position=position,  # type: ignore[arg-type]
-            side=StrategySide.SHORT,
-            position_side=FuturesPositionSide.BOTH,
-            matching_orders=[order],  # type: ignore[arg-type]
-            fill_times={"e_short_1": t0},
-            fill_prices={"e_short_1": Decimal("60000")},
-        )
-        assert len(batches) == 1
-        assert batches[0].quantity == Decimal("10")
-        assert batches[0].entry_price == Decimal("60000")
-        assert batches[0].opened_at == t0
-        assert isinstance(batches[0], ManagedLivePositionBatch)
-
-
-def test_position_ledger_shadow_comparator_detects_reconciliation_gap() -> None:
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionKey,
-        PositionLedgerBatch,
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
-        PositionLedgerShadowComparator,
-        ShadowDiffCategory,
-    )
-
-    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
-    position_key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
+    batches = _build_position_batches(
+        position=position,  # type: ignore[arg-type]
+        side=StrategySide.SHORT,
         position_side=FuturesPositionSide.BOTH,
+        matching_orders=[order],  # type: ignore[arg-type]
+        fill_times={"e_short_1": t0},
+        fill_prices={"e_short_1": Decimal("60000")},
     )
-
-    batches = (
-        ManagedLivePositionBatch(
-            batch_id="b1",
-            quantity=Decimal("10"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-    )
-    ledger_batches = (
-        PositionLedgerBatch(
-            batch_id="b1",
-            episode_id="ep1",
-            quantity=Decimal("10"),
-            original_quantity=Decimal("10"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-    )
-
-    projection_with_gap = PositionLedgerProjection(
-        position_key=position_key,
-        active_episode=None,
-        active_batches=ledger_batches,
-        total_active_quantity=Decimal("10"),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("2.0"),
-        high_watermark_trade_at=t0,
-    )
-
-    report = PositionLedgerShadowComparator.compare(
-        position_key=position_key,
-        legacy_batches=batches,
-        ledger_projection=projection_with_gap,
-    )
-
-    assert report.is_concordant is False
-    assert report.category == ShadowDiffCategory.RECONCILIATION_GAP_DETECTED
-    assert report.reconciliation_gap == Decimal("2.0")
-    assert "reconciliation gap is non-zero" in report.details
+    assert len(batches) == 1
+    assert batches[0].quantity == Decimal("10")
+    assert batches[0].entry_price == Decimal("60000")
+    assert batches[0].opened_at == t0
+    assert isinstance(batches[0], ManagedLivePositionBatch)
 
 
-def test_position_ledger_shadow_comparator_detects_unallocated_qty() -> None:
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        PositionKey,
-        PositionLedgerBatch,
-        PositionLedgerProjection,
-    )
-    from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
-        PositionLedgerShadowComparator,
-        ShadowDiffCategory,
-    )
-
-    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
-    position_key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        position_side=FuturesPositionSide.BOTH,
-    )
-
-    batches = (
-        ManagedLivePositionBatch(
-            batch_id="b1",
-            quantity=Decimal("10"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-    )
-    ledger_batches = (
-        PositionLedgerBatch(
-            batch_id="b1",
-            episode_id="ep1",
-            quantity=Decimal("10"),
-            original_quantity=Decimal("10"),
-            entry_price=Decimal("100"),
-            opened_at=t0,
-        ),
-    )
-
-    projection_with_unallocated = PositionLedgerProjection(
-        position_key=position_key,
-        active_episode=None,
-        active_batches=ledger_batches,
-        total_active_quantity=Decimal("10"),
-        unallocated_quantity=Decimal("1.5"),
-        reconciliation_gap=Decimal("0"),
-        high_watermark_trade_at=t0,
-    )
-
-    report = PositionLedgerShadowComparator.compare(
-        position_key=position_key,
-        legacy_batches=batches,
-        ledger_projection=projection_with_unallocated,
-    )
-
-    assert report.is_concordant is False
-    assert report.category == ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED
-    assert report.unallocated_quantity == Decimal("1.5")
-    assert "unallocated quantity is non-zero" in report.details
-
-
-def test_build_position_batches_preserves_recovery_order_fields_under_cutover() -> None:
+def test_build_position_batches_preserves_recovery_order_fields() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     t1 = datetime(2026, 9, 20, 10, 5, tzinfo=UTC)
     position = SimpleNamespace(
@@ -406,14 +177,6 @@ def test_build_position_batches_preserves_recovery_order_fields_under_cutover() 
         symbol="BTCUSDT",
         position_amt=Decimal("10"),
         entry_price=Decimal("60000"),
-    )
-
-    from crypto_momentum_lab.domain.execution import OrderExecutionPlan
-    from crypto_momentum_lab.domain.execution.order_state import (
-        ExchangeOrderState,
-    )
-    from crypto_momentum_lab.domain.execution.position_batches import (
-        PositionOrderFact,
     )
 
     entry_order = PositionOrderFact(
@@ -463,39 +226,30 @@ def test_build_position_batches_preserves_recovery_order_fields_under_cutover() 
         plan=recovery_plan,
     )
 
-    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
-        batches = _build_position_batches(
-            position=position,  # type: ignore[arg-type]
-            side=StrategySide.LONG,
-            position_side=FuturesPositionSide.BOTH,
-            matching_orders=[entry_order, exit_limit_order],  # type: ignore[arg-type]
-            fill_times={"e_entry": t0},
-            fill_prices={"e_entry": Decimal("60000")},
-        )
-        assert len(batches) == 1
-        batch = batches[0]
-        assert batch.quantity == Decimal("10")
-        assert batch.entry_price == Decimal("60000")
-        assert batch.opened_at == t0
-        assert batch.recovery_order_client_id == "cml_recovery_123"
-        assert batch.recovery_order_plan == recovery_plan
-        assert batch.recovery_order_remaining_quantity == Decimal("10")
-        assert batch.closing_order_filled is False
-        assert batch.exit_order_submitted_at == t1
+    batches = _build_position_batches(
+        position=position,  # type: ignore[arg-type]
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        matching_orders=[entry_order, exit_limit_order],  # type: ignore[arg-type]
+        fill_times={"e_entry": t0},
+        fill_prices={"e_entry": Decimal("60000")},
+    )
+    assert len(batches) == 1
+    batch = batches[0]
+    assert batch.quantity == Decimal("10")
+    assert batch.entry_price == Decimal("60000")
+    assert batch.opened_at == t0
+    assert batch.recovery_order_client_id == "cml_recovery_123"
+    assert batch.recovery_order_plan == recovery_plan
+    assert batch.recovery_order_remaining_quantity == Decimal("10")
+    assert batch.closing_order_filled is False
+    assert batch.exit_order_submitted_at == t1
 
 
-def test_build_position_batches_discards_stale_fills_and_maintains_concordance() -> (
-    None
-):
-    """Verify that account_fills from a prior episode (>5 min before entry) do not cause false reconciliation gap."""
+def test_build_position_batches_discards_stale_fills() -> None:
+    """Verify that prior episode fills (>5m before entry) avoid false gaps."""
     t_old = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
     t_entry = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
-
-    from crypto_momentum_lab.domain.account import AccountFillEvent
-    from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
-    from crypto_momentum_lab.domain.execution.position_batches import (
-        PositionOrderFact,
-    )
 
     position = SimpleNamespace(
         environment="live",
@@ -553,17 +307,16 @@ def test_build_position_batches_discards_stale_fills_and_maintains_concordance()
         raw_payload={"positionSide": "BOTH", "is_system": True},
     )
 
-    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
-        batches = _build_position_batches(
-            position=position,  # type: ignore[arg-type]
-            side=StrategySide.LONG,
-            position_side=FuturesPositionSide.BOTH,
-            matching_orders=[entry_order],  # type: ignore[arg-type]
-            fill_times={"e_celr_entry": t_entry},
-            fill_prices={"e_celr_entry": Decimal("0.004386")},
-            account_fills=[stale_fill, current_fill],
-        )
-        assert len(batches) == 1
-        assert batches[0].quantity == Decimal("22799")
-        assert batches[0].entry_price == Decimal("0.004386")
-        assert batches[0].opened_at == t_entry
+    batches = _build_position_batches(
+        position=position,  # type: ignore[arg-type]
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        matching_orders=[entry_order],  # type: ignore[arg-type]
+        fill_times={"e_celr_entry": t_entry},
+        fill_prices={"e_celr_entry": Decimal("0.004386")},
+        account_fills=[stale_fill, current_fill],
+    )
+    assert len(batches) == 1
+    assert batches[0].quantity == Decimal("22799")
+    assert batches[0].entry_price == Decimal("0.004386")
+    assert batches[0].opened_at == t_entry

@@ -18,6 +18,7 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
@@ -164,6 +165,24 @@ class PositionLedger:
 
             # If no active episode, this fill initiates a new episode
             if active_episode is None:
+                if bool((fill.raw_payload or {}).get("reduce_only", False)):
+                    continue
+                if (
+                    self._position_key.position_side == FuturesPositionSide.LONG
+                    and fill_side != "BUY"
+                ):
+                    continue
+                if (
+                    self._position_key.position_side == FuturesPositionSide.SHORT
+                    and fill_side != "SELL"
+                ):
+                    continue
+                if facts.snapshots:
+                    obs_amt = facts.snapshots[0].position_amt
+                    if obs_amt > 0 and fill_side != "BUY":
+                        continue
+                    if obs_amt < 0 and fill_side != "SELL":
+                        continue
                 episode_counter += 1
                 side = StrategySide.LONG if fill_side == "BUY" else StrategySide.SHORT
                 ep_id = (
