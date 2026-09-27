@@ -318,9 +318,7 @@ def test_explicit_position_mode_enforcement() -> None:
     assert t_short.rejection_reason == "direction_not_permitted_by_position_mode"
 
     # Generator emitting SHORT candidate: LONG_ONLY policy must reject it
-    def short_generator(
-        env: MarketEnvelope, st: PolicyState
-    ) -> OrderIntentCandidate:
+    def short_generator(env: MarketEnvelope, st: PolicyState) -> OrderIntentCandidate:
         return OrderIntentCandidate(
             candidate_id="cand_short_01",
             signal_id="sig_short_01",
@@ -381,9 +379,7 @@ def test_clock_driven_holding_exit_and_cooldown_timer() -> None:
 
     # Position opened 2 hours ago (> 1 hour max holding)
     opened_at = t0 - timedelta(hours=2)
-    pview = _make_position_view(
-        "BTCUSDT", quantity=Decimal("2.0"), opened_at=opened_at
-    )
+    pview = _make_position_view("BTCUSDT", quantity=Decimal("2.0"), opened_at=opened_at)
 
     clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=2)
     frame = DecisionFrame(
@@ -433,9 +429,7 @@ def test_clock_driven_holding_timer_when_not_exiting() -> None:
 
     # Position opened 10 minutes ago (< 1 hour max holding)
     opened_at = t0 - timedelta(minutes=10)
-    pview = _make_position_view(
-        "BTCUSDT", quantity=Decimal("1.0"), opened_at=opened_at
-    )
+    pview = _make_position_view("BTCUSDT", quantity=Decimal("1.0"), opened_at=opened_at)
 
     clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=2)
     frame = DecisionFrame(
@@ -834,4 +828,3 @@ def test_policy_state_with_exit_atomic_purge() -> None:
     assert s1.anchor_prices_by_symbol["ETHUSDT"] == Decimal("3500.00")
     assert s1.active_intent_ids_by_symbol["ETHUSDT"] == "cand_eth"
     assert s1.signal_memory["ema_trend"] == Decimal("1.0")
-

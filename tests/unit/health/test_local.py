@@ -15,9 +15,7 @@ def test_local_health_writer_resets_and_publishes_markers(tmp_path) -> None:
     assert health.status_path.read_text() == "ready\n"
     assert health.database_path.read_text() == "ok\n"
 
-    health.write_readiness(
-        {"entry_enabled": False, "warmup_complete_symbols": 0}
-    )
+    health.write_readiness({"entry_enabled": False, "warmup_complete_symbols": 0})
 
     assert json.loads(health.readiness_path.read_text()) == {
         "entry_enabled": False,

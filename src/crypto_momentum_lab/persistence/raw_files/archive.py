@@ -68,10 +68,7 @@ def serialize_envelope(envelope: RawEnvelope) -> bytes:
         "raw_payload": envelope.raw_payload,
         "recovered": envelope.recovered,
     }
-    return (
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        + b"\n"
-    )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 class ZstdJsonlArchive:
@@ -140,13 +137,9 @@ class ZstdJsonlArchive:
                     manifest_sink=self._manifest_sink,
                     known_gap_count_provider=self._known_gap_count_provider,
                     zstd_level=self._zstd_level,
-                    rotation_uncompressed_bytes=(
-                        self._rotation_uncompressed_bytes
-                    ),
+                    rotation_uncompressed_bytes=(self._rotation_uncompressed_bytes),
                     group_commit_max_events=self._group_commit_max_events,
-                    group_commit_max_milliseconds=(
-                        self._group_commit_max_milliseconds
-                    ),
+                    group_commit_max_milliseconds=(self._group_commit_max_milliseconds),
                     first_sequence=envelope.local_sequence,
                 )
                 self._writers[key] = writer
@@ -268,8 +261,7 @@ class _ArchiveWriter:
 
     def should_rotate_for(self, row_size: int) -> bool:
         return self._row_count > 0 and (
-            self._uncompressed_bytes + row_size
-            > self._rotation_uncompressed_bytes
+            self._uncompressed_bytes + row_size > self._rotation_uncompressed_bytes
         )
 
     async def append(
@@ -329,9 +321,9 @@ class _ArchiveWriter:
         self._temporary_path.parent.mkdir(parents=True, exist_ok=True)
         raw_file = self._temporary_path.open("wb")
         try:
-            compressor = zstandard.ZstdCompressor(
-                level=self._zstd_level
-            ).stream_writer(raw_file, closefd=False)
+            compressor = zstandard.ZstdCompressor(level=self._zstd_level).stream_writer(
+                raw_file, closefd=False
+            )
         except Exception:
             raw_file.close()
             self._temporary_path.unlink(missing_ok=True)

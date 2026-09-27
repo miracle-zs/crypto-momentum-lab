@@ -87,7 +87,6 @@ def _decision_slo_response(
             if transition not in recorded_transitions:
                 latency_samples.setdefault(transition, []).append(latency)
 
-
         if row.event_type in _TERMINAL_REASON_EVENTS:
             reason = _slo_text(details.get("reason"))
             if reason is not None:

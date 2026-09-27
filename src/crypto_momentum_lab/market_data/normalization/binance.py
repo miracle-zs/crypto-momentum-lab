@@ -66,9 +66,7 @@ def _normalize_agg_trade(
         price=price,
         quantity=quantity,
         notional=price * quantity,
-        aggressor_side=(
-            AggressorSide.SELL if buyer_is_maker else AggressorSide.BUY
-        ),
+        aggressor_side=(AggressorSide.SELL if buyer_is_maker else AggressorSide.BUY),
     )
 
 
@@ -135,9 +133,7 @@ def _normalize_force_order(
     average_price = _required_decimal(order_payload, "ap")
     original_quantity = _required_decimal(order_payload, "q")
     filled_quantity = _optional_decimal(order_payload, "z")
-    quantity = (
-        filled_quantity if filled_quantity is not None else original_quantity
-    )
+    quantity = filled_quantity if filled_quantity is not None else original_quantity
     notional_price = average_price if average_price > 0 else price
     return NormalizedLiquidation(
         **_source_kwargs(envelope),

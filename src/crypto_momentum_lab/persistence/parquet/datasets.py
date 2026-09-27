@@ -412,8 +412,7 @@ def _parquet_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     # Hive partition columns are supplied by the directory names. Writing the
     # same column inside the file makes pyarrow fail schema merging.
     return [
-        {key: value for key, value in row.items() if key != "symbol"}
-        for row in rows
+        {key: value for key, value in row.items() if key != "symbol"} for row in rows
     ]
 
 
@@ -454,9 +453,7 @@ def _market_state_from_row(row: dict[str, object], path: Path) -> MarketState15s
         liquidation_notional=_required_decimal(row, "liquidation_notional"),
         mark_price=_optional_decimal_row(row, "mark_price"),
         closed_kline_count=_required_int(row, "closed_kline_count"),
-        closed_kline_1m_open_time=_optional_datetime(
-            row, "closed_kline_1m_open_time"
-        ),
+        closed_kline_1m_open_time=_optional_datetime(row, "closed_kline_1m_open_time"),
         closed_kline_1m_close_time=_optional_datetime(
             row, "closed_kline_1m_close_time"
         ),

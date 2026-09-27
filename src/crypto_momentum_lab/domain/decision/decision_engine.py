@@ -51,7 +51,10 @@ from crypto_momentum_lab.domain.strategy.models import (
     StrategyDecision,
     StrategyRejection,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    ClosedCandle15m,
+    PositionExitPolicy,
+)
 
 
 def _require_aware(dt: datetime, name: str) -> datetime:
@@ -73,6 +76,7 @@ class DecisionInput:
     cash_balance: Decimal
     risk_config_version: str
     frame: DecisionFrame | None = None
+    closed_candles: tuple[ClosedCandle15m, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -451,6 +455,7 @@ def decide(
     decision_input: DecisionInput,
     state: PolicyState,
     policy: EffectivePolicy,
+    closed_candles: tuple[ClosedCandle15m, ...] | None = None,
 ) -> DecisionResult:
     """Pure strategy decision function.
 
@@ -483,12 +488,18 @@ def decide(
             cash_balance=decision_input.cash_balance,
         )
 
+    candles = (
+        closed_candles
+        if closed_candles is not None
+        else getattr(decision_input, "closed_candles", ())
+    )
     transition = execute_policy_transition(
         frame=frame,
         prior_state=state,
         policy_artifact=policy,
         market_envelope=decision_input.market_envelope,
         position_view=decision_input.position_view,
+        closed_candles=candles,
         decision_input=decision_input,
     )
 
@@ -513,9 +524,15 @@ class DecisionEngine:
         decision_input: DecisionInput,
         state: PolicyState,
         policy: EffectivePolicy,
+        closed_candles: tuple[ClosedCandle15m, ...] | None = None,
     ) -> DecisionResult:
         """Evaluates pure strategy decision."""
-        return decide(decision_input, state, policy)
+        return decide(
+            decision_input,
+            state,
+            policy,
+            closed_candles=closed_candles,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +569,7 @@ def build_decision_input(
     market_envelope: MarketEnvelope | None = None,
     frame: DecisionFrame | None = None,
     policy: EffectivePolicy | None = None,
+    closed_candles: tuple[ClosedCandle15m, ...] = (),
 ) -> DecisionInput:
     """Shared DecisionInput assembly for live, paper, and research paths.
 
@@ -619,6 +637,7 @@ def build_decision_input(
         cash_balance=frozen.cash_balance,
         risk_config_version=frozen.risk_config_version,
         frame=frame,
+        closed_candles=closed_candles,
     )
 
 

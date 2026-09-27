@@ -15,9 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
-DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL = (
-    "wss://fstream.binance.com/private/ws"
-)
+DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL = "wss://fstream.binance.com/private/ws"
 
 
 class BinancePayloadError(ValueError):
@@ -58,12 +56,9 @@ class BinanceUserDataEvent:
             raise ValueError("received_at must be timezone-aware")
         if len(self.event_id) != 64:
             raise ValueError("event_id must be a SHA-256 hex digest")
-        if (
-            self.exchange_event_at is not None
-            and (
-                self.exchange_event_at.tzinfo is None
-                or self.exchange_event_at.utcoffset() is None
-            )
+        if self.exchange_event_at is not None and (
+            self.exchange_event_at.tzinfo is None
+            or self.exchange_event_at.utcoffset() is None
         ):
             raise ValueError("exchange_event_at must be timezone-aware")
         for value, field_name in (
@@ -155,10 +150,7 @@ def parse_user_data_event(
                     "o.pu",
                 )
     resolved_received_at = received_at or datetime.now(tz=UTC)
-    if (
-        resolved_received_at.tzinfo is None
-        or resolved_received_at.utcoffset() is None
-    ):
+    if resolved_received_at.tzinfo is None or resolved_received_at.utcoffset() is None:
         raise ValueError("received_at must be timezone-aware")
     event_id = hashlib.sha256(
         json.dumps(

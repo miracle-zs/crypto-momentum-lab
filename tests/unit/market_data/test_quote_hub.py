@@ -335,4 +335,3 @@ async def test_price_stream_source_raises_after_continuous_unavailable_timeout(
         match="market quote hub unavailable for 60.0 seconds",
     ):
         await anext(source.__aiter__())
-

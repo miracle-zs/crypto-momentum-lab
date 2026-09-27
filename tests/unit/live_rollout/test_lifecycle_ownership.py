@@ -119,7 +119,6 @@ async def test_shutdown_fault_injection_drain_cancelled() -> None:
     assert session.shutdown_result.halt_reason == "drain_cancelled"
 
 
-
 async def test_shutdown_fault_injection_persist_timeout() -> None:
     """When checkpoint persists beyond timeout, checkpoint_durable is False and halt_reason is set."""
     supervisor = MockSupervisor()
@@ -150,7 +149,9 @@ async def test_shutdown_fault_injection_persist_timeout() -> None:
 async def test_shutdown_fault_injection_close_exception() -> None:
     """When lifecycle.close raises an exception, session still cleanly achieves STOPPED state."""
     supervisor = MockSupervisor()
-    lifecycle = MockLifecycle(raise_on_close=ConnectionResetError("peer dropped socket"))
+    lifecycle = MockLifecycle(
+        raise_on_close=ConnectionResetError("peer dropped socket")
+    )
 
     session = RuntimeSession(
         run_id="session-close-exc",
@@ -188,8 +189,11 @@ async def test_shutdown_fault_injection_close_cancelled() -> None:
     assert "close_cancelled" in session.shutdown_result.failures
 
 
-async def test_shutdown_real_lifecycle_close_failure_marks_resources_not_closed() -> None:
+async def test_shutdown_real_lifecycle_close_failure_marks_resources_not_closed() -> (
+    None
+):
     """When a real LiveResourceLifecycle has a failing resource, resources_closed is False (R8)."""
+
     class FailingClient:
         async def aclose(self) -> None:
             raise RuntimeError("simulated client aclose failed")
@@ -210,6 +214,7 @@ async def test_shutdown_real_lifecycle_close_failure_marks_resources_not_closed(
 
     assert session.shutdown_result is not None
     assert session.shutdown_result.resources_closed is False
-    assert any("trade_client:RuntimeError" in f for f in session.shutdown_result.failures)
+    assert any(
+        "trade_client:RuntimeError" in f for f in session.shutdown_result.failures
+    )
     assert session.shutdown_result.halt_reason is not None
-

@@ -85,7 +85,9 @@ class FakeService:
         self.heartbeat_states.append(state)
 
 
-async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up() -> None:
+async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up() -> (
+    None
+):
     service = FakeService(_snapshot())
     daemon = UserDataAccountSyncDaemon(
         service=service,
@@ -145,6 +147,7 @@ async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
     daemon._accept_events = True
 
     import pytest
+
     with pytest.raises(TypeError, match="internal implementation error"):
         await daemon._publish_heartbeat()
 
@@ -339,9 +342,7 @@ async def test_user_data_daemon_uses_realtime_reconcile_and_replays_new_fills() 
         service=service,
         stream=FakeStream(),
         config=UserDataAccountSyncConfig(),
-        on_reconciled_fill=lambda fill, result: reconciled_fills.append(
-            (fill, result)
-        ),
+        on_reconciled_fill=lambda fill, result: reconciled_fills.append((fill, result)),
     )
 
     await daemon._reconcile(include_fills=True)
@@ -501,8 +502,9 @@ async def test_daemon_notifies_live_consumers_before_slow_persistence() -> None:
     await task
 
 
-async def test_daemon_returns_after_apply_while_persistence_runs_in_background(
-) -> None:
+async def test_daemon_returns_after_apply_while_persistence_runs_in_background() -> (
+    None
+):
     service = BlockingPersistService(_snapshot())
     applied = []
     applied_event = asyncio.Event()

@@ -103,9 +103,7 @@ def _same_active_reduce_only_intent(
     second order under the same client ID would be both invalid and unsafe.
     """
 
-    terminal_states = {
-        state.value for state in ExchangeOrderState if state.terminal
-    }
+    terminal_states = {state.value for state in ExchangeOrderState if state.terminal}
     return (
         bool(expected_values["reduce_only"])
         and existing_order.reduce_only
@@ -303,9 +301,7 @@ class PostgresOrderRepository:
                                     LiveSessionTransitionRow.session_id
                                     == required_session_id,
                                 )
-                                .order_by(
-                                    LiveSessionTransitionRow.occurred_at.desc()
-                                )
+                                .order_by(LiveSessionTransitionRow.occurred_at.desc())
                                 .limit(1)
                             )
                             if latest_session_state is None:
@@ -349,8 +345,7 @@ class PostgresOrderRepository:
                             )
                         ):
                             raise ValueError(
-                                "live exposure claim baseline must be provided "
-                                "together"
+                                "live exposure claim baseline must be provided together"
                             )
                         assert environment is not None
                         assert account_label is not None
@@ -362,10 +357,7 @@ class PostgresOrderRepository:
                         if exposure_notional <= 0:
                             raise ValueError("exposure_notional must be positive")
                         await session.execute(
-                            text(
-                                "SELECT pg_advisory_xact_lock("
-                                "hashtext(:lock_key))"
-                            ),
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
                             {
                                 "lock_key": (
                                     "live-exposure:"
@@ -377,9 +369,7 @@ class PostgresOrderRepository:
                             max_daily_loss is not None
                             and current_daily_pnl <= -max_daily_loss
                         ):
-                            raise OrderPreSubmissionError(
-                                "max daily loss reached"
-                            )
+                            raise OrderPreSubmissionError("max daily loss reached")
                         active_claim_sum = await session.scalar(
                             select(
                                 func.coalesce(
@@ -388,13 +378,10 @@ class PostgresOrderRepository:
                                 )
                             ).where(
                                 LiveExposureClaimRow.environment == environment,
-                                LiveExposureClaimRow.account_label
-                                == account_label,
-                                LiveExposureClaimRow.strategy_name
-                                == strategy_name,
+                                LiveExposureClaimRow.account_label == account_label,
+                                LiveExposureClaimRow.strategy_name == strategy_name,
                                 LiveExposureClaimRow.active.is_(True),
-                                LiveExposureClaimRow.intent_id
-                                != intent.candidate_id,
+                                LiveExposureClaimRow.intent_id != intent.candidate_id,
                             )
                         )
                         active_claim_symbols = set(
@@ -402,8 +389,7 @@ class PostgresOrderRepository:
                                 await session.scalars(
                                     select(LiveExposureClaimRow.symbol)
                                     .where(
-                                        LiveExposureClaimRow.environment
-                                        == environment,
+                                        LiveExposureClaimRow.environment == environment,
                                         LiveExposureClaimRow.account_label
                                         == account_label,
                                         LiveExposureClaimRow.strategy_name
@@ -425,9 +411,7 @@ class PostgresOrderRepository:
                             )
                             > max_open_positions
                         ):
-                            raise OrderPreSubmissionError(
-                                "max open positions reached"
-                            )
+                            raise OrderPreSubmissionError("max open positions reached")
                         if (
                             max_gross_exposure is not None
                             and current_gross_exposure
@@ -435,9 +419,7 @@ class PostgresOrderRepository:
                             + exposure_notional
                             > max_gross_exposure
                         ):
-                            raise OrderPreSubmissionError(
-                                "max gross exposure reached"
-                            )
+                            raise OrderPreSubmissionError("max gross exposure reached")
                     await session.execute(
                         insert(OrderIntentExecutionRow)
                         .values(intent_values)
@@ -472,8 +454,7 @@ class PostgresOrderRepository:
                         reservation = await session.scalar(
                             select(ExitEpisodeReservationRow)
                             .where(
-                                ExitEpisodeReservationRow.environment
-                                == environment,
+                                ExitEpisodeReservationRow.environment == environment,
                                 ExitEpisodeReservationRow.account_label
                                 == account_label,
                                 ExitEpisodeReservationRow.strategy_name
@@ -481,15 +462,12 @@ class PostgresOrderRepository:
                                 ExitEpisodeReservationRow.symbol == plan.symbol,
                                 ExitEpisodeReservationRow.position_side
                                 == plan.position_side.value,
-                                ExitEpisodeReservationRow.episode_key
-                                == episode_key,
+                                ExitEpisodeReservationRow.episode_key == episode_key,
                             )
                             .with_for_update()
                         )
                         if reservation is None:
-                            raise RuntimeError(
-                                "exit episode reservation disappeared"
-                            )
+                            raise RuntimeError("exit episode reservation disappeared")
                         if reservation.active and (
                             reservation.intent_id != plan.intent_id
                             or reservation.client_order_id != plan.client_order_id
@@ -519,9 +497,8 @@ class PostgresOrderRepository:
                                     updated_at=prepared_at,
                                 )
                             )
-                    if (
-                        not plan.reduce_only
-                        and any(value is not None for value in exposure_fields)
+                    if not plan.reduce_only and any(
+                        value is not None for value in exposure_fields
                     ):
                         assert environment is not None
                         assert account_label is not None
@@ -552,8 +529,7 @@ class PostgresOrderRepository:
                     if inserted_order is None:
                         existing_order = await session.scalar(
                             select(ExchangeOrderRow).where(
-                                ExchangeOrderRow.client_order_id
-                                == plan.client_order_id
+                                ExchangeOrderRow.client_order_id == plan.client_order_id
                             )
                         )
                         if existing_order is None:
@@ -575,8 +551,7 @@ class PostgresOrderRepository:
                                 # terminal state.
                                 raise _SubmissionAlreadyPrepared
                             raise ValueError(
-                                "client order ID is already bound to a "
-                                "different order"
+                                "client order ID is already bound to a different order"
                             )
                         # A restarted or concurrent worker already owns the
                         # same order. Roll back any new intent atomically.
@@ -588,9 +563,7 @@ class PostgresOrderRepository:
                     )
                     await session.execute(
                         update(OrderIntentExecutionRow)
-                        .where(
-                            OrderIntentExecutionRow.intent_id == plan.intent_id
-                        )
+                        .where(OrderIntentExecutionRow.intent_id == plan.intent_id)
                         .values(state=ExchangeOrderState.SUBMITTING.value)
                     )
         except _SubmissionAlreadyPrepared:
@@ -659,9 +632,7 @@ class PostgresOrderRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
-                    insert(ExchangeOrderRow)
-                    .values(values)
-                    .on_conflict_do_nothing()
+                    insert(ExchangeOrderRow).values(values).on_conflict_do_nothing()
                 )
                 await session.execute(
                     update(OrderIntentExecutionRow)
@@ -738,8 +709,7 @@ class PostgresOrderRepository:
                 if inserted is None:
                     existing_order = await session.scalar(
                         select(ExchangeOrderRow).where(
-                            ExchangeOrderRow.client_order_id
-                            == plan.client_order_id
+                            ExchangeOrderRow.client_order_id == plan.client_order_id
                         )
                     )
                     if existing_order is None or not _same_order_identity(
@@ -747,8 +717,7 @@ class PostgresOrderRepository:
                         order_values,
                     ):
                         raise ValueError(
-                            "client order ID is already bound to a "
-                            "different order"
+                            "client order ID is already bound to a different order"
                         )
 
     async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
@@ -770,17 +739,14 @@ class PostgresOrderRepository:
                 )
                 if inserted is not None:
                     terminal_states = tuple(
-                        state.value
-                        for state in ExchangeOrderState
-                        if state.terminal
+                        state.value for state in ExchangeOrderState if state.terminal
                     )
                     terminal_transition = and_(
                         literal(event.state.terminal),
                         # FILLED is the strongest terminal observation; a
                         # later cancel/reject event must not erase it.
                         or_(
-                            ExchangeOrderRow.state
-                            != ExchangeOrderState.FILLED.value,
+                            ExchangeOrderRow.state != ExchangeOrderState.FILLED.value,
                             literal(event.state is ExchangeOrderState.FILLED),
                         ),
                     )
@@ -820,15 +786,13 @@ class PostgresOrderRepository:
                         )
                     order_intent_id = await session.scalar(
                         select(ExchangeOrderRow.intent_id).where(
-                            ExchangeOrderRow.client_order_id
-                            == event.client_order_id
+                            ExchangeOrderRow.client_order_id == event.client_order_id
                         )
                     )
                     order_update = await session.execute(
                         update(ExchangeOrderRow)
                         .where(
-                            ExchangeOrderRow.client_order_id
-                            == event.client_order_id,
+                            ExchangeOrderRow.client_order_id == event.client_order_id,
                             # Preserve the immutable exchange identity. Keep
                             # conflicting legacy events in the event journal,
                             # but never merge another order into this row.
@@ -843,8 +807,7 @@ class PostgresOrderRepository:
                     )
                     current_order_state = await session.scalar(
                         select(ExchangeOrderRow.state).where(
-                            ExchangeOrderRow.client_order_id
-                            == event.client_order_id
+                            ExchangeOrderRow.client_order_id == event.client_order_id
                         )
                     )
                     if (
@@ -882,8 +845,7 @@ class PostgresOrderRepository:
                             await session.execute(
                                 update(LiveExposureClaimRow)
                                 .where(
-                                    LiveExposureClaimRow.intent_id
-                                    == order_intent_id,
+                                    LiveExposureClaimRow.intent_id == order_intent_id,
                                     LiveExposureClaimRow.active.is_(True),
                                 )
                                 .values(
@@ -944,8 +906,7 @@ class PostgresOrderRepository:
                 query = query.where(ExchangeOrderRow.run_id == run_id)
             rows = (
                 await session.scalars(
-                    query
-                    .order_by(
+                    query.order_by(
                         ExchangeOrderRow.updated_at,
                         ExchangeOrderRow.client_order_id,
                     )
@@ -986,6 +947,88 @@ class PostgresOrderRepository:
                 "details": jsonable(details),
             },
         )
+
+    async def upsert_execution_command(
+        self,
+        *,
+        command_id: str,
+        client_order_id: str | None,
+        command: str,
+        status: str,
+        requested_at: datetime,
+        details: dict[str, JsonValue],
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                stmt = (
+                    insert(ExecutionCommandRow)
+                    .values(
+                        command_id=command_id,
+                        client_order_id=client_order_id,
+                        command=command,
+                        status=status,
+                        requested_at=requested_at,
+                        details=jsonable(details),
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[ExecutionCommandRow.command_id],
+                        set_={
+                            "status": status,
+                            "details": jsonable(details),
+                        },
+                    )
+                )
+                await session.execute(stmt)
+
+    async def load_active_execution_commands(
+        self,
+    ) -> tuple[dict[str, Any], ...]:
+        async with self._session_factory() as session:
+            query = select(ExecutionCommandRow).where(
+                ExecutionCommandRow.status.not_in(["terminal", "rejected"])
+            )
+            rows = (
+                await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
+            ).all()
+            return tuple(
+                {
+                    "command_id": r.command_id,
+                    "client_order_id": r.client_order_id,
+                    "command": r.command,
+                    "status": r.status,
+                    "requested_at": r.requested_at,
+                    "details": dict(r.details) if isinstance(r.details, dict) else {},
+                }
+                for r in rows
+            )
+
+    async def load_seen_event_ids(
+        self,
+        limit: int = 2000,
+    ) -> tuple[str, ...]:
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(ExchangeOrderEventRow.event_id)
+                    .order_by(ExchangeOrderEventRow.occurred_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return tuple(str(r) for r in rows if r)
+
+    async def load_seen_fill_trade_ids(
+        self,
+        limit: int = 2000,
+    ) -> tuple[str, ...]:
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(ExchangeFillRow.exchange_trade_id)
+                    .order_by(ExchangeFillRow.filled_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return tuple(str(r) for r in rows if r)
 
     async def save_reconciliation_event(
         self,

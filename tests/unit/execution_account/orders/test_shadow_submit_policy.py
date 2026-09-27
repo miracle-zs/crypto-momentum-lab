@@ -17,9 +17,7 @@ from tests.unit.execution_account.orders.test_state_machine import (
 
 
 async def test_shadow_submit_policy_records_suppression_without_submit() -> None:
-    exchange = FakeExchange(
-        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-    )
+    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
     repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,
@@ -39,9 +37,7 @@ async def test_shadow_submit_policy_records_suppression_without_submit() -> None
 
 
 async def test_live_submit_policy_uses_submit_boundary() -> None:
-    exchange = FakeExchange(
-        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-    )
+    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
     repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,
@@ -57,9 +53,7 @@ async def test_live_submit_policy_uses_submit_boundary() -> None:
 
 
 async def test_shadow_policy_still_requires_quantized_order_plan() -> None:
-    exchange = FakeExchange(
-        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-    )
+    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
     repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,

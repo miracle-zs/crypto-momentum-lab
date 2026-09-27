@@ -766,9 +766,8 @@ class WebSocketRiskControlSource:
         self._notify_connection_change(False, reason)
 
     def _notify_connection_change(self, available: bool, reason: str | None) -> None:
-        if (
-            self._connection_available == available
-            and (available or self._last_recovery_reason == reason)
+        if self._connection_available == available and (
+            available or self._last_recovery_reason == reason
         ):
             return
         self._connection_available = available
@@ -881,12 +880,8 @@ def decode_risk_control_event(
         raise RiskControlHubProtocolError("unsupported risk-control schema")
     environment = _require_string(payload, "environment")
     account_label = _require_string(payload, "account_label")
-    if (
-        expected_environment is not None
-        and environment != expected_environment
-    ) or (
-        expected_account_label is not None
-        and account_label != expected_account_label
+    if (expected_environment is not None and environment != expected_environment) or (
+        expected_account_label is not None and account_label != expected_account_label
     ):
         raise RiskControlHubProtocolError("risk-control event scope mismatch")
     try:
@@ -930,9 +925,8 @@ def _event_matches_filter(
     strategy_name: str | None,
     session_id: str | None,
 ) -> bool:
-    return (
-        (event.strategy_name is None or event.strategy_name == strategy_name)
-        and (event.session_id is None or event.session_id == session_id)
+    return (event.strategy_name is None or event.strategy_name == strategy_name) and (
+        event.session_id is None or event.session_id == session_id
     )
 
 
@@ -1001,11 +995,7 @@ def _optional_non_negative_int(
     field_name: str,
 ) -> int:
     value = payload.get(field_name, 0)
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value < 0
-    ):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise RiskControlHubProtocolError(
             f"{field_name} must be a non-negative integer"
         )
@@ -1064,9 +1054,7 @@ def _put_queue_item(
         queue.put_nowait(
             _QueueOverflow(
                 latest_sequence=(
-                    item.sequence
-                    if isinstance(item, RiskControlEvent)
-                    else 0
+                    item.sequence if isinstance(item, RiskControlEvent) else 0
                 )
             )
         )

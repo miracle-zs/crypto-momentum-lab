@@ -209,8 +209,7 @@ async def test_deployment_idempotent_resume_after_partial_failure() -> None:
 
     # Both accounts now completed
     assert all(
-        r.status == AccountTransitionStatus.SUCCESS
-        for r in receipt2.account_records
+        r.status == AccountTransitionStatus.SUCCESS for r in receipt2.account_records
     )
     assert await supervisor.get_active_epoch("primary") == 2
     assert await supervisor.get_active_epoch("account-2") == 2

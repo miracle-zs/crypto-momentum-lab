@@ -67,9 +67,7 @@ class AccountUserDataState:
             key: item.observed_at for key, item in self._open_orders.items()
         }
         self._last_account_exchange_event_at: datetime | None = None
-        self._last_order_exchange_event_at: dict[
-            tuple[str, str], datetime
-        ] = {}
+        self._last_order_exchange_event_at: dict[tuple[str, str], datetime] = {}
         self._last_exchange_update_id: dict[str, int] = {}
         self._seen_event_ids: deque[str] = deque(maxlen=4096)
         self._seen_event_id_set: set[str] = set()
@@ -290,10 +288,7 @@ class AccountUserDataState:
             self._last_order_exchange_event_at[key] = event.exchange_event_at
         else:
             last_received_at = self._last_order_received_at.get(key)
-            if (
-                last_received_at is not None
-                and event.received_at < last_received_at
-            ):
+            if last_received_at is not None and event.received_at < last_received_at:
                 return False, (), "stale_local_event"
             self._last_order_received_at[key] = event.received_at
 

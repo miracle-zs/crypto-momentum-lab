@@ -76,8 +76,7 @@ async def test_records_24h_quote_volume_and_signal_context() -> None:
             "effective_entry_candidates": {
                 "candidate-1": {
                     "effective_limit_price": Decimal("100"),
-                    "effective_expires_at": detected_at
-                    + timedelta(minutes=15),
+                    "effective_expires_at": detected_at + timedelta(minutes=15),
                 },
             },
         },

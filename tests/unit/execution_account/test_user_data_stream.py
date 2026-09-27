@@ -27,9 +27,9 @@ class FakeListenKeyClient:
 def test_user_data_stream_defaults_to_private_user_data_endpoint() -> None:
     expected = "wss://fstream.binance.com/private/ws"
 
-    stream_default = signature(BinanceUsdMUserDataStream).parameters[
-        "websocket_url"
-    ].default
+    stream_default = (
+        signature(BinanceUsdMUserDataStream).parameters["websocket_url"].default
+    )
     command_default = signature(sync_command).parameters["websocket_url"].default
 
     assert stream_default == expected

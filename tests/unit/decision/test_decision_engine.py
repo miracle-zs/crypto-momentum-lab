@@ -257,9 +257,7 @@ def test_decision_input_rejects_mismatched_market_envelope_ref() -> None:
     )
     pview = _make_flat_position_view("BTCUSDT")
 
-    with pytest.raises(
-        ValueError, match="must match market_ref"
-    ):
+    with pytest.raises(ValueError, match="must match market_ref"):
         DecisionInput(
             symbol="BTCUSDT",
             market_ref=mref1,
@@ -591,21 +589,33 @@ async def test_reproduce_decision_rejects_tampered_or_empty_trace() -> None:
 
     # 2. Tampered input_hash fails audit
     tampered_hash_trace = replace(trace, input_hash="WRONG_HASH_000000")
-    audit_tampered = await audit_decision_trace(trace.decision_id, trace_override=tampered_hash_trace)
+    audit_tampered = await audit_decision_trace(
+        trace.decision_id, trace_override=tampered_hash_trace
+    )
     assert audit_tampered["status"] == "UNREPRODUCIBLE"
     assert audit_tampered["reproduced"] is False
 
     # 3. Empty evaluated_market_refs fails audit
     class _MalformedTrace:
         pass
+
     empty_refs_trace = _MalformedTrace()
-    for attr in ("decision_id", "strategy_name", "account_label", "decision_time", "intent_produced", "intent_id", "rejection_reason", "input_hash", "frame_digest", "trace_payload"):
+    for attr in (
+        "decision_id",
+        "strategy_name",
+        "account_label",
+        "decision_time",
+        "intent_produced",
+        "intent_id",
+        "rejection_reason",
+        "input_hash",
+        "frame_digest",
+        "trace_payload",
+    ):
         setattr(empty_refs_trace, attr, getattr(trace, attr))
     empty_refs_trace.evaluated_market_refs = ()
-    audit_empty = await audit_decision_trace(trace.decision_id, trace_override=empty_refs_trace)
+    audit_empty = await audit_decision_trace(
+        trace.decision_id, trace_override=empty_refs_trace
+    )
     assert audit_empty["status"] == "EVIDENCE_INSUFFICIENT"
     assert audit_empty["reproduced"] is False
-
-
-
-

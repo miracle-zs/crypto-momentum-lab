@@ -48,9 +48,7 @@ def test_live_gate_rejects_when_strategy_lease_missing() -> None:
 
 
 def test_live_gate_rejects_when_lease_generation_differs_from_worker() -> None:
-    decision = evaluate_live_gate(
-        replace(_context(), git_commit_hash="def456")
-    )
+    decision = evaluate_live_gate(replace(_context(), git_commit_hash="def456"))
 
     assert decision.status is LiveGateStatus.BLOCKED
     assert "lease_code_generation_mismatch" in decision.reasons

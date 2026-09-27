@@ -78,9 +78,7 @@ async def test_set_expected_symbols_drops_last_state_for_removed_symbols() -> No
     publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
-    await publisher.observe(
-        fixture_trade(0, price="200", sequence=2, symbol="ETHUSDT")
-    )
+    await publisher.observe(fixture_trade(0, price="200", sequence=2, symbol="ETHUSDT"))
     await publisher.observe(fixture_trade(3, price="101", sequence=3))
 
     assert ("research", "ETHUSDT") in publisher._last_state_by_symbol
@@ -224,9 +222,7 @@ async def test_late_event_for_previously_unseen_bucket_is_rejected() -> None:
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
     await publisher.observe(fixture_trade(3, price="102", sequence=2))
-    await publisher.observe(
-        fixture_trade(0, price="99", sequence=3, symbol="ETHUSDT")
-    )
+    await publisher.observe(fixture_trade(0, price="99", sequence=3, symbol="ETHUSDT"))
 
     assert publisher.metrics.late_event_count == 1
     assert repository.saved_symbols == [("BTCUSDT",)]
@@ -250,10 +246,7 @@ async def test_late_recovered_trade_marks_durable_bucket_incomplete() -> None:
 
     assert publisher.metrics.late_event_count == 1
     assert len(repository.incomplete_gaps) == 1
-    assert (
-        repository.incomplete_gaps[0].reason
-        == "late_recovery_after_durable_close"
-    )
+    assert repository.incomplete_gaps[0].reason == "late_recovery_after_durable_close"
 
 
 async def test_gap_persistence_is_ordered_after_pending_state_insert() -> None:
@@ -462,9 +455,7 @@ async def test_publisher_fails_closed_after_permanent_durable_write_error() -> N
             RuntimeError,
             match="durable market-state persistence worker failed",
         ):
-            await publisher.observe(
-                fixture_trade(3, price="103", sequence=3)
-            )
+            await publisher.observe(fixture_trade(3, price="103", sequence=3))
     finally:
         await publisher.stop()
 
@@ -484,9 +475,7 @@ async def test_publisher_reports_transport_lateness_and_close_thresholds() -> No
     await publisher.observe(
         replace(
             second,
-            exchange_event_at=second.exchange_event_at + timedelta(
-                milliseconds=600
-            ),
+            exchange_event_at=second.exchange_event_at + timedelta(milliseconds=600),
         )
     )
     await publisher.observe(fixture_trade(0, price="99", sequence=3))

@@ -216,10 +216,7 @@ class ScheduledRiskWindowController:
             # positions were opened before or after today's flattening window.
             # Treat that already-reopened day as complete instead of replaying
             # the previous window's forced flatten against normal positions.
-            if (
-                phase is ScheduledRiskWindowPhase.REOPENED
-                and new_scheduled_window_day
-            ):
+            if phase is ScheduledRiskWindowPhase.REOPENED and new_scheduled_window_day:
                 self._scheduled_positions_verified = True
                 return None
 
@@ -239,9 +236,7 @@ class ScheduledRiskWindowController:
                 reason="scheduled_risk_window",
             )
             if not self._scheduled_entry_orders_cancelled:
-                cancellation_failure = (
-                    await self._cancel_scheduled_entry_orders()
-                )
+                cancellation_failure = await self._cancel_scheduled_entry_orders()
                 if cancellation_failure is not None:
                     return cancellation_failure
                 self._scheduled_entry_orders_cancelled = True
@@ -252,9 +247,7 @@ class ScheduledRiskWindowController:
                 phase is ScheduledRiskWindowPhase.DEADLINE
                 and not self._scheduled_deadline_entry_orders_cancelled
             ):
-                cancellation_failure = (
-                    await self._cancel_scheduled_entry_orders()
-                )
+                cancellation_failure = await self._cancel_scheduled_entry_orders()
                 if cancellation_failure is not None:
                     return cancellation_failure
                 self._scheduled_deadline_entry_orders_cancelled = True
@@ -281,8 +274,8 @@ class ScheduledRiskWindowController:
                         observed_at,
                         force=True,
                     )
-                verification_failure, residual = (
-                    await self._verify_scheduled_positions(observed_at)
+                verification_failure, residual = await self._verify_scheduled_positions(
+                    observed_at
                 )
                 if verification_failure is not None:
                     failure = failure or verification_failure
@@ -373,10 +366,7 @@ class ScheduledRiskWindowController:
                     run_id=self._config.run_id,
                     error_type=type(error).__name__,
                 )
-                return (
-                    "scheduled_entry_submission_drain_failed:"
-                    f"{type(error).__name__}"
-                )
+                return f"scheduled_entry_submission_drain_failed:{type(error).__name__}"
         known_plans: dict[str, OrderExecutionPlan] = {}
         context: LiveDaemonRuntimeContext | None = None
         state = self._latest_scheduled_state()
@@ -388,8 +378,7 @@ class ScheduledRiskWindowController:
             except Exception as error:
                 if self._cancel_unfilled_entry_orders is None:
                     return (
-                        "scheduled_entry_order_context_failed:"
-                        f"{type(error).__name__}"
+                        f"scheduled_entry_order_context_failed:{type(error).__name__}"
                     )
                 log.warning(
                     "live_scheduled_entry_order_context_unavailable",
@@ -398,23 +387,16 @@ class ScheduledRiskWindowController:
                 )
         if context is not None:
             for item in context.unresolved_orders:
-                if (
-                    not item.plan.reduce_only
-                    and not item.state.terminal
-                ):
+                if not item.plan.reduce_only and not item.state.terminal:
                     known_plans[item.plan.client_order_id] = item.plan
             if context.account_snapshot is not None:
                 known_ids = set(known_plans)
                 unknown_open_entries = tuple(
                     order
                     for order in context.account_snapshot.open_orders
-                    if not order.reduce_only
-                    and order.client_order_id not in known_ids
+                    if not order.reduce_only and order.client_order_id not in known_ids
                 )
-                if (
-                    unknown_open_entries
-                    and self._cancel_unfilled_entry_orders is None
-                ):
+                if unknown_open_entries and self._cancel_unfilled_entry_orders is None:
                     return "scheduled_entry_order_cancellation_unavailable"
         for plan, _executed_quantity in self._pending_entry_plans():
             known_plans.setdefault(plan.client_order_id, plan)
@@ -472,8 +454,7 @@ class ScheduledRiskWindowController:
         if (
             not force
             and last_attempt is not None
-            and (now - last_attempt).total_seconds()
-            < retry_interval_seconds
+            and (now - last_attempt).total_seconds() < retry_interval_seconds
         ):
             return None
         states, state_failure = await self._scheduled_flatten_states(now)
@@ -487,9 +468,7 @@ class ScheduledRiskWindowController:
                 log.info(
                     "live_scheduled_flatten_market_state_pending",
                     run_id=self._config.run_id,
-                    elapsed_seconds=round(
-                        (now - self._started_at).total_seconds(), 2
-                    ),
+                    elapsed_seconds=round((now - self._started_at).total_seconds(), 2),
                 )
                 return "scheduled_flatten_market_state_pending"
             log.error(
@@ -517,10 +496,7 @@ class ScheduledRiskWindowController:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                failure = (
-                    "scheduled_flatten_context_failed:"
-                    f"{type(error).__name__}"
-                )
+                failure = f"scheduled_flatten_context_failed:{type(error).__name__}"
                 log.error(
                     "live_scheduled_flatten_context_failed",
                     run_id=self._config.run_id,
@@ -529,9 +505,7 @@ class ScheduledRiskWindowController:
                 )
                 continue
             if state.symbol in context.pending_position_symbols:
-                symbols = ",".join(
-                    sorted(context.pending_position_symbols)
-                )
+                symbols = ",".join(sorted(context.pending_position_symbols))
                 failure = f"pending_live_positions:{symbols}"
                 log.warning(
                     "live_scheduled_flatten_position_sync_pending",
@@ -559,8 +533,7 @@ class ScheduledRiskWindowController:
                     )
                 if not positions:
                     failure = (
-                        "unmanaged_live_positions_missing_snapshot:"
-                        f"{state.symbol}"
+                        f"unmanaged_live_positions_missing_snapshot:{state.symbol}"
                     )
                     log.error(
                         "live_scheduled_flatten_unmanaged_position_snapshot_missing",
@@ -580,9 +553,7 @@ class ScheduledRiskWindowController:
                 positions,
                 now=now,
                 symbol=state.symbol,
-                reference_prices={
-                    state.symbol: _scheduled_reference_price(state)
-                },
+                reference_prices={state.symbol: _scheduled_reference_price(state)},
                 attempt=attempt,
             )
             if not requests:
@@ -610,16 +581,13 @@ class ScheduledRiskWindowController:
                     run_id=self._config.run_id,
                     symbol=state.symbol,
                     client_order_ids=sorted(
-                        plan.client_order_id
-                        for plan in active_exit_plans_to_cancel
+                        plan.client_order_id for plan in active_exit_plans_to_cancel
                     ),
                 )
                 continue
             if active_exit_plans_to_cancel:
-                cancel_failure = (
-                    await self._cancel_active_scheduled_exit_orders(
-                        active_exit_plans_to_cancel
-                    )
+                cancel_failure = await self._cancel_active_scheduled_exit_orders(
+                    active_exit_plans_to_cancel
                 )
                 if cancel_failure is not None:
                     failure = cancel_failure
@@ -632,15 +600,10 @@ class ScheduledRiskWindowController:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    failure = (
-                        "scheduled_flatten_context_failed:"
-                        f"{type(error).__name__}"
-                    )
+                    failure = f"scheduled_flatten_context_failed:{type(error).__name__}"
                     continue
                 if state.symbol in context.pending_position_symbols:
-                    symbols = ",".join(
-                        sorted(context.pending_position_symbols)
-                    )
+                    symbols = ",".join(sorted(context.pending_position_symbols))
                     failure = f"pending_live_positions:{symbols}"
                     continue
                 positions = tuple(
@@ -659,8 +622,7 @@ class ScheduledRiskWindowController:
                         )
                     if not positions:
                         failure = (
-                            "unmanaged_live_positions_missing_snapshot:"
-                            f"{state.symbol}"
+                            f"unmanaged_live_positions_missing_snapshot:{state.symbol}"
                         )
                         continue
                 if not positions:
@@ -669,9 +631,7 @@ class ScheduledRiskWindowController:
                     positions,
                     now=now,
                     symbol=state.symbol,
-                    reference_prices={
-                        state.symbol: _scheduled_reference_price(state)
-                    },
+                    reference_prices={state.symbol: _scheduled_reference_price(state)},
                     attempt=attempt,
                 )
                 if not requests:
@@ -685,22 +645,23 @@ class ScheduledRiskWindowController:
                     failure = "scheduled_active_exit_cancel_not_confirmed"
                     continue
             try:
-                approved, submitted, request_failure = (
-                    await self._process_exit_requests(
-                        requests,
-                        state=state,
-                        context=context,
-                        reference_price=_scheduled_reference_price(state),
-                        invalidate_context=False,
-                    )
+                (
+                    approved,
+                    submitted,
+                    request_failure,
+                ) = await self._process_exit_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    reference_price=_scheduled_reference_price(state),
+                    invalidate_context=False,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 approved = submitted = 0
                 request_failure = (
-                    "scheduled_flatten_execution_failed:"
-                    f"{type(error).__name__}"
+                    f"scheduled_flatten_execution_failed:{type(error).__name__}"
                 )
                 log.error(
                     "live_scheduled_flatten_execution_failed",
@@ -801,9 +762,7 @@ class ScheduledRiskWindowController:
                 symbols=missing_reference_symbols,
             )
         return tuple(states), (
-            "scheduled_flatten_position_reference_unavailable"
-            if not states
-            else None
+            "scheduled_flatten_position_reference_unavailable" if not states else None
         )
 
     async def _cancel_active_scheduled_exit_orders(
@@ -873,9 +832,7 @@ class ScheduledRiskWindowController:
                 None,
             )
         residual = tuple(
-            position
-            for position in positions
-            if position.position_amt != 0
+            position for position in positions if position.position_amt != 0
         )
         if residual:
             log.error(
@@ -944,11 +901,7 @@ def _unmanaged_position_views(
         reference_price = position.mark_price or position.entry_price
         if reference_price <= 0 or position.entry_price <= 0:
             continue
-        side = (
-            StrategySide.LONG
-            if position.position_amt > 0
-            else StrategySide.SHORT
-        )
+        side = StrategySide.LONG if position.position_amt > 0 else StrategySide.SHORT
         position_side = FuturesPositionSide(position.position_side)
         views.append(
             ManagedLivePosition(
@@ -958,10 +911,7 @@ def _unmanaged_position_views(
                 quantity=abs(position.position_amt),
                 entry_price=position.entry_price,
                 opened_at=position.observed_at,
-                batch_id=(
-                    f"unmanaged:{position.symbol}:"
-                    f"{position.position_side}"
-                ),
+                batch_id=(f"unmanaged:{position.symbol}:{position.position_side}"),
             )
         )
     return tuple(views)

@@ -128,6 +128,7 @@ async def test_signed_request_includes_timestamp_and_signature() -> None:
     assert "recvWindow=10000" in captured_query
     assert "signature=" in captured_query
 
+
 async def test_client_fetches_account_snapshot() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/fapi/v3/balance"
@@ -1508,8 +1509,9 @@ async def test_margin_type_change_failure_does_not_submit_order() -> None:
     assert requested_paths == ["/fapi/v1/symbolConfig", "/fapi/v1/marginType"]
 
 
-async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip(
-) -> None:
+async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip() -> (
+    None
+):
     requested_paths: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:

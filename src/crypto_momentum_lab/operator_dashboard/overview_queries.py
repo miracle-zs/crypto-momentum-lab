@@ -40,6 +40,7 @@ from crypto_momentum_lab.operator_dashboard.status import (
     freshness_status,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountReconciliationHeadRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
@@ -252,19 +253,48 @@ class OverviewQueries:
                 "details": view.details,
             }
 
+        heads_by_account: dict[str, AccountReconciliationHeadRow] = {}
+        try:
+            async with self._session_factory() as session:
+                heads = (
+                    await session.scalars(
+                        select(AccountReconciliationHeadRow).where(
+                            AccountReconciliationHeadRow.environment == "live"
+                        )
+                    )
+                ).all()
+                heads_by_account = {h.account_label: h for h in heads}
+        except Exception:
+            pass
+
         account_views: list[OperationalView] = []
         for acc in accounts_resp.accounts:
             observed = acc.observed_at or now
             lag = max(0.0, (now - observed).total_seconds())
             lease_active = (
-                acc.lease_expires_at is not None
-                and acc.lease_expires_at > now
+                acc.lease_expires_at is not None and acc.lease_expires_at > now
             )
             strategy_active = acc.strategy_state in ("active", "running")
+
+            head = heads_by_account.get(acc.account_label)
+            if head is not None:
+                recon_matched = (
+                    head.status in ("OK", "reconciled", "matched")
+                    and head.mismatch_count == 0
+                )
+                head_st = head.status.lower()
+                recon_details = (
+                    f"reconciliation_{head_st}_mismatches_{head.mismatch_count}"
+                )
+            else:
+                recon_matched = acc.status != OperationalStatus.HALTED
+                recon_details = "unconfirmed_reconciliation_head_absent"
+
             cap_ok = (
                 lease_active
                 and strategy_active
                 and acc.status == OperationalStatus.READY
+                and recon_matched
             )
 
             acc_view = evaluate_standard_health(
@@ -276,10 +306,16 @@ class OverviewQueries:
                 fact_gaps_count=0 if acc.status == OperationalStatus.READY else 1,
                 capability_permitted=cap_ok,
                 capability_reason=(
-                    "ready" if cap_ok else "lease_expired_or_inactive"
+                    "ready"
+                    if cap_ok
+                    else (
+                        "reconciliation_mismatched"
+                        if not recon_matched
+                        else "lease_expired_or_inactive"
+                    )
                 ),
-                reconciliation_matched=acc.status != OperationalStatus.HALTED,
-                reconciliation_details="ledger_reconciled",
+                reconciliation_matched=recon_matched,
+                reconciliation_details=recon_details,
                 observed_at=observed,
             )
             account_views.append(acc_view)
@@ -320,7 +356,6 @@ class OverviewQueries:
             ],
             "details": composite_view.details,
         }
-
 
     async def readiness(self) -> SystemReadinessResponse:
         now = self._clock()

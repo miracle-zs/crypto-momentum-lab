@@ -36,10 +36,7 @@ def _never_order_identity_conflict(_error: Exception) -> bool:
 
 
 def is_pending_position_sync_failure(failure: str | None) -> bool:
-    return bool(
-        failure is not None
-        and failure.startswith("pending_live_positions:")
-    )
+    return bool(failure is not None and failure.startswith("pending_live_positions:"))
 
 
 def promote_pending_position_failure(failure: str) -> str:
@@ -108,13 +105,8 @@ class LiveExitChannelRuntime:
                 try:
                     failure = await self._daemon.process_market_quote(quote, state)
                 except Exception as error:
-                    order_identity_conflict = self._is_order_identity_conflict(
-                        error
-                    )
-                    if not (
-                        self._is_transient_error(error)
-                        or order_identity_conflict
-                    ):
+                    order_identity_conflict = self._is_order_identity_conflict(error)
+                    if not (self._is_transient_error(error) or order_identity_conflict):
                         raise
                     failure = (
                         ORDER_IDENTITY_CONFLICT_REASON
@@ -134,13 +126,8 @@ class LiveExitChannelRuntime:
                     )
                     continue
                 if failure is not None:
-                    pending_position_sync = is_pending_position_sync_failure(
-                        failure
-                    )
-                    if (
-                        not pending_position_sync
-                        and self._on_exit_failure is not None
-                    ):
+                    pending_position_sync = is_pending_position_sync_failure(failure)
+                    if not pending_position_sync and self._on_exit_failure is not None:
                         self._on_exit_failure(quote.symbol, failure)
                     if pending_position_sync:
                         log.warning(
@@ -175,9 +162,7 @@ class LiveExitChannelRuntime:
     ) -> None:
         async for event in source:
             quote = next(
-                iter(
-                    self._latest_market_quotes.for_symbols((event.candle.symbol,))
-                ),
+                iter(self._latest_market_quotes.for_symbols((event.candle.symbol,))),
                 None,
             )
             failure: str | None = None
@@ -194,7 +179,9 @@ class LiveExitChannelRuntime:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON
                         if hasattr(self._daemon, "note_order_identity_conflict"):
-                            self._daemon.note_order_identity_conflict(event.candle.symbol)
+                            self._daemon.note_order_identity_conflict(
+                                event.candle.symbol
+                            )
                         break
                     if not self._is_transient_error(error):
                         raise
@@ -330,13 +317,8 @@ class LiveExitChannelRuntime:
                     )
                     continue
                 if failure is not None:
-                    pending_position_sync = is_pending_position_sync_failure(
-                        failure
-                    )
-                    if (
-                        not pending_position_sync
-                        and self._on_exit_failure is not None
-                    ):
+                    pending_position_sync = is_pending_position_sync_failure(failure)
+                    if not pending_position_sync and self._on_exit_failure is not None:
                         self._on_exit_failure(state.symbol, failure)
                     if pending_position_sync:
                         log.warning(

@@ -127,8 +127,7 @@ class LiveLeaseHeartbeat:
                 renewed = await self._repository.renew_lease(
                     lease_id=self._lease.lease_id,
                     owner=self._owner,
-                    expires_at=now
-                    + timedelta(seconds=self._config.lease_ttl_seconds),
+                    expires_at=now + timedelta(seconds=self._config.lease_ttl_seconds),
                 )
             except asyncio.CancelledError:
                 raise

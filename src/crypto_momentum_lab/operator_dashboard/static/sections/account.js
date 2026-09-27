@@ -719,19 +719,22 @@ async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRang
   selectedLiveAccount = accountLabel;
   setLiveAccountTabState(root, accountLabel);
   slot.dataset.accountLabel = accountLabel;
-  slot.setAttribute("aria-busy", "true");
+  const isSameAccount = slot.dataset.renderedAccount === accountLabel;
   if (accountData?.summary || accountData?.balances) {
     const [status, html] = renderAccount({ ...accountData, equity_range: equityRange });
     replaceChildrenFromHtml(slot, html);
     slot.dataset.accountStatus = status;
+    slot.dataset.renderedAccount = accountLabel;
     wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
     slot.removeAttribute("aria-busy");
     return;
   }
-  replaceChildrenFromHtml(
-    slot,
-    `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
-  );
+  if (!isSameAccount || !slot.children.length) {
+    replaceChildrenFromHtml(
+      slot,
+      `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
+    );
+  }
   try {
     const query = new URLSearchParams({
       account_label: accountLabel,
@@ -742,6 +745,7 @@ async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRang
     const [status, html] = renderAccount(detail);
     replaceChildrenFromHtml(slot, html);
     slot.dataset.accountStatus = status;
+    slot.dataset.renderedAccount = accountLabel;
     wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
   } catch (error) {
     if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
@@ -780,16 +784,19 @@ async function loadLiveAccountMetrics(root, requestJson, equityRange) {
   if (!slot) return;
   const requestId = ++liveAccountMetricsRequest;
   selectedLiveAccountMetricsRange = equityRange;
-  slot.setAttribute("aria-busy", "true");
-  replaceChildrenFromHtml(
-    slot,
-    `<div class="live-account-metrics-loading">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`,
-  );
+  const isSameRange = slot.dataset.renderedRange === equityRange;
+  if (!isSameRange || !slot.children.length) {
+    replaceChildrenFromHtml(
+      slot,
+      `<div class="live-account-metrics-loading">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`,
+    );
+  }
   try {
     const query = new URLSearchParams({ equity_range: equityRange });
     const data = await requestJson(`api/live-account-metrics?${query.toString()}`);
     if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;
     replaceChildrenFromHtml(slot, renderLiveAccountMetrics(data));
+    slot.dataset.renderedRange = equityRange;
     wireLiveAccountMetricsRanges(slot, (nextRange) => loadLiveAccountMetrics(root, requestJson, nextRange));
   } catch (error) {
     if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;

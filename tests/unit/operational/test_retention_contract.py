@@ -29,7 +29,9 @@ def test_retention_consumer_requirement_validations() -> None:
         )
 
     naive_time = datetime(2026, 9, 20, 12, 0, 0)
-    with pytest.raises(ValueError, match="min_required_watermark must be timezone-aware"):
+    with pytest.raises(
+        ValueError, match="min_required_watermark must be timezone-aware"
+    ):
         RetentionConsumerRequirement(
             consumer_id="active_episodes",
             min_required_watermark=naive_time,
@@ -51,7 +53,10 @@ def test_retention_gating_evaluation_validations() -> None:
     assert eval_result.is_constrained is True
     assert eval_result.effective_cutoff == older
 
-    with pytest.raises(ValueError, match="effective_cutoff .* must never be newer than requested_cutoff"):
+    with pytest.raises(
+        ValueError,
+        match="effective_cutoff .* must never be newer than requested_cutoff",
+    ):
         RetentionGatingEvaluation(
             requested_cutoff=now,
             effective_cutoff=newer,
@@ -89,7 +94,9 @@ def test_retention_watermark_evaluator_constrained_by_active_episode() -> None:
     assert res.binding_constraint == req_active
 
 
-def test_retention_watermark_evaluator_multiple_requirements_takes_safest_minimum() -> None:
+def test_retention_watermark_evaluator_multiple_requirements_takes_safest_minimum() -> (
+    None
+):
     requested = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
     req_journal = RetentionConsumerRequirement(
         consumer_id="uncommitted_journal",

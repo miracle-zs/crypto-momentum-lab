@@ -76,9 +76,7 @@ def test_report_validation_rejects_unknown_fill_candidate() -> None:
     report = fixture_paper_report()
     invalid = replace(
         report,
-        paper_fills=(
-            replace(report.paper_fills[0], candidate_id="missing"),
-        ),
+        paper_fills=(replace(report.paper_fills[0], candidate_id="missing"),),
     )
 
     with pytest.raises(ValueError, match="fill references unknown candidate_id"):

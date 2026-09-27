@@ -106,9 +106,7 @@ class PostgresUniverseRepository:
                             )
                         ).all()
                     )
-                    changed_symbols = {
-                        item.symbol for item in changed_contracts
-                    }
+                    changed_symbols = {item.symbol for item in changed_contracts}
                     contracts_to_write = tuple(
                         item
                         for item in contracts
@@ -263,8 +261,7 @@ class PostgresUniverseRepository:
             symbols = await session.scalars(
                 select(MonitoringMembershipRow.symbol).where(
                     MonitoringMembershipRow.snapshot_id == snapshot_id,
-                    MonitoringMembershipRow.status
-                    != MembershipStatus.EXTENDED.value,
+                    MonitoringMembershipRow.status != MembershipStatus.EXTENDED.value,
                 )
             )
             return frozenset(symbols)
@@ -325,8 +322,7 @@ class PostgresUniverseRepository:
                 )
                 await session.execute(
                     delete(MonitoringMembershipRow).where(
-                        MonitoringMembershipRow.snapshot_id
-                        == snapshot.snapshot_id
+                        MonitoringMembershipRow.snapshot_id == snapshot.snapshot_id
                     )
                 )
                 await session.execute(
@@ -419,10 +415,7 @@ class PostgresUniverseRepository:
                 (
                     await session.execute(
                         select(UniverseEntryRow)
-                        .where(
-                            UniverseEntryRow.snapshot_id
-                            == snapshot_row.snapshot_id
-                        )
+                        .where(UniverseEntryRow.snapshot_id == snapshot_row.snapshot_id)
                         .order_by(UniverseEntryRow.symbol)
                     )
                 ).scalars()
@@ -479,9 +472,7 @@ class PostgresUniverseRepository:
             candidates=candidates,
             gainers=gainers,
             losers=losers,
-            target_symbols=frozenset(
-                row.symbol for row in entries if row.is_target
-            ),
+            target_symbols=frozenset(row.symbol for row in entries if row.is_target),
             exclusions={
                 row.symbol: row.exclusion_reason
                 for row in entries

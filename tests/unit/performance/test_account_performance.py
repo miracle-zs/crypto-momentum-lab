@@ -587,4 +587,3 @@ def test_coverage_receipt_invariants() -> None:
             is_gapless=True,
             gaps=((t0, t1),),
         )
-

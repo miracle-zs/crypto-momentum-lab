@@ -67,10 +67,13 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
                 ema10=Decimal("99"),
             )
         )
-        assert cache.snapshot_for(
-            symbol="BTCUSDT",
-            observed_at=now + timedelta(minutes=15),
-        ) is None
+        assert (
+            cache.snapshot_for(
+                symbol="BTCUSDT",
+                observed_at=now + timedelta(minutes=15),
+            )
+            is None
+        )
         assert sorted(symbol for symbol, _ in calls) == ["BTCUSDT", "ETHUSDT"]
     finally:
         await cache.stop()
@@ -106,9 +109,7 @@ async def test_entry_symbol_cache_refreshes_pool_without_blocking_reads() -> Non
         await asyncio.wait_for(ready.wait(), timeout=1)
         assert cache.ready is True
         assert cache.symbols_for(now) == frozenset({"BTCUSDT"})
-        assert cache.symbols_for(now + timedelta(seconds=15)) == frozenset(
-            {"BTCUSDT"}
-        )
+        assert cache.symbols_for(now + timedelta(seconds=15)) == frozenset({"BTCUSDT"})
         assert calls == [now]
     finally:
         await cache.stop()
@@ -308,4 +309,3 @@ async def test_entry_filter_cache_stop_propagates_external_cancellation() -> Non
 
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-

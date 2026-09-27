@@ -224,9 +224,7 @@ def _window_rows(
 
 def _window_start_from_path(path: Path) -> datetime:
     date_part = next(
-        part.removeprefix("date=")
-        for part in path.parts
-        if part.startswith("date=")
+        part.removeprefix("date=") for part in path.parts if part.startswith("date=")
     )
     clock = path.stem.removeprefix("window=")
     if len(clock) == 4:

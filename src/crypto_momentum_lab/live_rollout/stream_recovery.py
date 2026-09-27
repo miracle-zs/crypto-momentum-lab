@@ -28,6 +28,7 @@ from crypto_momentum_lab.market_data.quote_hub import MarketQuoteHubError
 
 log = structlog.get_logger(__name__)
 
+
 async def _resilient_stream[StreamItem](
     source: AsyncIterable[StreamItem],
     *,

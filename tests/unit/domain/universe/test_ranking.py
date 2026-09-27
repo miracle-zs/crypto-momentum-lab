@@ -75,10 +75,7 @@ def test_small_population_deduplicates_target_union() -> None:
 
 def test_ranking_depth_keeps_entries_beyond_target_count() -> None:
     result = rank_utc_day_returns(
-        [
-            candidate(f"S{index}USDT", "100", str(100 + index))
-            for index in range(4)
-        ],
+        [candidate(f"S{index}USDT", "100", str(100 + index)) for index in range(4)],
         top_count=1,
         ranking_depth=3,
     )

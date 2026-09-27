@@ -31,9 +31,7 @@ class FakeAggTradeHistory:
     ) -> tuple[BinanceAggTrade, ...]:
         self.calls.append((symbol, from_id, limit))
         return tuple(
-            trade
-            for trade in self.trades
-            if trade.aggregate_trade_id >= from_id
+            trade for trade in self.trades if trade.aggregate_trade_id >= from_id
         )[:limit]
 
 
@@ -210,7 +208,6 @@ async def test_recoverer_congestion_bypass_bypasses_network_without_error() -> N
     assert result.unrecovered_gaps[0].missing_count == 2
     # Network was bypassed, so history API must not be called
     assert history.calls == []
-
 
 
 def _trade(aggregate_trade_id: int) -> BinanceAggTrade:

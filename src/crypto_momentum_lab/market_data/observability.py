@@ -23,9 +23,7 @@ log = structlog.get_logger(__name__)
 async def monitor_market_data_health(
     *,
     capture_metrics: Callable[[], CaptureMetricsSnapshot],
-    connection_metrics: Callable[
-        [], BinanceConnectionPoolMetricsSnapshot
-    ],
+    connection_metrics: Callable[[], BinanceConnectionPoolMetricsSnapshot],
     runtime_state_metrics: Callable[[], dict[str, object]] | None = None,
     recovery_metrics: Callable[[], object] | None = None,
     report_interval_seconds: float = 30.0,
@@ -47,9 +45,7 @@ async def monitor_market_data_health(
         raise ValueError("sample_interval_seconds must be positive")
     if not 0 < queue_warning_utilization < queue_critical_utilization <= 1:
         raise ValueError("queue utilization thresholds are invalid")
-    if not (
-        0 < event_loop_lag_warning_seconds < event_loop_lag_critical_seconds
-    ):
+    if not (0 < event_loop_lag_warning_seconds < event_loop_lag_critical_seconds):
         raise ValueError("event-loop lag thresholds are invalid")
 
     loop = asyncio.get_running_loop()
@@ -80,9 +76,7 @@ async def monitor_market_data_health(
         runtime_snapshot = (
             None if runtime_state_metrics is None else runtime_state_metrics()
         )
-        recovery_snapshot = (
-            None if recovery_metrics is None else recovery_metrics()
-        )
+        recovery_snapshot = None if recovery_metrics is None else recovery_metrics()
         report_elapsed_seconds = max(now - previous_report_at, 0.000001)
         received_message_rate = _counter_rate(
             connections.received_messages,
@@ -276,8 +270,7 @@ async def monitor_market_data_health(
         pressured_ingress_groups = tuple(
             detail["group_id"]
             for detail in connection_details
-            if _connection_ingress_utilization(detail)
-            >= queue_warning_utilization
+            if _connection_ingress_utilization(detail) >= queue_warning_utilization
         )
         if queue_utilization >= queue_warning_utilization:
             level = (
@@ -309,8 +302,7 @@ async def monitor_market_data_health(
             log.warning(
                 "market_data_backpressure_observed",
                 new_wait_count=(
-                    backpressure_wait_count
-                    - previous_backpressure_wait_count
+                    backpressure_wait_count - previous_backpressure_wait_count
                 ),
                 total_wait_count=backpressure_wait_count,
                 total_wait_seconds=round(
@@ -328,9 +320,7 @@ async def monitor_market_data_health(
         if unrecovered_gap_count > previous_unrecovered_gap_count:
             log.warning(
                 "market_data_unrecovered_agg_trade_gap",
-                new_gap_count=(
-                    unrecovered_gap_count - previous_unrecovered_gap_count
-                ),
+                new_gap_count=(unrecovered_gap_count - previous_unrecovered_gap_count),
                 total_gap_count=unrecovered_gap_count,
             )
         previous_report_at = now

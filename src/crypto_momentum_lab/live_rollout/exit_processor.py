@@ -322,8 +322,7 @@ class LiveExitProcessor:
             if (
                 order.plan.symbol != state.symbol
                 or not order.plan.reduce_only
-                or order.state
-                is not ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                or order.state is not ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
             ):
                 continue
             root, attempt = _exit_recovery_identity(order.plan)
@@ -750,18 +749,18 @@ class LiveExitProcessor:
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
                     if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.pending_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"pending_live_positions:{symbols}"
+                        symbols = ",".join(sorted(context.pending_position_symbols))
+                        return (
+                            approved,
+                            submitted,
+                            (f"pending_live_positions:{symbols}"),
                         )
                     if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.unmanaged_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"unmanaged_live_positions:{symbols}"
+                        symbols = ",".join(sorted(context.unmanaged_position_symbols))
+                        return (
+                            approved,
+                            submitted,
+                            (f"unmanaged_live_positions:{symbols}"),
                         )
                 remaining = max(
                     Decimal("0"),
@@ -779,26 +778,25 @@ class LiveExitProcessor:
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
                     if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.pending_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"pending_live_positions:{symbols}"
+                        symbols = ",".join(sorted(context.pending_position_symbols))
+                        return (
+                            approved,
+                            submitted,
+                            (f"pending_live_positions:{symbols}"),
                         )
                     if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.unmanaged_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"unmanaged_live_positions:{symbols}"
+                        symbols = ",".join(sorted(context.unmanaged_position_symbols))
+                        return (
+                            approved,
+                            submitted,
+                            (f"unmanaged_live_positions:{symbols}"),
                         )
                 current_position_quantity = next(
                     (
                         position.quantity
                         for position in context.managed_positions
                         if position.symbol == request.cancel_plan.symbol
-                        and position.position_side
-                        is request.cancel_plan.position_side
+                        and position.position_side is request.cancel_plan.position_side
                     ),
                     Decimal("0"),
                 )
@@ -847,10 +845,7 @@ class LiveExitProcessor:
                     self._invalidate_context_cache()
                 approved += 1
                 submitted += int(not result.suppressed)
-                if (
-                    result.state
-                    is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                ):
+                if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
                     if result.plan is not None:
                         recovery_result = await self._recover_unknown_exit(
                             plan=result.plan,
@@ -981,9 +976,7 @@ def _build_exit_recovery_candidate(
             client_order_id=plan.client_order_id,
         )
         return None
-    limit_price = (
-        plan.price if recovery_entry_type is None else recovery_limit_price
-    )
+    limit_price = plan.price if recovery_entry_type is None else recovery_limit_price
     if order_type == "LIMIT" and limit_price is None:
         log.error(
             "live_exit_recovery_missing_limit_price",
@@ -994,9 +987,7 @@ def _build_exit_recovery_candidate(
     candidate_id = f"{_EXIT_RECOVERY_PREFIX}{root_client_order_id}-{attempt}"
     signal_id = f"live-exit-recovery-signal-{uuid5(NAMESPACE_URL, candidate_id)}"
     base = source_candidate
-    features: dict[str, JsonValue] = (
-        {} if base is None else dict(base.features)
-    )
+    features: dict[str, JsonValue] = {} if base is None else dict(base.features)
     features.update(
         {
             "recovery": True,

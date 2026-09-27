@@ -112,9 +112,7 @@ async def test_runtime_retries_pending_position_sync(
         latest_market_quotes=QuoteCache(),  # type: ignore[arg-type]
         run_id="run-1",
         is_transient_error=lambda _error: False,
-        on_exit_failure=lambda symbol, failure: failures.append(
-            (symbol, failure)
-        ),
+        on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
         pending_position_retry_delays=(0.25,),
     )
 
@@ -126,8 +124,9 @@ async def test_runtime_retries_pending_position_sync(
 
 
 @pytest.mark.asyncio
-async def test_runtime_invalidates_account_snapshot_before_non_transient_crash(
-) -> None:
+async def test_runtime_invalidates_account_snapshot_before_non_transient_crash() -> (
+    None
+):
     event = SimpleNamespace(
         event_type="ORDER_TRADE_UPDATE",
         client_order_id="entry-1",
@@ -172,8 +171,9 @@ async def test_runtime_invalidates_account_snapshot_before_non_transient_crash(
 
 
 @pytest.mark.asyncio
-async def test_runtime_deduplicates_fill_telemetry_after_account_stream_replay(
-) -> None:
+async def test_runtime_deduplicates_fill_telemetry_after_account_stream_replay() -> (
+    None
+):
     event = SimpleNamespace(
         event_type="ORDER_TRADE_UPDATE",
         client_order_id="entry-1",

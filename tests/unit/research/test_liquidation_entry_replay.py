@@ -333,9 +333,7 @@ def test_delayed_continuation_dies_after_return_inside_breakout() -> None:
 
 def test_delayed_continuation_counts_only_strategy_eligible_buckets() -> None:
     rows = [_row(index, price=100.0) for index in range(4)]
-    rows.append(
-        _row(4, price=102.0, liquidation_count=1, liquidation_notional=1000)
-    )
+    rows.append(_row(4, price=102.0, liquidation_count=1, liquidation_notional=1000))
     missing_close = _row(5, price=102.05)
     missing_close[2:6] = ["", "", "", ""]
     rows.extend(

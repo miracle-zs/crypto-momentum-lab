@@ -974,13 +974,9 @@ class UserDataAccountSyncDaemon:
         self._check_stream_queue_health()
         async with self._state_lock:
             if self._accept_events and self._state is not None:
-                is_syncing = (
-                    self._last_sync_result is not None
-                    and (
-                        self._last_sync_result.fills_catching_up
-                        or self._last_sync_result.status
-                        == ExecutionAccountStatus.SYNCING
-                    )
+                is_syncing = self._last_sync_result is not None and (
+                    self._last_sync_result.fills_catching_up
+                    or self._last_sync_result.status == ExecutionAccountStatus.SYNCING
                 )
                 target_state = (
                     ExecutionAccountStatus.SYNCING
@@ -988,9 +984,7 @@ class UserDataAccountSyncDaemon:
                     else ExecutionAccountStatus.READY_READONLY
                 )
                 async with self._rest_sync_lock:
-                    if _accepts_state_kwarg(
-                        self._service.publish_user_data_heartbeat
-                    ):
+                    if _accepts_state_kwarg(self._service.publish_user_data_heartbeat):
                         await self._service.publish_user_data_heartbeat(
                             observed_at=self._now(),
                             state=target_state,

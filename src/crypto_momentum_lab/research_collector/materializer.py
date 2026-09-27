@@ -247,15 +247,17 @@ class WindowMaterializer:
             if res is not None:
                 ready_resolutions.append(res)
             else:
-                ready_resolutions.append({
-                    "record_id": r.record_id,
-                    "sequence": r.sequence,
-                    "stream_id": r.stream_id,
-                    "source_kind": r.source_kind.value,
-                    "status": "materialized",
-                    "reason": "committed_on_flush",
-                    "resolved_at": datetime.now(UTC).isoformat(),
-                })
+                ready_resolutions.append(
+                    {
+                        "record_id": r.record_id,
+                        "sequence": r.sequence,
+                        "stream_id": r.stream_id,
+                        "source_kind": r.source_kind.value,
+                        "status": "materialized",
+                        "reason": "committed_on_flush",
+                        "resolved_at": datetime.now(UTC).isoformat(),
+                    }
+                )
 
         if ready_receipts:
             self._journal.commit_materialization(

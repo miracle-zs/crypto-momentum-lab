@@ -225,5 +225,3 @@ def test_publish_reconciled_fill_ignores_when_snapshot_is_none() -> None:
     # Should not raise ValueError and should not publish anything
     publish_reconciled_fill(fill, result_no_snap)
     assert len(published) == 0
-
-

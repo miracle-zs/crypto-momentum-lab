@@ -106,7 +106,9 @@ def test_strategy_checkpoint_incompatible_version_blocks_recovery() -> None:
     t0 = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
 
     # Future checkpoint schema version 2 must be rejected by version 1 code
-    with pytest.raises(IncompatibleCheckpointError, match="Incompatible strategy checkpoint"):
+    with pytest.raises(
+        IncompatibleCheckpointError, match="Incompatible strategy checkpoint"
+    ):
         StrategyCheckpoint(
             last_processed_at_by_symbol={"BTCUSDT": t0},
             warmup_buckets_by_symbol={"BTCUSDT": 10},
@@ -124,4 +126,3 @@ def test_strategy_checkpoint_incompatible_version_blocks_recovery() -> None:
         schema_version=1,
     )
     assert cp_ok.schema_version == 1
-

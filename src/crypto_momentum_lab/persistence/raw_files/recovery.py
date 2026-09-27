@@ -217,9 +217,7 @@ def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
         route=CaptureRoute(_str_value(payload["route"])),
         stream=CaptureStream(_str_value(payload["stream"])),
         symbol=_optional_str_value(payload["symbol"]),
-        exchange_event_at=_optional_datetime_value(
-            payload["exchange_event_at"]
-        ),
+        exchange_event_at=_optional_datetime_value(payload["exchange_event_at"]),
         received_at=_datetime_value(payload["received_at"]),
         received_monotonic_ns=_int_value(payload["received_monotonic_ns"]),
         connection_session_id=UUID(_str_value(payload["connection_session_id"])),

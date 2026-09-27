@@ -73,9 +73,7 @@ class _PaperEquityPoint:
     unrealized_pnl: Decimal
 
 
-PaperRunSelector = Callable[
-    [AsyncSession], Awaitable[list[StrategyRunRow]]
-]
+PaperRunSelector = Callable[[AsyncSession], Awaitable[list[StrategyRunRow]]]
 PaperExitDetails = Callable[[StrategyRunRow], tuple[str, str]]
 
 
@@ -170,23 +168,25 @@ def _paper_common_equity_statement(
     )
     resolved_interval_seconds = max(
         minimum_interval_seconds,
-        _COMMON_EQUITY_BUCKET_SECONDS
-        if interval_seconds is None
-        else interval_seconds,
+        _COMMON_EQUITY_BUCKET_SECONDS if interval_seconds is None else interval_seconds,
     )
     if resolved_interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
     bucket_interval = text(f"interval '{resolved_interval_seconds} seconds'")
     run_values = _paper_run_values(run_ids)
-    bucket_series = func.generate_series(
-        common_start_at,
-        _relative_bucket_end(
+    bucket_series = (
+        func.generate_series(
             common_start_at,
-            window_end,
-            resolved_interval_seconds,
-        ),
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="equity_buckets")
+            _relative_bucket_end(
+                common_start_at,
+                window_end,
+                resolved_interval_seconds,
+            ),
+            bucket_interval,
+        )
+        .table_valued("bucket")
+        .render_derived(name="equity_buckets")
+    )
     snapshot = aliased(PaperEquitySnapshotRow)
     bucket_start_at = bucket_series.c.bucket
     latest_equity = (
@@ -212,9 +212,7 @@ def _paper_common_equity_statement(
             latest_equity.c.observed_at,
             latest_equity.c.equity,
         )
-        .select_from(
-            run_values.join(bucket_series, true()).join(latest_equity, true())
-        )
+        .select_from(run_values.join(bucket_series, true()).join(latest_equity, true()))
         .order_by(run_values.c.run_id, bucket_start_at)
     )
 
@@ -244,11 +242,15 @@ def _paper_equity_statement(
     )
     series_start = max(earliest_bucket, latest_window_start)
     run_values = _paper_run_values(run_ids)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="equity_buckets")
+    bucket_series = (
+        func.generate_series(
+            series_start,
+            end_bucket,
+            bucket_interval,
+        )
+        .table_valued("bucket")
+        .render_derived(name="equity_buckets")
+    )
     snapshot = aliased(PaperEquitySnapshotRow)
     bucket_start_at = bucket_series.c.bucket
     latest_equity = (
@@ -280,9 +282,7 @@ def _paper_equity_statement(
             latest_equity.c.realized_pnl,
             latest_equity.c.unrealized_pnl,
         )
-        .select_from(
-            run_values.join(bucket_series, true()).join(latest_equity, true())
-        )
+        .select_from(run_values.join(bucket_series, true()).join(latest_equity, true()))
         .order_by(latest_equity.c.run_id, bucket_start_at)
     )
 
@@ -323,11 +323,15 @@ def _live_common_equity_statement(
         seconds=resolved_interval_seconds * (max_points - 1)
     )
     series_start = max(earliest_bucket, latest_window_start)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="equity_buckets")
+    bucket_series = (
+        func.generate_series(
+            series_start,
+            end_bucket,
+            bucket_interval,
+        )
+        .table_valued("bucket")
+        .render_derived(name="equity_buckets")
+    )
     snapshot = aliased(AccountBalanceSnapshotRow)
     bucket_start_at = bucket_series.c.bucket
     total_equity = snapshot.wallet_balance + snapshot.unrealized_pnl
@@ -651,23 +655,15 @@ class PaperEquityQueries:
                 )
             )
         return PaperAccountsEquityResponse(
-            status=(
-                OperationalStatus.READY if accounts else OperationalStatus.NO_DATA
-            ),
+            status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
             accounts=accounts,
-            common_equity_start_at=(
-                common_start_at if common_equity_by_run else None
-            ),
+            common_equity_start_at=(common_start_at if common_equity_by_run else None),
             common_equity_end_at=common_end_at,
             common_equity_sample_interval_seconds=(
-                common_equity_interval_seconds
-                if common_equity_by_run
-                else None
+                common_equity_interval_seconds if common_equity_by_run else None
             ),
             common_equity_anchor=(
-                "fixed_2026-08-21T02:45:00Z"
-                if common_equity_by_run
-                else None
+                "fixed_2026-08-21T02:45:00Z" if common_equity_by_run else None
             ),
             common_equity_anchor_accounts=common_anchor_accounts,
             common_equity_account_count=len(common_equity_by_run),

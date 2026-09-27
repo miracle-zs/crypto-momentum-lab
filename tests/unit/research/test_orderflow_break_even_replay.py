@@ -4,9 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPT_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "scripts"
-    / "replay_orderflow_break_even.py"
+    Path(__file__).resolve().parents[3] / "scripts" / "replay_orderflow_break_even.py"
 )
 SPEC = importlib.util.spec_from_file_location(
     "orderflow_break_even_replay_script", SCRIPT_PATH

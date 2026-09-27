@@ -22,9 +22,7 @@ class LatestMarketStateCache:
     ) -> tuple[MarketState15s, ...]:
         if symbols:
             selected = [
-                self._states[symbol]
-                for symbol in symbols
-                if symbol in self._states
+                self._states[symbol] for symbol in symbols if symbol in self._states
             ]
         else:
             selected = list(self._states.values())
@@ -50,9 +48,7 @@ class LatestMarketQuoteCache:
     ) -> tuple[RealtimeMarketQuote, ...]:
         if symbols:
             selected = [
-                self._quotes[symbol]
-                for symbol in symbols
-                if symbol in self._quotes
+                self._quotes[symbol] for symbol in symbols if symbol in self._quotes
             ]
         else:
             selected = list(self._quotes.values())

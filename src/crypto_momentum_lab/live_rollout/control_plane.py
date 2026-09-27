@@ -203,9 +203,7 @@ class LiveControlPlaneRuntime:
             # rolling strategy state.  A reconnect is safe only after the
             # source has replayed the exact cursor or the worker has rebuilt
             # from durable history; both paths must remain fail-closed.
-            if reason is not None and (
-                was_available or is_consumer_lag_reason(reason)
-            ):
+            if reason is not None and (was_available or is_consumer_lag_reason(reason)):
                 self._notify_market_state_gap(reason)
         self._refresh_entry_gate()
 

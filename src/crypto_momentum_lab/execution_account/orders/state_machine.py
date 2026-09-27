@@ -161,9 +161,7 @@ class PreparedOrderSubmission:
         if self.submitting_event.state is not ExchangeOrderState.SUBMITTING:
             raise ValueError("prepared submission must contain a SUBMITTING event")
         if self.submitting_event.client_order_id != self.plan.client_order_id:
-            raise ValueError(
-                "prepared submission event must reference the order plan"
-            )
+            raise ValueError("prepared submission event must reference the order plan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,9 +247,7 @@ class OrderExecutionStateMachine:
             if prepared_submission.plan != plan:
                 raise ValueError("prepared submission does not match order plan")
             if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                raise ValueError(
-                    "shadow submit cannot use a prepared live submission"
-                )
+                raise ValueError("shadow submit cannot use a prepared live submission")
         else:
             await self._repository.save_planned_order(plan)
         if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
@@ -366,8 +362,7 @@ class OrderExecutionStateMachine:
                 plan,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 details={
-                    "reason": query_result.reason
-                    or "reconciliation_order_not_found",
+                    "reason": query_result.reason or "reconciliation_order_not_found",
                     "reconciliation_attempts": query_result.attempts,
                 },
             )
@@ -398,9 +393,7 @@ class OrderExecutionStateMachine:
     ) -> OrderExecutionResult:
         """Close an unknown order after an independent absence proof."""
         if not plan.quantized:
-            raise ValueError(
-                "order plan must be quantized before absence resolution"
-            )
+            raise ValueError("order plan must be quantized before absence resolution")
         if self._lock is None:
             return await self._mark_absent_reconciled(plan, details=details)
         async with self._lock:

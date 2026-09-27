@@ -33,9 +33,7 @@ def test_account_balance_table_has_descending_latest_index() -> None:
         and str(index.expressions[-1]).endswith("observed_at DESC")
         for index in balances.indexes
     )
-    assert all(
-        index.name != "ix_account_balance_latest" for index in balances.indexes
-    )
+    assert all(index.name != "ix_account_balance_latest" for index in balances.indexes)
     assert any(
         index.name == "ix_account_balance_asset_hour_observed"
         for index in balances.indexes
@@ -66,32 +64,21 @@ def test_strategy_run_relationships_are_declared() -> None:
     paper_fills = Base.metadata.tables["paper_fills"]
     checkpoints = Base.metadata.tables["strategy_checkpoints"]
 
-    assert _foreign_key_targets(strategy_signals, "run_id") == {
-        "strategy_runs.run_id"
-    }
-    assert _foreign_key_targets(candidates, "run_id") == {
-        "strategy_runs.run_id"
-    }
+    assert _foreign_key_targets(strategy_signals, "run_id") == {"strategy_runs.run_id"}
+    assert _foreign_key_targets(candidates, "run_id") == {"strategy_runs.run_id"}
     assert _foreign_key_targets(candidates, "signal_id") == {
         "strategy_signals.signal_id"
     }
-    assert _foreign_key_targets(paper_fills, "run_id") == {
-        "strategy_runs.run_id"
-    }
+    assert _foreign_key_targets(paper_fills, "run_id") == {"strategy_runs.run_id"}
     assert _foreign_key_targets(paper_fills, "candidate_id") == {
         "order_intent_candidates.candidate_id"
     }
     assert _foreign_key_targets(paper_fills, "signal_id") == {
         "strategy_signals.signal_id"
     }
-    assert _foreign_key_targets(checkpoints, "run_id") == {
-        "strategy_runs.run_id"
-    }
+    assert _foreign_key_targets(checkpoints, "run_id") == {"strategy_runs.run_id"}
 
 
 def _foreign_key_targets(table: object, column_name: str) -> set[str]:
     column = table.c[column_name]
-    return {
-        f"{key.column.table.name}.{key.column.name}"
-        for key in column.foreign_keys
-    }
+    return {f"{key.column.table.name}.{key.column.name}" for key in column.foreign_keys}

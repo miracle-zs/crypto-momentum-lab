@@ -52,10 +52,10 @@ def test_legacy_identity_report_reconstructs_each_exchange_attempt() -> None:
     assert len(report) == 1
     assert report[0]["reconstructible"] is True
     assert report[0]["exchange_order_ids"] == ["778660371", "778660681"]
-    assert [
-        attempt["reconstructed_quantity"]
-        for attempt in report[0]["attempts"]
-    ] == ["1371", "415"]
+    assert [attempt["reconstructed_quantity"] for attempt in report[0]["attempts"]] == [
+        "1371",
+        "415",
+    ]
 
 
 def test_legacy_identity_report_marks_missing_attempt_quantity_unresolved() -> None:

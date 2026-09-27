@@ -47,9 +47,7 @@ def validate_missing_order_resolution(
         raise RuntimeError("executed quantity is non-zero")
     age_seconds = (now - created_at).total_seconds()
     if age_seconds < min_missing_age_seconds:
-        raise RuntimeError(
-            f"order is younger than {min_missing_age_seconds:g} seconds"
-        )
+        raise RuntimeError(f"order is younger than {min_missing_age_seconds:g} seconds")
     if exchange_order_found:
         raise RuntimeError("exchange order still exists")
     if matching_open_order_found:

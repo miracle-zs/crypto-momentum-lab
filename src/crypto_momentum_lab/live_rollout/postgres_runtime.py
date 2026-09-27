@@ -31,7 +31,6 @@ from crypto_momentum_lab.domain.execution.position_batches import (
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
-    PositionHealthStatus,
     PositionKey,
     compose_fact_coverage,
 )
@@ -59,7 +58,6 @@ from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
     LegacyOrderIdentityAdapter,
     PositionLedgerShadowComparator,
-    ShadowDiffCategory,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -1879,9 +1877,7 @@ def _classify_live_positions_detailed(
                 ),
                 batch_id=(batches[0].batch_id if len(batches) == 1 else None),
                 batches=batches,
-                projection_version=(
-                    batches[0].projection_version if batches else None
-                ),
+                projection_version=(batches[0].projection_version if batches else None),
             )
         )
     return (
@@ -2415,23 +2411,29 @@ def _build_position_batches(
         entry_price=position.entry_price,
         observed_at=getattr(position, "observed_at", None),
     )
-    history = PositionHistory(
-        orders=matching_orders,
-        fill_times=fill_times,
-        fill_prices=fill_prices,
-    )
-    result = rebuild_position_batches(observation, history)
-    for diag in result.diagnostics:
-        if diag.kind == "reassigned":
-            log.warning(
-                "live_exit_batch_binding_reassigned",
-                symbol=diag.symbol,
-                client_order_id=diag.client_order_id,
-                bound_batch_id=diag.bound_batch_id,
-                fallback_batch_id=diag.target_batch_id,
-                filled_quantity=str(diag.filled_quantity),
-                reassigned_quantity=str(diag.reassigned_quantity),
-            )
+    is_primary_enabled = os.environ.get(
+        "CML_POSITION_LEDGER_PRIMARY_ENABLED", "1"
+    ).lower() in {"1", "true", "yes"}
+
+    if not is_primary_enabled:
+        history = PositionHistory(
+            orders=matching_orders,
+            fill_times=fill_times,
+            fill_prices=fill_prices,
+        )
+        result = rebuild_position_batches(observation, history)
+        for diag in result.diagnostics:
+            if diag.kind == "reassigned":
+                log.warning(
+                    "live_exit_batch_binding_reassigned",
+                    symbol=diag.symbol,
+                    client_order_id=diag.client_order_id,
+                    bound_batch_id=diag.bound_batch_id,
+                    fallback_batch_id=diag.target_batch_id,
+                    filled_quantity=str(diag.filled_quantity),
+                    reassigned_quantity=str(diag.reassigned_quantity),
+                )
+        return result.batches
 
     # Authoritative PositionLedger projection: builds primary batches
     # with zero-gap reconciliation.
@@ -2481,62 +2483,68 @@ def _build_position_batches(
         )
         ledger = PositionLedger(position_key)
         shadow_projection = ledger.project(facts)
-        diff_report = PositionLedgerShadowComparator.compare(
-            position_key=position_key,
-            legacy_batches=result.batches,
-            ledger_projection=shadow_projection,
-        )
-        if not diff_report.is_concordant:
-            log.info(
-                "shadow_position_ledger_divergence",
+
+        # Read-only shadow comparison against legacy rebuild
+        # (retained solely for diagnostic logs)
+        try:
+            history = PositionHistory(
+                orders=matching_orders,
+                fill_times=fill_times,
+                fill_prices=fill_prices,
+            )
+            legacy_result = rebuild_position_batches(observation, history)
+            diff_report = PositionLedgerShadowComparator.compare(
+                position_key=position_key,
+                legacy_batches=legacy_result.batches,
+                ledger_projection=shadow_projection,
+            )
+            if not diff_report.is_concordant:
+                log.info(
+                    "shadow_position_ledger_divergence",
+                    symbol=position.symbol,
+                    category=diff_report.category.value,
+                    legacy_count=diff_report.legacy_batch_count,
+                    ledger_count=diff_report.ledger_batch_count,
+                    details=diff_report.details,
+                )
+        except Exception as shadow_exc:
+            log.debug(
+                "shadow_position_ledger_comparison_skipped",
                 symbol=position.symbol,
-                category=diff_report.category.value,
-                legacy_count=diff_report.legacy_batch_count,
-                ledger_count=diff_report.ledger_batch_count,
-                details=diff_report.details,
+                error=str(shadow_exc),
             )
 
-        is_primary_enabled = os.environ.get(
-            "CML_POSITION_LEDGER_PRIMARY_ENABLED", "1"
-        ).lower() in {"1", "true", "yes"}
-        if is_primary_enabled:
-            ledger_is_ready = (
-                shadow_projection.health_status
-                in (PositionHealthStatus.READY, PositionHealthStatus.CATCHING_UP)
-                and shadow_projection.total_active_quantity
-                == abs(position.position_amt)
-                and shadow_projection.reconciliation_gap == Decimal("0")
-                and shadow_projection.unallocated_quantity == Decimal("0")
+        active_limit_orders = [
+            order
+            for order in matching_orders
+            if getattr(order, "plan", None) is not None
+            and getattr(order.plan, "reduce_only", False)
+            and getattr(order, "order_type", None) == "LIMIT"
+            and not getattr(getattr(order, "state", None), "terminal", False)
+        ]
+        active_market_orders = any(
+            getattr(order, "plan", None) is not None
+            and getattr(order.plan, "reduce_only", False)
+            and getattr(order, "order_type", None) == "MARKET"
+            and not getattr(getattr(order, "state", None), "terminal", False)
+            for order in matching_orders
+        )
+        recovery_order = max(
+            active_limit_orders,
+            key=lambda order: (order.created_at, order.updated_at),
+            default=None,
+        )
+        recovery_remaining = None
+        if recovery_order is not None and recovery_order.plan is not None:
+            recovery_remaining = max(
+                Decimal("0"),
+                recovery_order.plan.quantity - recovery_order.executed_quantity,
             )
-            if ledger_is_ready:
-                active_limit_orders = [
-                    order
-                    for order in matching_orders
-                    if getattr(order, "plan", None) is not None
-                    and getattr(order.plan, "reduce_only", False)
-                    and getattr(order, "order_type", None) == "LIMIT"
-                    and not getattr(getattr(order, "state", None), "terminal", False)
-                ]
-                active_market_orders = any(
-                    getattr(order, "plan", None) is not None
-                    and getattr(order.plan, "reduce_only", False)
-                    and getattr(order, "order_type", None) == "MARKET"
-                    and not getattr(getattr(order, "state", None), "terminal", False)
-                    for order in matching_orders
-                )
-                recovery_order = max(
-                    active_limit_orders,
-                    key=lambda order: (order.created_at, order.updated_at),
-                    default=None,
-                )
-                recovery_remaining = None
-                if recovery_order is not None and recovery_order.plan is not None:
-                    recovery_remaining = max(
-                        Decimal("0"),
-                        recovery_order.plan.quantity - recovery_order.executed_quantity,
-                    )
 
-                ledger_batches = tuple(
+        ledger_batches_list: list[ManagedLivePositionBatch] = []
+        if shadow_projection.active_batches:
+            for ab in shadow_projection.active_batches:
+                ledger_batches_list.append(
                     ManagedLivePositionBatch(
                         batch_id=ab.batch_id,
                         quantity=ab.quantity,
@@ -2570,37 +2578,67 @@ def _build_position_batches(
                         ),
                         projection_version=shadow_projection.projection_version,
                     )
-                    for ab in shadow_projection.active_batches
                 )
-                log.info(
-                    "position_ledger_primary_active",
-                    symbol=position.symbol,
-                    batch_count=len(ledger_batches),
-                    total_quantity=str(shadow_projection.total_active_quantity),
-                    concordant=diff_report.is_concordant,
-                )
-                return ledger_batches
 
-            log.warning(
-                "position_ledger_primary_fallback",
-                symbol=position.symbol,
-                category=diff_report.category.value,
-                details=diff_report.details,
-                is_concordant=diff_report.is_concordant,
-                position_amt=str(position.position_amt),
-                abs_position_amt=str(abs(position.position_amt)),
-                ledger_total=str(shadow_projection.total_active_quantity),
-                reconciliation_gap=str(shadow_projection.reconciliation_gap),
-                unallocated_quantity=str(shadow_projection.unallocated_quantity),
+        target_abs = abs(position.position_amt)
+        current_ledger_qty = sum(
+            (b.quantity for b in ledger_batches_list), Decimal("0")
+        )
+        if current_ledger_qty < target_abs:
+            gap_qty = target_abs - current_ledger_qty
+            gap_opened_at = getattr(position, "observed_at", None) or datetime.now(
+                tz=UTC
             )
+            gap_batch_id = f"ep_{position.symbol}_gap_{int(gap_opened_at.timestamp())}"
+            ledger_batches_list.append(
+                ManagedLivePositionBatch(
+                    batch_id=gap_batch_id,
+                    quantity=gap_qty,
+                    entry_price=position.entry_price,
+                    opened_at=gap_opened_at,
+                    exit_order_submitted_at=(
+                        recovery_order.created_at
+                        if recovery_order is not None
+                        else None
+                    ),
+                    recovery_order_client_id=(
+                        None
+                        if recovery_order is None or recovery_order.plan is None
+                        else recovery_order.plan.client_order_id
+                    ),
+                    recovery_order_plan=(
+                        None if recovery_order is None else recovery_order.plan
+                    ),
+                    recovery_order_remaining_quantity=recovery_remaining,
+                    closing_order_filled=active_market_orders,
+                    legacy_attribution=False,
+                    entry_order_count=1,
+                    entry_client_order_ids=frozenset(),
+                    projection_version=shadow_projection.projection_version,
+                )
+            )
+
+        ledger_batches = tuple(ledger_batches_list)
+        log.info(
+            "position_ledger_primary_active",
+            symbol=position.symbol,
+            batch_count=len(ledger_batches),
+            total_quantity=str(sum((b.quantity for b in ledger_batches), Decimal("0"))),
+        )
+        return ledger_batches
     except Exception as exc:
-        log.warning(
-            "shadow_position_ledger_comparison_failed",
+        log.error(
+            "authoritative_position_ledger_failed",
             symbol=position.symbol,
             error=str(exc),
         )
-
-    return result.batches
+        # Fail-closed in authoritative primary mode: never silently fall back
+        # to legacy rebuild batches.
+        err_msg = (
+            f"Authoritative PositionLedger projection failed for "
+            f"{position.symbol}: {exc}"
+        )
+        raise RuntimeError(err_msg) from exc
 
 
 def _is_entry_fill_observed(

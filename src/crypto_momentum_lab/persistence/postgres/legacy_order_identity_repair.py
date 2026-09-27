@@ -141,9 +141,7 @@ def build_legacy_identity_report(
                 "row_exchange_order_id": (
                     None if row is None else row.exchange_order_id
                 ),
-                "row_quantity": (
-                    None if row is None else str(row.quantity)
-                ),
+                "row_quantity": (None if row is None else str(row.quantity)),
                 "row_executed_quantity": (
                     None if row is None else str(row.executed_quantity)
                 ),
@@ -179,9 +177,7 @@ async def load_legacy_identity_report(
                     .group_by(ExchangeOrderEventRow.client_order_id)
                     .having(
                         func.count(
-                            func.distinct(
-                                ExchangeOrderEventRow.exchange_order_id
-                            )
+                            func.distinct(ExchangeOrderEventRow.exchange_order_id)
                         )
                         > 1
                     )
@@ -194,9 +190,7 @@ async def load_legacy_identity_report(
             await session.scalars(
                 select(ExchangeOrderRow).where(
                     ExchangeOrderRow.run_id == run_id,
-                    ExchangeOrderRow.client_order_id.in_(
-                        ambiguous_client_order_ids
-                    ),
+                    ExchangeOrderRow.client_order_id.in_(ambiguous_client_order_ids),
                 )
             )
         ).all()
@@ -210,11 +204,7 @@ async def load_legacy_identity_report(
         ).all()
         exchange_order_ids = tuple(
             sorted(
-                {
-                    event.exchange_order_id
-                    for event in events
-                    if event.exchange_order_id
-                }
+                {event.exchange_order_id for event in events if event.exchange_order_id}
             )
         )
         fills: Sequence[AccountFillEventRow] = ()

@@ -106,9 +106,7 @@ async def ensure_event_partitions(
 
     end = _ceil_event_partition_end(through)
     start = floor_event_partition_start(
-        datetime.now(UTC) - EVENT_PARTITION_INTERVAL
-        if from_at is None
-        else from_at
+        datetime.now(UTC) - EVENT_PARTITION_INTERVAL if from_at is None else from_at
     )
     if end <= start:
         return 0
@@ -190,9 +188,7 @@ async def drop_expired_event_partitions(
                             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
                             {"lock_key": lock_key},
                         )
-                    await drop_session.execute(
-                        text("SET LOCAL lock_timeout = '2s'")
-                    )
+                    await drop_session.execute(text("SET LOCAL lock_timeout = '2s'"))
                     await drop_session.execute(
                         text(f"DROP TABLE {_quote_identifier(name)}")
                     )
@@ -233,22 +229,24 @@ async def prepare_event_partition(
             if await _table_is_partitioned(session, EVENT_TABLE):
                 raise RuntimeError(f"{EVENT_TABLE} is already partitioned")
             if await _table_exists(session, EVENT_SHADOW_TABLE):
-                raise RuntimeError(
-                    f"shadow table already exists: {EVENT_SHADOW_TABLE}"
-                )
+                raise RuntimeError(f"shadow table already exists: {EVENT_SHADOW_TABLE}")
 
             source = _quote_identifier(EVENT_TABLE)
             shadow = _quote_identifier(EVENT_SHADOW_TABLE)
             summary = (
-                await session.execute(
-                    text(
-                        f"SELECT count(*)::bigint AS row_count, "
-                        f"min(\"occurred_at\") AS first_at, "
-                        f"max(\"occurred_at\") AS last_at "
-                        f"FROM {source}"
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT count(*)::bigint AS row_count, "
+                            f'min("occurred_at") AS first_at, '
+                            f'max("occurred_at") AS last_at '
+                            f"FROM {source}"
+                        )
                     )
                 )
-            ).one()._mapping
+                .one()
+                ._mapping
+            )
             source_rows = int(summary["row_count"])
             first_at = summary["first_at"]
             last_at = summary["last_at"]
@@ -261,7 +259,7 @@ async def prepare_event_partition(
                 text(
                     f"CREATE TABLE {shadow} "
                     f"(LIKE {source} INCLUDING DEFAULTS INCLUDING CONSTRAINTS) "
-                    f"PARTITION BY RANGE (\"occurred_at\")"
+                    f'PARTITION BY RANGE ("occurred_at")'
                 )
             )
             first_partition_start = floor_event_partition_start(first_at)
@@ -313,8 +311,7 @@ async def cutover_event_partition(
                 raise RuntimeError(f"{EVENT_TABLE} is already partitioned")
             if not await _table_is_partitioned(session, EVENT_SHADOW_TABLE):
                 raise RuntimeError(
-                    "partitioned shadow table is missing: "
-                    f"{EVENT_SHADOW_TABLE}"
+                    f"partitioned shadow table is missing: {EVENT_SHADOW_TABLE}"
                 )
             if await _table_exists(session, resolved_legacy_table):
                 raise RuntimeError(
@@ -362,16 +359,11 @@ async def cutover_event_partition(
                 )
             )
             await session.execute(
-                text(
-                    f"ALTER TABLE {shadow} "
-                    f"RENAME TO {_quote_identifier(EVENT_TABLE)}"
-                )
+                text(f"ALTER TABLE {shadow} RENAME TO {_quote_identifier(EVENT_TABLE)}")
             )
 
     async with session_factory() as analyze_session:
-        await analyze_session.execute(
-            text(f"ANALYZE {_quote_identifier(EVENT_TABLE)}")
-        )
+        await analyze_session.execute(text(f"ANALYZE {_quote_identifier(EVENT_TABLE)}"))
         await analyze_session.commit()
 
     return EventPartitionCutoverReport(
@@ -431,15 +423,12 @@ async def _create_shadow_indexes(session: AsyncSession) -> None:
         text(
             f"ALTER TABLE {shadow} ADD CONSTRAINT "
             f"{_quote_identifier(_EVENT_PRIMARY_KEY)} PRIMARY KEY "
-            f"(\"event_id\", \"occurred_at\")"
+            f'("event_id", "occurred_at")'
         )
     )
     for index_name, columns in _EVENT_INDEXES:
         await session.execute(
-            text(
-                f"CREATE INDEX {_quote_identifier(index_name)} "
-                f"ON {shadow} {columns}"
-            )
+            text(f"CREATE INDEX {_quote_identifier(index_name)} ON {shadow} {columns}")
         )
 
 

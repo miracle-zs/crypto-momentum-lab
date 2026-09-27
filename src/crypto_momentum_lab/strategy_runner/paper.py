@@ -2,7 +2,7 @@ import json
 import logging
 from collections import Counter, deque
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +49,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,
     StrategyRejection,
     StrategyRunIdentity,
+    StrategySide,
     StrategySignal,
     deterministic_config_hash,
 )
@@ -211,7 +212,10 @@ def run_paper_trading(
             f"CapabilityEvaluator blocked simulation: {sim_eval.reason}"
         )
     _sim_adapter = SimulationExecutionAdapter(
-        default_fill_model=FillModel(fee_rate=config.execution.taker_fee_rate),
+        default_fill_model=FillModel(
+            fee_rate=config.execution.taker_fee_rate,
+            slippage_bps=config.execution.slippage_bps,
+        ),
     )
     _decision_engine = DecisionEngine()
     try:
@@ -292,8 +296,7 @@ def run_paper_trading(
             )
             if (
                 not candle_history
-                or candle_history[-1].candle_start
-                != closed_candle.candle_start
+                or candle_history[-1].candle_start != closed_candle.candle_start
             ):
                 candle_history.append(closed_candle)
         else:
@@ -308,9 +311,8 @@ def run_paper_trading(
             config=config.portfolio,
             taker_fee_rate=config.execution.taker_fee_rate,
             closed_candle=closed_candle,
-            closed_candles=(
-                () if candle_history is None else tuple(candle_history)
-            ),
+            closed_candles=(() if candle_history is None else tuple(candle_history)),
+            allow_close=False,
         )
         for position in position_updates:
             positions_by_id[position.position_id] = position
@@ -380,12 +382,14 @@ def run_paper_trading(
             universe_version="univ_v1",
             risk_config_version="risk_v1",
         )
+        candles_tuple = () if candle_history is None else tuple(candle_history)
         dec_input = build_decision_input(
             state=state,
             frozen=frozen,
             clock_sequence=input_state_count,
             scope="paper",
             source_epoch=f"ep_{config.run_id}",
+            closed_candles=candles_tuple,
         )
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
@@ -396,13 +400,60 @@ def run_paper_trading(
                 policy_id=f"policy_{config.strategy_name}",
                 strategy_name=config.strategy_name,
                 target_notional=config.candidate_notional or Decimal("500.00"),
-                candidate_generator=(
-                    lambda inp, st, _c=raw_cand: _c
-                ),
+                candidate_generator=(lambda inp, st, _c=raw_cand: _c),
                 exit_policy=runner_exit_policy,
             )
             dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
             policy_state = dec_res.next_policy_state
+
+            if dec_res.exit_command is not None:
+                try:
+                    sim_exit_res = _sim_adapter.execute_exit(
+                        command=dec_res.exit_command,
+                        envelope=envelope,
+                        journal=journal,
+                    )
+                    pos_ids_to_close: set[str] = set()
+                    alloc_plan = dec_res.exit_command.allocation_plan
+                    if alloc_plan is not None:
+                        pos_ids_to_close = {
+                            alloc.batch_id.removeprefix("batch_")
+                            for alloc in alloc_plan.allocations
+                        }
+                    for p in tuple(positions_by_id.values()):
+                        if (
+                            p.symbol == state.symbol
+                            and p.status is PaperPositionStatus.OPEN
+                            and (
+                                not pos_ids_to_close
+                                or p.position_id in pos_ids_to_close
+                            )
+                        ):
+                            gross_pnl = (
+                                (sim_exit_res.price - p.entry_price) * p.quantity
+                                if p.side == StrategySide.LONG
+                                else (p.entry_price - sim_exit_res.price) * p.quantity
+                            )
+                            realized_pnl = gross_pnl - p.entry_fee - sim_exit_res.fee
+                            positions_by_id[p.position_id] = replace(
+                                p,
+                                status=PaperPositionStatus.CLOSED,
+                                closed_at=sim_exit_res.filled_at,
+                                exit_price=sim_exit_res.price,
+                                exit_fee=sim_exit_res.fee,
+                                last_mark_price=sim_exit_res.price,
+                                unrealized_pnl=Decimal("0"),
+                                realized_pnl=realized_pnl,
+                                return_pct=realized_pnl / p.entry_notional,
+                                close_reason=dec_res.exit_command.reason,
+                                updated_at=sim_exit_res.filled_at,
+                            )
+                except Exception as err:
+                    logger.warning(
+                        "Failed to execute paper exit for command %s: %s",
+                        dec_res.exit_command.command_id,
+                        err,
+                    )
 
             if dec_res.intent is not None:
                 candidates.append(dec_res.intent)
@@ -419,8 +470,7 @@ def run_paper_trading(
                         details={
                             "decision_id": dec_res.decision_id,
                             "raw_reason": (
-                                dec_res.rejection_reason
-                                or "decision_engine_rejected"
+                                dec_res.rejection_reason or "decision_engine_rejected"
                             ),
                             "candidate_id": raw_cand.candidate_id,
                         },

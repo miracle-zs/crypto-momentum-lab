@@ -21,22 +21,20 @@ def test_models_have_correct_indexes() -> None:
 
     # 2. ix_universe_entries_price_time must be present (F12)
     ue_indexes = {
-        arg.name
-        for arg in UniverseEntryRow.__table_args__
-        if isinstance(arg, sa.Index)
+        arg.name for arg in UniverseEntryRow.__table_args__ if isinstance(arg, sa.Index)
     }
     assert "ix_universe_entries_price_time" in ue_indexes
 
     # 3. ix_exchange_orders_unresolved_partial must be present (F12)
     eo_indexes = {
-        arg.name
-        for arg in ExchangeOrderRow.__table_args__
-        if isinstance(arg, sa.Index)
+        arg.name for arg in ExchangeOrderRow.__table_args__ if isinstance(arg, sa.Index)
     }
     assert "ix_exchange_orders_unresolved_partial" in eo_indexes
 
 
-def test_0037_downgrade_guards_against_partitioned_table(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_0037_downgrade_guards_against_partitioned_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F13: downgrade() in 0037 must raise RuntimeError when strategy_runtime_events is partitioned."""
     import importlib.util
     from pathlib import Path

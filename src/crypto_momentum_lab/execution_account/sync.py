@@ -178,9 +178,7 @@ class ExecutionAccountSyncConfig:
             if not normalized_symbol:
                 raise ValueError("recent_fill_cursors must not contain empty keys")
             if cursor.symbol.strip().upper() != normalized_symbol:
-                raise ValueError(
-                    "recent_fill_cursors keys must match cursor symbols"
-                )
+                raise ValueError("recent_fill_cursors keys must match cursor symbols")
             if (
                 cursor.environment != self.environment
                 or cursor.account_label != self.account_label
@@ -379,9 +377,7 @@ def _config_scope(config: AccountConfigSnapshot) -> tuple[str, str]:
 
 
 def _require_item_scope(
-    item: AccountBalanceSnapshot
-    | AccountPositionSnapshot
-    | AccountOpenOrderSnapshot,
+    item: AccountBalanceSnapshot | AccountPositionSnapshot | AccountOpenOrderSnapshot,
     scope: tuple[str, str],
     field_name: str,
 ) -> None:
@@ -479,9 +475,7 @@ class ExecutionAccountSyncService:
             tuple[str, str], tuple[Decimal, Decimal, datetime]
         ] = {}
         self._known_fill_keys: set[FillKey] = set()
-        self._known_fill_key_order: deque[FillKey] = deque(
-            maxlen=_FILL_KEY_CACHE_SIZE
-        )
+        self._known_fill_key_order: deque[FillKey] = deque(maxlen=_FILL_KEY_CACHE_SIZE)
         self._has_completed_sync = False
         self._latest_observation_at: datetime | None = None
         self._latest_rest_account_config: AccountConfigSnapshot | None = None
@@ -497,9 +491,7 @@ class ExecutionAccountSyncService:
         authoritative reconciliation loop.
         """
         resolved_observed_at = (
-            self._config.observed_at
-            if observed_at is None
-            else observed_at
+            self._config.observed_at if observed_at is None else observed_at
         )
         if (
             resolved_observed_at.tzinfo is None
@@ -518,15 +510,11 @@ class ExecutionAccountSyncService:
             for position in positions
             if (
                 (position.symbol, position.position_side) in active_position_keys
-                or (
-                    (position.symbol, position.position_side)
-                    in closed_position_keys
-                )
+                or ((position.symbol, position.position_side) in closed_position_keys)
             )
         )
         normalized_balances = tuple(
-            replace(balance, observed_at=resolved_observed_at)
-            for balance in balances
+            replace(balance, observed_at=resolved_observed_at) for balance in balances
         )
         persisted_balances = self._balances_to_persist(normalized_balances)
         normalized_positions = tuple(
@@ -615,9 +603,7 @@ class ExecutionAccountSyncService:
             self._latest_rest_account_config = account_config
             reconciliation_id = _reconciliation_id(config)
             mismatches: list[str] = []
-            if account_config.multi_assets_mode != (
-                config.expected_multi_assets_mode
-            ):
+            if account_config.multi_assets_mode != (config.expected_multi_assets_mode):
                 mismatches.append("multi_assets_mode_mismatch")
             if account_config.hedge_mode != config.expected_hedge_mode:
                 mismatches.append("hedge_mode_mismatch")
@@ -676,9 +662,7 @@ class ExecutionAccountSyncService:
                 for symbol, _position_side in previous_active_position_keys
             }
             newly_active_symbols = (
-                {
-                    position.symbol.strip().upper() for position in active_positions
-                }
+                {position.symbol.strip().upper() for position in active_positions}
                 - previous_active_symbols
                 if self._has_completed_sync
                 else set()
@@ -686,24 +670,15 @@ class ExecutionAccountSyncService:
             start_time_by_symbol = {
                 symbol: cursor.start_time_ms
                 for symbol, cursor in previous_fill_cursors.items()
-                if (
-                    cursor.from_id is None
-                    and cursor.start_time_ms is not None
-                )
+                if (cursor.from_id is None and cursor.start_time_ms is not None)
             }
             from_id_by_symbol = {
                 symbol: cursor.from_id
                 for symbol, cursor in previous_fill_cursors.items()
-                if (
-                    cursor.from_id is not None
-                    and symbol in tracked_fill_symbols
-                )
+                if (cursor.from_id is not None and symbol in tracked_fill_symbols)
             }
             new_position_start_at = int(
-                (
-                    config.observed_at - _NEW_POSITION_FILL_LOOKBACK
-                ).timestamp()
-                * 1000
+                (config.observed_at - _NEW_POSITION_FILL_LOOKBACK).timestamp() * 1000
             )
             for symbol in newly_active_symbols:
                 if symbol not in previous_fill_cursors:
@@ -712,10 +687,7 @@ class ExecutionAccountSyncService:
             # Bound it explicitly so userTrades never falls back to "latest
             # 1000 fills of every prior episode" for that symbol.
             historical_start_at = int(
-                (
-                    config.observed_at - _HISTORICAL_FILL_LOOKBACK
-                ).timestamp()
-                * 1000
+                (config.observed_at - _HISTORICAL_FILL_LOOKBACK).timestamp() * 1000
             )
             for symbol in tracked_fill_symbols:
                 if symbol in from_id_by_symbol:
@@ -740,10 +712,7 @@ class ExecutionAccountSyncService:
                 key
                 for key in fill_keys
                 if (
-                    (
-                        key[0] in previous_fill_cursors
-                        or key[0] in newly_active_symbols
-                    )
+                    (key[0] in previous_fill_cursors or key[0] in newly_active_symbols)
                     and key not in self._known_fill_keys
                 )
             )
@@ -777,8 +746,7 @@ class ExecutionAccountSyncService:
             new_fills = tuple(
                 fill
                 for fill in fills
-                if (fill.symbol.strip().upper(), fill.trade_id.strip())
-                in new_fill_keys
+                if (fill.symbol.strip().upper(), fill.trade_id.strip()) in new_fill_keys
             )
             self._remember_balance_values(balances)
             for key in fill_keys:
@@ -845,9 +813,7 @@ class ExecutionAccountSyncService:
             )
             or result.snapshot is None
         ):
-            raise ValueError(
-                "only a ready or syncing account result can be persisted"
-            )
+            raise ValueError("only a ready or syncing account result can be persisted")
         snapshot = result.snapshot
         if (
             self._latest_observation_at is not None
@@ -862,9 +828,7 @@ class ExecutionAccountSyncService:
                     cursors=result.fill_cursor_updates,
                 )
                 if result.fill_cursor_updates:
-                    self._update_fill_cursors_monotonically(
-                        result.fill_cursor_updates
-                    )
+                    self._update_fill_cursors_monotonically(result.fill_cursor_updates)
             return
         config = replace(
             self._config,
@@ -912,9 +876,7 @@ class ExecutionAccountSyncService:
             observed_at=snapshot.config.observed_at,
         )
         if result.fill_cursor_updates:
-            self._update_fill_cursors_monotonically(
-                result.fill_cursor_updates
-            )
+            self._update_fill_cursors_monotonically(result.fill_cursor_updates)
         await self._save_state(
             (
                 ExecutionAccountStatus.SYNCING
@@ -1047,9 +1009,7 @@ class ExecutionAccountSyncService:
         active_fill_symbols: set[str],
         observed_at: datetime,
     ) -> tuple[str, ...]:
-        historical_cutoff = (
-            observed_at - self._historical_fill_reconciliation_interval
-        )
+        historical_cutoff = observed_at - self._historical_fill_reconciliation_interval
         due_historical_symbols = {
             symbol
             for symbol in self._tracked_fill_symbols
@@ -1086,9 +1046,7 @@ class ExecutionAccountSyncService:
             balance
             for balance in balances
             if _balance_has_value(balance)
-            or _balance_value_is_nonzero(
-                self._last_balance_values.get(balance.asset)
-            )
+            or _balance_value_is_nonzero(self._last_balance_values.get(balance.asset))
         )
 
     def _positions_to_persist(
@@ -1183,8 +1141,7 @@ class ExecutionAccountSyncService:
         if target_state is None:
             if (
                 not self._has_completed_sync
-                or self._last_persisted_process_state
-                == ExecutionAccountStatus.SYNCING
+                or self._last_persisted_process_state == ExecutionAccountStatus.SYNCING
             ):
                 target_state = ExecutionAccountStatus.SYNCING
             else:
@@ -1255,10 +1212,7 @@ def _balance_value_is_nonzero(value: BalanceValue | None) -> bool:
 
 
 def _fill_keys(fills: tuple[AccountFillEvent, ...]) -> set[FillKey]:
-    return {
-        (fill.symbol.strip().upper(), fill.trade_id.strip())
-        for fill in fills
-    }
+    return {(fill.symbol.strip().upper(), fill.trade_id.strip()) for fill in fills}
 
 
 def _fill_counts_by_symbol(

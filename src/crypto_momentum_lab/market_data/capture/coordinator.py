@@ -115,9 +115,7 @@ class CaptureCoordinator:
 
     def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
         """Bound ingress and continuity state to the active symbol set."""
-        normalized = frozenset(
-            symbol.upper() for symbol in symbols
-        )
+        normalized = frozenset(symbol.upper() for symbol in symbols)
         self._monitored_symbols = normalized
         self._quality.set_monitored_symbols(normalized)
         if self._envelope_recovery is not None:
@@ -134,9 +132,8 @@ class CaptureCoordinator:
         return True
 
     async def submit(self, envelope: RawEnvelope) -> None:
-        if (
-            envelope.symbol is not None
-            and not self.accepts_symbol(envelope.stream, envelope.symbol)
+        if envelope.symbol is not None and not self.accepts_symbol(
+            envelope.stream, envelope.symbol
         ):
             return
         await self._queue.put(envelope)
@@ -186,9 +183,7 @@ class CaptureCoordinator:
                 if self._requires_side_effect_processing(envelope)
             )
             results = (
-                await asyncio.gather(*tasks, return_exceptions=True)
-                if tasks
-                else ()
+                await asyncio.gather(*tasks, return_exceptions=True) if tasks else ()
             )
 
             failures = tuple(
@@ -210,17 +205,13 @@ class CaptureCoordinator:
     async def _process_envelope(self, envelope: RawEnvelope) -> None:
         quality_events = self._quality.observe(envelope)
         should_archive = (
-            self._archive_streams is None
-            or envelope.stream in self._archive_streams
+            self._archive_streams is None or envelope.stream in self._archive_streams
         )
         acknowledgement = (
             await self._archive.append(envelope) if should_archive else None
         )
         await self._save_quality_events(quality_events)
-        if (
-            acknowledgement is not None
-            and self._acknowledgement_sink is not None
-        ):
+        if acknowledgement is not None and self._acknowledgement_sink is not None:
             result = self._acknowledgement_sink(acknowledgement)
             if inspect.isawaitable(result):
                 await result

@@ -36,7 +36,9 @@ def test_initial_state_is_connecting_and_times_out():
     assert clock.remaining_budget() == 15.0
 
     current_time += 15.0
-    with pytest.raises(StreamAvailabilityTimeoutError, match="startup timeout of 30.0s exceeded"):
+    with pytest.raises(
+        StreamAvailabilityTimeoutError, match="startup timeout of 30.0s exceeded"
+    ):
         clock.check_timeout()
 
 
@@ -202,5 +204,7 @@ def test_recovery_timeout_triggers_if_snapshot_never_arrives():
     assert clock.state == StreamAvailabilityState.RECOVERING
 
     current_time += 20.0
-    with pytest.raises(StreamAvailabilityTimeoutError, match="recovery timeout of 20.0s exceeded"):
+    with pytest.raises(
+        StreamAvailabilityTimeoutError, match="recovery timeout of 20.0s exceeded"
+    ):
         clock.check_timeout()

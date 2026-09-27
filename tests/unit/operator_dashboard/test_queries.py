@@ -512,7 +512,6 @@ def test_decision_slo_response_preserves_true_unfiltered_latencies() -> None:
     assert samples.max_ms == 54000.0
 
 
-
 async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     window_end = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
     event = SimpleNamespace(
@@ -1312,7 +1311,9 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
     assert resp.status in (OperationalStatus.DEGRADED, OperationalStatus.STALE)
 
 
-async def test_readiness_allows_fully_tradeable_when_services_include_database_ready() -> None:
+async def test_readiness_allows_fully_tradeable_when_services_include_database_ready() -> (
+    None
+):
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
         LiveAccountSummaryResponse,
@@ -1422,7 +1423,9 @@ async def test_readiness_shields_exceptions_to_degraded_response() -> None:
 
 
 def test_live_account_status_syncing_is_degraded() -> None:
-    from crypto_momentum_lab.operator_dashboard.overview_queries import live_account_status
+    from crypto_momentum_lab.operator_dashboard.overview_queries import (
+        live_account_status,
+    )
 
     now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
     status = live_account_status("syncing", observed_at=now, now=now)
@@ -1431,7 +1434,9 @@ def test_live_account_status_syncing_is_degraded() -> None:
 
 async def test_risk_execution_computes_data_age_and_freshness() -> None:
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     now = datetime.now(UTC)
     old_time = now - timedelta(seconds=200)
@@ -1486,7 +1491,9 @@ async def test_risk_execution_computes_data_age_and_freshness() -> None:
 
 async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None:
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
     from crypto_momentum_lab.persistence.postgres.models import ExchangeOrderRow
 
     now = datetime.now(UTC)
@@ -1536,7 +1543,9 @@ async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None
 
 async def test_risk_execution_filters_by_environment_and_complete_data() -> None:
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     scalars_mock = MagicMock()
     scalars_mock.all.side_effect = [[], [], []]
@@ -1564,7 +1573,9 @@ async def test_risk_execution_filters_by_environment_and_complete_data() -> None
 async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
     """F04: A single fresh symbol cannot mask a stale symbol among required symbols."""
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     now = datetime.now(UTC)
     fresh_time = now - timedelta(seconds=5)
@@ -1601,7 +1612,9 @@ async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
 async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
     """F04: Incomplete symbol coverage must cause STALE status, even if present symbol is fresh."""
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     now = datetime.now(UTC)
     fresh_time = now - timedelta(seconds=5)
@@ -1636,7 +1649,9 @@ async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
 async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
     """F04: When all required symbols have complete, fresh data, status is READY / LIVE."""
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     now = datetime.now(UTC)
     btc_time = now - timedelta(seconds=5)
@@ -1675,7 +1690,9 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     """F04: When coverage query fails, API MUST return only safe error code & trace ID without raw exception text."""
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
 
     now = datetime.now(UTC)
     fresh_time = now - timedelta(seconds=5)
@@ -1707,7 +1724,9 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
     assert resp.coverage_trace_id is not None
     assert resp.coverage_trace_id.startswith("cov_")
-    assert resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
+    assert (
+        resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
+    )
 
     # Critical security assertion: NEVER leak raw exception, credentials, or internal topology to the response!
     assert "secret_12345" not in resp.coverage_error
@@ -1719,7 +1738,9 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
 async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
     """F04: If halts exist when coverage query fails, status is HALTED but safe error code & trace are preserved."""
     from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        RiskExecutionQueries,
+    )
     from crypto_momentum_lab.persistence.postgres.models import RiskHaltRow
 
     now = datetime.now(UTC)
@@ -1749,22 +1770,30 @@ async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> N
     assert resp.coverage_scope == "QUERY_ERROR"
     assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
     assert resp.coverage_trace_id is not None
-    assert resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
+    assert (
+        resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
+    )
     assert resp.missing_symbols == []
 
 
 def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     """F04: Log sanitization must redact client_secret, access_token, JSON/colon passwords, Authorization Bearer, and DSNs."""
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import _sanitize_error_detail
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        _sanitize_error_detail,
+    )
 
     # 1. Database DSN credentials
-    exc_dsn = RuntimeError("Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod")
+    exc_dsn = RuntimeError(
+        "Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod"
+    )
     sanitized_dsn = _sanitize_error_detail(exc_dsn)
     assert "super_secret_pw" not in sanitized_dsn
     assert "postgresql://cml_user:***@10.0.0.1:5432/cml_prod" in sanitized_dsn
 
     # 2. client_secret=... and access_token=...
-    exc_tokens = RuntimeError("OAuth failed client_secret=cs_live_99887766 and access_token=at_live_11223344")
+    exc_tokens = RuntimeError(
+        "OAuth failed client_secret=cs_live_99887766 and access_token=at_live_11223344"
+    )
     sanitized_tokens = _sanitize_error_detail(exc_tokens)
     assert "cs_live_99887766" not in sanitized_tokens
     assert "at_live_11223344" not in sanitized_tokens
@@ -1772,15 +1801,22 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     assert "access_token=***" in sanitized_tokens
 
     # 3. JSON format passwords and secrets
-    exc_json = ValueError('Invalid json {"password": "p@ssw0rd123", "client_secret": "cs_json_456", "access_token": "at_json_789"}')
+    exc_json = ValueError(
+        'Invalid json {"password": "p@ssw0rd123", "client_secret": "cs_json_456", "access_token": "at_json_789"}'
+    )
     sanitized_json = _sanitize_error_detail(exc_json)
     assert "p@ssw0rd123" not in sanitized_json
     assert "cs_json_456" not in sanitized_json
     assert "at_json_789" not in sanitized_json
-    assert '{"password": "***", "client_secret": "***", "access_token": "***"}' in sanitized_json
+    assert (
+        '{"password": "***", "client_secret": "***", "access_token": "***"}'
+        in sanitized_json
+    )
 
     # 4. Colon format (YAML/header/freeform): password: ...
-    exc_colon = RuntimeError("Config error password: plain_yaml_pass\nclient_secret: plain_yaml_cs")
+    exc_colon = RuntimeError(
+        "Config error password: plain_yaml_pass\nclient_secret: plain_yaml_cs"
+    )
     sanitized_colon = _sanitize_error_detail(exc_colon)
     assert "plain_yaml_pass" not in sanitized_colon
     assert "plain_yaml_cs" not in sanitized_colon
@@ -1788,18 +1824,24 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     assert "client_secret: ***" in sanitized_colon
 
     # 5. Authorization: Bearer <token> and Authorization: Basic <token>
-    exc_auth = ConnectionError("HTTP header Authorization: Bearer jwt_secret_token_123456 rejected")
+    exc_auth = ConnectionError(
+        "HTTP header Authorization: Bearer jwt_secret_token_123456 rejected"
+    )
     sanitized_auth = _sanitize_error_detail(exc_auth)
     assert "jwt_secret_token_123456" not in sanitized_auth
     assert "Authorization: Bearer ***" in sanitized_auth
 
-    exc_basic = ConnectionError("HTTP header Authorization: Basic dXNlcjpwYXNz rejected")
+    exc_basic = ConnectionError(
+        "HTTP header Authorization: Basic dXNlcjpwYXNz rejected"
+    )
     sanitized_basic = _sanitize_error_detail(exc_basic)
     assert "dXNlcjpwYXNz" not in sanitized_basic
     assert "Authorization: Basic ***" in sanitized_basic
 
     # 6. Standalone Bearer token
-    exc_bearer = RuntimeError("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token_payload expired")
+    exc_bearer = RuntimeError(
+        "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token_payload expired"
+    )
     sanitized_bearer = _sanitize_error_detail(exc_bearer)
     assert "token_payload" not in sanitized_bearer
     assert "Bearer ***" in sanitized_bearer
@@ -1810,13 +1852,17 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     assert "ak_live_xyz987" not in sanitized_api
     assert "sig1234567" not in sanitized_api
 
-    exc_query = RuntimeError("URL request https://api.binance.com/api/v3/order?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed")
+    exc_query = RuntimeError(
+        "URL request https://api.binance.com/api/v3/order?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed"
+    )
     sanitized_query = _sanitize_error_detail(exc_query)
     assert "d98a72ef8912" not in sanitized_query
     assert "signature=***" in sanitized_query
 
     # 8. Private key blocks
-    exc_pkey = RuntimeError("Bad key: -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----")
+    exc_pkey = RuntimeError(
+        "Bad key: -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----"
+    )
     sanitized_pkey = _sanitize_error_detail(exc_pkey)
     assert "MIIEowIBAAKCAQEA0" not in sanitized_pkey
     assert "[REDACTED_PRIVATE_KEY]" in sanitized_pkey
@@ -1840,7 +1886,9 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
 
 def test_extract_sqlstate_retrieves_pgcode_or_sqlstate() -> None:
     """F04: Helper extracts standard SQLSTATE from DBAPI/SQLAlchemy exceptions."""
-    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import _extract_sqlstate
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+        _extract_sqlstate,
+    )
 
     class MockOrig:
         pgcode = "08006"
@@ -1871,6 +1919,7 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     mock_session = AsyncMock()
 
     from uuid import uuid4
+
     snap1 = AccountBalanceSnapshotRow(
         snapshot_id=uuid4(),
         environment="live",
@@ -1957,7 +2006,10 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     perf_certified = await dashboard.account_performance("primary", window_hours=24)
     assert perf_certified["coverage_status"] == "confirmed"
     assert perf_certified["is_certified"] is True
-    assert perf_certified["cash_flow_coverage_proof"] == "audited_records_count_1_with_verified_evidence"
+    assert (
+        perf_certified["cash_flow_coverage_proof"]
+        == "audited_records_count_1_with_verified_evidence"
+    )
     assert perf_certified["cash_flow_corrections_count"] == 1
 
     # Test proven empty cash flows
@@ -1972,7 +2024,3 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     assert perf_proven_empty["is_certified"] is True
     assert perf_proven_empty["cash_flow_coverage_proof"] == "proven_zero_cash_flows"
     assert perf_proven_empty["net_equity_delta"] is not None
-
-
-
-

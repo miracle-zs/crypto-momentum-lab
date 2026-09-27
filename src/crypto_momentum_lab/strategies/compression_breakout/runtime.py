@@ -652,9 +652,7 @@ def _aggregate_signal_state(
     highs = tuple(
         price for state in states if (price := _state_high(state)) is not None
     )
-    lows = tuple(
-        price for state in states if (price := _state_low(state)) is not None
-    )
+    lows = tuple(price for state in states if (price := _state_low(state)) is not None)
     return MarketState15s(
         schema_version=first.schema_version,
         exchange=first.exchange,

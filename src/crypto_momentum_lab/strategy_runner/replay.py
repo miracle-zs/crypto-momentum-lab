@@ -168,9 +168,7 @@ class EntryPolicyReplayReport:
             "source_run_id": self.source_run_id,
             "source_paths": list(self.source_paths),
             "candidate_count": self.candidate_count,
-            "comparisons": [
-                comparison.as_details() for comparison in self.comparisons
-            ],
+            "comparisons": [comparison.as_details() for comparison in self.comparisons],
             "summary": dict(self.summary),
             "policy_reasons": dict(self.policy_reasons),
             "mismatch_reasons": dict(self.mismatch_reasons),
@@ -305,9 +303,7 @@ def build_entry_policy_replay_report(
     """
 
     entry_candidates = tuple(
-        candidate
-        for candidate in replay_report.candidates
-        if not candidate.reduce_only
+        candidate for candidate in replay_report.candidates if not candidate.reduce_only
     )
 
     request_tuple = tuple(requests)
@@ -351,8 +347,7 @@ def build_entry_policy_replay_report(
             comparisons.append(compare_entry_policy_request(request))
         except (TypeError, ValueError) as error:
             raise EntryPolicyReplayError(
-                "invalid Policy input for candidate "
-                f"{candidate.candidate_id}: {error}"
+                f"invalid Policy input for candidate {candidate.candidate_id}: {error}"
             ) from error
 
     comparison_tuple = tuple(comparisons)
@@ -395,9 +390,7 @@ def read_entry_policy_comparison_requests(
     root = _mapping(payload, "comparison input root")
     _ensure_keys(root, _COMPARISON_INPUT_FIELDS, "comparison input root")
     if root.get("schema_version") != 1:
-        raise EntryPolicyReplayError(
-            "comparison input schema_version must be 1"
-        )
+        raise EntryPolicyReplayError("comparison input schema_version must be 1")
     raw_requests = root.get("requests")
     if not isinstance(raw_requests, list):
         raise EntryPolicyReplayError("comparison input requests must be a list")
@@ -442,9 +435,7 @@ def read_entry_policy_comparison_requests(
                         row.get("universe_snapshot"),
                         field_name="universe_snapshot",
                     ),
-                    ema_observed_at=_optional_datetime(
-                        row, "ema_observed_at"
-                    ),
+                    ema_observed_at=_optional_datetime(row, "ema_observed_at"),
                     ema_snapshot_id=_optional_text(row, "ema_snapshot_id"),
                     ema_config_hash=_optional_text(row, "ema_config_hash"),
                 )
@@ -466,8 +457,7 @@ def write_entry_policy_replay_report(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(jsonable(report.as_details()), indent=2, sort_keys=True)
-        + "\n",
+        json.dumps(jsonable(report.as_details()), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
@@ -610,9 +600,7 @@ def _optional_universe_snapshot(
         direction = _required_text(entry, "direction")
         rank = entry["rank"]
         if not isinstance(rank, int) or isinstance(rank, bool):
-            raise ValueError(
-                f"{field_name}.entries[{index}].rank must be an integer"
-            )
+            raise ValueError(f"{field_name}.entries[{index}].rank must be an integer")
         entries.append(
             UniverseRankingEntry(
                 symbol=_required_text(entry, "symbol"),

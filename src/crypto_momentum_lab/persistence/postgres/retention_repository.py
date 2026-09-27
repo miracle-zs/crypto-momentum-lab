@@ -29,9 +29,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
 
 log = structlog.get_logger(__name__)
 
-_RETENTION_ADVISORY_LOCK_SQL = text(
-    "SELECT pg_advisory_xact_lock(hashtext(:lock_key))"
-)
+_RETENTION_ADVISORY_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))")
 
 
 def _log_lock_failure(lock_key: str, lock_err: Exception) -> None:

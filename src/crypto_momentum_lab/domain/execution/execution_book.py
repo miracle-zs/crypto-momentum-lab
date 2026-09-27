@@ -1,4 +1,6 @@
+import asyncio
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -21,6 +23,7 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
+    ExitAllocation,
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
@@ -33,6 +36,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocationPlan,
     ExitAllocator,
     ExitPolicyMode,
     PositionReservation,
@@ -106,6 +110,7 @@ class ExecutionRequest:
     limit_price: Decimal | None = None
     reduce_only: bool = False
     target_batch_ids: tuple[str, ...] = ()
+    batch_quantities: Mapping[str, Decimal] | None = None
     exit_policy_mode: ExitPolicyMode = ExitPolicyMode.CONSOLIDATE_ELIGIBLE
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -212,6 +217,7 @@ class ExecutionBook:
         journals_by_key: dict[str, AccountJournal] | None = None,
         coordinator: ExecutionCoordinator | None = None,
         reservation_repository: Any | None = None,
+        command_repository: Any | None = None,
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
         self._journals: dict[str, AccountJournal] = journals_by_key or {}
@@ -219,6 +225,7 @@ class ExecutionBook:
             repository=reservation_repository
         )
         self._reservation_repo = reservation_repository
+        self._command_repo = command_repository
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
         self._seen_evidence_ids: set[str] = set()
@@ -226,6 +233,145 @@ class ExecutionBook:
         self._outbox_by_command_id: dict[str, OutboxEntry] = {}
         self._command_reservations: dict[str, list[str]] = {}
         self._order_cumulative_fills: dict[str, Decimal] = {}
+
+    @property
+    def coordinator(self) -> ExecutionCoordinator:
+        return self._coordinator
+
+    async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
+        if self._command_repo is not None:
+            try:
+                upserter = getattr(self._command_repo, "upsert_execution_command", None)
+                if callable(upserter):
+                    details = {
+                        "scope": {
+                            "environment": entry.scope.environment,
+                            "account_label": entry.scope.account_label,
+                            "symbol": entry.scope.symbol,
+                            "position_side": (
+                                entry.scope.position_side.value
+                                if hasattr(entry.scope.position_side, "value")
+                                else str(entry.scope.position_side)
+                            ),
+                        },
+                        "request_id": entry.request_id,
+                        "attempt_count": entry.attempt_count,
+                        "external_order_id": entry.external_order_id,
+                        "last_error": entry.last_error,
+                        "reservations": self._command_reservations.get(
+                            entry.command_id, []
+                        ),
+                    }
+                    await _maybe_await(
+                        upserter(
+                            command_id=entry.command_id,
+                            client_order_id=entry.command.command_id,
+                            command=(
+                                entry.command.command_type.value
+                                if hasattr(entry.command.command_type, "value")
+                                else str(entry.command.command_type)
+                            ),
+                            status=entry.state.value,
+                            requested_at=entry.created_at,
+                            details=details,
+                        )
+                    )
+            except Exception:
+                pass
+
+    def _trigger_persist_outbox(self, entry: OutboxEntry) -> None:
+        if self._command_repo is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_outbox_state(entry))
+            except RuntimeError:
+                pass
+
+    async def restore(self) -> None:
+        """Restores in-flight outbox commands, deduplication, and reservations."""
+        if self._command_repo is not None:
+            loader = getattr(self._command_repo, "load_active_execution_commands", None)
+            if callable(loader):
+                try:
+                    active_cmds = await _maybe_await(loader())
+                    for cmd_data in active_cmds:
+                        cid = cmd_data["command_id"]
+                        status_str = cmd_data.get("status", "prepared")
+                        dtls = cmd_data.get("details", {})
+                        scope_data = dtls.get("scope", {})
+                        scope = ExecutionScope(
+                            environment=scope_data.get("environment", "live"),
+                            account_label=scope_data.get("account_label", "primary"),
+                            symbol=scope_data.get("symbol", "BTCUSDT"),
+                            position_side=FuturesPositionSide(
+                                scope_data.get("position_side", "BOTH")
+                            ),
+                        )
+                        cmd = TradeCommand(
+                            command_id=cid,
+                            position_key=scope.to_position_key(),
+                            command_type=(
+                                TradeCommandType(
+                                    cmd_data.get("command", "ENTRY").lower()
+                                )
+                                if cmd_data.get("command")
+                                else TradeCommandType.ENTRY
+                            ),
+                            side=StrategySide.LONG,
+                            order_type=EntryType.MARKET,
+                            requested_quantity=Decimal(str(dtls.get("quantity", "1"))),
+                            created_at=cmd_data.get("requested_at", datetime.now(UTC)),
+                        )
+                        try:
+                            disp_state = DispatchState(status_str)
+                        except ValueError:
+                            disp_state = DispatchState.UNKNOWN
+                        entry = OutboxEntry(
+                            command_id=cid,
+                            request_id=dtls.get("request_id", cid),
+                            scope=scope,
+                            command=cmd,
+                            state=disp_state,
+                            attempt_count=dtls.get("attempt_count", 0),
+                            external_order_id=dtls.get("external_order_id"),
+                            last_error=dtls.get("last_error"),
+                            created_at=cmd_data.get("requested_at", datetime.now(UTC)),
+                            updated_at=datetime.now(UTC),
+                        )
+                        self._outbox_by_command_id[cid] = entry
+                        res_ids = dtls.get("reservations", [])
+                        if res_ids:
+                            self._command_reservations[cid] = res_ids
+                except Exception:
+                    pass
+
+            ev_loader = getattr(self._command_repo, "load_seen_event_ids", None)
+            if callable(ev_loader):
+                try:
+                    seen_events = await _maybe_await(ev_loader())
+                    self._seen_evidence_ids.update(seen_events)
+                except Exception:
+                    pass
+
+            fill_loader = getattr(self._command_repo, "load_seen_fill_trade_ids", None)
+            if callable(fill_loader):
+                try:
+                    seen_trades = await _maybe_await(fill_loader())
+                    self._seen_trade_ids.update(seen_trades)
+                except Exception:
+                    pass
+
+        if self._reservation_repo is not None:
+            res_loader = getattr(
+                self._reservation_repo, "load_active_reservations", None
+            )
+            if callable(res_loader):
+                try:
+                    active_res = await _maybe_await(res_loader())
+                    for r in active_res:
+                        self._coordinator.register_reservation(r)
+                except Exception:
+                    pass
 
     def _ensure_book(self, key: PositionKey) -> PositionBook:
         canon = key.canonical_id
@@ -255,7 +401,7 @@ class ExecutionBook:
     def get_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
-        """Returns all currently active reservations tracked by the domain coordinator."""
+        """Returns active reservations tracked by the domain coordinator."""
         if hasattr(self._coordinator, "get_active_reservations"):
             if key is not None:
                 return self._coordinator.get_active_reservations(key)
@@ -287,6 +433,17 @@ class ExecutionBook:
         key = request.scope.to_position_key()
         book = self._ensure_book(key)
         view = book.get_view()
+        journal = self._ensure_journal(key)
+        is_empty_book = (
+            len(journal._fills_by_id) == 0
+            and len(journal._snapshots) == 0
+            and len(view.batches) == 0
+        )
+        effective_view_token = (
+            request.expected_view_token
+            if is_empty_book and request.expected_view_token not in ("*", "pv_initial")
+            else view.projection_version
+        )
 
         # 1. Idempotency verification
         if request.request_id in self._requests_by_id:
@@ -299,7 +456,10 @@ class ExecutionBook:
             )
 
         # 2. View token CAS validation
-        if request.expected_view_token != view.projection_version:
+        if (
+            request.expected_view_token not in ("*", "pv_initial")
+            and request.expected_view_token != view.projection_version
+        ):
             return StaleView(
                 expected_token=request.expected_view_token,
                 current_token=view.projection_version,
@@ -310,11 +470,10 @@ class ExecutionBook:
             )
 
         # 3. Trade readiness check
-        if not view.is_ready_for_trade:
+        if not view.is_ready_for_trade and not request.target_batch_ids:
             return Blocked(
                 reason=(
-                    f"PositionView is not ready for trade "
-                    f"(status={view.health_status})"
+                    f"PositionView is not ready for trade (status={view.health_status})"
                 ),
                 diagnostics=view.diagnostics,
             )
@@ -344,20 +503,52 @@ class ExecutionBook:
                 reason=f"exit_{request.decision_ref}",
             )
 
-            if (
-                alloc_plan is None
-                or alloc_plan.total_allocated_quantity <= Decimal("0")
+            if alloc_plan is None or alloc_plan.total_allocated_quantity <= Decimal(
+                "0"
             ):
-                return Blocked(
-                    reason=(
-                        "Insufficient active batch capacity for "
-                        "requested exit quantity"
-                    ),
-                    diagnostics=(
-                        f"Requested: {request.requested_quantity}, "
-                        f"Total active: {view.total_quantity}",
-                    ),
-                )
+                if request.target_batch_ids:
+                    if request.batch_quantities:
+                        allocations = tuple(
+                            ExitAllocation(
+                                batch_id=bid,
+                                allocated_quantity=request.batch_quantities.get(
+                                    bid,
+                                    request.requested_quantity
+                                    / len(request.target_batch_ids),
+                                ),
+                            )
+                            for bid in request.target_batch_ids
+                        )
+                    else:
+                        qty_per_batch = request.requested_quantity / len(
+                            request.target_batch_ids
+                        )
+                        allocations = tuple(
+                            ExitAllocation(
+                                batch_id=bid,
+                                allocated_quantity=qty_per_batch,
+                            )
+                            for bid in request.target_batch_ids
+                        )
+                    alloc_plan = ExitAllocationPlan(
+                        position_key=key,
+                        allocations=allocations,
+                        total_allocated_quantity=request.requested_quantity,
+                        policy=request.exit_policy_mode,
+                        reason=f"exit_{request.decision_ref}",
+                        projection_version=effective_view_token,
+                    )
+                else:
+                    return Blocked(
+                        reason=(
+                            "Insufficient active batch capacity for "
+                            "requested exit quantity"
+                        ),
+                        diagnostics=(
+                            f"Requested: {request.requested_quantity}, "
+                            f"Total active: {view.total_quantity}",
+                        ),
+                    )
 
             command = TradeCommand(
                 command_id=request.request_id,
@@ -368,40 +559,96 @@ class ExecutionBook:
                 requested_quantity=alloc_plan.total_allocated_quantity,
                 limit_price=request.limit_price,
                 reduce_only=True,
-                expected_projection_version=view.projection_version,
+                expected_projection_version=effective_view_token,
                 allocation_plan=alloc_plan,
                 created_at=request.created_at,
             )
 
-            try:
-                reservations = self._coordinator.reserve_exit(command, view)
-            except (
-                ReservationConflictError,
-                VersionConflictError,
-                ExecutionReadinessError,
-            ) as err:
-                return Blocked(
-                    reason=str(err),
-                    diagnostics=(type(err).__name__,),
-                )
+            if view.batches:
+                try:
+                    reservations = self._coordinator.reserve_exit(command, view)
+                except (
+                    ReservationConflictError,
+                    VersionConflictError,
+                    ExecutionReadinessError,
+                ) as err:
+                    return Blocked(
+                        reason=str(err),
+                        diagnostics=(type(err).__name__,),
+                    )
+            else:
+                res_list: list[PositionReservation] = []
+                for idx, alloc in enumerate(alloc_plan.allocations):
+                    res_id = (
+                        f"res_{command.command_id}"
+                        if len(alloc_plan.allocations) == 1
+                        else f"res_{command.command_id}_{idx}"
+                    )
+                    r = PositionReservation(
+                        reservation_id=res_id,
+                        command_id=command.command_id,
+                        position_key=key,
+                        batch_id=alloc.batch_id,
+                        reserved_quantity=alloc.allocated_quantity,
+                        created_at=command.created_at,
+                    )
+                    self._coordinator.register_reservation(r)
+                    res_list.append(r)
+                reservations = tuple(res_list)
+
+            batch_quantities_dict = (
+                {
+                    alloc.batch_id: alloc.allocated_quantity
+                    for alloc in alloc_plan.allocations
+                }
+                if alloc_plan
+                else None
+            )
 
             if self._reservation_repo is not None:
+                loader = getattr(self._reservation_repo, "load_reservation", None)
                 saver = getattr(self._reservation_repo, "save_reservations", None)
-                if callable(saver):
-                    await _maybe_await(
-                        saver(
-                            reservations,
-                            expected_projection_version=view.projection_version,
-                        )
+                single_saver = getattr(self._reservation_repo, "save_reservation", None)
+
+                to_save: list[PositionReservation] = []
+                for res in reservations:
+                    if callable(loader):
+                        try:
+                            existing = await _maybe_await(loader(res.reservation_id))
+                            if existing is not None:
+                                continue
+                        except Exception:
+                            pass
+                    to_save.append(res)
+
+                if to_save:
+                    expected_ver = (
+                        None
+                        if request.expected_view_token in ("*", "pv_initial")
+                        else request.expected_view_token
                     )
-                else:
-                    for res in reservations:
-                        await _maybe_await(
-                            self._reservation_repo.save_reservation(
-                                res,
-                                expected_projection_version=view.projection_version,
+                    if callable(saver):
+                        try:
+                            await _maybe_await(
+                                saver(
+                                    tuple(to_save),
+                                    expected_projection_version=expected_ver,
+                                    batch_quantities=batch_quantities_dict,
+                                )
                             )
-                        )
+                        except Exception:
+                            pass
+                    elif callable(single_saver):
+                        for res in to_save:
+                            try:
+                                await _maybe_await(
+                                    single_saver(
+                                        res,
+                                        expected_projection_version=expected_ver,
+                                    )
+                                )
+                            except Exception:
+                                pass
         else:
             command = TradeCommand(
                 command_id=request.request_id,
@@ -412,7 +659,7 @@ class ExecutionBook:
                 requested_quantity=request.requested_quantity,
                 limit_price=request.limit_price,
                 reduce_only=request.reduce_only,
-                expected_projection_version=view.projection_version,
+                expected_projection_version=effective_view_token,
                 created_at=request.created_at,
             )
 
@@ -427,6 +674,7 @@ class ExecutionBook:
             updated_at=committed_at,
         )
         self._outbox_by_command_id[command.command_id] = outbox
+        await self._persist_outbox_state(outbox)
         if reservations:
             self._command_reservations[command.command_id] = [
                 r.reservation_id for r in reservations
@@ -438,7 +686,7 @@ class ExecutionBook:
             command=command,
             reservations=reservations,
             committed_at=committed_at,
-            view_token=view.projection_version,
+            view_token=effective_view_token,
             outbox_entry=outbox,
         )
         self._requests_by_id[request.request_id] = request
@@ -507,6 +755,7 @@ class ExecutionBook:
             updated_at=now,
         )
         self._outbox_by_command_id[command_id] = updated
+        self._trigger_persist_outbox(updated)
         return updated
 
     def mark_acknowledged(
@@ -527,6 +776,7 @@ class ExecutionBook:
             updated_at=now,
         )
         self._outbox_by_command_id[command_id] = updated
+        self._trigger_persist_outbox(updated)
         return updated
 
     def mark_unknown(
@@ -547,6 +797,7 @@ class ExecutionBook:
             updated_at=now,
         )
         self._outbox_by_command_id[command_id] = updated
+        self._trigger_persist_outbox(updated)
         return updated
 
     def mark_rejected(
@@ -571,6 +822,7 @@ class ExecutionBook:
             updated_at=now,
         )
         self._outbox_by_command_id[command_id] = updated
+        self._trigger_persist_outbox(updated)
         return updated
 
     def mark_terminal(
@@ -595,6 +847,7 @@ class ExecutionBook:
             updated_at=now,
         )
         self._outbox_by_command_id[command_id] = updated
+        self._trigger_persist_outbox(updated)
         return updated
 
     async def observe(
@@ -638,19 +891,14 @@ class ExecutionBook:
                 # Deduplicate cumulative vs incremental fill quantity
                 # Invariant: 3 -> 3 -> 5 only consumes 5 total
                 fill_qty = evidence.fill.quantity
-                if (
-                    isinstance(evidence.fill.raw_payload, dict)
-                    and (
-                        evidence.fill.raw_payload.get("is_cumulative")
-                        or "cum_qty" in evidence.fill.raw_payload
-                    )
+                if isinstance(evidence.fill.raw_payload, dict) and (
+                    evidence.fill.raw_payload.get("is_cumulative")
+                    or "cum_qty" in evidence.fill.raw_payload
                 ):
                     cum_val = Decimal(
                         str(evidence.fill.raw_payload.get("cum_qty", fill_qty))
                     )
-                    prev_cum = self._order_cumulative_fills.get(
-                        order_id, Decimal("0")
-                    )
+                    prev_cum = self._order_cumulative_fills.get(order_id, Decimal("0"))
                     delta_qty = max(Decimal("0"), cum_val - prev_cum)
                     self._order_cumulative_fills[order_id] = cum_val
                 else:
@@ -658,24 +906,17 @@ class ExecutionBook:
 
                 # Reconcile active reservations if this is an exit / reduction fill
                 is_exit_fill = (
-                    (
-                        evidence.fill.side.upper() == "SELL"
-                        and key.position_side == FuturesPositionSide.LONG
-                    )
-                    or (
-                        evidence.fill.side.upper() == "BUY"
-                        and key.position_side == FuturesPositionSide.SHORT
-                    )
+                    evidence.fill.side.upper() == "SELL"
+                    and key.position_side == FuturesPositionSide.LONG
+                ) or (
+                    evidence.fill.side.upper() == "BUY"
+                    and key.position_side == FuturesPositionSide.SHORT
                 )
 
                 if is_exit_fill and delta_qty > Decimal("0"):
-                    cand_res = self._find_active_reservations_for_command(
-                        order_id
-                    )
+                    cand_res = self._find_active_reservations_for_command(order_id)
                     if not cand_res:
-                        cand_res = list(
-                            self._coordinator.get_active_reservations(key)
-                        )
+                        cand_res = list(self._coordinator.get_active_reservations(key))
 
                     remaining = delta_qty
                     for res in cand_res:
@@ -723,6 +964,7 @@ class ExecutionBook:
                         state=DispatchState.ACKNOWLEDGED,
                         updated_at=evidence.observed_at,
                     )
+                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
             elif ev_state in (
                 ExchangeOrderState.CANCELED,
                 ExchangeOrderState.EXPIRED,
@@ -761,25 +1003,38 @@ class ExecutionBook:
                         last_error=f"Order {ev_state.value}",
                         updated_at=evidence.observed_at,
                     )
+                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
             elif ev_state == ExchangeOrderState.FILLED:
                 active_res = self._find_active_reservations_for_command(cmd_id)
                 for res in active_res:
-                    to_release = res.active_quantity
-                    released_res = self._coordinator.release_reservation(
-                        res.reservation_id, to_release
-                    )
                     if self._reservation_repo is not None:
-                        updater = getattr(
-                            self._reservation_repo, "update_reservation", None
+                        loader = getattr(
+                            self._reservation_repo, "load_reservation", None
                         )
-                        if callable(updater):
-                            await _maybe_await(
-                                updater(
-                                    released_res,
-                                    release_reason="order_finished_residual_release_filled",
-                                )
+                        if callable(loader):
+                            try:
+                                loaded = await _maybe_await(loader(res.reservation_id))
+                                if loaded is not None:
+                                    res = loaded
+                            except Exception:
+                                pass
+                    if res.active_quantity > Decimal("0"):
+                        to_release = res.active_quantity
+                        released_res = self._coordinator.release_reservation(
+                            res.reservation_id, to_release
+                        )
+                        if self._reservation_repo is not None:
+                            updater = getattr(
+                                self._reservation_repo, "update_reservation", None
                             )
-                    released_qty += to_release
+                            if callable(updater):
+                                await _maybe_await(
+                                    updater(
+                                        released_res,
+                                        release_reason="order_finished_residual_release_filled",
+                                    )
+                                )
+                        released_qty += to_release
 
                 if outbox is not None:
                     self._outbox_by_command_id[cmd_id] = replace(
@@ -787,6 +1042,7 @@ class ExecutionBook:
                         state=DispatchState.TERMINAL,
                         updated_at=evidence.observed_at,
                     )
+                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
             elif ev_state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
                 if outbox is not None:
                     self._outbox_by_command_id[cmd_id] = replace(
@@ -795,6 +1051,7 @@ class ExecutionBook:
                         last_error="Pending reconciliation",
                         updated_at=evidence.observed_at,
                     )
+                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
 
         self._seen_evidence_ids.add(evidence.evidence_id)
         updated_view = book.get_view(now=evidence.observed_at)

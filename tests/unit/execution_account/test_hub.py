@@ -1183,6 +1183,3 @@ def test_account_event_hub_bootstrap_message_caching() -> None:
     assert msg3 != msg1
     # Subsequent call reuses the new cached message
     assert hub._bootstrap_message(scope_primary) is msg3
-
-
-

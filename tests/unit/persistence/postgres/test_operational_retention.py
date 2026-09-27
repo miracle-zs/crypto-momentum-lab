@@ -57,7 +57,9 @@ def test_snapshot_history_delete_is_bounded_and_preserves_latest_rows() -> None:
     assert "limit :batch_size" in sql
 
 
-async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff() -> None:
+async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff() -> (
+    None
+):
     from crypto_momentum_lab.domain.operational.retention_contract import (
         RetentionConsumerRequirement,
     )
@@ -84,4 +86,3 @@ async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff()
     assert repository._prune_account_snapshot_table.await_count > 0
     for call in repository._prune_account_snapshot_table.await_args_list:
         assert call.kwargs["before"] == consumer_watermark
-

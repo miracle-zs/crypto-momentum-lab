@@ -91,9 +91,7 @@ class InMemoryRetentionRepository:
         scope = resolve_dataset_scope(dataset_name)
         related = set(scope.related_dataset_names())
         return tuple(
-            dep
-            for dep in self.dependencies.values()
-            if dep.dataset_name in related
+            dep for dep in self.dependencies.values() if dep.dataset_name in related
         )
 
     def save_plan(self, plan: PrunePlan) -> None:

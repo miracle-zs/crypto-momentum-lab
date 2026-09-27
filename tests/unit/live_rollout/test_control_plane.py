@@ -112,9 +112,7 @@ def _account_event(*, snapshot: object | None, sequence: int = 7) -> AccountEven
         event_at=NOW,
         received_at=NOW,
         account_state=(
-            ExecutionAccountStatus.READY_READONLY
-            if snapshot is not None
-            else None
+            ExecutionAccountStatus.READY_READONLY if snapshot is not None else None
         ),
         account_snapshot=snapshot,  # type: ignore[arg-type]
         snapshot_kind="full" if snapshot is not None else "notification",
@@ -174,8 +172,9 @@ def test_account_snapshot_recovery_fails_closed_until_full_snapshot() -> None:
     assert len(refreshes) == 2
 
 
-async def test_lease_callbacks_publish_state_and_recover_from_latest_market_state(
-) -> None:
+async def test_lease_callbacks_publish_state_and_recover_from_latest_market_state() -> (
+    None
+):
     provider = FakeContextProvider()
     gate_context = object()
     heartbeat_provider = FakeContextProvider(
@@ -216,18 +215,14 @@ def test_market_connection_changes_fail_closed_and_report_sequence_gaps() -> Non
     )
 
     assert runtime.market_state_available is False
-    assert runtime.market_state_unavailable_reason == (
-        "market_state_hub_connecting"
-    )
+    assert runtime.market_state_unavailable_reason == ("market_state_hub_connecting")
 
     runtime.on_market_connection_change(
         False,
         "market_state_consumer_lagged",
     )
     assert runtime.market_state_available is False
-    assert runtime.market_state_unavailable_reason == (
-        "market_state_consumer_lagged"
-    )
+    assert runtime.market_state_unavailable_reason == ("market_state_consumer_lagged")
     assert gap_calls == ["market_state_consumer_lagged"]
     assert telemetry.events[-1]["lag"] is True
 

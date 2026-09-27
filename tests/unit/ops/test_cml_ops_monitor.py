@@ -122,8 +122,6 @@ def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:
     assert alerts[0].severity == "critical"
 
 
-
-
 def test_database_state_reports_which_live_ready_arm_failed() -> None:
     """A not-ready live session names the failing arm, not three tables to check."""
 
@@ -349,13 +347,9 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
 
 
 def test_log_signals_alert_on_legacy_order_identity_conflict() -> None:
-    alerts = evaluate_log_signals(
-        LogSignals(legacy_order_identity_conflicts=1)
-    )
+    alerts = evaluate_log_signals(LogSignals(legacy_order_identity_conflicts=1))
 
-    assert [alert.name for alert in alerts] == [
-        "live_legacy_order_identity_conflict"
-    ]
+    assert [alert.name for alert in alerts] == ["live_legacy_order_identity_conflict"]
     assert alerts[0].severity == "critical"
 
 
@@ -527,10 +521,13 @@ def test_memory_growth_ignores_a_restart_warmup() -> None:
     }
 
     # Without a limit to compare against, the old behaviour is unchanged.
-    assert evaluate_container_memory_growth(
-        **warmup,
-        current_bytes=148 * 1024 * 1024,
-    ) != ()
+    assert (
+        evaluate_container_memory_growth(
+            **warmup,
+            current_bytes=148 * 1024 * 1024,
+        )
+        != ()
+    )
 
     # With the real limit, 148 MiB of 768 MiB is far from trouble.
     assert (
@@ -589,10 +586,13 @@ def test_container_memory_growth_requires_consecutive_samples() -> None:
         "metric_source": "cgroup_memory_current",
     }
 
-    assert evaluate_container_memory_growth(
-        **common,
-        consecutive_samples=2,
-    ) == ()
+    assert (
+        evaluate_container_memory_growth(
+            **common,
+            consecutive_samples=2,
+        )
+        == ()
+    )
 
     alerts = evaluate_container_memory_growth(
         **common,
@@ -718,8 +718,7 @@ def test_memory_growth_starts_a_new_baseline_after_container_recreation(
     assert monitor._state["memory_samples"]["market-data"] == [[180.0, 1_000]]
     assert monitor._state["memory_growth_breaches"]["market-data"] == 0
     assert (
-        monitor._state["memory_sample_container_ids"]["market-data"]
-        == "new-container"
+        monitor._state["memory_sample_container_ids"]["market-data"] == "new-container"
     )
 
 
@@ -1063,12 +1062,15 @@ def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
         "signal_count": 1,
         "candidate_count": 1,
     }
-    assert evaluate_signal_divergence(
-        (
-            SignalObservation("primary", fingerprint="same", **common),
-            SignalObservation("account-2", fingerprint="same", **common),
+    assert (
+        evaluate_signal_divergence(
+            (
+                SignalObservation("primary", fingerprint="same", **common),
+                SignalObservation("account-2", fingerprint="same", **common),
+            )
         )
-    ) == ()
+        == ()
+    )
 
     alerts = evaluate_signal_divergence(
         (
@@ -1100,12 +1102,15 @@ def test_signal_divergence_ignores_async_candidate_count_difference() -> None:
         "fingerprint": "same-signal",
     }
 
-    assert evaluate_signal_divergence(
-        (
-            SignalObservation("primary", candidate_count=1, **common),
-            SignalObservation("account-2", candidate_count=0, **common),
+    assert (
+        evaluate_signal_divergence(
+            (
+                SignalObservation("primary", candidate_count=1, **common),
+                SignalObservation("account-2", candidate_count=0, **common),
+            )
         )
-    ) == ()
+        == ()
+    )
 
 
 def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> None:
@@ -1335,14 +1340,17 @@ def test_position_intent_divergence_compares_intent_not_fills() -> None:
         )
 
     # Identical orders everywhere -- only the fills differed, so no alert.
-    assert evaluate_position_intent_divergence(
-        (
-            intent("primary", 1, "buy-limit-262"),
-            intent("account-2", 1, "buy-limit-262"),
-            intent("account-3", 1, "buy-limit-262"),
-            intent("account-4", 1, "buy-limit-262"),
+    assert (
+        evaluate_position_intent_divergence(
+            (
+                intent("primary", 1, "buy-limit-262"),
+                intent("account-2", 1, "buy-limit-262"),
+                intent("account-3", 1, "buy-limit-262"),
+                intent("account-4", 1, "buy-limit-262"),
+            )
         )
-    ) == ()
+        == ()
+    )
 
     # A different quantity is a different intent.
     alerts = evaluate_position_intent_divergence(
@@ -1364,12 +1372,15 @@ def test_position_intent_divergence_compares_intent_not_fills() -> None:
     ] == ["live_position_intent_divergence"]
 
     # Accounts on different configs are never comparable.
-    assert evaluate_position_intent_divergence(
-        (
-            OrderIntentObservation("primary", "MTLUSDT", 1, "cfg-a", "a"),
-            OrderIntentObservation("account-3", "MTLUSDT", 1, "cfg-b", "b"),
+    assert (
+        evaluate_position_intent_divergence(
+            (
+                OrderIntentObservation("primary", "MTLUSDT", 1, "cfg-a", "a"),
+                OrderIntentObservation("account-3", "MTLUSDT", 1, "cfg-b", "b"),
+            )
         )
-    ) == ()
+        == ()
+    )
 
 
 def test_position_spread_is_recorded_as_state_not_raised(tmp_path) -> None:
@@ -1484,9 +1495,7 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     )
     args = argparse.Namespace(
         project_directory=str(tmp_path),
-        compose_file=(
-            f"{tmp_path / 'compose.yaml'},{tmp_path / 'compose.live.yaml'}"
-        ),
+        compose_file=(f"{tmp_path / 'compose.yaml'},{tmp_path / 'compose.live.yaml'}"),
         services="postgres,live-strategy,live-strategy-account-2",
         live_run_id=None,
         interval_seconds=60.0,
@@ -1766,7 +1775,9 @@ def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> 
     monitor._emit(alert, now=130.0)
     assert len(delivered) == 1
     assert delivered[0]["event"] == "ops_alert"
-    assert delivered[0]["alert_name"] == "live_market_state_delay:live-strategy-account-2"
+    assert (
+        delivered[0]["alert_name"] == "live_market_state_delay:live-strategy-account-2"
+    )
 
 
 def test_resolution_debounce_requires_consecutive_passes(monkeypatch, tmp_path) -> None:
@@ -1966,21 +1977,14 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
 
     first_alerts = monitor.run_once()
     restart_commands = [
-        call
-        for call in runner.calls
-        if call[:2] == ["docker", "compose"]
+        call for call in runner.calls if call[:2] == ["docker", "compose"]
     ]
     assert len(restart_commands) == 1
     assert restart_commands[0][-2:] == ["restart", "live-strategy-account-2"]
-    assert any(
-        alert.name == "live_heartbeat_stale:account-2"
-        for alert in first_alerts
-    )
+    assert any(alert.name == "live_heartbeat_stale:account-2" for alert in first_alerts)
     archives = tuple((tmp_path / "crash-logs").glob("*.log"))
     assert len(archives) == 1
-    assert "container_id=account-2-container" in archives[0].read_text(
-        encoding="utf-8"
-    )
+    assert "container_id=account-2-container" in archives[0].read_text(encoding="utf-8")
     assert any(
         alert.details.get("crash_log_archive") == str(archives[0])
         for alert in first_alerts
@@ -1988,21 +1992,21 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
 
     now[0] += 10
     monitor.run_once()
-    assert len(
-        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
-    ) == 1
+    assert (
+        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 1
+    )
 
     now[0] += 900
     monitor.run_once()
-    assert len(
-        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
-    ) == 2
+    assert (
+        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 2
+    )
 
     now[0] += 900
     final_alerts = monitor.run_once()
-    assert len(
-        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
-    ) == 2
+    assert (
+        len([call for call in runner.calls if call[:2] == ["docker", "compose"]]) == 2
+    )
     assert any(
         alert.name == "live_heartbeat_restart_suppressed:account-2"
         for alert in final_alerts
@@ -2032,9 +2036,7 @@ def test_position_divergence_ignores_accounts_on_different_configs() -> None:
     )
 
     # Different configs: the quantity gap is expected, so no alert.
-    assert (
-        evaluate_position_divergence((left, right), stale_after_seconds=60) == ()
-    )
+    assert evaluate_position_divergence((left, right), stale_after_seconds=60) == ()
 
     same_config = PositionObservation(
         "account-2",
@@ -2074,10 +2076,7 @@ def test_position_divergence_groups_unknown_configs_apart() -> None:
         Decimal("9"),
     )
 
-    assert (
-        evaluate_position_divergence((known, unknown), stale_after_seconds=60)
-        == ()
-    )
+    assert evaluate_position_divergence((known, unknown), stale_after_seconds=60) == ()
 
 
 def test_position_intent_divergence_scope_action_and_serverchan() -> None:
@@ -2128,7 +2127,9 @@ def test_position_intent_divergence_scope_action_and_serverchan() -> None:
     assert form["title"] == "CML | 严重 | BTWUSDT | 账户下单意图发生分叉"
     assert "BTWUSDT" in form["desp"]
     assert "c223e6db" in form["desp"]
-    assert "| `account-2` | 已下单 (**1** 笔) | 买入 141 @ 0.707（限价） |" in form["desp"]
+    assert (
+        "| `account-2` | 已下单 (**1** 笔) | 买入 141 @ 0.707（限价） |" in form["desp"]
+    )
     assert "| `primary` | **未下单** (0 笔) | *(无委托)* |" in form["desp"]
     assert "检测到单边未下单" in form["desp"]
     assert "- **影响**" not in form["desp"]
@@ -2201,8 +2202,13 @@ def test_container_memory_pressure_human_formatting() -> None:
     )
     assert "[警告] market-data：服务匿名内存被换出" in form["desp"]
     assert "market-data" in form["desp"]
-    assert "物理内存用量**：`260.6 MB` / `640.0 MB`（占比 **40.7%**，峰值 262.9 MB）" in form["desp"]
-    assert "Swap 换出情况**：当前换出 `32.6 MB` （本次新增: `+32.6 MB`）" in form["desp"]
+    assert (
+        "物理内存用量**：`260.6 MB` / `640.0 MB`（占比 **40.7%**，峰值 262.9 MB）"
+        in form["desp"]
+    )
+    assert (
+        "Swap 换出情况**：当前换出 `32.6 MB` （本次新增: `+32.6 MB`）" in form["desp"]
+    )
     assert "物理内存充足" in form["desp"]
 
 
@@ -2236,7 +2242,9 @@ def test_position_and_signal_divergence_human_formatting() -> None:
         }
     )
     assert pos_form["title"] == "CML | 严重 | BTWUSDT | 账户持仓发生差异"
-    assert "分叉标的**：`BTWUSDT`（方向: BOTH，策略配置: `c223e6db`）" in pos_form["desp"]
+    assert (
+        "分叉标的**：`BTWUSDT`（方向: BOTH，策略配置: `c223e6db`）" in pos_form["desp"]
+    )
     assert "| `primary` | BOTH | **141** |" in pos_form["desp"]
     assert "| `account-2` | BOTH | **0** |" in pos_form["desp"]
 
@@ -2274,7 +2282,10 @@ def test_position_and_signal_divergence_human_formatting() -> None:
         }
     )
     assert sig_form["title"] == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
-    assert "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 23:55:00`，策略配置: `c223e6db`）" in sig_form["desp"]
+    assert (
+        "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 23:55:00`，策略配置: `c223e6db`）"
+        in sig_form["desp"]
+    )
     assert "| `primary` | **1** / 3 | - |" in sig_form["desp"]
     assert "| `account-2` | **0** / 0 | - |" in sig_form["desp"]
 
@@ -2349,10 +2360,16 @@ def test_all_alert_labels_fit_in_serverchan_title() -> None:
     for name, label in _ALERT_LABELS.items():
         # Test with primary scope
         title = _serverchan_title("严重", "primary", label)
-        assert len(title) <= 32, f"Alert {name} label '{label}' title too long: {title} ({len(title)} chars)"
+        assert len(title) <= 32, (
+            f"Alert {name} label '{label}' title too long: {title} ({len(title)} chars)"
+        )
         # Test with no scope
         title_no_scope = _serverchan_title("严重", None, label)
-        assert len(title_no_scope) <= 32, f"Alert {name} label '{label}' title without scope too long: {title_no_scope} ({len(title_no_scope)} chars)"
+        assert len(title_no_scope) <= 32, (
+            f"Alert {name} label '{label}' title without scope too long: {title_no_scope} ({len(title_no_scope)} chars)"
+        )
         # Test with recovery
         title_rec = _serverchan_title("恢复", "primary", label)
-        assert len(title_rec) <= 32, f"Alert {name} label '{label}' recovery title too long: {title_rec} ({len(title_rec)} chars)"
+        assert len(title_rec) <= 32, (
+            f"Alert {name} label '{label}' recovery title too long: {title_rec} ({len(title_rec)} chars)"
+        )

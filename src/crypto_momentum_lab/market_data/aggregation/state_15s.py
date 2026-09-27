@@ -296,9 +296,8 @@ class MarketState15sAccumulator:
                 if sequence_max is None
                 else max(sequence_max, latest_quote.source_local_sequence)
             )
-        if (
-            initial_quote is not None
-            and (last_bid_price is None or last_ask_price is None)
+        if initial_quote is not None and (
+            last_bid_price is None or last_ask_price is None
         ):
             last_bid_price, last_ask_price = initial_quote
         spread: Decimal | None = None

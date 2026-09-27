@@ -254,7 +254,6 @@ class StrategyCheckpoint:
         _ensure_json_normalizable(asdict(self), "checkpoint")
 
 
-
 @dataclass(frozen=True, slots=True)
 class StrategyDecision:
     signals: tuple[StrategySignal, ...]
@@ -267,9 +266,7 @@ class StrategyDecision:
         for candidate in self.candidates:
             signal = signals_by_id.get(candidate.signal_id)
             if signal is None:
-                raise ValueError(
-                    "candidate signal_id must reference a decision signal"
-                )
+                raise ValueError("candidate signal_id must reference a decision signal")
             if not _candidate_matches_signal(candidate, signal):
                 raise ValueError("candidate must match source signal identity")
 

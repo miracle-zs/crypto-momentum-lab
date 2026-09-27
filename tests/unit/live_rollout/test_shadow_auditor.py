@@ -515,6 +515,3 @@ def test_shadow_auditor_audit_submission_detects_batch_mismatch() -> None:
     assert result.success is True
     assert result.is_concordant is False
     assert "batch_id" in result.details
-
-
-

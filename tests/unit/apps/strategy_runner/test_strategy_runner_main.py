@@ -291,10 +291,7 @@ def test_replay_command_writes_entry_policy_comparison_report(
     assert result.exit_code == 0
     assert comparison_calls == [(replay_report, (request_marker,))]
     assert writes == [(comparison_report, compare_output)]
-    assert (
-        "Entry Policy comparison completed: matched=2 mismatched=1"
-        in result.stdout
-    )
+    assert "Entry Policy comparison completed: matched=2 mismatched=1" in result.stdout
 
 
 def test_paper_command_writes_report(tmp_path: Path, monkeypatch) -> None:
@@ -496,9 +493,7 @@ def test_paper_command_persists_with_database_url(
     )
 
     assert result.exit_code == 0
-    assert persisted == [
-        (report, "postgresql+asyncpg://cml:cml@localhost:54329/cml")
-    ]
+    assert persisted == [(report, "postgresql+asyncpg://cml:cml@localhost:54329/cml")]
     assert "persisted=true" in result.stdout
 
 
@@ -722,9 +717,7 @@ def test_paper_live_daemon_builds_daemon_config(
     assert config.entry_policy_compare_only is True
     assert calls[0]["entry_policy_comparison_observer"] is not None
     assert (tmp_path / "entry-policy.jsonl").exists()
-    assert source_calls[0]["start_at"] == datetime(
-        2026, 7, 4, 0, 5, tzinfo=UTC
-    )
+    assert source_calls[0]["start_at"] == datetime(2026, 7, 4, 0, 5, tzinfo=UTC)
     assert "resume_run_ids" not in source_calls[0]
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
@@ -759,6 +752,7 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             ),
         ),
     )
+
     def fake_build_runtime_strategy_for_cli(**kwargs) -> object:
         strategy_calls.append(kwargs)
         return object()
@@ -846,9 +840,7 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert calls[0]["strategy"] is not None
     assert calls[0]["startup_timer"] is not None
     assert len(strategy_calls) == 1
-    assert strategy_calls[0]["order_flow_min_aggressive_imbalance"] == Decimal(
-        "0.40"
-    )
+    assert strategy_calls[0]["order_flow_min_aggressive_imbalance"] == Decimal("0.40")
     assert len(identity_calls) == 6
     assert all(
         call["order_flow_min_aggressive_imbalance"] == Decimal("0.40")
@@ -866,9 +858,7 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert accounts[3].config.run_id == "c1-run"
     assert accounts[0].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[0].config.portfolio.candle_grace_bars == 8
-    assert accounts[0].config.portfolio.candle_grace_profit_pct == Decimal(
-        "0.0088"
-    )
+    assert accounts[0].config.portfolio.candle_grace_profit_pct == Decimal("0.0088")
     assert accounts[0].config.entry_filter.allow_short is False
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[2].config.portfolio.exit_mode.value == "candle_15m"
@@ -886,15 +876,11 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     )
     assert accounts[4].config.run_id == "b1-run"
     assert accounts[4].config.portfolio.candle_grace_bars == 1
-    assert accounts[4].config.portfolio.candle_grace_profit_pct == Decimal(
-        "0.0058"
-    )
+    assert accounts[4].config.portfolio.candle_grace_profit_pct == Decimal("0.0058")
     assert accounts[4].config.entry_filter.allow_short is False
     assert accounts[5].config.run_id == "b8-run"
     assert accounts[5].config.portfolio.candle_grace_bars == 8
-    assert accounts[5].config.portfolio.candle_grace_profit_pct == Decimal(
-        "0.0058"
-    )
+    assert accounts[5].config.portfolio.candle_grace_profit_pct == Decimal("0.0058")
     assert accounts[5].config.entry_filter.allow_short is False
     entry_symbols = calls[0]["entry_symbol_loader"]
     assert entry_symbols(datetime(2026, 7, 4, 0, 0, tzinfo=UTC)) == frozenset(
@@ -928,9 +914,7 @@ def test_paper_daemon_repository_disables_async_connection_pool(monkeypatch) -> 
         main,
         "async_sessionmaker",
         lambda candidate, expire_on_commit: (
-            factory
-            if candidate is engine and expire_on_commit is False
-            else None
+            factory if candidate is engine and expire_on_commit is False else None
         ),
     )
 
@@ -938,9 +922,7 @@ def test_paper_daemon_repository_disables_async_connection_pool(monkeypatch) -> 
         "postgresql+asyncpg://cml:cml@localhost:54329/cml"
     )
 
-    assert calls == [
-        ("postgresql+asyncpg://cml:cml@localhost:54329/cml", False)
-    ]
+    assert calls == [("postgresql+asyncpg://cml:cml@localhost:54329/cml", False)]
     assert repository._session_factory is factory
 
 

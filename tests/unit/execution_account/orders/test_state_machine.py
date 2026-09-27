@@ -205,8 +205,9 @@ async def test_terminal_fill_updates_order_state_and_persists_fill() -> None:
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
-async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effects(
-) -> None:
+async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effects() -> (
+    None
+):
     fill = ExchangeOrderFill(
         fill_id="fill-1",
         client_order_id=_plan().client_order_id,
@@ -243,9 +244,7 @@ async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effect
         callbacks.append(event)
 
     machine = OrderExecutionStateMachine(
-        exchange=FakeExchange(
-            submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-        ),
+        exchange=FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)),
         repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
@@ -324,8 +323,7 @@ async def test_cancel_timeout_is_fail_closed() -> None:
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert (
-        repository.events[-1].state
-        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+        repository.events[-1].state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     )
 
 

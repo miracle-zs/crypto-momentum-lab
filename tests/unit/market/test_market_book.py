@@ -267,9 +267,7 @@ def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> N
     # Simulate DB returning empty list of revisions
     mock_session.execute.return_value.scalars.return_value.all.return_value = []
 
-    with pytest.raises(
-        UnreproducibleError, match="missing revision rev_exists"
-    ):
+    with pytest.raises(UnreproducibleError, match="missing revision rev_exists"):
         repo.load_decision_trace("dec_missing_rev_1")
 
     # 2. DatasetManifestRow references a missing revision
@@ -291,9 +289,7 @@ def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> N
     )
     mock_session.get.return_value = mock_manifest_row
 
-    with pytest.raises(
-        UnreproducibleError, match="missing revision rev_missing_888"
-    ):
+    with pytest.raises(UnreproducibleError, match="missing revision rev_missing_888"):
         repo.load_manifest("mf_missing_rev_1")
 
 
@@ -338,5 +334,3 @@ def test_market_state_hash_includes_1m_candle_and_received_timestamps() -> None:
     # 4. Alter is_backfill
     state_diff_backfill = replace(base, is_backfill=True)
     assert compute_market_state_hash(state_diff_backfill) != base_hash
-
-

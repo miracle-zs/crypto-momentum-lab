@@ -61,9 +61,7 @@ class PostgresCaptureRepository:
                     )
                     if existing is not None:
                         if existing.sha256 != manifest.sha256:
-                            raise ValueError(
-                                "archive manifest checksum conflict"
-                            )
+                            raise ValueError("archive manifest checksum conflict")
                         return
                     session.add(_manifest_row(manifest))
         except Exception as error:
@@ -123,17 +121,12 @@ class PostgresCaptureRepository:
         events: Iterable[QualityEvent],
     ) -> None:
         values = tuple(
-            _quality_values(event)
-            for event in self._throttle_quality_events(events)
+            _quality_values(event) for event in self._throttle_quality_events(events)
         )
         if not values:
             return
-        statement = insert(MarketDataQualityEventRow).values(
-            values
-        )
-        statement = statement.on_conflict_do_nothing(
-            index_elements=["event_id"]
-        )
+        statement = insert(MarketDataQualityEventRow).values(values)
+        statement = statement.on_conflict_do_nothing(index_elements=["event_id"])
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(statement)

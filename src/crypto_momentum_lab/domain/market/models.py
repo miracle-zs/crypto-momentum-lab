@@ -99,9 +99,7 @@ class RawEnvelope:
     def __post_init__(self) -> None:
         if not _is_aware(self.received_at):
             raise ValueError("received_at must be timezone-aware")
-        if self.exchange_event_at is not None and not _is_aware(
-            self.exchange_event_at
-        ):
+        if self.exchange_event_at is not None and not _is_aware(self.exchange_event_at):
             raise ValueError("exchange_event_at must be timezone-aware")
         if self.local_sequence <= 0:
             raise ValueError("local_sequence must be positive")
@@ -287,9 +285,7 @@ class NormalizedMarkPrice(NormalizedEventSource):
 
     def __post_init__(self) -> None:
         NormalizedEventSource.__post_init__(self)
-        if self.next_funding_at is not None and not _is_aware(
-            self.next_funding_at
-        ):
+        if self.next_funding_at is not None and not _is_aware(self.next_funding_at):
             raise ValueError("next_funding_at must be timezone-aware")
 
 
@@ -407,13 +403,9 @@ class MarketState15s:
             raise ValueError("source_event_count must be non-negative")
         if self.missing_agg_trade_count < 0:
             raise ValueError("missing_agg_trade_count must be non-negative")
-        if self.first_received_at is not None and not _is_aware(
-            self.first_received_at
-        ):
+        if self.first_received_at is not None and not _is_aware(self.first_received_at):
             raise ValueError("first_received_at must be timezone-aware")
-        if self.last_received_at is not None and not _is_aware(
-            self.last_received_at
-        ):
+        if self.last_received_at is not None and not _is_aware(self.last_received_at):
             raise ValueError("last_received_at must be timezone-aware")
         kline_fields = (
             self.closed_kline_1m_open_time,

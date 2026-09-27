@@ -221,4 +221,3 @@ async def test_supervisor_stop_propagates_external_cancellation() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await stop_task
-

@@ -52,17 +52,13 @@ class PaperExitConfig:
         if self.initial_balance <= 0:
             raise ValueError("initial_balance must be positive")
         if self.candle_minimum_holding_buckets < 0:
-            raise ValueError(
-                "candle_minimum_holding_buckets must not be negative"
-            )
+            raise ValueError("candle_minimum_holding_buckets must not be negative")
         if self.candle_confirmation_count <= 0:
             raise ValueError("candle_confirmation_count must be positive")
         if self.candle_grace_bars < 0:
             raise ValueError("candle_grace_bars must not be negative")
         if not Decimal("0") <= self.candle_grace_profit_pct < Decimal("1"):
-            raise ValueError(
-                "candle_grace_profit_pct must be in the range [0, 1)"
-            )
+            raise ValueError("candle_grace_profit_pct must be in the range [0, 1)")
 
 
 @dataclass(slots=True)
@@ -179,8 +175,7 @@ class Candle15mAggregator:
             current.close_price = state.closed_kline_1m_close_price
 
         expected_minutes = {
-            candle_start + timedelta(minutes=offset)
-            for offset in range(15)
+            candle_start + timedelta(minutes=offset) for offset in range(15)
         }
         if current.closed_minute_starts != expected_minutes:
             return None
@@ -302,6 +297,7 @@ def mark_positions(
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
     closed_candles: tuple[ClosedCandle15m, ...] = (),
+    allow_close: bool = True,
 ) -> tuple[PaperPosition, ...]:
     updates: list[PaperPosition] = []
     observed_at = state.bucket_end
@@ -334,6 +330,17 @@ def mark_positions(
         gross_pnl = _gross_pnl(position, mark_price)
         unrealized_pnl = gross_pnl - position.entry_fee
         gross_return = gross_pnl / position.entry_notional
+        if not allow_close:
+            updates.append(
+                replace(
+                    position,
+                    last_mark_price=mark_price,
+                    unrealized_pnl=unrealized_pnl,
+                    updated_at=observed_at,
+                    last_candle_end=last_candle_end,
+                )
+            )
+            continue
         if (
             config.exit_mode is PaperExitMode.CANDLE_15M
             and config.candle_grace_bars > 0
@@ -348,9 +355,7 @@ def mark_positions(
                 taker_fee_rate=taker_fee_rate,
             )
             if grace_update is not None:
-                updates.append(
-                    replace(grace_update, last_candle_end=last_candle_end)
-                )
+                updates.append(replace(grace_update, last_candle_end=last_candle_end))
                 continue
         close_reason = _close_reason(
             gross_return=gross_return,
@@ -417,10 +422,7 @@ def _close_reason(
     closed_candle: ClosedCandle15m | None,
     closed_candles: tuple[ClosedCandle15m, ...],
 ) -> str | None:
-    if (
-        config.exit_mode is PaperExitMode.CANDLE_15M
-        and config.candle_grace_bars > 0
-    ):
+    if config.exit_mode is PaperExitMode.CANDLE_15M and config.candle_grace_bars > 0:
         if held_until >= position.opened_at + timedelta(
             seconds=config.max_holding_buckets * config.state_interval_seconds
         ):
@@ -438,8 +440,7 @@ def _close_reason(
             ),
             mode=config.exit_mode,
             minimum_holding_seconds=(
-                config.candle_minimum_holding_buckets
-                * config.state_interval_seconds
+                config.candle_minimum_holding_buckets * config.state_interval_seconds
             ),
             candle_confirmation_count=config.candle_confirmation_count,
         ),
@@ -471,10 +472,7 @@ def _apply_candle_grace_exit(
     started_at = position.grace_exit_started_at
     deadline = position.grace_exit_deadline
     minimum_holding_at = position.opened_at + timedelta(
-        seconds=(
-            config.candle_minimum_holding_buckets
-            * config.state_interval_seconds
-        )
+        seconds=(config.candle_minimum_holding_buckets * config.state_interval_seconds)
     )
     minimum_holding_reached = state.bucket_end >= minimum_holding_at
     if started_at is None:
@@ -499,19 +497,12 @@ def _apply_candle_grace_exit(
                 taker_fee_rate=taker_fee_rate,
             )
         started_at = closed_candle.candle_end
-        deadline = started_at + timedelta(
-            minutes=15 * config.candle_grace_bars
-        )
+        deadline = started_at + timedelta(minutes=15 * config.candle_grace_bars)
     elif deadline is None:
         deadline = started_at + timedelta(minutes=15 * config.candle_grace_bars)
 
-    if (
-        minimum_holding_reached
-        and state.bucket_end
-        >= position.opened_at
-        + timedelta(
-            seconds=config.max_holding_buckets * config.state_interval_seconds
-        )
+    if minimum_holding_reached and state.bucket_end >= position.opened_at + timedelta(
+        seconds=config.max_holding_buckets * config.state_interval_seconds
     ):
         return _close_at_price(
             position=position,
@@ -534,9 +525,7 @@ def _apply_candle_grace_exit(
             position=position,
             closed_at=state.bucket_end,
             exit_price=mark_price,
-            close_reason=(
-                f"candle_15m_grace_limit_{config.candle_grace_bars}"
-            ),
+            close_reason=(f"candle_15m_grace_limit_{config.candle_grace_bars}"),
             taker_fee_rate=taker_fee_rate,
         )
 
@@ -550,9 +539,7 @@ def _apply_candle_grace_exit(
             position=position,
             closed_at=state.bucket_end,
             exit_price=mark_price,
-            close_reason=(
-                f"candle_15m_grace_timeout_{config.candle_grace_bars}"
-            ),
+            close_reason=(f"candle_15m_grace_timeout_{config.candle_grace_bars}"),
             taker_fee_rate=taker_fee_rate,
         )
 
@@ -710,9 +697,7 @@ def _position_mark_price(
 ) -> Decimal | None:
     if require_executable_quote:
         price = (
-            state.last_bid_price
-            if side is StrategySide.LONG
-            else state.last_ask_price
+            state.last_bid_price if side is StrategySide.LONG else state.last_ask_price
         )
         return price if price is not None and price > 0 else None
     mark_price = state.close_price or state.mark_price

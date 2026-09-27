@@ -67,7 +67,6 @@ def test_quantize_allows_below_min_notional_for_reduce_only() -> None:
     assert result.reduce_only is True
 
 
-
 def test_rejects_resize_beyond_tolerance() -> None:
     result = quantize_order_plan(
         _intent(Decimal("100")),

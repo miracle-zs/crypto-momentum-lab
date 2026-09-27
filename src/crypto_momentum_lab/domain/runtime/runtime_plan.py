@@ -184,8 +184,16 @@ class RuntimePlanCompiler:
         ).hexdigest()
 
         risk_payload = {
-            "max_open_positions": 4,
-            "max_account_drawdown": "0.10",
+            "max_open_positions": int(user_overrides.get("max_open_positions", 4)),
+            "max_account_drawdown": str(
+                user_overrides.get("max_account_drawdown", "0.10")
+            ),
+            "max_gross_notional": str(
+                user_overrides.get("max_gross_notional", "2000.00")
+            ),
+            "max_order_notional": str(
+                user_overrides.get("max_order_notional", "500.00")
+            ),
         }
         risk_hash = hashlib.sha256(
             json.dumps(risk_payload, sort_keys=True).encode()
@@ -195,9 +203,7 @@ class RuntimePlanCompiler:
             f"{environment}:{git_commit}:{schema_version}".encode()
         ).hexdigest()
 
-        plan_id = (
-            f"plan_{environment}_{account_label}_{strat_hash[:8]}_{exec_hash[:8]}"
-        )
+        plan_id = f"plan_{environment}_{account_label}_{strat_hash[:8]}_{exec_hash[:8]}"
 
         policy = EffectivePolicy(
             policy_id=strat_hash[:16],

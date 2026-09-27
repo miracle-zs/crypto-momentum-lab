@@ -592,12 +592,19 @@ async def test_coordinator_advances_monotonic_clock_on_writer_success() -> None:
     clock = [100.0]
     persisted: list[int] = []
 
-    async def _persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+    async def _persist(
+        run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime
+    ) -> None:
         clock[0] += 0.5
         persisted.append(1)
 
-    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
-        writer = CheckpointWriter(run_id="run-clock-success", persist=_persist, clock=lambda: clock[0])
+    with patch(
+        "crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter",
+        side_effect=lambda: clock[0],
+    ):
+        writer = CheckpointWriter(
+            run_id="run-clock-success", persist=_persist, clock=lambda: clock[0]
+        )
         coordinator = LiveCheckpointCoordinator(
             writer=writer,
             strategy=_Strategy(),
@@ -633,11 +640,16 @@ async def test_coordinator_retains_dirty_clock_on_writer_failure() -> None:
     clock = [100.0]
     fail = True
 
-    async def _failing_persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+    async def _failing_persist(
+        run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime
+    ) -> None:
         if fail:
             raise RuntimeError("disk failure")
 
-    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
+    with patch(
+        "crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter",
+        side_effect=lambda: clock[0],
+    ):
         writer = CheckpointWriter(
             run_id="run-clock-fail",
             persist=_failing_persist,
@@ -674,13 +686,20 @@ async def test_coordinator_coalesced_writes_advance_to_latest_token() -> None:
     persisted_tokens: list[int] = []
     persist_gate = asyncio.Event()
 
-    async def _gated_persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+    async def _gated_persist(
+        run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime
+    ) -> None:
         await persist_gate.wait()
         clock[0] += 1.0
         persisted_tokens.append(1)
 
-    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
-        writer = CheckpointWriter(run_id="run-coalesce", persist=_gated_persist, clock=lambda: clock[0])
+    with patch(
+        "crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter",
+        side_effect=lambda: clock[0],
+    ):
+        writer = CheckpointWriter(
+            run_id="run-coalesce", persist=_gated_persist, clock=lambda: clock[0]
+        )
         coordinator = LiveCheckpointCoordinator(
             writer=writer,
             strategy=_Strategy(),
@@ -706,4 +725,3 @@ async def test_coordinator_coalesced_writes_advance_to_latest_token() -> None:
         assert coordinator.durable_age_seconds == 0.0
 
         await coordinator.stop()
-

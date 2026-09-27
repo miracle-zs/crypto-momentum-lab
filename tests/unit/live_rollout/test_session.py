@@ -106,9 +106,7 @@ def _session() -> tuple[
     FakeTransitionRepository,
     FakeExchange,
 ]:
-    exchange = FakeExchange(
-        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-    )
+    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
     transitions = FakeTransitionRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,

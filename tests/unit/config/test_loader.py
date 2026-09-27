@@ -153,9 +153,7 @@ def test_loads_websocket_capture_configuration(
         "postgresql+asyncpg://cml:cml@localhost:54329/cml",
     )
 
-    config = load_runtime_config(
-        Path("configs/environments/research.yaml")
-    )
+    config = load_runtime_config(Path("configs/environments/research.yaml"))
 
     assert str(config.capture.market_websocket_url) == (
         "wss://fstream.binance.com/market/ws"
@@ -204,12 +202,8 @@ def test_research_and_server_capture_configs_keep_shared_defaults_aligned(
         "postgresql+asyncpg://cml:cml@localhost:54329/cml",
     )
 
-    research = load_runtime_config(
-        Path("configs/environments/research.yaml")
-    ).capture
-    server = load_runtime_config(
-        Path("configs/environments/server_paper.yaml")
-    ).capture
+    research = load_runtime_config(Path("configs/environments/research.yaml")).capture
+    server = load_runtime_config(Path("configs/environments/server_paper.yaml")).capture
 
     for field_name in (
         "market_websocket_url",

@@ -134,11 +134,7 @@ class PostgresTop30Selector:
             observed_at=timestamp,
         )
         self._cached_selection = selection
-        refresh_delay = (
-            timedelta(seconds=15)
-            if degraded
-            else self._refresh_interval
-        )
+        refresh_delay = timedelta(seconds=15) if degraded else self._refresh_interval
         self._next_refresh_at = timestamp + refresh_delay
         return selection
 

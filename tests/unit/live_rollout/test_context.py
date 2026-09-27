@@ -30,8 +30,9 @@ class _Provider:
 
 
 @pytest.mark.asyncio
-async def test_context_runtime_publishes_managed_symbols_through_narrow_callbacks(
-) -> None:
+async def test_context_runtime_publishes_managed_symbols_through_narrow_callbacks() -> (
+    None
+):
     provider = _Provider()
     pending_updates: list[frozenset[str]] = []
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
@@ -75,8 +76,9 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
 
 
 @pytest.mark.asyncio
-async def test_context_runtime_ignores_stale_publication_and_invalidates_provider(
-) -> None:
+async def test_context_runtime_ignores_stale_publication_and_invalidates_provider() -> (
+    None
+):
     provider = _Provider()
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     runtime = LiveContextRuntime(
@@ -196,4 +198,3 @@ def test_context_runtime_with_live_context_reader() -> None:
     assert runtime.generation == 1
     assert reader.invalidation_count == 1
     assert reader.last_event == event
-

@@ -67,9 +67,7 @@ class PositionReservationRepository:
     ) -> tuple[PositionReservation, ...]:
         raise NotImplementedError
 
-    def load_reservation(
-        self, reservation_id: str
-    ) -> PositionReservation | None:
+    def load_reservation(self, reservation_id: str) -> PositionReservation | None:
         raise NotImplementedError
 
 
@@ -187,9 +185,7 @@ class ExecutionCoordinator:
             count += 1
         return count
 
-    def register_reservation(
-        self, reservation: PositionReservation
-    ) -> None:
+    def register_reservation(self, reservation: PositionReservation) -> None:
         """Registers a pre-existing reservation into in-memory tracking.
 
         Use this to populate the coordinator with reservations recovered
@@ -197,21 +193,15 @@ class ExecutionCoordinator:
         """
         self._reservations_by_id[reservation.reservation_id] = reservation
 
-    def update_reservation(
-        self, reservation: PositionReservation
-    ) -> None:
+    def update_reservation(self, reservation: PositionReservation) -> None:
         """Replaces the tracked reservation after consume/release."""
         self._reservations_by_id[reservation.reservation_id] = reservation
 
-    def unregister_reservation(
-        self, reservation_id: str
-    ) -> PositionReservation | None:
+    def unregister_reservation(self, reservation_id: str) -> PositionReservation | None:
         """Drops a reservation from tracking; returns it when present."""
         return self._reservations_by_id.pop(reservation_id, None)
 
-    def get_reservation(
-        self, reservation_id: str
-    ) -> PositionReservation | None:
+    def get_reservation(self, reservation_id: str) -> PositionReservation | None:
         return self._reservations_by_id.get(reservation_id)
 
     def get_active_reservations(

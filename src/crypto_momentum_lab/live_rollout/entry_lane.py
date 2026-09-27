@@ -55,12 +55,8 @@ EntrySymbolLoader = Callable[[datetime], Awaitable[frozenset[str]]]
 EntryFilterContextLoader = Callable[
     [MarketState15s], Awaitable[LiveEntryFilterContext | None]
 ]
-EntryUniverseContextProvider = Callable[
-    [str, datetime], Mapping[str, object] | None
-]
-EntryUniverseSnapshotProvider = Callable[
-    [datetime], UniverseRankingSnapshot | None
-]
+EntryUniverseContextProvider = Callable[[str, datetime], Mapping[str, object] | None]
+EntryUniverseSnapshotProvider = Callable[[datetime], UniverseRankingSnapshot | None]
 
 
 class EntryCandidateExecutor(Protocol):
@@ -80,12 +76,8 @@ class EntryLaneConfig:
     entry_symbol_loader: EntrySymbolLoader | None = None
     entry_symbol_refresh_seconds: float = 15.0
     entry_filter_context_loader: EntryFilterContextLoader | None = None
-    entry_universe_context_provider: (
-        EntryUniverseContextProvider | None
-    ) = None
-    entry_universe_snapshot_provider: (
-        EntryUniverseSnapshotProvider | None
-    ) = None
+    entry_universe_context_provider: EntryUniverseContextProvider | None = None
+    entry_universe_snapshot_provider: EntryUniverseSnapshotProvider | None = None
     entry_long_only: bool = False
     require_price_above_ema5: bool = False
     require_price_above_ema10: bool = False
@@ -95,7 +87,6 @@ class EntryLaneConfig:
     entry_limit_ttl_seconds: int = 900
     max_concurrency_per_symbol: int | None = None
     readiness_provider: Callable[[], ExecutionReadiness] | None = None
-
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -211,9 +202,7 @@ class EntryExecutionLane:
             return
         candidate_filter_results: dict[str, object] = {}
         for candidate in decision.candidates:
-            symbol_concurrency = _count_symbol_concurrency(
-                candidate.symbol, context
-            )
+            symbol_concurrency = _count_symbol_concurrency(candidate.symbol, context)
             rejection_reason = _live_entry_candidate_rejection_reason(
                 candidate,
                 entry_enabled=self._entry_enabled(),
@@ -228,7 +217,6 @@ class EntryExecutionLane:
                 now=recorded_at,
             )
             candidate_filter_results[candidate.candidate_id] = {
-
                 "symbol": candidate.symbol,
                 "side": _enum_text(candidate.side),
                 "reduce_only": candidate.reduce_only,
@@ -247,17 +235,12 @@ class EntryExecutionLane:
                 filter_context=filter_context,
             )
         policy_comparisons = [
-            comparison.as_details()
-            for comparison in policy_evaluation.comparisons
+            comparison.as_details() for comparison in policy_evaluation.comparisons
         ]
         policy_comparison_summary: dict[str, object] | None = None
         if (
-            self._config.entry_policy_compare_only
-            or self._config.entry_policy_enforce
-        ) and (
-            policy_evaluation.comparisons
-            or policy_evaluation.skip_reason is None
-        ):
+            self._config.entry_policy_compare_only or self._config.entry_policy_enforce
+        ) and (policy_evaluation.comparisons or policy_evaluation.skip_reason is None):
             policy_comparison_summary = summarize_entry_policy_comparisons(
                 policy_evaluation.comparisons,
                 reduce_only_skipped=sum(
@@ -272,9 +255,7 @@ class EntryExecutionLane:
         ):
             policy_enforce_skip_reason = "universe_snapshot_error"
         details: dict[str, object] = dict(filter_context or {})
-        universe_context_provider = (
-            self._config.entry_universe_context_provider
-        )
+        universe_context_provider = self._config.entry_universe_context_provider
         if universe_context_provider is not None:
             try:
                 universe_context = universe_context_provider(
@@ -311,12 +292,8 @@ class EntryExecutionLane:
                 "entry_symbol_pool_size": (
                     None if entry_symbols is None else len(entry_symbols)
                 ),
-                "require_price_above_ema5": (
-                    self._config.require_price_above_ema5
-                ),
-                "require_price_above_ema10": (
-                    self._config.require_price_above_ema10
-                ),
+                "require_price_above_ema5": (self._config.require_price_above_ema5),
+                "require_price_above_ema10": (self._config.require_price_above_ema10),
                 "gate_reasons": list(gate_reasons),
                 "signal_count": len(decision.signals),
                 "candidate_count": len(decision.candidates),
@@ -330,9 +307,7 @@ class EntryExecutionLane:
                     }
                     for rejection in decision.rejections
                 ],
-                "entry_filter_values": _entry_filter_values(
-                    entry_filter_context
-                ),
+                "entry_filter_values": _entry_filter_values(entry_filter_context),
                 "market_state_bucket_start": state.bucket_start,
                 "market_state_bucket_end": state.bucket_end,
                 "market_state_last_received_at": state.last_received_at,
@@ -341,9 +316,7 @@ class EntryExecutionLane:
                     3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
-                "entry_policy_compare_only": (
-                    self._config.entry_policy_compare_only
-                ),
+                "entry_policy_compare_only": (self._config.entry_policy_compare_only),
                 "entry_policy_enforce": self._config.entry_policy_enforce,
                 "entry_policy_mode": (
                     "enforce"
@@ -397,9 +370,7 @@ class EntryExecutionLane:
         if has_entry_candidates and self._config.entry_symbol_loader is not None:
             if (
                 self._entry_symbols_loaded_at is None
-                or (
-                    state.bucket_start - self._entry_symbols_loaded_at
-                ).total_seconds()
+                or (state.bucket_start - self._entry_symbols_loaded_at).total_seconds()
                 >= self._config.entry_symbol_refresh_seconds
             ):
                 try:
@@ -422,8 +393,8 @@ class EntryExecutionLane:
             and self._config.entry_filter_context_loader is not None
         ):
             try:
-                entry_filter_context = (
-                    await self._config.entry_filter_context_loader(state)
+                entry_filter_context = await self._config.entry_filter_context_loader(
+                    state
                 )
             except Exception:
                 # Missing or stale EMA data must not authorize a live entry.
@@ -478,13 +449,8 @@ class EntryExecutionLane:
         approved = submitted = 0
         pending_reconciliation = False
         for candidate in decision.candidates:
-            if (
-                not candidate.reduce_only
-                and self._config.entry_policy_enforce
-            ):
-                comparison = policy_evaluation.comparison_for(
-                    candidate.candidate_id
-                )
+            if not candidate.reduce_only and self._config.entry_policy_enforce:
+                comparison = policy_evaluation.comparison_for(candidate.candidate_id)
                 if (
                     policy_evaluation.skip_reason is not None
                     or policy_evaluation.universe_snapshot_error is not None
@@ -499,12 +465,8 @@ class EntryExecutionLane:
                     entry_long_only=self._config.entry_long_only,
                     entry_symbols=self._entry_symbols,
                     context=entry_filter_context,
-                    require_price_above_ema5=(
-                        self._config.require_price_above_ema5
-                    ),
-                    require_price_above_ema10=(
-                        self._config.require_price_above_ema10
-                    ),
+                    require_price_above_ema5=(self._config.require_price_above_ema5),
+                    require_price_above_ema10=(self._config.require_price_above_ema10),
                     max_concurrency_per_symbol=self._config.max_concurrency_per_symbol,
                     symbol_concurrency=_count_symbol_concurrency(
                         candidate.symbol, context
@@ -514,7 +476,6 @@ class EntryExecutionLane:
                 )
                 is not None
             ):
-
                 continue
             result = await self._execute_candidate(
                 candidate,
@@ -555,8 +516,7 @@ class EntryExecutionLane:
         filter_context: Mapping[str, object] | None,
     ) -> _EntryPolicyEvaluation:
         if not (
-            self._config.entry_policy_compare_only
-            or self._config.entry_policy_enforce
+            self._config.entry_policy_compare_only or self._config.entry_policy_enforce
         ):
             return _EntryPolicyEvaluation()
         context_available = (filter_context or {}).get(
@@ -568,14 +528,10 @@ class EntryExecutionLane:
 
         universe_snapshot: UniverseRankingSnapshot | None = None
         universe_snapshot_error: str | None = None
-        universe_snapshot_provider = (
-            self._config.entry_universe_snapshot_provider
-        )
+        universe_snapshot_provider = self._config.entry_universe_snapshot_provider
         if universe_snapshot_provider is not None:
             try:
-                universe_snapshot = universe_snapshot_provider(
-                    state.bucket_end
-                )
+                universe_snapshot = universe_snapshot_provider(state.bucket_end)
             except Exception as error:
                 universe_snapshot_error = type(error).__name__
                 log.warning(
@@ -586,16 +542,10 @@ class EntryExecutionLane:
                 )
 
         entry_price = (
-            None
-            if entry_filter_context is None
-            else entry_filter_context.entry_price
+            None if entry_filter_context is None else entry_filter_context.entry_price
         )
-        ema5 = (
-            None if entry_filter_context is None else entry_filter_context.ema5
-        )
-        ema10 = (
-            None if entry_filter_context is None else entry_filter_context.ema10
-        )
+        ema5 = None if entry_filter_context is None else entry_filter_context.ema5
+        ema10 = None if entry_filter_context is None else entry_filter_context.ema10
         source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
         comparisons: list[EntryPolicyComparison] = []
         for candidate in decision.candidates:
@@ -715,20 +665,14 @@ def _live_entry_candidate_rejection_reason(
 
     if candidate.reduce_only:
         return None
-    if (
-        readiness is not None
-        and readiness != ExecutionReadiness.INDEPENDENT_EXECUTABLE
-    ):
+    if readiness is not None and readiness != ExecutionReadiness.INDEPENDENT_EXECUTABLE:
         return f"progress_not_ready:{readiness.value}"
     if not entry_enabled:
         return "entry_disabled"
 
     if now is not None and candidate.expires_at <= now:
         return "candidate_expired"
-    if (
-        entry_long_only
-        and getattr(candidate.side, "value", candidate.side) != "long"
-    ):
+    if entry_long_only and getattr(candidate.side, "value", candidate.side) != "long":
         return "short_entries_disabled"
     if entry_symbols is not None and candidate.symbol not in entry_symbols:
         return "outside_entry_symbol_pool"
@@ -800,18 +744,14 @@ def _live_signal_account_context(
             position.symbol for position in context.managed_positions
         ),
         "pending_position_symbols": sorted(context.pending_position_symbols),
-        "unmanaged_position_symbols": sorted(
-            context.unmanaged_position_symbols
-        ),
+        "unmanaged_position_symbols": sorted(context.unmanaged_position_symbols),
         "active_halt_count": len(context.active_halts),
         "active_halt_reasons": [halt.reason for halt in context.active_halts],
         "unresolved_order_count": len(context.unresolved_order_states),
         "unresolved_order_states": [
             _enum_text(state) for state in context.unresolved_order_states
         ],
-        "active_lease_state": (
-            None if lease is None else _enum_text(lease.state)
-        ),
+        "active_lease_state": (None if lease is None else _enum_text(lease.state)),
         "active_lease_expires_at": None if lease is None else lease.expires_at,
         "risk_config": {
             "max_order_notional": context.risk_config.max_order_notional,

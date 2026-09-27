@@ -390,7 +390,9 @@ async def test_runtime_session_cooperative_stop_stops_supervisor_cleanly() -> No
     assert session.state == SessionLifecycleState.STOPPED
 
 
-async def test_runtime_session_checkpoint_false_prevents_completed_terminal_state() -> None:
+async def test_runtime_session_checkpoint_false_prevents_completed_terminal_state() -> (
+    None
+):
     """Verify that when save_final_checkpoint returns False, terminal state is not COMPLETED."""
     supervisor = FakeSupervisor()  # halt_reason is None
     lifecycle = FakeResourceLifecycle()

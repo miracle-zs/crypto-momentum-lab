@@ -661,9 +661,7 @@ def execute_policy_transition(
             target_notional = getattr(
                 policy_artifact, "target_notional", Decimal("500.00")
             )
-            order_type = getattr(
-                policy_artifact, "order_type", EntryType.MARKET
-            )
+            order_type = getattr(policy_artifact, "order_type", EntryType.MARKET)
             cand = OrderIntentCandidate(
                 candidate_id=f"intent_{decision_id}",
                 signal_id=f"sig_{decision_id}",
@@ -720,9 +718,7 @@ def execute_policy_transition(
             cand = cand_sized
 
         grace_timers = []
-        grace_period = getattr(
-            policy_artifact, "grace_period", timedelta(0)
-        )
+        grace_period = getattr(policy_artifact, "grace_period", timedelta(0))
         grace_due = None
         if grace_period > timedelta(0):
             grace_due = clock_time + grace_period

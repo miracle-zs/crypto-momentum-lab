@@ -119,16 +119,14 @@ def strategy_run_report_rows(
         },
         signals=tuple(strategy_signal_row(signal) for signal in report.signals),
         candidates=tuple(
-            order_intent_candidate_row(candidate)
-            for candidate in report.candidates
+            order_intent_candidate_row(candidate) for candidate in report.candidates
         ),
         fills=tuple(
             paper_fill_row(fill, run_id=report.run.run_id)
             for fill in report.paper_fills
         ),
         positions=tuple(
-            paper_position_row(position)
-            for position in report.paper_positions
+            paper_position_row(position) for position in report.paper_positions
         ),
         checkpoint={
             "run_id": report.run.run_id,
@@ -283,12 +281,8 @@ class PostgresStrategyRunRepository:
             "signals": tuple(_model_values(row) for row in signals),
             "candidates": tuple(_model_values(row) for row in candidates),
             "paper_fills": tuple(_model_values(row) for row in fills),
-            "paper_positions": tuple(
-                _model_values(row) for row in positions
-            ),
-            "checkpoint": None
-            if checkpoint is None
-            else _model_values(checkpoint),
+            "paper_positions": tuple(_model_values(row) for row in positions),
+            "checkpoint": None if checkpoint is None else _model_values(checkpoint),
         }
 
 
@@ -408,9 +402,7 @@ async def _insert_idempotent(
             insert(model)
             .values(values)
             .on_conflict_do_nothing()
-            .returning(
-                *tuple(getattr(model_any, key) for key in primary_key)
-            )
+            .returning(*tuple(getattr(model_any, key) for key in primary_key))
         )
     ).first()
     if inserted is not None:

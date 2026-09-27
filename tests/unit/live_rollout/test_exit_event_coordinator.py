@@ -231,9 +231,7 @@ async def test_closed_candle_event_builds_synthetic_state_and_returns_failure() 
 
     assert result == "candle_failed"
     assert len(events["provider"]) == 1
-    kind, received_event, state_value, _context, latest_quote = (
-        processor.calls[0]
-    )
+    kind, received_event, state_value, _context, latest_quote = processor.calls[0]
     state = cast(MarketState15s, state_value)
     assert kind == "candle"
     assert received_event == event

@@ -21,6 +21,7 @@ async def test_child_task_cleanup_consumes_done_exception() -> None:
 
     loop.set_exception_handler(capture_unhandled)
     try:
+
         async def fail() -> None:
             raise RuntimeError("normal-close regression")
 

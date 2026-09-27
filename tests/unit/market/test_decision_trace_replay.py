@@ -475,4 +475,3 @@ def test_vertical_slice_publisher_runner_trace_and_replay() -> None:
         risk_plan_digest="sha256_risk_v1",
     )
     assert len(r_manifest.run_manifest_hash) == 64
-

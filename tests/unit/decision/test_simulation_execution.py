@@ -313,4 +313,3 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     )
     with pytest.raises(ValueError, match="execute_exit requires EXIT command_type"):
         adapter.execute_exit(non_exit_cmd, menv, journal, coordinator)
-

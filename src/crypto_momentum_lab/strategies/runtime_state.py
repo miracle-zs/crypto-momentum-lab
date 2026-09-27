@@ -49,9 +49,7 @@ class StrategyRuntimeState:
             raise ValueError("max_buffer_length must be positive")
 
         self.warmup = dict(checkpoint.warmup_buckets_by_symbol)
-        self.cooldown_remaining = dict(
-            checkpoint.cooldown_buckets_remaining_by_symbol
-        )
+        self.cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self.last_processed = dict(checkpoint.last_processed_at_by_symbol)
         restored_buffers = checkpoint.payload.get(self.buffer_payload_key)
         if isinstance(restored_buffers, dict):
@@ -160,9 +158,7 @@ def evaluate_buffered_state[EventT](
     warmup_buckets: int,
     max_buffer_length: int,
     cooldown_buckets: int,
-    find_event: Callable[
-        [tuple[MarketState15s, ...], MarketState15s], EventT | None
-    ],
+    find_event: Callable[[tuple[MarketState15s, ...], MarketState15s], EventT | None],
     build_signal_and_candidate: Callable[
         [EventT, datetime], tuple[StrategySignal, OrderIntentCandidate]
     ],

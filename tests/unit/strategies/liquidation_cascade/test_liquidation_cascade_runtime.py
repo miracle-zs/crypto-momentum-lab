@@ -53,9 +53,7 @@ def test_liquidation_cascade_ignores_states_without_liquidation() -> None:
 def test_liquidation_cascade_restores_checkpoint() -> None:
     strategy = _strategy()
     checkpoint = StrategyCheckpoint(
-        last_processed_at_by_symbol={
-            "BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)
-        },
+        last_processed_at_by_symbol={"BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)},
         warmup_buckets_by_symbol={"BTCUSDT": 6},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
         payload={},

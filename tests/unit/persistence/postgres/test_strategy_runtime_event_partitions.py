@@ -15,9 +15,7 @@ from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions 
 
 def test_floor_event_partition_start_floors_to_utc_midnight() -> None:
     value = datetime(2026, 9, 16, 15, 42, 13, 999000, tzinfo=UTC)
-    assert floor_event_partition_start(value) == datetime(
-        2026, 9, 16, 0, 0, tzinfo=UTC
-    )
+    assert floor_event_partition_start(value) == datetime(2026, 9, 16, 0, 0, tzinfo=UTC)
 
 
 def test_event_partition_name_uses_compact_day() -> None:

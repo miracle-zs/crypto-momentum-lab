@@ -22,9 +22,7 @@ from tests.unit.persistence.postgres.test_strategy_run_repository import (
 
 def test_checkpoint_from_row_values_restores_checkpoint() -> None:
     checkpoint = checkpoint_from_row_values(
-        last_processed_at_by_symbol={
-            "BTCUSDT": "2026-07-04T00:00:15+00:00"
-        },
+        last_processed_at_by_symbol={"BTCUSDT": "2026-07-04T00:00:15+00:00"},
         warmup_buckets_by_symbol={"BTCUSDT": 3},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
         payload={"latest_signal": "sig-1"},
@@ -93,7 +91,9 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
     assert row["execution_config"]["portfolio"]["max_holding_buckets"] == 80
 
 
-def test_legacy_paper_run_without_exit_mode_defaults_to_candle_15m_for_compare() -> None:
+def test_legacy_paper_run_without_exit_mode_defaults_to_candle_15m_for_compare() -> (
+    None
+):
     legacy = {
         "execution_config": {
             "portfolio": {
@@ -220,11 +220,14 @@ def test_paper_run_accepts_legacy_volume_hash_alias() -> None:
         "execution_config": {},
     }
 
-    assert _legacy_paper_run_upgrade_values(
-        actual=actual,
-        expected=expected,
-        compatible_config_hashes=(expected["config_hash"],),
-    ) is None
+    assert (
+        _legacy_paper_run_upgrade_values(
+            actual=actual,
+            expected=expected,
+            compatible_config_hashes=(expected["config_hash"],),
+        )
+        is None
+    )
 
 
 def test_known_commit_paper_run_can_upgrade_candle_exit_fields() -> None:
@@ -294,10 +297,13 @@ def test_known_commit_paper_run_rejects_parameter_changes() -> None:
         "execution_config": {"fills": {"latency_buckets": 2}},
     }
 
-    assert _legacy_paper_run_upgrade_values(
-        actual=actual,
-        expected=expected,
-    ) is None
+    assert (
+        _legacy_paper_run_upgrade_values(
+            actual=actual,
+            expected=expected,
+        )
+        is None
+    )
 
 
 def test_candidate_from_row_restores_pending_candidate() -> None:

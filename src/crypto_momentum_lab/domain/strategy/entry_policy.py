@@ -134,8 +134,7 @@ class UniverseRankingSnapshot:
             _require_text(self.config_hash, "config_hash")
         normalized_entries = tuple(self.entries)
         if any(
-            not isinstance(entry, UniverseRankingEntry)
-            for entry in normalized_entries
+            not isinstance(entry, UniverseRankingEntry) for entry in normalized_entries
         ):
             raise TypeError("entries must contain UniverseRankingEntry values")
         seen: set[tuple[str, StrategySide]] = set()
@@ -282,15 +281,11 @@ def _append_ema_reasons(
         return
     failed = (
         state.require_price_above_ema5
-        and (
-            ema_snapshot.ema5 is None
-            or ema_snapshot.entry_price <= ema_snapshot.ema5
-        )
+        and (ema_snapshot.ema5 is None or ema_snapshot.entry_price <= ema_snapshot.ema5)
     ) or (
         state.require_price_above_ema10
         and (
-            ema_snapshot.ema10 is None
-            or ema_snapshot.entry_price <= ema_snapshot.ema10
+            ema_snapshot.ema10 is None or ema_snapshot.entry_price <= ema_snapshot.ema10
         )
     )
     if failed:

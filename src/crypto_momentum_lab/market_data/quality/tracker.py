@@ -36,9 +36,7 @@ class StreamQualityTracker:
         if silence_timeout_seconds <= 0:
             raise ValueError("silence_timeout_seconds must be positive")
         if closed_session_retention_seconds <= 0:
-            raise ValueError(
-                "closed_session_retention_seconds must be positive"
-            )
+            raise ValueError("closed_session_retention_seconds must be positive")
         self._silence_timeout_seconds = silence_timeout_seconds
         self._closed_session_retention = timedelta(
             seconds=closed_session_retention_seconds
@@ -118,9 +116,7 @@ class StreamQualityTracker:
                         },
                     )
                 )
-                self._known_gap_counts[key] = (
-                    self._known_gap_counts.get(key, 0) + gap
-                )
+                self._known_gap_counts[key] = self._known_gap_counts.get(key, 0) + gap
             elif (
                 envelope.stream is not CaptureStream.KLINE_1M
                 and envelope.stream is not CaptureStream.AGG_TRADE
@@ -192,8 +188,7 @@ class StreamQualityTracker:
             if connection_session_id in self._closed_sessions:
                 continue
             elapsed = (
-                now.astimezone(UTC)
-                - state.last_received_at.astimezone(UTC)
+                now.astimezone(UTC) - state.last_received_at.astimezone(UTC)
             ).total_seconds()
             if elapsed <= self._silence_timeout_seconds or state.silence_reported:
                 continue
@@ -305,11 +300,5 @@ def _event_id(
 ) -> UUID:
     return uuid5(
         NAMESPACE_URL,
-        (
-            "quality:"
-            f"{category.value}:"
-            f"{connection_session_id}:"
-            f"{local_sequence}:"
-            f"{symbol}"
-        ),
+        (f"quality:{category.value}:{connection_session_id}:{local_sequence}:{symbol}"),
     )

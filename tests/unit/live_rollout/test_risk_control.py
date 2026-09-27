@@ -59,10 +59,7 @@ class FakeCommandRepository:
         failure_reason: str | None,
     ) -> bool:
         del completed_at
-        if (
-            command_id != self.command.command_id
-            or self.command.status != "executing"
-        ):
+        if command_id != self.command.command_id or self.command.status != "executing":
             return False
         self.command = replace(self.command, status=status)
         self.completed.append((command_id, status, failure_reason))

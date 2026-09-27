@@ -286,8 +286,7 @@ class AccountFacts:
         hasher.update(self.position_key.canonical_id.encode())
         for f in sorted(self.fills, key=lambda x: (x.trade_at, x.trade_id)):
             f_str = (
-                f"{f.trade_id}:{f.quantity}:{f.price}:"
-                f"{f.side}:{f.trade_at.isoformat()}"
+                f"{f.trade_id}:{f.quantity}:{f.price}:{f.side}:{f.trade_at.isoformat()}"
             )
             hasher.update(f_str.encode())
         for s in sorted(self.snapshots, key=lambda x: x.observed_at):

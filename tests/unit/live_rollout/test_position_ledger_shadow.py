@@ -278,4 +278,3 @@ def test_to_account_facts_filters_stale_pre_episode_fills() -> None:
 
     assert len(facts.fills) == 1
     assert facts.fills[0].trade_id == "t_current_22799"
-

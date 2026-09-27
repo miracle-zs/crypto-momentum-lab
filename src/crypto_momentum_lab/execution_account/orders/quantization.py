@@ -71,8 +71,10 @@ def quantize_order_plan(
         raise ValueError("requested_quantity must be positive")
     if intent.entry_type is EntryType.LIMIT and intent.limit_price is None:
         return QuantizationRejection("missing_limit_price", {})
-    if intent.entry_type is EntryType.LIMIT and intent.limit_price is not None and (
-        intent.limit_price <= 0
+    if (
+        intent.entry_type is EntryType.LIMIT
+        and intent.limit_price is not None
+        and (intent.limit_price <= 0)
     ):
         return QuantizationRejection("invalid_limit_price", {})
 
@@ -122,9 +124,7 @@ def quantize_order_plan(
 
     features = getattr(intent, "features", None) or {}
     resolved_batch_id = batch_id or (
-        str(features["batch_id"]).strip()
-        if features.get("batch_id")
-        else None
+        str(features["batch_id"]).strip() if features.get("batch_id") else None
     )
     resolved_projection_version = projection_version or (
         str(features["projection_version"]).strip()
@@ -172,9 +172,7 @@ def _quantized_price(
     source_price = intent.limit_price or reference_price
     side = _exchange_side(intent)
     rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
-    units = (source_price / rules.tick_size).to_integral_value(
-        rounding=rounding
-    )
+    units = (source_price / rules.tick_size).to_integral_value(rounding=rounding)
     return units * rules.tick_size
 
 

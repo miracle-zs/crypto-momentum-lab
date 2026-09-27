@@ -97,9 +97,7 @@ def test_collector_status_reports_fresh_contiguous_windows(tmp_path) -> None:
     assert response.parquet_file_count == 3
     assert response.parquet_gap_count == 0
     assert response.last_sequence == 42
-    assert response.recent_windows[0]["window_start"] == (
-        "2026-09-03T15:30:00+00:00"
-    )
+    assert response.recent_windows[0]["window_start"] == ("2026-09-03T15:30:00+00:00")
 
 
 def test_collector_status_does_not_alert_on_current_window_spool(tmp_path) -> None:
@@ -201,7 +199,9 @@ def test_collector_status_alerts_on_injected_disk_warning(tmp_path) -> None:
     response = read_research_collector_status(
         root,
         now=now,
-        disk_usage_fn=lambda _path: _Usage(warning_free * 2, warning_free, warning_free),
+        disk_usage_fn=lambda _path: _Usage(
+            warning_free * 2, warning_free, warning_free
+        ),
     )
 
     assert response.status is OperationalStatus.DEGRADED

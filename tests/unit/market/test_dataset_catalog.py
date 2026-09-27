@@ -354,4 +354,3 @@ def test_dataset_catalog_list_and_distinct_dates() -> None:
     # Test list_manifests
     listed = catalog.list_manifests(scope="live")
     assert len(listed) == 2
-

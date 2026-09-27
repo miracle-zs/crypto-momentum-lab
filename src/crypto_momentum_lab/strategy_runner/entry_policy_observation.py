@@ -193,9 +193,7 @@ class PaperEntryPolicyObservationReport:
                 value.tzinfo is None or value.utcoffset() is None
             ):
                 raise ValueError(f"{field_name} must be timezone-aware")
-        if (
-            self.first_observed_at is None
-        ) != (self.last_observed_at is None):
+        if (self.first_observed_at is None) != (self.last_observed_at is None):
             raise ValueError("observation window timestamps must be paired")
         if (
             self.first_observed_at is not None
@@ -212,12 +210,8 @@ class PaperEntryPolicyObservationReport:
         return {
             "schema_version": 1,
             "record_count": self.record_count,
-            "first_observed_at": _optional_datetime_text(
-                self.first_observed_at
-            ),
-            "last_observed_at": _optional_datetime_text(
-                self.last_observed_at
-            ),
+            "first_observed_at": _optional_datetime_text(self.first_observed_at),
+            "last_observed_at": _optional_datetime_text(self.last_observed_at),
             "summary": self.summary.as_details(),
             "mismatch_rate": _decimal_text(_mismatch_rate(self.summary)),
             "threshold": self.threshold.as_details(),
@@ -265,9 +259,7 @@ def summarize_paper_entry_policy_observations(
     """Aggregate low-cardinality counts and evaluate optional alert limits."""
 
     record_tuple = tuple(records)
-    summary = _sum_observation_summaries(
-        record.summary for record in record_tuple
-    )
+    summary = _sum_observation_summaries(record.summary for record in record_tuple)
     resolved_threshold = threshold or PaperEntryPolicyObservationThreshold()
     observed_at_values = tuple(record.observed_at for record in record_tuple)
     first_observed_at = min(observed_at_values) if observed_at_values else None
@@ -301,9 +293,7 @@ def _parse_observation_record(
 ) -> PaperEntryPolicyObservationRecord:
     row = _mapping(payload, "observation")
     if row.get("schema_version") != 1:
-        raise PaperEntryPolicyObservationError(
-            "schema_version must be 1"
-        )
+        raise PaperEntryPolicyObservationError("schema_version must be 1")
     observed_at = _required_datetime(row, "observed_at")
     _required_datetime(row, "bucket_start")
     _required_datetime(row, "bucket_end")
@@ -316,9 +306,7 @@ def _parse_observation_record(
         mismatched=_required_count(summary_row, "mismatched"),
         legacy_eligible=_required_count(summary_row, "legacy_eligible"),
         policy_eligible=_required_count(summary_row, "policy_eligible"),
-        reduce_only_skipped=_required_count(
-            summary_row, "reduce_only_skipped"
-        ),
+        reduce_only_skipped=_required_count(summary_row, "reduce_only_skipped"),
         policy_reasons=_reason_counts(summary_row, "policy_reasons"),
         mismatch_reasons=_reason_counts(summary_row, "mismatch_reasons"),
     )
@@ -408,9 +396,7 @@ def _required_datetime(
             f"{field_name} must be a valid ISO timestamp"
         ) from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise PaperEntryPolicyObservationError(
-            f"{field_name} must be timezone-aware"
-        )
+        raise PaperEntryPolicyObservationError(f"{field_name} must be timezone-aware")
     return parsed
 
 

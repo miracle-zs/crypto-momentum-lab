@@ -84,7 +84,6 @@ class FakeQueries:
             "details": {},
         }
 
-
     async def readiness(self) -> SystemReadinessResponse:
         return SystemReadinessResponse(
             status=OperationalStatus.READY,

@@ -380,10 +380,7 @@ class ExitExecutionLane:
                     account_work = account_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-                if (
-                    account_work is not None
-                    and account_work.completion is not None
-                ):
+                if account_work is not None and account_work.completion is not None:
                     account_work.completion.cancel()
         for market_work in self._market_latest.values():
             if market_work.completion is not None:

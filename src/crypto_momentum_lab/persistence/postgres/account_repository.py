@@ -523,12 +523,9 @@ class PostgresAccountRepository:
             ).subquery()
 
             labels = await session.scalars(
-                select(subq.c.account_label).where(
-                    subq.c.position_count > 0
-                )
+                select(subq.c.account_label).where(subq.c.position_count > 0)
             )
             return frozenset(labels.all())
-
 
     async def load_reconciliation_heads(
         self,

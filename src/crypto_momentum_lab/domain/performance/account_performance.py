@@ -45,9 +45,7 @@ class AccountPerformanceCalculator:
                 )
             if cut.coverage_receipt.is_empty_proven:
                 details = cut.coverage_receipt.details
-                details_str = (
-                    str(details) if details else "proven_zero_cash_flows"
-                )
+                details_str = str(details) if details else "proven_zero_cash_flows"
                 return (
                     True,
                     "confirmed",
@@ -74,7 +72,6 @@ class AccountPerformanceCalculator:
             return True, "confirmed", f"audited_records_count_{len(cut.cash_flows)}"
         return False, "uncertified", "uncertified_zero_cash_flow_facts"
 
-
     @classmethod
     def calculate(
         cls,
@@ -82,8 +79,8 @@ class AccountPerformanceCalculator:
         cut: AccountEquityCut,
     ) -> MetricValue:
         """Evaluates an authoritative MetricValue from an AccountEquityCut."""
-        is_certified, coverage_status, coverage_proof = (
-            cls._resolve_coverage_evidence(cut)
+        is_certified, coverage_status, coverage_proof = cls._resolve_coverage_evidence(
+            cut
         )
         source_refs = (
             f"account:{cut.account_label}",

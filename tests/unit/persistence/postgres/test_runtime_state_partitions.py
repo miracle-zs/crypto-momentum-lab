@@ -21,9 +21,10 @@ def test_runtime_state_partition_start_uses_utc_six_hour_boundaries() -> None:
 
 
 def test_runtime_state_partition_name_is_deterministic() -> None:
-    assert runtime_state_partition_name(
-        datetime(2026, 8, 23, 17, 42, tzinfo=UTC)
-    ) == "runtime_market_states_15s_p_20260823_1200"
+    assert (
+        runtime_state_partition_name(datetime(2026, 8, 23, 17, 42, tzinfo=UTC))
+        == "runtime_market_states_15s_p_20260823_1200"
+    )
 
 
 def test_runtime_state_partition_start_rejects_naive_datetime() -> None:

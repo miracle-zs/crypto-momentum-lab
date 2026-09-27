@@ -300,9 +300,7 @@ def test_account_user_data_trade_deduplication_cache_is_bounded() -> None:
 
     assert len(state._seen_trade_ids) == state._SEEN_TRADE_CACHE_SIZE
     assert ("BTCUSDT", "0") not in state._seen_trade_id_set
-    assert ("BTCUSDT", str(state._SEEN_TRADE_CACHE_SIZE)) in (
-        state._seen_trade_id_set
-    )
+    assert ("BTCUSDT", str(state._SEEN_TRADE_CACHE_SIZE)) in (state._seen_trade_id_set)
 
 
 def test_account_user_data_state_requests_reconcile_for_unknown_position() -> None:

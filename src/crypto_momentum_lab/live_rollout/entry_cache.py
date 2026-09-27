@@ -63,12 +63,8 @@ def universe_context_for(
         ),
         None,
     )
-    gainer_ranks = {
-        item.symbol: item.rank for item in snapshot.ranking.gainers
-    }
-    loser_ranks = {
-        item.symbol: item.rank for item in snapshot.ranking.losers
-    }
+    gainer_ranks = {item.symbol: item.rank for item in snapshot.ranking.gainers}
+    loser_ranks = {item.symbol: item.rank for item in snapshot.ranking.losers}
     gainer_rank = gainer_ranks.get(normalized_symbol)
     loser_rank = loser_ranks.get(normalized_symbol)
     if gainer_rank is not None and loser_rank is not None:
@@ -104,19 +100,11 @@ def universe_context_for(
         "snapshot_activated": snapshot.activated,
         "utc_day": snapshot.utc_day,
         "symbol": normalized_symbol,
-        "daily_open_price": (
-            None if candidate is None else candidate.open_price
-        ),
-        "daily_current_price": (
-            None if candidate is None else candidate.current_price
-        ),
-        "daily_price_time": (
-            None if candidate is None else candidate.price_time
-        ),
+        "daily_open_price": (None if candidate is None else candidate.open_price),
+        "daily_current_price": (None if candidate is None else candidate.current_price),
+        "daily_price_time": (None if candidate is None else candidate.price_time),
         "utc_day_return": daily_return,
-        "utc_day_return_pct": (
-            None if daily_return is None else daily_return * 100
-        ),
+        "utc_day_return_pct": (None if daily_return is None else daily_return * 100),
         "gainer_rank": gainer_rank,
         "loser_rank": loser_rank,
         "ranking_side": ranking_side,
@@ -220,12 +208,7 @@ class LiveEntryFilterCache:
             refresh_failure_count=self._refresh_failure_count,
             prefetched_snapshot_count=self._prefetched_snapshot_count,
             prefetch_failure_count=self._prefetch_failure_count,
-            tracked_symbol_count=len(
-                {
-                    symbol
-                    for symbol, _bucket in self._snapshots
-                }
-            ),
+            tracked_symbol_count=len({symbol for symbol, _bucket in self._snapshots}),
             ready=self._ready,
             last_refresh_at=self._last_refresh_at,
             last_refresh_duration_seconds=self._last_refresh_duration_seconds,
@@ -236,9 +219,7 @@ class LiveEntryFilterCache:
 
     def symbols_for(self, observed_at: datetime) -> frozenset[str]:
         bucket = _bucket_start_15s(observed_at)
-        candidates = [
-            key for key in self._symbols_by_bucket if key <= bucket
-        ]
+        candidates = [key for key in self._symbols_by_bucket if key <= bucket]
         if not candidates:
             return frozenset()
         return self._symbols_by_bucket[max(candidates)]
@@ -248,9 +229,7 @@ class LiveEntryFilterCache:
         observed_at: datetime,
     ) -> LiveEntryUniverseData | None:
         bucket = _bucket_start_15s(observed_at)
-        candidates = [
-            key for key in self._universe_data_by_bucket if key <= bucket
-        ]
+        candidates = [key for key in self._universe_data_by_bucket if key <= bucket]
         if not candidates:
             return None
         return self._universe_data_by_bucket[max(candidates)]
@@ -511,9 +490,7 @@ class LiveEntrySymbolCache:
         observed_at: datetime,
     ) -> LiveEntryUniverseData | None:
         bucket = _bucket_start_15s(observed_at)
-        candidates = [
-            key for key in self._universe_data_by_bucket if key <= bucket
-        ]
+        candidates = [key for key in self._universe_data_by_bucket if key <= bucket]
         if not candidates:
             return None
         return self._universe_data_by_bucket[max(candidates)]

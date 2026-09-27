@@ -118,10 +118,13 @@ class LiveEntryRuntime:
     @property
     def entry_filter_context_loader(
         self,
-    ) -> Callable[
-        [MarketState15s],
-        Awaitable[LiveEntryFilterContext | None],
-    ] | None:
+    ) -> (
+        Callable[
+            [MarketState15s],
+            Awaitable[LiveEntryFilterContext | None],
+        ]
+        | None
+    ):
         if self._ema_provider is None:
             return None
         return self._load_entry_filter_context
@@ -232,9 +235,7 @@ class LiveEntryRuntime:
             return LiveEntryUniverseData(symbols=frozenset(), snapshot=None)
         symbols = frozenset(
             entry.symbol
-            for entry in snapshot.ranking.gainers[
-                : self._positive_gainer_top_count
-            ]
+            for entry in snapshot.ranking.gainers[: self._positive_gainer_top_count]
             if entry.utc_day_return > 0
         )
         self._last_entry_universe_symbols = symbols
@@ -314,9 +315,7 @@ class LiveEntryRuntime:
         return universe_context_for(
             self._cached_universe_data(observed_at),
             symbol=symbol,
-            entry_pool_name=(
-                "positive_gainer_top" f"{self._positive_gainer_top_count}"
-            ),
+            entry_pool_name=(f"positive_gainer_top{self._positive_gainer_top_count}"),
             entry_pool_top_count=self._positive_gainer_top_count,
         )
 
@@ -332,9 +331,7 @@ class LiveEntryRuntime:
         return universe_snapshot_for_symbols(
             universe_data.symbols,
             observed_at=(
-                observed_at
-                if source_snapshot is None
-                else source_snapshot.observed_at
+                observed_at if source_snapshot is None else source_snapshot.observed_at
             ),
             snapshot_id=(
                 None if source_snapshot is None else str(source_snapshot.snapshot_id)

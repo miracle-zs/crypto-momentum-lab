@@ -321,7 +321,5 @@ class BinanceUsdMRestClient:
             async with semaphore:
                 return await self.fetch_daily_open(symbol, utc_day)
 
-        results = await asyncio.gather(
-            *(fetch(symbol) for symbol in sorted(symbols))
-        )
+        results = await asyncio.gather(*(fetch(symbol) for symbol in sorted(symbols)))
         return tuple(item for item in results if item is not None)

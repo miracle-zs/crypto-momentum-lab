@@ -7,6 +7,8 @@ yield ``None`` so the decision filter can fail closed.
 from __future__ import annotations
 
 import asyncio
+import inspect
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -247,13 +249,53 @@ class LiveDecisionFactSource:
         account_label: str,
         trace_repository: Any | None = None,
         strategy_name: str = "orderflow_impulse",
+        retention_authority: Any | None = None,
     ) -> None:
         self._account_label = account_label
         self._context: LiveDaemonRuntimeContext | None = None
         self._policy_state = PolicyState()
         self._trace_repository = trace_repository
         self._strategy_name = strategy_name
+        self._retention_authority = retention_authority
         self._active_tasks: set[asyncio.Task[Any]] = set()
+        self._exit_handler: Any | None = None
+
+    def set_exit_handler(self, handler: Any | None) -> None:
+        self._exit_handler = handler
+
+    async def restore(self) -> None:
+        """Restores policy state from the latest durable decision trace if available."""
+        if self._trace_repository is None:
+            return
+        loader = getattr(self._trace_repository, "load_latest_decision_trace", None)
+        if callable(loader):
+            try:
+                trace = await loader(self._strategy_name, self._account_label)
+                if trace is not None and trace.trace_payload:
+                    st_data = trace.trace_payload.get("next_policy_state")
+                    if st_data:
+                        self._policy_state = PolicyState(
+                            policy_version=st_data.get("policy_version", "v1"),
+                            cooldown_until_by_symbol={
+                                k: datetime.fromisoformat(v)
+                                for k, v in st_data.get("cooldown_until", {}).items()
+                            },
+                            anchor_prices_by_symbol={
+                                k: Decimal(str(v))
+                                for k, v in st_data.get("anchor_prices", {}).items()
+                            },
+                            active_intent_ids_by_symbol=dict(
+                                st_data.get("active_intent_ids", {})
+                            ),
+                            warmup_status=dict(st_data.get("warmup_status", {})),
+                        )
+                        log.info(
+                            "policy_state_restored_from_durable_trace",
+                            decision_id=trace.decision_id,
+                            account_label=self._account_label,
+                        )
+            except Exception as exc:
+                log.warning("policy_state_restore_failed", error=str(exc))
 
     def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
         self._context = context
@@ -266,7 +308,7 @@ class LiveDecisionFactSource:
         self._policy_state = state
 
     def record_trace(self, trace: DecisionTrace) -> None:
-        """Saves a trace via the trace repository asynchronously with supervisor tracking."""
+        """Saves a trace asynchronously with supervisor tracking."""
         if self._trace_repository is None:
             return
         try:
@@ -281,6 +323,34 @@ class LiveDecisionFactSource:
         try:
             if self._trace_repository is not None:
                 await self._trace_repository.save_decision_trace(trace)
+            if self._retention_authority is not None and getattr(
+                trace, "evaluated_market_refs", ()
+            ):
+                earliest_bucket = min(
+                    r.bucket_start for r in trace.evaluated_market_refs
+                )
+                from crypto_momentum_lab.domain.operational.retention_authority import (
+                    RecoverySpec,
+                )
+
+                spec = RecoverySpec(
+                    source_dataset="market_revisions",
+                    earliest_needed_watermark=earliest_bucket,
+                    earliest_checkpoint_id=trace.decision_id,
+                    cold_recovery_supported=True,
+                )
+                if hasattr(self._retention_authority, "register_dependency_async"):
+                    await self._retention_authority.register_dependency_async(
+                        consumer_id=f"decision_{trace.decision_id}",
+                        generation=1,
+                        recovery_spec=spec,
+                    )
+                elif hasattr(self._retention_authority, "register_dependency"):
+                    self._retention_authority.register_dependency(
+                        consumer_id=f"decision_{trace.decision_id}",
+                        generation=1,
+                        recovery_spec=spec,
+                    )
         except Exception as exc:
             log.warning(
                 "async_save_decision_trace_failed",
@@ -318,6 +388,17 @@ class LiveDecisionFactSource:
                 account_label=self._account_label,
             )
             self.record_trace(trace)
+        if result.exit_command is not None and self._exit_handler is not None:
+            try:
+                res = self._exit_handler(result.exit_command)
+                if inspect.isawaitable(res):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(res)
+                    except RuntimeError:
+                        pass
+            except Exception as exit_err:
+                log.warning("decision_exit_handler_failed", error=str(exit_err))
 
     def build(self, state: MarketState15s) -> FrozenDecisionInputs | None:
         if self._context is None:

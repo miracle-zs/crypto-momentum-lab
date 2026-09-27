@@ -31,4 +31,3 @@ __all__ = [
     "RollbackCommand",
     "require_authorized_command",
 ]
-

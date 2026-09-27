@@ -144,10 +144,7 @@ class AccountEvent:
             (self.event_at, "event_at"),
             (self.received_at, "received_at"),
         ):
-            if (
-                timestamp_value.tzinfo is None
-                or timestamp_value.utcoffset() is None
-            ):
+            if timestamp_value.tzinfo is None or timestamp_value.utcoffset() is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
         normalized_symbols = tuple(
             sorted({item.strip().upper() for item in self.symbols})
@@ -164,12 +161,9 @@ class AccountEvent:
         ):
             if optional_value is not None and not optional_value.strip():
                 raise ValueError(f"{field_name} must not be blank when present")
-        if (
-            self.exchange_event_at is not None
-            and (
-                self.exchange_event_at.tzinfo is None
-                or self.exchange_event_at.utcoffset() is None
-            )
+        if self.exchange_event_at is not None and (
+            self.exchange_event_at.tzinfo is None
+            or self.exchange_event_at.utcoffset() is None
         ):
             raise ValueError("exchange_event_at must be timezone-aware")
         for value, field_name in (
@@ -214,9 +208,7 @@ class AccountEvent:
             )
             event_scope = (self.environment, self.account_label)
             if snapshot_scope != event_scope:
-                raise ValueError(
-                    "account snapshot scope does not match account event"
-                )
+                raise ValueError("account snapshot scope does not match account event")
         if self.account_delta is not None:
             delta_scope = _delta_scope(self.account_delta)
             event_scope = (self.environment, self.account_label)
@@ -289,7 +281,6 @@ class AccountEventHubConfig:
             raise ValueError("replay_event_count must be positive")
 
 
-
 @dataclass(slots=True)
 class _Subscriber:
     connection: ServerConnection
@@ -331,12 +322,8 @@ class AccountEventHub:
         self._seen_fill_key_order: deque[tuple[str, str]] = deque(
             maxlen=_FILL_KEY_CACHE_SIZE
         )
-        self._replay_buffers: dict[
-            tuple[str, str], deque[_ReplayEntry]
-        ] = {}
-        self._bootstrap_cache: dict[
-            tuple[str, str], tuple[str, int, str]
-        ] = {}
+        self._replay_buffers: dict[tuple[str, str], deque[_ReplayEntry]] = {}
+        self._bootstrap_cache: dict[tuple[str, str], tuple[str, int, str]] = {}
         self._published_event_count = 0
         self._subscriber_queue_overflow_count = 0
         self._replay_request_count = 0
@@ -552,8 +539,7 @@ class AccountEventHub:
     ) -> tuple[list[str], bool, bool]:
         latest_sequence = self._sequences.get(scope, 0)
         stream_reset = (
-            requested_epoch is not None
-            and requested_epoch != self._stream_epoch
+            requested_epoch is not None and requested_epoch != self._stream_epoch
         )
         if (
             last_sequence is not None
@@ -625,9 +611,12 @@ class AccountEventHub:
             # force the client into a recovery/reconnect window. The latest
             # Hub snapshot already includes the event being fanned out, so use
             # it as the single replacement message whenever it is available.
-            replacement = self._bootstrap_message(
-                (subscriber.environment, subscriber.account_label)
-            ) or message
+            replacement = (
+                self._bootstrap_message(
+                    (subscriber.environment, subscriber.account_label)
+                )
+                or message
+            )
         try:
             subscriber.queue.put_nowait(replacement)
         except asyncio.QueueFull:
@@ -685,16 +674,13 @@ class AccountEventHub:
                     bootstrap = self._bootstrap_message(scope)
                     messages = [] if bootstrap is None else [bootstrap]
                     full_snapshot = (
-                        bootstrap is not None
-                        and _message_has_full_snapshot(bootstrap)
+                        bootstrap is not None and _message_has_full_snapshot(bootstrap)
                     )
                 for message in messages:
                     self._enqueue_latest(subscriber, message)
                 latest_sequence = self._sequences.get(scope, 0)
                 replay_buffer = self._replay_buffers.get(scope)
-                oldest_sequence = (
-                    replay_buffer[0].sequence if replay_buffer else None
-                )
+                oldest_sequence = replay_buffer[0].sequence if replay_buffer else None
             await connection.send(
                 json.dumps(
                     {
@@ -920,7 +906,9 @@ class WebSocketAccountEventSource:
                         or ready.get("stream_reset") is True
                         or ready.get("full_snapshot") is True
                     )
-                    self._availability_clock.mark_connected(needs_recovery=needs_recovery)
+                    self._availability_clock.mark_connected(
+                        needs_recovery=needs_recovery
+                    )
                     if not needs_recovery:
                         reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
@@ -1023,9 +1011,7 @@ class WebSocketAccountEventSource:
                     event.sequence != self._last_sequence + 1
                     and event.snapshot_kind != _SNAPSHOT_KIND_FULL
                 ):
-                    self._prepare_full_snapshot_recovery(
-                        "account_event_sequence_gap"
-                    )
+                    self._prepare_full_snapshot_recovery("account_event_sequence_gap")
                     raise AccountEventHubSequenceGap(
                         "account-event hub sequence is not contiguous"
                     )
@@ -1166,8 +1152,7 @@ class WebSocketAccountPositionExpectationPublisher:
                 )
             if (
                 _require_string(response, "environment") != self._environment
-                or _require_string(response, "account_label")
-                != self._account_label
+                or _require_string(response, "account_label") != self._account_label
                 or _require_string(response, "client_order_id")
                 != expectation.client_order_id
             ):
@@ -1257,9 +1242,7 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "exchange_update_id": event.exchange_update_id,
             "exchange_previous_update_id": event.exchange_previous_update_id,
             "account_state": (
-                None
-                if event.account_state is None
-                else event.account_state.value
+                None if event.account_state is None else event.account_state.value
             ),
             "snapshot_kind": event.snapshot_kind,
             "account_snapshot": (
@@ -1440,9 +1423,7 @@ def _encode_account_snapshot_delta(delta: AccountSnapshotDelta) -> dict[str, obj
         "open_orders": [
             _encode_open_order_snapshot(item) for item in delta.open_orders
         ],
-        "removed_open_orders": [
-            list(key) for key in delta.removed_open_orders
-        ],
+        "removed_open_orders": [list(key) for key in delta.removed_open_orders],
     }
 
 
@@ -1587,9 +1568,7 @@ def _decode_account_snapshot_delta(
             )
             for item in _required_list(payload, "positions")
         ),
-        removed_positions=tuple(
-            _required_key_list(payload, "removed_positions")
-        ),
+        removed_positions=tuple(_required_key_list(payload, "removed_positions")),
         open_orders=tuple(
             _decode_open_order_snapshot(
                 item,
@@ -1598,9 +1577,7 @@ def _decode_account_snapshot_delta(
             )
             for item in _required_list(payload, "open_orders")
         ),
-        removed_open_orders=tuple(
-            _required_key_list(payload, "removed_open_orders")
-        ),
+        removed_open_orders=tuple(_required_key_list(payload, "removed_open_orders")),
     )
 
 
@@ -1775,9 +1752,7 @@ def _require_snapshot_scope(
         _require_string(payload, "environment") != expected_environment
         or _require_string(payload, "account_label") != expected_account_label
     ):
-        raise AccountEventHubProtocolError(
-            "account snapshot nested scope mismatch"
-        )
+        raise AccountEventHubProtocolError("account snapshot nested scope mismatch")
 
 
 def _required_bool(payload: dict[str, object], field_name: str) -> bool:
@@ -1877,9 +1852,7 @@ def _optional_account_state(
     if value is None:
         return None
     if not isinstance(value, str):
-        raise AccountEventHubProtocolError(
-            "account_state must be a string or null"
-        )
+        raise AccountEventHubProtocolError("account_state must be a string or null")
     try:
         return ExecutionAccountStatus(value)
     except ValueError as error:
@@ -1902,9 +1875,7 @@ def _required_decimal(
             f"{field_name} is not a valid decimal"
         ) from error
     if not parsed.is_finite():
-        raise AccountEventHubProtocolError(
-            f"{field_name} must be a finite decimal"
-        )
+        raise AccountEventHubProtocolError(f"{field_name} must be a finite decimal")
     return parsed
 
 

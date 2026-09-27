@@ -903,8 +903,7 @@ def paper_live_daemon_command(
 ) -> None:
     if entry_policy_compare_output is not None and not entry_policy_compare_only:
         raise typer.BadParameter(
-            "--entry-policy-compare-output requires "
-            "--entry-policy-compare-only"
+            "--entry-policy-compare-output requires --entry-policy-compare-only"
         )
     resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
@@ -931,16 +930,12 @@ def paper_live_daemon_command(
     )
     health = LocalHealthWriter.from_environment()
     health_callback = (
-        None
-        if health is None
-        else lambda: health.heartbeat(database_ok=True)
+        None if health is None else lambda: health.heartbeat(database_ok=True)
     )
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
-    order_flow_min_aggressive_imbalance_decimal = (
-        _parse_optional_non_negative_decimal(
-            order_flow_min_aggressive_imbalance,
-            "--orderflow-min-aggressive-imbalance",
-        )
+    order_flow_min_aggressive_imbalance_decimal = _parse_optional_non_negative_decimal(
+        order_flow_min_aggressive_imbalance,
+        "--orderflow-min-aggressive-imbalance",
     )
     clock = _SystemClock()
     created_at = clock.now()
@@ -996,6 +991,7 @@ def paper_live_daemon_command(
     if entry_positive_gainer_top_count is None:
         entry_symbol_loader = source.load_active_symbols_at
     else:
+
         def entry_symbol_loader(observed_at: datetime) -> frozenset[str]:
             return source.load_positive_gainer_symbols_at(
                 observed_at,
@@ -1032,11 +1028,9 @@ def paper_live_daemon_command(
     ):
         if entry_price_above_ema5 or entry_price_above_ema10:
             if candle_source is None:
-                raise RuntimeError(
-                    "EMA entry filters require a 15m candle source"
-                )
-            ema_provider: ClosedCandleEmaProvider | None = (
-                ClosedCandleEmaProvider(candle_source)
+                raise RuntimeError("EMA entry filters require a 15m candle source")
+            ema_provider: ClosedCandleEmaProvider | None = ClosedCandleEmaProvider(
+                candle_source
             )
         else:
             ema_provider = None
@@ -1113,9 +1107,7 @@ def paper_live_daemon_command(
             entry_symbol_loader=entry_symbol_loader,
             candle_source=candle_source,
             entry_filter_context_loader=(
-                load_entry_filter_context
-                if ema_provider is not None
-                else None
+                load_entry_filter_context if ema_provider is not None else None
             ),
             entry_policy_comparison_observer=(
                 None if comparison_sink is None else comparison_sink
@@ -1433,15 +1425,11 @@ def paper_live_pair_command(
     )
     health = LocalHealthWriter.from_environment()
     health_callback = (
-        None
-        if health is None
-        else lambda: health.heartbeat(database_ok=True)
+        None if health is None else lambda: health.heartbeat(database_ok=True)
     )
-    order_flow_min_aggressive_imbalance_decimal = (
-        _parse_optional_non_negative_decimal(
-            order_flow_min_aggressive_imbalance,
-            "--orderflow-min-aggressive-imbalance",
-        )
+    order_flow_min_aggressive_imbalance_decimal = _parse_optional_non_negative_decimal(
+        order_flow_min_aggressive_imbalance,
+        "--orderflow-min-aggressive-imbalance",
     )
     clock = _SystemClock()
     created_at = clock.now()
@@ -1464,6 +1452,7 @@ def paper_live_pair_command(
         forward_horizon_buckets=(1,),
     )
     candidate_notional_decimal = Decimal(candidate_notional)
+
     def identity_for(run_id: str | None) -> StrategyRunIdentity | None:
         return _paired_runtime_identity(
             run_id,
@@ -1517,9 +1506,7 @@ def paper_live_pair_command(
                 candle_grace_bars=candle_grace_bars,
                 candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             ),
-            entry_filter=_entry_filter_config(
-                long_only=candle_entry_long_only
-            ),
+            entry_filter=_entry_filter_config(long_only=candle_entry_long_only),
         )
     )
     if third_run_id is not None:
@@ -1734,9 +1721,7 @@ class _PairedAccountSpec:
     run_id: str
     run_identity: StrategyRunIdentity
     portfolio: PaperExitConfig
-    entry_filter: PaperEntryFilterConfig = field(
-        default_factory=PaperEntryFilterConfig
-    )
+    entry_filter: PaperEntryFilterConfig = field(default_factory=PaperEntryFilterConfig)
 
 
 def _paired_runtime_identity(
@@ -1762,9 +1747,7 @@ def _paired_runtime_identity(
         candidate_notional=candidate_notional,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
-        order_flow_min_aggressive_imbalance=(
-            order_flow_min_aggressive_imbalance
-        ),
+        order_flow_min_aggressive_imbalance=(order_flow_min_aggressive_imbalance),
     )
 
 
@@ -1841,9 +1824,7 @@ def _parse_optional_non_negative_decimal(
     except (InvalidOperation, ValueError) as error:
         raise typer.BadParameter(f"{option_name} must be a decimal") from error
     if not parsed.is_finite() or parsed < 0:
-        raise typer.BadParameter(
-            f"{option_name} must be finite and non-negative"
-        )
+        raise typer.BadParameter(f"{option_name} must be finite and non-negative")
     return parsed
 
 
@@ -1878,9 +1859,9 @@ def build_runtime_strategy_for_cli(
         "compression_breakout": compression_breakout,
     }
     if order_flow_min_aggressive_imbalance is not None:
-        config_payload[
-            "order_flow_impulse_min_aggressive_imbalance"
-        ] = order_flow_min_aggressive_imbalance
+        config_payload["order_flow_impulse_min_aggressive_imbalance"] = (
+            order_flow_min_aggressive_imbalance
+        )
     return build_runtime_strategy(
         strategy_name,
         config=config_payload,
@@ -1908,9 +1889,9 @@ def build_runtime_identity_for_cli(
         "compression_breakout": compression_breakout,
     }
     if order_flow_min_aggressive_imbalance is not None:
-        config_payload[
-            "order_flow_impulse_min_aggressive_imbalance"
-        ] = order_flow_min_aggressive_imbalance
+        config_payload["order_flow_impulse_min_aggressive_imbalance"] = (
+            order_flow_min_aggressive_imbalance
+        )
     runtime_config = build_runtime_config(
         strategy_name,
         config=config_payload,
@@ -1937,11 +1918,7 @@ def build_runtime_identity_for_cli(
         strategy_version="v0",
         config_hash=config_hash,
         run_mode=RunMode.PAPER,
-        code_commit=(
-            resolve_code_commit()
-            if code_commit is None
-            else code_commit
-        ),
+        code_commit=(resolve_code_commit() if code_commit is None else code_commit),
         created_at=generated_at,
         source_paths=(source_description,),
         config_hash_aliases=config_hash_aliases,

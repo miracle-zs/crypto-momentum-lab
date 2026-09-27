@@ -88,9 +88,7 @@ class LiveMarketStateContinuityError(RuntimeError):
         current_at: datetime,
         expected_interval_seconds: int,
     ) -> None:
-        observed_delta_seconds = int(
-            (current_at - previous_at).total_seconds()
-        )
+        observed_delta_seconds = int((current_at - previous_at).total_seconds())
         super().__init__(
             "missing market-state bucket: "
             f"symbol={symbol} previous={previous_at.isoformat()} "
@@ -143,9 +141,7 @@ class LiveMarketLoop:
         state_machine: OrderExecutionPort,
         clock: Callable[[], datetime],
         recover_market_state_gap: MarketStateGapRecovery | None = None,
-        hub_cursor_provider: Callable[
-            [], Mapping[str, str | int] | None
-        ] | None = None,
+        hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         unmanaged_halt_debounce_seconds: float = 15.0,
@@ -156,9 +152,7 @@ class LiveMarketLoop:
             ]
             | None
         ) = None,
-        decision_fact_binder: Callable[
-            [LiveDaemonRuntimeContext | None], None
-        ]
+        decision_fact_binder: Callable[[LiveDaemonRuntimeContext | None], None]
         | None = None,
     ) -> None:
         if not run_id.strip():
@@ -386,12 +380,9 @@ class LiveMarketLoop:
                         final_state_at,
                     )
             gap_generation = self._market_gap_generation
-            if (
-                gap_generation
-                > self._strategy_gap_reset_generation_by_symbol.get(
-                    state.symbol,
-                    0,
-                )
+            if gap_generation > self._strategy_gap_reset_generation_by_symbol.get(
+                state.symbol,
+                0,
             ):
                 reset = getattr(self._strategy, "reset_symbol", None)
                 if callable(reset):
@@ -756,16 +747,12 @@ def _strategy_decision_details(
     state: MarketState15s,
     last_processed_at: datetime | None,
     recovered_bucket_count: int,
-    hub_cursor_provider: Callable[
-        [], Mapping[str, str | int] | None
-    ] | None,
+    hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None,
 ) -> dict[str, JsonValue]:
     details: dict[str, JsonValue] = {
         "market_state_input_fingerprint": market_state_input_fingerprint(state),
         "last_processed_at_before": (
-            None
-            if last_processed_at is None
-            else last_processed_at.isoformat()
+            None if last_processed_at is None else last_processed_at.isoformat()
         ),
         "gap_recovered_bucket_count": recovered_bucket_count,
         "input_data_complete": state.data_complete,

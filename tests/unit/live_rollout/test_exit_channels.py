@@ -117,6 +117,7 @@ def test_pending_position_failure_is_promoted_after_retries() -> None:
     assert exit_channels.is_pending_position_sync_failure(
         "pending_live_positions:BTCUSDT"
     )
-    assert exit_channels.promote_pending_position_failure(
-        "pending_live_positions:BTCUSDT"
-    ) == "unmanaged_live_positions:BTCUSDT"
+    assert (
+        exit_channels.promote_pending_position_failure("pending_live_positions:BTCUSDT")
+        == "unmanaged_live_positions:BTCUSDT"
+    )

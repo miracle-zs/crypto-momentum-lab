@@ -155,9 +155,9 @@ def test_refresh_command_rejects_invalid_timestamp() -> None:
 
 
 def test_parse_paper_exit_run_ids_normalizes_csv() -> None:
-    assert main.parse_paper_exit_run_ids(
-        " run-1,run-2, run-1, ,"
-    ) == frozenset({"run-1", "run-2"})
+    assert main.parse_paper_exit_run_ids(" run-1,run-2, run-1, ,") == frozenset(
+        {"run-1", "run-2"}
+    )
 
 
 def test_parse_live_position_account_label_normalizes_optional_value() -> None:
@@ -240,9 +240,7 @@ async def test_protected_symbols_discover_live_accounts_with_positions() -> None
         configured_live_position_account_labels=frozenset({"primary"}),
     )
 
-    assert symbols == frozenset(
-        {"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"}
-    )
+    assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"})
     assert accounts.labels_calls == ["live"]
     assert set(accounts.symbol_calls) == {"primary", "account-2"}
 
@@ -731,9 +729,7 @@ async def test_capture_observer_tier_zero_keeps_all_monitoring_symbols() -> None
 
     await observer.snapshot_updated(fixture_tiered_snapshot())
 
-    assert capture.calls[0] == frozenset(
-        f"S{rank:02d}USDT" for rank in range(1, 41)
-    )
+    assert capture.calls[0] == frozenset(f"S{rank:02d}USDT" for rank in range(1, 41))
 
 
 async def test_capture_observer_tier_promotes_when_rank_improves() -> None:
@@ -832,7 +828,9 @@ async def test_capture_observer_backfills_when_t1_promotes_into_must_warm() -> N
     assert backfilled == [frozenset({"S15USDT"})]
 
 
-async def test_capture_observer_skips_backfill_after_full_trade_tier_residence() -> None:
+async def test_capture_observer_skips_backfill_after_full_trade_tier_residence() -> (
+    None
+):
     class FakeCapture:
         async def apply_symbols(self, symbols, *, streams, generation) -> None:
             return None
@@ -934,9 +932,7 @@ async def test_logging_refresh_service_times_out_stalled_refresh() -> None:
     )
 
     with pytest.raises(TimeoutError):
-        await service.refresh(
-            observed_at=datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
-        )
+        await service.refresh(observed_at=datetime(2026, 7, 28, 0, 0, tzinfo=UTC))
 
 
 async def test_market_data_watchdog_rejects_missing_startup_data() -> None:
@@ -1144,7 +1140,9 @@ async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
     assert "S25USDT" not in capture.calls[-1][0]
 
 
-async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit() -> None:
+async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit() -> (
+    None
+):
     class FakeCapture:
         def __init__(self) -> None:
             self.calls = []
@@ -1179,4 +1177,3 @@ async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_e
 
     # S35 was NEVER in the trade tier; leaving the universe must NOT give it an aggTrade stream.
     assert "S35USDT" not in capture.calls[-1][0]
-

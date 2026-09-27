@@ -96,9 +96,7 @@ def _service() -> tuple[
     shadow_repository = FakeShadowRepository()
     approved_repository = FakeApprovedIntentRepository()
     order_state_repository = FakeOrderRepository()
-    exchange = FakeExchange(
-        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
-    )
+    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_state_repository,

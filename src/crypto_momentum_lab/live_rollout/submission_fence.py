@@ -107,9 +107,7 @@ class LiveSubmissionFence:
             if current_lease.strategy_name != self._strategy_name:
                 raise OrderPreSubmissionError("active lease strategy changed")
             if current_lease.code_generation != self._code_generation:
-                raise OrderPreSubmissionError(
-                    "active lease code generation changed"
-                )
+                raise OrderPreSubmissionError("active lease code generation changed")
             expected_lease = (
                 None if self._active_lease is None else self._active_lease()
             )
@@ -117,9 +115,7 @@ class LiveSubmissionFence:
                 expected_lease is not None
                 and current_lease.lease_id != expected_lease.lease_id
             ):
-                raise OrderPreSubmissionError(
-                    "active lease fencing token changed"
-                )
+                raise OrderPreSubmissionError("active lease fencing token changed")
 
             if (
                 self._capability_evaluator is not None
@@ -177,9 +173,7 @@ class LiveSubmissionFence:
             raise OrderPreSubmissionError("active lease strategy changed")
         if current_lease.code_generation != self._code_generation:
             raise OrderPreSubmissionError("active lease code generation changed")
-        expected_lease = (
-            None if self._active_lease is None else self._active_lease()
-        )
+        expected_lease = None if self._active_lease is None else self._active_lease()
         if (
             expected_lease is not None
             and current_lease.lease_id != expected_lease.lease_id

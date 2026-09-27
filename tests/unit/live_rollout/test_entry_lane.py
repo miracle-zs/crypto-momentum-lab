@@ -203,7 +203,9 @@ async def test_entry_lane_rejects_when_progress_lagging() -> None:
     assert outcome.submitted_order_count == 0
 
 
-async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is_true() -> None:
+async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is_true() -> (
+    None
+):
     executed: list[str] = []
 
     class MockPosition:
@@ -241,7 +243,9 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
         clock=lambda: NOW,
         entry_enabled=lambda: True,
         entry_enabled_reason=lambda: "ready",
-        execute_candidate=lambda candidate, **kwargs: executed.append(candidate.candidate_id),
+        execute_candidate=lambda candidate, **kwargs: executed.append(
+            candidate.candidate_id
+        ),
         invalidate_context=lambda: None,
     )
 
@@ -258,5 +262,3 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
     assert executed == []
     assert outcome.approved_intent_count == 0
     assert outcome.submitted_order_count == 0
-
-

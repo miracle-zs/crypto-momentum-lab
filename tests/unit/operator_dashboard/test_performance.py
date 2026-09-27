@@ -228,7 +228,13 @@ def test_assess_coverage_hardened_validation() -> None:
 
     # 1. Content hash matches the canonical record
     valid_cf = FullCF(
-        "cf1", "primary", Decimal("10"), "deposit", valid_eff, "wire", "appr_1",
+        "cf1",
+        "primary",
+        Decimal("10"),
+        "deposit",
+        valid_eff,
+        "wire",
+        "appr_1",
         good_hash,
     )
     ok, status, proof = _assess_coverage([valid_cf], start, end)

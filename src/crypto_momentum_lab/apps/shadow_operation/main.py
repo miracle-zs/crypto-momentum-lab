@@ -209,9 +209,7 @@ async def _run_from_database(
                 run_mode=RunMode.SHADOW,
                 code_commit="operator-shadow",
                 created_at=now,
-                source_paths=(
-                    f"postgres-runtime-states:{market_environment}",
-                ),
+                source_paths=(f"postgres-runtime-states:{market_environment}",),
             ),
         )
         guarded_exchange = _WriteRejectingExchange()

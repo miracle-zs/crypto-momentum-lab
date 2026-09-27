@@ -67,9 +67,7 @@ def catalog_auto_daily(
     overwrite: bool = False,
 ) -> list[dict[str, Any]]:
     """Scan distinct dates in revisions and catalog completed daily datasets."""
-    date_symbols = repo.get_distinct_dates_and_symbols(
-        scope=scope, interval=interval
-    )
+    date_symbols = repo.get_distinct_dates_and_symbols(scope=scope, interval=interval)
     existing_manifests = {
         m.manifest_id: m for m in catalog.list_manifests(scope=scope, limit=1000)
     }

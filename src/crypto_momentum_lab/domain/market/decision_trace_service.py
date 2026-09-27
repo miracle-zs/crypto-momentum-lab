@@ -116,9 +116,7 @@ class DecisionTraceService:
         decision_id: str,
         *,
         replay_mode: MarketVisibilityMode = MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator: Callable[
-            [tuple[MarketEnvelope, ...]], Any
-        ],
+        policy_evaluator: Callable[[tuple[MarketEnvelope, ...]], Any],
     ) -> ReplayResult:
         """Replays historic decision using visible or canonical revisions.
 

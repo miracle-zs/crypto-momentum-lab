@@ -39,8 +39,7 @@ class ClosedCandleEmaSnapshot:
                 raise ValueError("symbol must not be empty")
             object.__setattr__(self, "symbol", normalized_symbol)
         if self.observed_at is not None and (
-            self.observed_at.tzinfo is None
-            or self.observed_at.utcoffset() is None
+            self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None
         ):
             raise ValueError("observed_at must be timezone-aware")
         for value, field_name in (
@@ -134,9 +133,7 @@ class ClosedCandleEmaProvider:
         if max_boundaries_per_symbol <= 0:
             raise ValueError("max_boundaries_per_symbol must be positive")
         protected = {
-            symbol.strip().upper()
-            for symbol in protected_symbols
-            if symbol.strip()
+            symbol.strip().upper() for symbol in protected_symbols if symbol.strip()
         }
         cutoff = observed_at - inactive_after
         keys_by_symbol: dict[str, list[tuple[str, datetime]]] = defaultdict(list)
@@ -406,9 +403,7 @@ class BinanceRestClosedCandle15mSource:
                     ) from error
             delay = self._retry_delays[attempt]
             time.sleep(delay + random.uniform(0.0, delay * 0.25))
-        raise ClosedCandleSourceError(
-            "Binance 15m candle request retry loop exhausted"
-        )
+        raise ClosedCandleSourceError("Binance 15m candle request retry loop exhausted")
 
     def _prune(
         self,

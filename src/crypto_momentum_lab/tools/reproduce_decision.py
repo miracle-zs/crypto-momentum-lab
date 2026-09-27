@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import sys
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -75,7 +76,9 @@ async def audit_decision_trace(
             return {
                 "decision_id": trace.decision_id,
                 "status": "EVIDENCE_INSUFFICIENT",
-                "error": "DecisionTrace missing cryptographic input_hash or frame_digest",
+                "error": (
+                    "DecisionTrace missing cryptographic input_hash or frame_digest"
+                ),
                 "reproduced": False,
             }
 
@@ -86,24 +89,36 @@ async def audit_decision_trace(
             return {
                 "decision_id": trace.decision_id,
                 "status": "UNREPRODUCIBLE",
-                "error": f"input_hash mismatch: trace {trace.input_hash} vs payload {payload.get('input_hash')}",
+                "error": (
+                    f"input_hash mismatch: trace {trace.input_hash} vs payload "
+                    f"{payload.get('input_hash')}"
+                ),
                 "reproduced": False,
             }
-        if payload.get("frame_digest") and payload.get("frame_digest") != trace.frame_digest:
+        if (
+            payload.get("frame_digest")
+            and payload.get("frame_digest") != trace.frame_digest
+        ):
             return {
                 "decision_id": trace.decision_id,
                 "status": "UNREPRODUCIBLE",
-                "error": f"frame_digest mismatch: trace {trace.frame_digest} vs payload {payload.get('frame_digest')}",
+                "error": (
+                    f"frame_digest mismatch: trace {trace.frame_digest} vs payload "
+                    f"{payload.get('frame_digest')}"
+                ),
                 "reproduced": False,
             }
 
         revisions_summary = []
         for ref in trace.evaluated_market_refs:
-            if not getattr(ref, "revision_id", None) or not getattr(ref, "content_hash", None):
+            if not getattr(ref, "revision_id", None) or not getattr(
+                ref, "content_hash", None
+            ):
+                rev_id = getattr(ref, "revision_id", "?")
                 return {
                     "decision_id": trace.decision_id,
                     "status": "EVIDENCE_INSUFFICIENT",
-                    "error": f"Market revision ref {getattr(ref, 'revision_id', '?')} has invalid content_hash",
+                    "error": (f"Market revision ref {rev_id} has invalid content_hash"),
                     "reproduced": False,
                 }
             revisions_summary.append(
@@ -129,13 +144,28 @@ async def audit_decision_trace(
             return {
                 "decision_id": trace.decision_id,
                 "status": "UNREPRODUCIBLE",
-                "error": f"Output intent presence mismatch: {bool(output_intent)} vs {trace.intent_produced}",
+                "error": (
+                    f"Output intent presence mismatch: {bool(output_intent)} vs "
+                    f"{trace.intent_produced}"
+                ),
                 "reproduced": False,
             }
 
         # 4. Semantic Replay verification (if market_state payload is available)
         market_state_payload = payload.get("market_state")
         if market_state_payload:
+            from crypto_momentum_lab.domain.decision.decision_engine import (
+                ClockEvent,
+                DecisionInput,
+                EffectivePolicy,
+                PolicyState,
+                decide,
+            )
+            from crypto_momentum_lab.domain.execution.position_ledger_models import (
+                PositionHealthStatus,
+                PositionKey,
+                PositionView,
+            )
             from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
             from crypto_momentum_lab.market_data.hub import market_state_from_payload
 
@@ -147,7 +177,78 @@ async def audit_decision_trace(
                 return {
                     "decision_id": trace.decision_id,
                     "status": "UNREPRODUCIBLE",
-                    "error": f"Envelope symbol {envelope.state.symbol} does not match ref symbol {ref0.symbol}",
+                    "error": (
+                        f"Envelope symbol {envelope.state.symbol} does not match "
+                        f"ref symbol {ref0.symbol}"
+                    ),
+                    "reproduced": False,
+                }
+
+            # Reconstruct policy parameters from trace payload or defaults
+            pol_params = payload.get("policy_parameters") or {}
+            entry_thresh = Decimal(str(pol_params.get("entry_threshold", "65000.00")))
+            target_notional = Decimal(str(pol_params.get("target_notional", "1000.00")))
+            policy = EffectivePolicy(
+                policy_id=f"policy_{trace.strategy_name}",
+                strategy_name=trace.strategy_name,
+                policy_version=1,
+                entry_threshold=entry_thresh,
+                target_notional=target_notional,
+            )
+            prior_state = PolicyState(policy_version=1)
+            pos_key = PositionKey(
+                environment="live",
+                account_label=trace.account_label,
+                symbol=ref0.symbol,
+            )
+            pos_view = PositionView(
+                key=pos_key,
+                projection_version="pv_replay_0",
+                input_revision=1,
+                event_cut=None,
+                policy_version="v1",
+                schema_version="v1",
+                coverage=None,
+                active_episode=None,
+                batches=(),
+                unallocated_quantity=Decimal("0"),
+                reconciliation_gap=Decimal("0"),
+                health_status=PositionHealthStatus.READY,
+            )
+            dec_input = DecisionInput(
+                symbol=ref0.symbol,
+                market_ref=ref0,
+                market_envelope=envelope,
+                position_view=pos_view,
+                universe_version="u1",
+                clock_event=ClockEvent(sequence=1, timestamp=trace.decision_time),
+                cash_balance=Decimal("10000.00"),
+                risk_config_version="risk_v1",
+            )
+            replayed_result = decide(dec_input, prior_state, policy)
+            rep_intent_produced = replayed_result.intent is not None
+            if rep_intent_produced != trace.intent_produced:
+                return {
+                    "decision_id": trace.decision_id,
+                    "status": "UNREPRODUCIBLE",
+                    "error": (
+                        f"Replay intent mismatch: produced={rep_intent_produced} "
+                        f"vs recorded={trace.intent_produced}"
+                    ),
+                    "reproduced": False,
+                }
+            if (
+                not trace.intent_produced
+                and replayed_result.rejection_reason != trace.rejection_reason
+            ):
+                rej = replayed_result.rejection_reason
+                rec = trace.rejection_reason
+                return {
+                    "decision_id": trace.decision_id,
+                    "status": "UNREPRODUCIBLE",
+                    "error": (
+                        f"Replay rejection reason mismatch: '{rej}' vs recorded '{rec}'"
+                    ),
                     "reproduced": False,
                 }
 

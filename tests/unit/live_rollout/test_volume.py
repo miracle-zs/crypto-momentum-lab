@@ -52,10 +52,7 @@ async def test_cache_returns_latest_causal_usdt_snapshot() -> None:
 
     assert cache.snapshot("BTCUSDT", as_of=now) is not None
     assert cache.snapshot("BTCUSDT", as_of=now).quote_volume == Decimal("100")
-    assert (
-        cache.snapshot("BTCUSDT", as_of=later).quote_volume
-        == Decimal("200")
-    )
+    assert cache.snapshot("BTCUSDT", as_of=later).quote_volume == Decimal("200")
     assert cache.snapshot("BTCUSDC", as_of=later) is None
 
 
@@ -125,5 +122,3 @@ async def test_cache_metrics_tracking() -> None:
         "lookup_hit_count": 1,
         "lookup_miss_count": 2,
     }
-
-

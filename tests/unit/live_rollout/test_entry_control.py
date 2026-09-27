@@ -26,9 +26,7 @@ def test_entry_control_composes_gate_priority_and_pending_positions() -> None:
 
     gate.set_pending_position_symbols({"BTCUSDT"})
     assert gate.entry_enabled is False
-    assert gate.entry_enabled_reason == (
-        "account_position_sync_pending:BTCUSDT"
-    )
+    assert gate.entry_enabled_reason == ("account_position_sync_pending:BTCUSDT")
 
     gate.set_scheduled_entry_blocked(True, reason="scheduled_risk_window")
     gate.set_risk_control_entry_blocked(
@@ -45,9 +43,7 @@ def test_entry_control_composes_gate_priority_and_pending_positions() -> None:
         reason="scheduled_risk_window_complete",
     )
     assert gate.entry_enabled is False
-    assert gate.entry_enabled_reason == (
-        "account_position_sync_pending:BTCUSDT"
-    )
+    assert gate.entry_enabled_reason == ("account_position_sync_pending:BTCUSDT")
     assert state_machine.calls == ["block", "block", "unblock"]
 
 
@@ -103,9 +99,7 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         market_state_unavailable_reason="market_state_hub_ready",
         account_snapshot_available=True,
     )
-    assert gate.entry_enabled_reason == (
-        "exit_failure:BTCUSDT:exit request failed"
-    )
+    assert gate.entry_enabled_reason == ("exit_failure:BTCUSDT:exit request failed")
 
     gate.set_exit_failure("BTCUSDT", None)
     gate.set_entry_filter_cache_ready(True)

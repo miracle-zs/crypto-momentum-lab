@@ -105,9 +105,7 @@ async def test_stream_acknowledges_history_states_skipped_by_watermark() -> None
 
     yielded = [
         state
-        async for state in buffer.stream(
-            skip_through={"BTCUSDT": skipped.bucket_start}
-        )
+        async for state in buffer.stream(skip_through={"BTCUSDT": skipped.bucket_start})
     ]
 
     assert yielded == []

@@ -158,9 +158,7 @@ def _assess_coverage(
     s_time = (
         start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
     )
-    e_time = (
-        end_time if end_time.tzinfo is not None else end_time.replace(tzinfo=UTC)
-    )
+    e_time = end_time if end_time.tzinfo is not None else end_time.replace(tzinfo=UTC)
 
     if equity_rows:
         if len(equity_rows) < 2:
@@ -228,7 +226,6 @@ def _assess_coverage(
             "uncertified_zero_cash_flow_facts",
         )
 
-
     for r in cf_rows:
         rec_id = getattr(r, "correction_id", "unknown")
         ev_hash = getattr(r, "evidence_hash", None)
@@ -266,9 +263,7 @@ def _assess_coverage(
                 "uncertified",
                 f"uncertified_missing_effective_at_in_record_{rec_id}",
             )
-        eff_time = (
-            eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
-        )
+        eff_time = eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
         if eff_time < s_time or eff_time > e_time:
             return (
                 False,

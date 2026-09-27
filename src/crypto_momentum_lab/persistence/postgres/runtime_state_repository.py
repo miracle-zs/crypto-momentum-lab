@@ -193,8 +193,7 @@ class PostgresRuntimeMarketStateRepository:
                 gap_rows = await _load_overlapping_gaps(session, states)
                 gap_counts = _gap_counts_by_state_key(gap_rows, states)
                 adjusted_states = [
-                    _apply_gap_completeness(state, gap_counts)
-                    for state in states
+                    _apply_gap_completeness(state, gap_counts) for state in states
                 ]
                 values = [
                     runtime_state_row(
@@ -234,9 +233,7 @@ class PostgresRuntimeMarketStateRepository:
                     .values(revision_values)
                     .on_conflict_do_nothing()
                 )
-                for environment in sorted(
-                    {state.environment for state in states}
-                ):
+                for environment in sorted({state.environment for state in states}):
                     await session.execute(
                         text("SELECT pg_notify(:channel, :payload)"),
                         {
@@ -297,8 +294,7 @@ class PostgresRuntimeMarketStateRepository:
                 )
                 updated_rows = (
                     await session.scalars(
-                        select(RuntimeMarketState15sRow)
-                        .where(
+                        select(RuntimeMarketState15sRow).where(
                             RuntimeMarketState15sRow.environment == gap.environment,
                             RuntimeMarketState15sRow.symbol == gap.symbol,
                             RuntimeMarketState15sRow.bucket_start >= first_bucket,
@@ -324,9 +320,7 @@ class PostgresRuntimeMarketStateRepository:
                         "source_epoch": f"gap_{inserted}",
                         "visibility_mode": "decision_visible",
                         "is_canonical": False,
-                        "payload": market_state_to_payload(
-                            market_state_from_row(row)
-                        ),
+                        "payload": market_state_to_payload(market_state_from_row(row)),
                         "lineage": {
                             "gap_id": str(inserted),
                             "gap_previous_event_at": gap.previous_event_at.isoformat(),
@@ -380,12 +374,8 @@ class PostgresRuntimeMarketStateRepository:
             symbol = "" if cursor.symbol is None else cursor.symbol
             statement = statement.where(
                 or_(
-                    RuntimeMarketState15sRow.bucket_start
-                    > cursor.bucket_start,
-                    (
-                        RuntimeMarketState15sRow.bucket_start
-                        == cursor.bucket_start
-                    )
+                    RuntimeMarketState15sRow.bucket_start > cursor.bucket_start,
+                    (RuntimeMarketState15sRow.bucket_start == cursor.bucket_start)
                     & (RuntimeMarketState15sRow.symbol > symbol),
                 )
             )
@@ -473,9 +463,7 @@ class PostgresRuntimeMarketStateRepository:
             _require_aware(upper_bound, "upper_bound")
 
         bounds = []
-        for symbol, checkpoint_upper_bound in (
-            last_processed_at_by_symbol.items()
-        ):
+        for symbol, checkpoint_upper_bound in last_processed_at_by_symbol.items():
             if not symbol.strip():
                 raise ValueError("checkpoint symbols must not be empty")
             _require_aware(
@@ -483,9 +471,7 @@ class PostgresRuntimeMarketStateRepository:
                 "last_processed_at_by_symbol value",
             )
             recovery_upper_bound = (
-                upper_bound
-                if upper_bound is not None
-                else checkpoint_upper_bound
+                upper_bound if upper_bound is not None else checkpoint_upper_bound
             )
             bounds.append(
                 (
@@ -509,9 +495,7 @@ class PostgresRuntimeMarketStateRepository:
         async with self._session_factory() as session:
             if upper_bound is not None:
                 symbols = tuple(symbol for symbol, _, _ in bounds)
-                lower_bound = upper_bound - timedelta(
-                    seconds=lookback_seconds
-                )
+                lower_bound = upper_bound - timedelta(seconds=lookback_seconds)
                 statement = (
                     select(RuntimeMarketState15sRow)
                     .where(
@@ -532,9 +516,7 @@ class PostgresRuntimeMarketStateRepository:
                     if len(states) < per_symbol_limit:
                         states.append(market_state_from_row(row))
                 common_recovered = [
-                    state
-                    for states in recovered_by_symbol.values()
-                    for state in states
+                    state for states in recovered_by_symbol.values() for state in states
                 ]
                 common_recovered.sort(
                     key=lambda state: (state.bucket_start, state.symbol)
@@ -589,9 +571,7 @@ async def _insert_batch_idempotent(
     inserted_keys: set[_RuntimeStateKey] = {
         cast(_RuntimeStateKey, tuple(row)) for row in inserted_rows.all()
     }
-    keys: set[_RuntimeStateKey] = {
-        _runtime_state_key(item) for item in values
-    }
+    keys: set[_RuntimeStateKey] = {_runtime_state_key(item) for item in values}
     missing_keys = keys - inserted_keys
     if not missing_keys:
         return
@@ -723,7 +703,8 @@ def _gap_counts_by_state_key(
             if (
                 row.environment == state.environment
                 and row.symbol == state.symbol
-                and row.first_bucket_start <= state.bucket_start
+                and row.first_bucket_start
+                <= state.bucket_start
                 <= row.last_bucket_start
             )
         )

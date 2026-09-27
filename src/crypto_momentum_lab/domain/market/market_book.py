@@ -192,9 +192,7 @@ class InMemoryMarketBookRepository:
             if s == scope and inv == interval:
                 d = b_start.date()
                 date_to_symbols.setdefault(d, set()).add(sym)
-        return [
-            (d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())
-        ]
+        return [(d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())]
 
     def save_decision_trace(self, trace: DecisionTrace) -> None:
         self.decision_traces[trace.decision_id] = trace
@@ -266,11 +264,7 @@ class MarketBook:
                     )
                 return r
 
-        pub_time = (
-            published_at
-            or state.last_received_at
-            or datetime.now(UTC)
-        )
+        pub_time = published_at or state.last_received_at or datetime.now(UTC)
 
         ref = MarketRevisionRef(
             scope=state.environment,
@@ -546,8 +540,7 @@ class DatasetCatalog:
                 "manifest_id": manifest_id,
                 "status": "INTEGRITY_VIOLATION",
                 "error": (
-                    f"Computed hash {computed_hash} != stored "
-                    f"{manifest.manifest_hash}"
+                    f"Computed hash {computed_hash} != stored {manifest.manifest_hash}"
                 ),
                 "verified": False,
             }

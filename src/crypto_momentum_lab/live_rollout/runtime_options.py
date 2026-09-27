@@ -136,9 +136,7 @@ def runtime_manifest_strategy_config_hash(account: LiveRuntimeAccount) -> str:
         computed = _live_strategy_config_hash(
             account.strategy,
             profile=inputs.profile,
-            entry_positive_gainer_top_count=(
-                inputs.entry_positive_gainer_top_count
-            ),
+            entry_positive_gainer_top_count=(inputs.entry_positive_gainer_top_count),
             require_price_above_ema5=inputs.require_price_above_ema5,
             require_price_above_ema10=inputs.require_price_above_ema10,
             entry_policy_enforce=inputs.entry_policy_enforce,
@@ -378,9 +376,7 @@ def resolve_live_runtime_config(
             else options.entry_price_above_ema10
         )
         entry_order_type = (
-            _LIVE_ENTRY_ORDER_TYPE
-            if entry_order_type is None
-            else entry_order_type
+            _LIVE_ENTRY_ORDER_TYPE if entry_order_type is None else entry_order_type
         )
         entry_limit_ttl_seconds = (
             _LIVE_ENTRY_LIMIT_TTL_SECONDS
@@ -388,9 +384,7 @@ def resolve_live_runtime_config(
             else entry_limit_ttl_seconds
         )
         entry_policy_compare_only = (
-            False
-            if entry_policy_compare_only is None
-            else entry_policy_compare_only
+            False if entry_policy_compare_only is None else entry_policy_compare_only
         )
         entry_policy_enforce = (
             False if entry_policy_enforce is None else entry_policy_enforce
@@ -498,10 +492,13 @@ def resolve_live_runtime_config(
             "--persist-exchange-operations",
         )
 
-        configured_git_commit = options.git_commit_hash.strip() or values.get(
-            "CML_CODE_COMMIT",
-            "",
-        ).strip()
+        configured_git_commit = (
+            options.git_commit_hash.strip()
+            or values.get(
+                "CML_CODE_COMMIT",
+                "",
+            ).strip()
+        )
         manifest_git_commit = _validate_hex_hash(
             manifest_account.image_commit,
             "runtime manifest image_commit",

@@ -31,9 +31,7 @@ def test_synthesize_states_buckets_trades_into_15s() -> None:
         _trade(2, at=t0 + timedelta(seconds=5), maker=True),
         _trade(3, at=t0 + timedelta(seconds=20), maker=False),
     )
-    states = synthesize_states_from_trades(
-        "BTCUSDT", trades, environment="research"
-    )
+    states = synthesize_states_from_trades("BTCUSDT", trades, environment="research")
     assert len(states) == 2
     assert states[0].bucket_start == t0
     assert states[0].trade_count == 2

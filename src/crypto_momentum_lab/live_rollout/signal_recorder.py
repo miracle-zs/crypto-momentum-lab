@@ -125,9 +125,7 @@ class LiveSignalObservation:
             "reason": self.reason,
             "schema_version": _SIGNAL_SCHEMA_VERSION,
             "quote_volume_24h": self.quote_volume_24h,
-            "quote_volume_24h_quote_asset": (
-                self.quote_volume_24h_quote_asset
-            ),
+            "quote_volume_24h_quote_asset": (self.quote_volume_24h_quote_asset),
             "quote_volume_24h_source": self.quote_volume_24h_source,
             "quote_volume_24h_source_at": self.quote_volume_24h_source_at,
             "quote_volume_24h_fetched_at": self.quote_volume_24h_fetched_at,
@@ -278,9 +276,7 @@ class LiveStrategySignalRecorder:
         account_context: Mapping[str, object],
         filter_context: Mapping[str, object],
     ) -> None:
-        candidates_by_signal: dict[str, list[OrderIntentCandidate]] = defaultdict(
-            list
-        )
+        candidates_by_signal: dict[str, list[OrderIntentCandidate]] = defaultdict(list)
         for candidate in decision.candidates:
             candidates_by_signal[candidate.signal_id].append(candidate)
         for signal in decision.signals:
@@ -324,9 +320,7 @@ class LiveStrategySignalRecorder:
                 "desired_notional": _json_value(candidate.desired_notional),
             },
             signal_kind=(
-                "reduce_only_candidate"
-                if candidate.reduce_only
-                else "candidate"
+                "reduce_only_candidate" if candidate.reduce_only else "candidate"
             ),
             state=state,
             recorded_at=recorded_at,
@@ -428,12 +422,8 @@ class LiveStrategySignalRecorder:
                     volume_fields.quote_volume_24h_quote_asset
                 ),
                 quote_volume_24h_source=volume_fields.quote_volume_24h_source,
-                quote_volume_24h_source_at=(
-                    volume_fields.quote_volume_24h_source_at
-                ),
-                quote_volume_24h_fetched_at=(
-                    volume_fields.quote_volume_24h_fetched_at
-                ),
+                quote_volume_24h_source_at=(volume_fields.quote_volume_24h_source_at),
+                quote_volume_24h_fetched_at=(volume_fields.quote_volume_24h_fetched_at),
                 quote_volume_24h_age_ms=volume_fields.quote_volume_24h_age_ms,
                 features=_json_mapping(features or {}),
                 reference_prices=_json_mapping(reference_prices or {}),

@@ -49,6 +49,7 @@ packages = ["src/crypto_momentum_lab"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --import-mode=importlib"
+pythonpath = [".", "src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [

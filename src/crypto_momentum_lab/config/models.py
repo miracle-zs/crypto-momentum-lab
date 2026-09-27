@@ -122,9 +122,7 @@ class UniverseConfig(BaseModel):
             self.full_stream_max_gainer_rank
             and self.ranking_depth < self.full_stream_max_gainer_rank
         ):
-            raise ValueError(
-                "ranking_depth must be >= full_stream_max_gainer_rank"
-            )
+            raise ValueError("ranking_depth must be >= full_stream_max_gainer_rank")
         return self
 
     @property
@@ -159,13 +157,9 @@ class ArchiveConfig(BaseModel):
     @model_validator(mode="after")
     def validate_disk_thresholds(self) -> "ArchiveConfig":
         if self.warning_free_bytes <= self.halt_free_bytes:
-            raise ValueError(
-                "warning_free_bytes must be greater than halt_free_bytes"
-            )
+            raise ValueError("warning_free_bytes must be greater than halt_free_bytes")
         if self.recovery_free_bytes <= self.halt_free_bytes:
-            raise ValueError(
-                "recovery_free_bytes must be greater than halt_free_bytes"
-            )
+            raise ValueError("recovery_free_bytes must be greater than halt_free_bytes")
         return self
 
 
@@ -238,10 +232,7 @@ class CaptureConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_archive_streams(self) -> "CaptureConfig":
-        if (
-            self.durable_closure_delay_seconds
-            < self.realtime_closure_delay_seconds
-        ):
+        if self.durable_closure_delay_seconds < self.realtime_closure_delay_seconds:
             raise ValueError(
                 "durable_closure_delay_seconds must be >= "
                 "realtime_closure_delay_seconds"

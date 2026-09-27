@@ -29,7 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_decision_filter,
 )
-from crypto_momentum_lab.domain.execution import ExecutionBook, OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    ExecutionBook,
+    OrderExecutionPlan,
+    TradeCommand,
+)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
@@ -51,6 +55,7 @@ from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyCheckpoint,
     StrategyRunIdentity,
+    StrategySide,
 )
 from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
 from crypto_momentum_lab.execution_account.hub import (
@@ -509,11 +514,22 @@ async def run_live_daemon(
         decision_trace_repository = PostgresDecisionTraceRepository(
             observability_factory
         )
+        from crypto_momentum_lab.domain.operational.retention_authority import (
+            RetentionAuthority,
+        )
+
+        retention_authority = RetentionAuthority()
         fact_source = LiveDecisionFactSource(
             account_label,
             trace_repository=decision_trace_repository,
             strategy_name=strategy_name,
+            retention_authority=retention_authority,
         )
+        try:
+            await fact_source.restore()
+        except Exception as fs_rest_err:
+            log.warning("decision_fact_source_restore_failed", error=str(fs_rest_err))
+        ownership_registry.register("decision_fact_source", fact_source.drain)
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
             account_label=account_label,
@@ -616,6 +632,22 @@ async def run_live_daemon(
         )
         order_event_runtime = LiveOrderEventRuntime(telemetry=telemetry)
 
+        plan_overrides = {
+            "target_notional": getattr(config.strategy, "target_notional_usdt", None)
+            or Decimal("500.00"),
+            "order_type": "market"
+            if getattr(config.strategy, "market_orders", False)
+            else "limit",
+            "max_open_positions": getattr(risk_config, "max_open_positions", 4),
+            "max_gross_notional": getattr(
+                risk_config, "max_gross_notional", Decimal("2000.00")
+            ),
+            "max_order_notional": getattr(
+                risk_config, "max_order_notional", Decimal("500.00")
+            ),
+            "max_holding_seconds": getattr(config.strategy, "max_holding_seconds", None)
+            or 1200,
+        }
         runtime_plan = RuntimePlanCompiler.compile(
             environment="live",
             account_label=account_label,
@@ -625,6 +657,7 @@ async def run_live_daemon(
             runtime_generation=git_commit_hash,
             fencing_epoch=int(getattr(active_lease, "fencing_token", 1) or 1),
             observed_database_revision=migration_revision,
+            overrides=plan_overrides,
         )
         capability_evaluator = CapabilityEvaluator()
 
@@ -649,22 +682,41 @@ async def run_live_daemon(
                 if order_sym in getattr(ctx, "unmanaged_position_symbols", ()):
                     is_concordant = False
                 unresolved = getattr(ctx, "unresolved_orders", ()) or ()
+                curr_cid = getattr(order_plan, "client_order_id", None)
                 unresolved_count = sum(
                     1
                     for o in unresolved
-                    if getattr(getattr(o, "plan", None), "symbol", None)
-                    == order_sym
+                    if getattr(getattr(o, "plan", None), "symbol", None) == order_sym
+                    and getattr(getattr(o, "plan", None), "client_order_id", None)
+                    != curr_cid
                 )
 
             is_app_valid = daemon is not None and daemon.entry_enabled
+            now_utc = (
+                checked_at if checked_at.tzinfo else checked_at.replace(tzinfo=UTC)
+            )
+            lease_exp = getattr(active_lease, "expires_at", None)
+            is_lease_valid = (
+                (
+                    lease_exp is not None
+                    and (
+                        lease_exp if lease_exp.tzinfo else lease_exp.replace(tzinfo=UTC)
+                    )
+                    > now_utc
+                )
+                if active_lease
+                else False
+            )
+            is_identity_ok = bool(account_label and getattr(client, "_api_key", None))
+
             return CapabilityEvidence(
                 evidence_version=f"ev_{account_label}_{checked_at.isoformat()}",
                 market_freshness_seconds=market_age,
                 is_account_concordant=is_concordant,
-                is_account_identity_verified=True,
+                is_account_identity_verified=is_identity_ok,
                 unresolved_inflight_orders_count=unresolved_count,
                 is_approval_valid=is_app_valid,
-                is_lease_active=True,
+                is_lease_active=is_lease_valid,
                 is_emergency_authorized=False,
                 is_universe_ready=is_app_valid,
                 plan_hash=runtime_plan.plan_hash,
@@ -726,7 +778,12 @@ async def run_live_daemon(
         execution_book = ExecutionBook(
             coordinator=domain_coordinator,
             reservation_repository=reservation_repository,
+            command_repository=order_repository,
         )
+        try:
+            await execution_book.restore()
+        except Exception as eb_rest_err:
+            log.warning("execution_book_restore_failed", error=str(eb_rest_err))
 
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
@@ -739,6 +796,34 @@ async def run_live_daemon(
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
+
+        async def _handle_decision_exit(cmd: TradeCommand) -> None:
+            allocs = ()
+            if cmd.allocation_plan:
+                allocs = cmd.allocation_plan.allocations
+            plan = OrderExecutionPlan(
+                intent_id=f"intent_exit_{cmd.command_id}",
+                run_id=session_id,
+                client_order_id=cmd.command_id,
+                symbol=cmd.position_key.symbol,
+                side="SELL" if cmd.side == StrategySide.LONG else "BUY",
+                order_type=(
+                    cmd.order_type.value
+                    if hasattr(cmd.order_type, "value")
+                    else str(cmd.order_type)
+                ),
+                quantity=cmd.requested_quantity,
+                price=cmd.limit_price,
+                reduce_only=True,
+                position_side=cmd.position_key.position_side,
+                created_at=cmd.created_at,
+                quantized=True,
+                allocations=allocs,
+                projection_version=cmd.expected_projection_version,
+            )
+            await execution_coordinator.submit(plan)
+
+        fact_source.set_exit_handler(_handle_decision_exit)
 
         assert execution_coordinator is not None
         assert client is not None
@@ -1719,7 +1804,10 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE:
         return True
     msg = str(error)
-    if "already exists in terminal status" in msg or "already bound to a different order" in msg:
+    if (
+        "already exists in terminal status" in msg
+        or "already bound to a different order" in msg
+    ):
         return True
     if "ReservationConflictError" in type(error).__name__:
         return True

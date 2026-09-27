@@ -387,4 +387,3 @@ def test_readiness_compute_dynamic_market_age_and_published_at(
     payload = json.loads(health.readiness_path.read_text())
     assert "published_at" in payload
     assert payload["latest_market_state_at"] == t0.isoformat()
-

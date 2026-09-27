@@ -152,15 +152,10 @@ class PaperEntryFilterConfig:
     def __post_init__(self) -> None:
         if not self.allow_long and not self.allow_short:
             raise ValueError("entry filter must allow at least one side")
-        if (
-            self.max_abs_aggressive_imbalance is not None
-            and not Decimal("0")
-            < self.max_abs_aggressive_imbalance
-            <= Decimal("1")
-        ):
-            raise ValueError(
-                "max_abs_aggressive_imbalance must be in (0, 1]"
-            )
+        if self.max_abs_aggressive_imbalance is not None and not Decimal(
+            "0"
+        ) < self.max_abs_aggressive_imbalance <= Decimal("1"):
+            raise ValueError("max_abs_aggressive_imbalance must be in (0, 1]")
         if (
             self.max_cluster_trade_count is not None
             and self.max_cluster_trade_count <= 0
@@ -191,13 +186,9 @@ class PaperLiveDaemonConfig:
     entry_symbol_refresh_seconds: float = 15.0
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
-    execution: ReplayExecutionConfig = field(
-        default_factory=ReplayExecutionConfig
-    )
+    execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
     portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
-    entry_filter: PaperEntryFilterConfig = field(
-        default_factory=PaperEntryFilterConfig
-    )
+    entry_filter: PaperEntryFilterConfig = field(default_factory=PaperEntryFilterConfig)
     entry_policy_compare_only: bool = False
     checkpoint_phase_seconds: float = 0.0
 
@@ -345,9 +336,7 @@ def run_paired_paper_live_daemon(
     last_candle_end_by_account: list[dict[str, datetime]] = []
     legacy_candle_cursor_symbols_by_account: list[set[str]] = []
     candle_aggregators: list[Candle15mAggregator | None] = []
-    candle_history_by_account: list[
-        dict[str, deque[ClosedCandle15m]]
-    ] = []
+    candle_history_by_account: list[dict[str, deque[ClosedCandle15m]]] = []
     for account_index, account in enumerate(accounts):
         config = account.config
         identity = config.run_identity
@@ -370,9 +359,7 @@ def run_paired_paper_live_daemon(
             )
         pending_candidates = list(
             _run_async(
-                account.artifact_repository.load_pending_candidates(
-                    config.run_id
-                )
+                account.artifact_repository.load_pending_candidates(config.run_id)
             )
         )
         pending_by_account.append(pending_candidates)
@@ -397,9 +384,7 @@ def run_paired_paper_live_daemon(
         last_position_persisted_at_by_account.append(
             {position.position_id: position.updated_at for position in open_positions}
         )
-        last_candle_end_by_account.append(
-            _initial_candle_cursors(open_positions)
-        )
+        last_candle_end_by_account.append(_initial_candle_cursors(open_positions))
         legacy_candle_cursor_symbols_by_account.append(set())
         candle_aggregators.append(
             Candle15mAggregator()
@@ -421,9 +406,7 @@ def run_paired_paper_live_daemon(
         seconds=first_config.checkpoint_phase_seconds
     )
     last_equity_snapshot_at: list[datetime | None] = [None] * len(accounts)
-    candle_retry_after_by_account: list[dict[str, datetime]] = [
-        {} for _ in accounts
-    ]
+    candle_retry_after_by_account: list[dict[str, datetime]] = [{} for _ in accounts]
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
@@ -481,18 +464,14 @@ def run_paired_paper_live_daemon(
             continue
 
         now = clock.now()
-        if (
-            _state_age_seconds(now, state)
-            > first_config.max_market_state_age_seconds
-        ):
+        if _state_age_seconds(now, state) > first_config.max_market_state_age_seconds:
             if state.symbol not in stale_symbols:
                 _log_stale_market_state(
                     state=state,
                     now=now,
                     max_age_seconds=first_config.max_market_state_age_seconds,
                     open_position_count=sum(
-                        len(positions)
-                        for positions in open_positions_by_account
+                        len(positions) for positions in open_positions_by_account
                     ),
                 )
                 stale_symbols.add(state.symbol)
@@ -528,9 +507,7 @@ def run_paired_paper_live_daemon(
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None
-            or (
-                state.bucket_start - entry_symbols_loaded_at
-            ).total_seconds()
+            or (state.bucket_start - entry_symbols_loaded_at).total_seconds()
             >= first_config.entry_symbol_refresh_seconds
         ):
             entry_symbols = entry_symbol_loader(state.bucket_start)
@@ -544,9 +521,7 @@ def run_paired_paper_live_daemon(
             if identity is None:
                 raise ValueError("paired paper account requires run_identity")
             aggregator = candle_aggregators[index]
-            observed_candle = (
-                None if aggregator is None else aggregator.observe(state)
-            )
+            observed_candle = None if aggregator is None else aggregator.observe(state)
             if aggregator is not None:
                 _log_candle_gap_events(
                     aggregator=aggregator,
@@ -559,9 +534,7 @@ def run_paired_paper_live_daemon(
                 not closed_candles
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
             ):
-                retry_after = candle_retry_after_by_account[index].get(
-                    state.symbol
-                )
+                retry_after = candle_retry_after_by_account[index].get(state.symbol)
                 if retry_after is None or now >= retry_after:
                     after = last_candle_end_by_account[index].get(state.symbol)
                     if (
@@ -594,9 +567,7 @@ def run_paired_paper_live_daemon(
                             )
                     try:
                         closed_candles = _load_closed_candles_for_positions(
-                            positions=tuple(
-                                open_positions_by_account[index].values()
-                            ),
+                            positions=tuple(open_positions_by_account[index].values()),
                             state=state,
                             source=candle_source,
                             not_before=identity.created_at,
@@ -609,15 +580,11 @@ def run_paired_paper_live_daemon(
                             account_index=index,
                             error=str(error),
                         )
-                        candle_retry_after_by_account[index][
-                            state.symbol
-                        ] = now + timedelta(
-                            seconds=_CANDLE_SOURCE_RETRY_SECONDS
+                        candle_retry_after_by_account[index][state.symbol] = (
+                            now + timedelta(seconds=_CANDLE_SOURCE_RETRY_SECONDS)
                         )
                     else:
-                        candle_retry_after_by_account[index].pop(
-                            state.symbol, None
-                        )
+                        candle_retry_after_by_account[index].pop(state.symbol, None)
             position_updates_by_id: dict[str, PaperPosition] = {}
             candle_events: tuple[ClosedCandle15m | None, ...] = (
                 closed_candles if closed_candles else (None,)
@@ -639,15 +606,12 @@ def run_paired_paper_live_daemon(
                     )
                     if (
                         not candle_history
-                        or candle_history[-1].candle_start
-                        != closed_candle.candle_start
+                        or candle_history[-1].candle_start != closed_candle.candle_start
                     ):
                         candle_history.append(closed_candle)
                 candle_history = candle_history_by_account[index].get(state.symbol)
                 position_updates = mark_positions(
-                    positions=tuple(
-                        open_positions_by_account[index].values()
-                    ),
+                    positions=tuple(open_positions_by_account[index].values()),
                     state=state,
                     config=config.portfolio,
                     taker_fee_rate=config.execution.taker_fee_rate,
@@ -695,9 +659,7 @@ def run_paired_paper_live_daemon(
                     )
                 else:
                     cooldown_remaining_by_account[index].pop(state.symbol, None)
-                _run_async(
-                    account.artifact_repository.save_decision(account_decision)
-                )
+                _run_async(account.artifact_repository.save_decision(account_decision))
                 pending_by_account[index].extend(account_decision.candidates)
 
         # Resolve entries after the strategy decision so zero-latency paper
@@ -772,14 +734,10 @@ def run_paired_paper_live_daemon(
                 bucket_start=state.bucket_start.isoformat(),
             )
             first_state_processed_logged = True
-        checkpoint_due = (
-            now >= checkpoint_not_before
-            and (
-                processed_since_checkpoint
-                >= first_config.checkpoint_every_states
-                or (now - last_checkpoint_elapsed_anchor).total_seconds()
-                >= first_config.checkpoint_every_seconds
-            )
+        checkpoint_due = now >= checkpoint_not_before and (
+            processed_since_checkpoint >= first_config.checkpoint_every_states
+            or (now - last_checkpoint_elapsed_anchor).total_seconds()
+            >= first_config.checkpoint_every_seconds
         )
         if checkpoint_due:
             checkpoint_to_save = _checkpoint_for_persistence(strategy)
@@ -787,9 +745,7 @@ def run_paired_paper_live_daemon(
                 accounts=accounts,
                 checkpoint=checkpoint_to_save,
                 saved_at=now,
-                cooldown_remaining_by_account=tuple(
-                    cooldown_remaining_by_account
-                ),
+                cooldown_remaining_by_account=tuple(cooldown_remaining_by_account),
             )
             notify_checkpoint_persisted()
             checkpoint_dirty = False
@@ -844,8 +800,7 @@ def _load_paired_checkpoints(
             if checkpoint is not None:
                 checkpoints_by_run_id[run_id] = checkpoint
     return tuple(
-        checkpoints_by_run_id.get(account.config.run_id)
-        for account in accounts
+        checkpoints_by_run_id.get(account.config.run_id) for account in accounts
     )
 
 
@@ -1166,9 +1121,7 @@ def _paper_policy_comparisons(
                 error_type=type(error).__name__,
             )
     signals_by_id = {signal.signal_id: signal for signal in decision.signals}
-    source_trace_id = (
-        f"paper-entry:{state.symbol}:{state.bucket_start.isoformat()}"
-    )
+    source_trace_id = f"paper-entry:{state.symbol}:{state.bucket_start.isoformat()}"
     comparisons: list[EntryPolicyComparison] = []
     for candidate in decision.candidates:
         if candidate.reduce_only:
@@ -1213,12 +1166,8 @@ def _paper_policy_comparisons(
                         if entry_filter_context is None
                         else entry_filter_context.ema10
                     ),
-                    require_price_above_ema5=(
-                        entry_filter.require_price_above_ema5
-                    ),
-                    require_price_above_ema10=(
-                        entry_filter.require_price_above_ema10
-                    ),
+                    require_price_above_ema5=(entry_filter.require_price_above_ema5),
+                    require_price_above_ema10=(entry_filter.require_price_above_ema10),
                     observed_at=observed_at,
                     ema_observed_at=(
                         None
@@ -1262,9 +1211,7 @@ def _observe_paper_policy_comparisons(
     log.info(
         "paper_entry_policy_compared",
         symbol=state.symbol,
-        source_trace_id=(
-            comparisons[0].source_trace_id if comparisons else None
-        ),
+        source_trace_id=(comparisons[0].source_trace_id if comparisons else None),
         candidate_count=len(comparisons),
         mismatch_count=mismatch_count,
         comparison_summary=comparison_summary.as_details(),
@@ -1330,9 +1277,7 @@ def _load_closed_candles_for_positions(
     if source is None:
         return ()
     candle_end = _candle_start_15m(state.bucket_start)
-    if candle_end <= not_before or (
-        after is not None and candle_end <= after
-    ):
+    if candle_end <= not_before or (after is not None and candle_end <= after):
         return ()
     matching = tuple(
         position
@@ -1344,9 +1289,7 @@ def _load_closed_candles_for_positions(
     if not matching:
         return ()
     candle_start = (
-        after
-        if after is not None
-        else candle_end - _LEGACY_CANDLE_CURSOR_LOOKBACK
+        after if after is not None else candle_end - _LEGACY_CANDLE_CURSOR_LOOKBACK
     )
     candle_start = max(candle_start, _candle_start_15m(not_before))
     candles = source.load_closed_candles(
@@ -1457,9 +1400,7 @@ def run_paper_live_daemon(
                 run_id=config.run_id,
             )
         pending_candidates.extend(
-            _run_async(
-                artifact_repository.load_pending_candidates(config.run_id)
-            )
+            _run_async(artifact_repository.load_pending_candidates(config.run_id))
         )
         if startup_timer is not None:
             startup_timer.mark(
@@ -1483,9 +1424,7 @@ def run_paper_live_daemon(
                 "open_positions_loaded",
                 open_position_count=len(loaded_open_positions),
             )
-        initial_candle_cursors = _initial_candle_cursors(
-            loaded_open_positions
-        )
+        initial_candle_cursors = _initial_candle_cursors(loaded_open_positions)
     else:
         initial_candle_cursors = {}
 
@@ -1509,9 +1448,7 @@ def run_paper_live_daemon(
     gapped_symbols: set[str] = set()
     stale_symbols: set[str] = set()
     last_processed_at_by_symbol = (
-        {}
-        if checkpoint is None
-        else dict(checkpoint.last_processed_at_by_symbol)
+        {} if checkpoint is None else dict(checkpoint.last_processed_at_by_symbol)
     )
     max_gap_seconds = _strategy_max_gap_seconds(strategy)
     candle_not_before = (
@@ -1566,9 +1503,7 @@ def run_paper_live_daemon(
             continue
 
         now = clock.now()
-        if (
-            _state_age_seconds(now, state) > config.max_market_state_age_seconds
-        ):
+        if _state_age_seconds(now, state) > config.max_market_state_age_seconds:
             if state.symbol not in stale_symbols:
                 _log_stale_market_state(
                     state=state,
@@ -1602,23 +1537,17 @@ def run_paper_live_daemon(
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None
-            or (
-                state.bucket_start - entry_symbols_loaded_at
-            ).total_seconds()
+            or (state.bucket_start - entry_symbols_loaded_at).total_seconds()
             >= config.entry_symbol_refresh_seconds
         ):
             entry_symbols = entry_symbol_loader(state.bucket_start)
             entry_symbols_loaded_at = state.bucket_start
-        entry_allowed = (
-            entry_symbols is None or state.symbol in entry_symbols
-        )
+        entry_allowed = entry_symbols is None or state.symbol in entry_symbols
 
         position_updates: tuple[PaperPosition, ...] = ()
         if artifact_repository is not None:
             observed_candle = (
-                None
-                if candle_aggregator is None
-                else candle_aggregator.observe(state)
+                None if candle_aggregator is None else candle_aggregator.observe(state)
             )
             if candle_aggregator is not None:
                 _log_candle_gap_events(aggregator=candle_aggregator)
@@ -1670,8 +1599,8 @@ def run_paper_live_daemon(
                             symbol=state.symbol,
                             error=str(error),
                         )
-                        candle_retry_after_by_symbol[state.symbol] = (
-                            now + timedelta(seconds=_CANDLE_SOURCE_RETRY_SECONDS)
+                        candle_retry_after_by_symbol[state.symbol] = now + timedelta(
+                            seconds=_CANDLE_SOURCE_RETRY_SECONDS
                         )
                     else:
                         candle_retry_after_by_symbol.pop(state.symbol, None)
@@ -1682,9 +1611,7 @@ def run_paper_live_daemon(
             for closed_candle in candle_events:
                 candle_history: deque[ClosedCandle15m] | None = None
                 if closed_candle is not None:
-                    last_candle_end_by_symbol[state.symbol] = (
-                        closed_candle.candle_end
-                    )
+                    last_candle_end_by_symbol[state.symbol] = closed_candle.candle_end
                     candle_history = candle_history_by_symbol.setdefault(
                         state.symbol,
                         deque(
@@ -1696,8 +1623,7 @@ def run_paper_live_daemon(
                     )
                     if (
                         not candle_history
-                        or candle_history[-1].candle_start
-                        != closed_candle.candle_start
+                        or candle_history[-1].candle_start != closed_candle.candle_start
                     ):
                         candle_history.append(closed_candle)
                 candle_history = candle_history_by_symbol.get(state.symbol)
@@ -1749,8 +1675,10 @@ def run_paper_live_daemon(
             entry_filter_context=entry_filter_context,
         )
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
-        if artifact_repository is not None and entry_allowed and (
-            decision.signals or decision.candidates
+        if (
+            artifact_repository is not None
+            and entry_allowed
+            and (decision.signals or decision.candidates)
         ):
             _run_async(artifact_repository.save_decision(decision))
             pending_candidates.extend(decision.candidates)
@@ -1778,8 +1706,7 @@ def run_paper_live_daemon(
                         )
             should_snapshot = (
                 last_equity_snapshot_at is None
-                or state.bucket_end - last_equity_snapshot_at
-                >= timedelta(minutes=1)
+                or state.bucket_end - last_equity_snapshot_at >= timedelta(minutes=1)
             )
             persisted_position_updates = _persistable_position_updates(
                 position_updates,
@@ -1822,9 +1749,8 @@ def run_paper_live_daemon(
         should_checkpoint_by_time = (
             now - last_checkpoint_elapsed_anchor
         ).total_seconds() >= config.checkpoint_every_seconds
-        if (
-            now >= checkpoint_not_before
-            and (should_checkpoint_by_count or should_checkpoint_by_time)
+        if now >= checkpoint_not_before and (
+            should_checkpoint_by_count or should_checkpoint_by_time
         ):
             checkpoint_to_save = _checkpoint_for_persistence(strategy)
             _run_async(
@@ -1897,8 +1823,7 @@ def _persistable_position_updates(
         for position in position_updates
         if position.status is PaperPositionStatus.CLOSED
         or position.position_id not in last_persisted_at
-        or observed_at - last_persisted_at[position.position_id]
-        >= timedelta(minutes=1)
+        or observed_at - last_persisted_at[position.position_id] >= timedelta(minutes=1)
     )
 
 
@@ -1944,16 +1869,9 @@ def _checkpoint_for_persistence(strategy: RuntimeStrategy) -> StrategyCheckpoint
 
 def _checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
     """Identify compact checkpoints produced by the paper daemon."""
-    return (
-        not any(
-            key in checkpoint.payload
-            for key in ("market_state_buffers", "signal_buffers")
-        )
-        and any(
-            key in checkpoint.payload
-            for key in ("buffer_sizes", "signal_sequence")
-        )
-    )
+    return not any(
+        key in checkpoint.payload for key in ("market_state_buffers", "signal_buffers")
+    ) and any(key in checkpoint.payload for key in ("buffer_sizes", "signal_sequence"))
 
 
 def _restore_paper_strategy_from_checkpoint(
@@ -1970,8 +1888,7 @@ def _restore_paper_strategy_from_checkpoint(
     load_recovery_window = getattr(source, "load_recovery_window", None)
     if not callable(load_recovery_window):
         raise RuntimeError(
-            "paper market-state source does not support compact checkpoint "
-            "recovery"
+            "paper market-state source does not support compact checkpoint recovery"
         )
     states = load_recovery_window(
         last_processed_at_by_symbol=checkpoint.last_processed_at_by_symbol,

@@ -43,9 +43,7 @@ class ScheduledRiskWindowConfig:
         if self.entry_stop_at > self.flatten_start_at:
             raise ValueError("entry_stop_at must not be after flatten_start_at")
         if self.flatten_start_at >= self.flatten_deadline_at:
-            raise ValueError(
-                "flatten_start_at must be before flatten_deadline_at"
-            )
+            raise ValueError("flatten_start_at must be before flatten_deadline_at")
         if self.flatten_deadline_at >= self.verify_at:
             raise ValueError("flatten_deadline_at must be before verify_at")
         if self.verify_at >= self.reopen_at:
@@ -86,9 +84,7 @@ class ScheduledRiskWindowConfig:
         current_time = local_value.time().replace(tzinfo=None)
         if self.entry_stop_at < self.reopen_at:
             return not (self.entry_stop_at <= current_time < self.reopen_at)
-        return not (
-            current_time >= self.entry_stop_at or current_time < self.reopen_at
-        )
+        return not (current_time >= self.entry_stop_at or current_time < self.reopen_at)
 
     def next_flatten_time(self, value: datetime) -> datetime:
         """Calculate the earliest flatten timestamp on or after value."""

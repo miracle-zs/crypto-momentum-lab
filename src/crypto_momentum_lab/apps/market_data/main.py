@@ -256,7 +256,6 @@ def parse_live_position_account_labels(
     return frozenset(labels)
 
 
-
 def _ignore_backfill_result(
     fn: Callable[[Any], Awaitable[Any]],
 ) -> Callable[[Any], Awaitable[None]]:
@@ -1649,12 +1648,13 @@ async def run_market_data(
                 consumer_req_provider = None
                 if maintenance_sessions is not None:
 
-                    async def consumer_req_provider() -> (
-                        tuple[RetentionConsumerRequirement, ...]
-                    ):
+                    async def consumer_req_provider() -> tuple[
+                        RetentionConsumerRequirement, ...
+                    ]:
                         return await _resolve_market_data_consumer_requirements(
                             maintenance_sessions
                         )
+
                 auxiliary_tasks += (
                     asyncio.create_task(
                         run_operational_database_retention_loop(

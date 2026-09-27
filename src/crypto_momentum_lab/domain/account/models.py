@@ -139,9 +139,7 @@ class AccountFillReconciliationCursor:
         if self.start_time_ms is not None and self.start_time_ms < 0:
             raise ValueError("start_time_ms must be non-negative")
         if (self.from_id is None) == (self.start_time_ms is None):
-            raise ValueError(
-                "exactly one of from_id and start_time_ms must be present"
-            )
+            raise ValueError("exactly one of from_id and start_time_ms must be present")
 
 
 @dataclass(frozen=True, slots=True)

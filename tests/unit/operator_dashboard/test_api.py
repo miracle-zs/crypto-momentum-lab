@@ -161,12 +161,16 @@ def test_paper_history_full_flag_uses_separate_cache_entry() -> None:
 
     queries = RecordingQueries()
     with TestClient(create_dashboard_app(queries=queries)) as client:
-        assert client.get(
-            "/api/paper-accounts/paper-account-test/history"
-        ).status_code == 200
-        assert client.get(
-            "/api/paper-accounts/paper-account-test/history?full=true"
-        ).status_code == 200
+        assert (
+            client.get("/api/paper-accounts/paper-account-test/history").status_code
+            == 200
+        )
+        assert (
+            client.get(
+                "/api/paper-accounts/paper-account-test/history?full=true"
+            ).status_code
+            == 200
+        )
 
     assert queries.full_history_requests == [False, True]
 
@@ -306,8 +310,10 @@ async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
     try:
         # Load 30 unique keys
         for i in range(30):
+
             async def loader(idx=i):
                 return idx
+
             res = await cache.get(f"key-{i}", loader)
             assert res == i
 
@@ -337,8 +343,10 @@ async def test_response_cache_refresh_concurrency_budget() -> None:
     try:
         # Prime 10 keys
         for i in range(10):
+
             async def loader(idx=i):
                 return idx
+
             await cache.get(f"budget-key-{i}", loader)
 
         # Wait for them to expire into stale grace
@@ -352,7 +360,9 @@ async def test_response_cache_refresh_concurrency_budget() -> None:
 
         # Request all 10 keys with stale_while_revalidate
         for i in range(10):
-            await cache.get(f"budget-key-{i}", hanging_loader, stale_while_revalidate_seconds=10.0)
+            await cache.get(
+                f"budget-key-{i}", hanging_loader, stale_while_revalidate_seconds=10.0
+            )
 
         # Background tasks must be capped at max_refresh_tasks=3
         assert len(cache._refresh_tasks) <= 3
@@ -389,7 +399,3 @@ def test_api_endpoints_return_x_cache_status_header() -> None:
         resp3 = client.get("/api/overview", auth=DASHBOARD_BASIC_AUTH)
         assert resp3.status_code == 200
         assert resp3.headers.get("X-Cache-Status") == "STALE"
-
-
-
-

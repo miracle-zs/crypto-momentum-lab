@@ -11,9 +11,7 @@ def test_dashboard_engine_bounds_query_memory_risk(monkeypatch) -> None:
 
     monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
 
-    result = session.create_dashboard_database_engine(
-        "postgresql+asyncpg://dashboard"
-    )
+    result = session.create_dashboard_database_engine("postgresql+asyncpg://dashboard")
 
     assert result is not None
     assert captured["database_url"] == "postgresql+asyncpg://dashboard"
@@ -54,9 +52,7 @@ def test_account_engine_uses_a_small_serial_sync_pool(monkeypatch) -> None:
 
     monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
 
-    result = session.create_account_database_engine(
-        "postgresql+asyncpg://account"
-    )
+    result = session.create_account_database_engine("postgresql+asyncpg://account")
 
     assert result is not None
     assert captured["database_url"] == "postgresql+asyncpg://account"
@@ -120,9 +116,7 @@ def test_market_engine_has_a_bounded_read_pool(monkeypatch) -> None:
 
     monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
 
-    result = session.create_market_database_engine(
-        "postgresql+asyncpg://market"
-    )
+    result = session.create_market_database_engine("postgresql+asyncpg://market")
 
     assert result is not None
     assert captured["database_url"] == "postgresql+asyncpg://market"

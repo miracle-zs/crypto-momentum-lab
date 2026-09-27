@@ -129,8 +129,7 @@ async def test_pool_starts_one_connection_per_route_stream_group() -> None:
     )
 
     assert {
-        (connection.group.route, connection.group.stream)
-        for connection in connections
+        (connection.group.route, connection.group.stream) for connection in connections
     } == {
         (CaptureRoute.MARKET, CaptureStream.AGG_TRADE),
         (CaptureRoute.MARKET, CaptureStream.KLINE_1M),
@@ -171,9 +170,11 @@ async def test_pool_applies_book_ticker_specific_shard_limit() -> None:
         generation=1,
     )
 
-    assert [
-        len(connection.group.subscriptions) for connection in connections
-    ] == [50, 50, 25]
+    assert [len(connection.group.subscriptions) for connection in connections] == [
+        50,
+        50,
+        25,
+    ]
     assert [connection.group.group_id for connection in connections] == [
         "public:bookTicker:0000",
         "public:bookTicker:0001",
@@ -211,9 +212,7 @@ async def test_pool_global_book_ticker_does_not_reconfigure_on_refresh() -> None
     )
 
     assert len(connections) == 1
-    assert connections[0].group.subscriptions[0].binance_name == (
-        "!bookTicker"
-    )
+    assert connections[0].group.subscriptions[0].binance_name == ("!bookTicker")
     assert events == []
 
 

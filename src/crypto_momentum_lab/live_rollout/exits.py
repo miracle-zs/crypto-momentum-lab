@@ -885,7 +885,6 @@ def _gross_return(
     return -price_return if position.side is StrategySide.SHORT else price_return
 
 
-
 def _recovery_price(
     position: ManagedLivePosition,
     profit_pct: Decimal,

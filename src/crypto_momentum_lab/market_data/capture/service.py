@@ -228,8 +228,7 @@ class MarketDataCaptureService:
                 await self._transition(
                     MarketDataState.HALTED,
                     reason=(
-                        "disk free space below halt threshold: "
-                        f"{free_bytes} bytes"
+                        f"disk free space below halt threshold: {free_bytes} bytes"
                     ),
                 )
             raise CaptureQueueFull(
@@ -273,21 +272,13 @@ class MarketDataCaptureService:
             queue_bytes=self._queue.current_bytes,
             queue_coalesced_replacements=self._queue.coalesced_replacements,
             queue_dropped_events=self._queue.dropped_events,
-            queue_pending_coalesced_events=(
-                self._queue.pending_coalesced_events
-            ),
+            queue_pending_coalesced_events=(self._queue.pending_coalesced_events),
             queue_max_events=self._queue.max_events,
             queue_max_bytes=self._queue.max_bytes,
-            queue_high_watermark_events=(
-                self._queue.high_watermark_events
-            ),
+            queue_high_watermark_events=(self._queue.high_watermark_events),
             queue_high_watermark_bytes=self._queue.high_watermark_bytes,
-            queue_backpressure_wait_count=(
-                self._queue.backpressure_wait_count
-            ),
-            queue_backpressure_wait_seconds=(
-                self._queue.backpressure_wait_seconds
-            ),
+            queue_backpressure_wait_count=(self._queue.backpressure_wait_count),
+            queue_backpressure_wait_seconds=(self._queue.backpressure_wait_seconds),
             queue_waiting_producers=self._queue.waiting_producers,
             filtered_book_ticker_events=(
                 0
@@ -298,9 +289,7 @@ class MarketDataCaptureService:
             archived_bytes=self._archived_bytes,
             open_writers=self._open_writers,
             pending_manifests=self._pending_manifests,
-            oldest_pending_manifest_seconds=(
-                self._oldest_pending_manifest_seconds
-            ),
+            oldest_pending_manifest_seconds=(self._oldest_pending_manifest_seconds),
             disk_free_bytes=self._disk_free_bytes,
         )
 

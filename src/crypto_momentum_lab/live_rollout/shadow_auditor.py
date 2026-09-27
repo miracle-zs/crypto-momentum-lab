@@ -165,16 +165,12 @@ class LiveExecutionShadowAuditor:
     @classmethod
     def get_metrics(cls) -> dict[str, Any]:
         total_audits = cls._revision
-        failure_rate = (
-            (cls._failure_count / total_audits) if total_audits > 0 else 0.0
-        )
+        failure_rate = (cls._failure_count / total_audits) if total_audits > 0 else 0.0
         divergence_rate = (
             (cls._divergence_count / total_audits) if total_audits > 0 else 0.0
         )
         critical_count = cls._divergence_by_severity.get("CRITICAL", 0)
-        critical_rate = (
-            (critical_count / total_audits) if total_audits > 0 else 0.0
-        )
+        critical_rate = (critical_count / total_audits) if total_audits > 0 else 0.0
         non_critical_count = cls._divergence_by_severity.get("NON_CRITICAL", 0)
         concordant_count = max(
             0, total_audits - cls._failure_count - cls._divergence_count
@@ -265,13 +261,12 @@ class LiveExecutionShadowAuditor:
             allocation_plan: ExitAllocationPlan | None = None
             expected_projection_version: str | None = None
             if candidate.reduce_only:
-                expected_projection_version = (
-                    getattr(legacy_plan, "projection_version", None)
-                    or (
-                        str(candidate.features["projection_version"]).strip()
-                        if candidate.features.get("projection_version")
-                        else None
-                    )
+                expected_projection_version = getattr(
+                    legacy_plan, "projection_version", None
+                ) or (
+                    str(candidate.features["projection_version"]).strip()
+                    if candidate.features.get("projection_version")
+                    else None
                 )
                 legacy_allocs = getattr(legacy_plan, "allocations", ()) or ()
                 legacy_batch_id = getattr(legacy_plan, "batch_id", None) or (

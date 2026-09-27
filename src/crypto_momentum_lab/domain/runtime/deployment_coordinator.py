@@ -182,9 +182,7 @@ class WriterSupervisorProtocol(Protocol):
     async def stop_writer(
         self, account_label: str, timeout_seconds: float = 30.0
     ) -> bool: ...
-    async def grant_fencing_epoch(
-        self, account_label: str, new_epoch: int
-    ) -> bool: ...
+    async def grant_fencing_epoch(self, account_label: str, new_epoch: int) -> bool: ...
     async def get_active_epoch(self, account_label: str) -> int: ...
     async def get_active_generation(self, account_label: str) -> str | None: ...
 
@@ -265,9 +263,7 @@ class InMemoryWriterSupervisor:
         self._writers[account_label] = False
         return True
 
-    async def grant_fencing_epoch(
-        self, account_label: str, new_epoch: int
-    ) -> bool:
+    async def grant_fencing_epoch(self, account_label: str, new_epoch: int) -> bool:
         current = self._epochs.get(account_label, 1)
         if new_epoch < current:
             return False
@@ -336,11 +332,7 @@ class DeploymentCoordinator:
             reason = (
                 "preflight_passed"
                 if passed
-                else (
-                    "schema_incompatible"
-                    if not schema_ok
-                    else "epoch_regression"
-                )
+                else ("schema_incompatible" if not schema_ok else "epoch_regression")
             )
 
             preflight_results.append(
@@ -450,9 +442,7 @@ class DeploymentCoordinator:
 
             # Step A: Stop old writer if running
             writer_stopped = True
-            is_active = await self._supervisor.check_writer_status(
-                target.account_label
-            )
+            is_active = await self._supervisor.check_writer_status(target.account_label)
             if is_active and target.stop_old_writer:
                 stopped = await self._supervisor.stop_writer(target.account_label)
                 if not stopped:
@@ -513,9 +503,7 @@ class DeploymentCoordinator:
 
         # Resolve overall status
         success_count = sum(
-            1
-            for r in account_records
-            if r.status == AccountTransitionStatus.SUCCESS
+            1 for r in account_records if r.status == AccountTransitionStatus.SUCCESS
         )
         total_accounts = len(candidate.manifest.accounts)
 

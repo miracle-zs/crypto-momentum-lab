@@ -17,9 +17,7 @@ def test_live_report_includes_fees_slippage_and_drawdown() -> None:
 
 
 def test_live_report_flags_reconciliation_mismatch() -> None:
-    report = build_live_final_report(
-        replace(_input(), reconciliation_mismatch_count=1)
-    )
+    report = build_live_final_report(replace(_input(), reconciliation_mismatch_count=1))
 
     assert report.status == "blocked"
 

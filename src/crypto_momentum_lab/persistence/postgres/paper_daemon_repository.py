@@ -690,9 +690,7 @@ class PostgresPaperDaemonRepository:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_event)
-                    .on_conflict_do_nothing(
-                        index_elements=["event_id", "occurred_at"]
-                    )
+                    .on_conflict_do_nothing(index_elements=["event_id", "occurred_at"])
                 )
                 await session.commit()
             except Exception:
@@ -818,9 +816,7 @@ class PostgresPaperDaemonRepository:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_events)
-                    .on_conflict_do_nothing(
-                        index_elements=["event_id", "occurred_at"]
-                    )
+                    .on_conflict_do_nothing(index_elements=["event_id", "occurred_at"])
                 )
                 await session.commit()
             except Exception:

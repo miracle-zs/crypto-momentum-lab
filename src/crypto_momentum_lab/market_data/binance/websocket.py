@@ -119,13 +119,9 @@ class BinanceWebSocketConnection:
         self._environment = environment
         self._desired_names = tuple(sorted(desired_names))
         if not self._desired_names and stream is None:
-            raise ValueError(
-                "stream is required when desired_names is empty"
-            )
+            raise ValueError("stream is required when desired_names is empty")
         self._stream = (
-            stream
-            if stream is not None
-            else _stream_from_name(self._desired_names[0])
+            stream if stream is not None else _stream_from_name(self._desired_names[0])
         )
         self._generation = generation
         self._on_envelope = on_envelope
@@ -206,9 +202,7 @@ class BinanceWebSocketConnection:
                 else self._pending_control.control_id
             ),
             pending_control_method=(
-                None
-                if self._pending_control is None
-                else self._pending_control.method
+                None if self._pending_control is None else self._pending_control.method
             ),
             ingress_queue_events=self._ingress_queue_events,
             ingress_queue_dropped_events=self._ingress_queue_dropped_events,
@@ -217,12 +211,10 @@ class BinanceWebSocketConnection:
                 self._ingress_queue_high_watermark_events
             ),
             reader_task_alive=(
-                self._reader_task is not None
-                and not self._reader_task.done()
+                self._reader_task is not None and not self._reader_task.done()
             ),
             dispatch_task_alive=(
-                self._dispatch_task is not None
-                and not self._dispatch_task.done()
+                self._dispatch_task is not None and not self._dispatch_task.done()
             ),
             realtime_queue_events=self._realtime_queue_events,
             realtime_queue_dropped_events=self._realtime_queue_dropped_events,
@@ -341,9 +333,7 @@ class BinanceWebSocketConnection:
         if not names:
             return
         async with self._desired_lock:
-            self._desired_names = tuple(
-                sorted(set((*self._desired_names, *names)))
-            )
+            self._desired_names = tuple(sorted(set((*self._desired_names, *names))))
             self._generation = generation
         self._desired_event.set()
 
@@ -407,9 +397,7 @@ class BinanceWebSocketConnection:
                     realtime_queue=realtime_queue,
                 )
             )
-            dispatch_task = asyncio.create_task(
-                self._dispatch_messages(data_queue)
-            )
+            dispatch_task = asyncio.create_task(self._dispatch_messages(data_queue))
             realtime_dispatch_task = asyncio.create_task(
                 self._dispatch_realtime_messages(realtime_queue)
             )
@@ -444,9 +432,7 @@ class BinanceWebSocketConnection:
                         now=now,
                     )
                     if control_timeout is not None and control_timeout <= 0:
-                        raise BinanceControlAckTimeout(
-                            "Binance control ACK timed out"
-                        )
+                        raise BinanceControlAckTimeout("Binance control ACK timed out")
                     timeout = (
                         None
                         if silence_timeout is None
@@ -503,9 +489,7 @@ class BinanceWebSocketConnection:
                     desired_changed = desired_task in done
                     if desired_changed:
                         self._desired_event.clear()
-                        desired_task = asyncio.create_task(
-                            self._desired_event.wait()
-                        )
+                        desired_task = asyncio.create_task(self._desired_event.wait())
 
                     if desired_changed:
                         await self._maybe_start_next_control(connection)
@@ -521,7 +505,8 @@ class BinanceWebSocketConnection:
                     await connection.close()
                     await _cancel_and_drain_tasks(
                         tuple(
-                            task for task in (ack_task, desired_task)
+                            task
+                            for task in (ack_task, desired_task)
                             if task is not None
                         )
                     )
@@ -535,9 +520,7 @@ class BinanceWebSocketConnection:
                             )
                             if task is not None
                         ),
-                        timeout_seconds=(
-                            _GRACEFUL_DISPATCH_DRAIN_TIMEOUT_SECONDS
-                        ),
+                        timeout_seconds=(_GRACEFUL_DISPATCH_DRAIN_TIMEOUT_SECONDS),
                     )
                 else:
                     child_tasks: tuple[asyncio.Future[Any], ...] = tuple(
@@ -583,9 +566,7 @@ class BinanceWebSocketConnection:
                 try:
                     ack_queue.put_nowait(decoded)
                 except asyncio.QueueFull as exc:
-                    raise CaptureQueueFull(
-                        "control ACK queue is saturated"
-                    ) from exc
+                    raise CaptureQueueFull("control ACK queue is saturated") from exc
                 continue
 
             if self._symbol_filter is not None:
@@ -635,9 +616,7 @@ class BinanceWebSocketConnection:
                 data_queue.put_nowait(envelope)
             except asyncio.QueueFull as exc:
                 self._ingress_queue_dropped_events += 1
-                raise CaptureQueueFull(
-                    "WebSocket ingress queue is saturated"
-                ) from exc
+                raise CaptureQueueFull("WebSocket ingress queue is saturated") from exc
             self._ingress_queue_events = data_queue.qsize()
             self._ingress_queue_high_watermark_events = max(
                 self._ingress_queue_high_watermark_events,
@@ -741,9 +720,7 @@ class BinanceWebSocketConnection:
             method=method,
             names=names,
             generation=generation,
-            deadline_monotonic=(
-                time.monotonic() + self._control_ack_timeout_seconds
-            ),
+            deadline_monotonic=(time.monotonic() + self._control_ack_timeout_seconds),
         )
         self._phase = _ConnectionPhase.SYNCING
 
@@ -798,9 +775,7 @@ class BinanceWebSocketConnection:
                 route=self._route.value,
                 stream=self._stream.value,
                 received_id=control_id,
-                expected_id=(
-                    None if pending is None else pending.control_id
-                ),
+                expected_id=(None if pending is None else pending.control_id),
             )
             return True
         code = decoded.get("code")
@@ -836,10 +811,7 @@ class BinanceWebSocketConnection:
                 stream=self._stream,
                 symbols=tuple(
                     sorted(
-                        {
-                            _symbol_from_stream_name(name)
-                            for name in self._desired_names
-                        }
+                        {_symbol_from_stream_name(name) for name in self._desired_names}
                     )
                 ),
                 occurred_at=datetime.now(UTC),

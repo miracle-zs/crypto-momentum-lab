@@ -114,8 +114,9 @@ def test_exit_processor_config_rejects_blank_run_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_requests_delegates_one_exit_and_reports_submission_counts(
-) -> None:
+async def test_process_requests_delegates_one_exit_and_reports_submission_counts() -> (
+    None
+):
     submission = RecordingSubmission(_acknowledged_result())
     processor = _processor(submission)
     candidate = replace(_intent(), candidate_id="exit-1", reduce_only=True)
@@ -133,8 +134,9 @@ async def test_process_requests_delegates_one_exit_and_reports_submission_counts
 
 
 @pytest.mark.asyncio
-async def test_process_requests_counts_suppressed_exit_without_exchange_submission(
-) -> None:
+async def test_process_requests_counts_suppressed_exit_without_exchange_submission() -> (
+    None
+):
     submission = RecordingSubmission(_acknowledged_result(suppressed=True))
     processor = _processor(submission)
     candidate = replace(_intent(), candidate_id="exit-suppressed", reduce_only=True)
@@ -149,8 +151,9 @@ async def test_process_requests_counts_suppressed_exit_without_exchange_submissi
 
 
 @pytest.mark.asyncio
-async def test_process_requests_retries_when_context_is_fenced_during_submission(
-) -> None:
+async def test_process_requests_retries_when_context_is_fenced_during_submission() -> (
+    None
+):
     current = [True]
 
     class StaleOnceSubmission(RecordingSubmission):

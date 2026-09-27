@@ -29,9 +29,7 @@ def market_state_payload(state: MarketState15s) -> dict[str, JsonValue]:
         "liquidation_notional": str(state.liquidation_notional),
         "mark_price": _decimal_payload(state.mark_price),
         "closed_kline_count": state.closed_kline_count,
-        "closed_kline_1m_open_time": _datetime_payload(
-            state.closed_kline_1m_open_time
-        ),
+        "closed_kline_1m_open_time": _datetime_payload(state.closed_kline_1m_open_time),
         "closed_kline_1m_close_time": _datetime_payload(
             state.closed_kline_1m_close_time
         ),
@@ -122,9 +120,7 @@ def market_state_from_payload(
         first_received_at=_payload_datetime(payload.get("first_received_at")),
         last_received_at=_payload_datetime(payload.get("last_received_at")),
         data_complete=_payload_bool_default(payload, "data_complete", True),
-        missing_agg_trade_count=int(
-            str(payload.get("missing_agg_trade_count", 0))
-        ),
+        missing_agg_trade_count=int(str(payload.get("missing_agg_trade_count", 0))),
     )
 
 

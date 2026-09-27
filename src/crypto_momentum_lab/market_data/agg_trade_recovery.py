@@ -136,9 +136,7 @@ class AggTradeGapRecoverer:
         normalized = frozenset(symbol.upper() for symbol in symbols)
         self._monitored_symbols = normalized
         self._last_seen = {
-            key: seen
-            for key, seen in self._last_seen.items()
-            if key[1] in normalized
+            key: seen for key, seen in self._last_seen.items() if key[1] in normalized
         }
 
     async def expand(
@@ -325,9 +323,7 @@ class AggTradeGapRecoverer:
                         expected_ids = tuple(
                             range(next_id, next_id + min(limit, len(page)))
                         )
-                        actual_ids = tuple(
-                            trade.aggregate_trade_id for trade in page
-                        )
+                        actual_ids = tuple(trade.aggregate_trade_id for trade in page)
                         if not page or actual_ids != expected_ids:
                             return _RecoveryResult(
                                 request,
@@ -366,10 +362,7 @@ class AggTradeGapRecoverer:
         async with self._request_budget_lock:
             now = time.monotonic()
             cutoff = now - 60
-            while (
-                self._request_timestamps
-                and self._request_timestamps[0] <= cutoff
-            ):
+            while self._request_timestamps and self._request_timestamps[0] <= cutoff:
                 self._request_timestamps.popleft()
             if len(self._request_timestamps) >= self._max_requests_per_minute:
                 return False
@@ -417,10 +410,7 @@ def _recovered_envelope(
         received_monotonic_ns=time.monotonic_ns(),
         connection_session_id=uuid5(
             NAMESPACE_URL,
-            (
-                "binance-agg-trade-recovery:"
-                f"{current.environment}:{current.symbol}"
-            ),
+            (f"binance-agg-trade-recovery:{current.environment}:{current.symbol}"),
         ),
         local_sequence=trade.aggregate_trade_id + 1,
         exchange_sequence=str(trade.aggregate_trade_id),

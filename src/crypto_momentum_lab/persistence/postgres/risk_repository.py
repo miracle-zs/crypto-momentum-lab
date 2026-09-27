@@ -65,9 +65,7 @@ def risk_config_row(config: RiskConfigSnapshot) -> dict[str, object]:
         "max_account_state_age_seconds": Decimal(
             str(config.max_account_state_age_seconds)
         ),
-        "allow_reduce_only_while_draining": (
-            config.allow_reduce_only_while_draining
-        ),
+        "allow_reduce_only_while_draining": (config.allow_reduce_only_while_draining),
         "created_at": config.created_at,
     }
 

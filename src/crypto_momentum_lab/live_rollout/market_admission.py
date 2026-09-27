@@ -46,9 +46,7 @@ class LiveMarketStateAdmission:
         self._context_provider = context_provider
         self._context_generation = context_generation
         self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._publish_managed_position_symbols = (
-            publish_managed_position_symbols
-        )
+        self._publish_managed_position_symbols = publish_managed_position_symbols
         self._telemetry = telemetry
         self._clock = clock
 

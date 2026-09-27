@@ -63,9 +63,7 @@ class LivePendingEntryRegistry:
             for item in context.unresolved_orders
             if not item.plan.reduce_only
         }
-        for client_order_id, (plan, executed_quantity) in tuple(
-            self._pending.items()
-        ):
+        for client_order_id, (plan, executed_quantity) in tuple(self._pending.items()):
             item = persisted.get(client_order_id)
             if item is None:
                 # Keep a just-submitted order until a fresh account/context

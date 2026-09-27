@@ -49,12 +49,8 @@ class LiveRuntimeCacheMaintenance:
         position_symbols: Collection[str],
         order_symbols: Collection[str],
     ) -> None:
-        self._managed_position_symbols = frozenset(
-            _normalize_symbols(position_symbols)
-        )
-        self._managed_order_symbols = frozenset(
-            _normalize_symbols(order_symbols)
-        )
+        self._managed_position_symbols = frozenset(_normalize_symbols(position_symbols))
+        self._managed_order_symbols = frozenset(_normalize_symbols(order_symbols))
         self._known = True
 
     def prune(
@@ -69,10 +65,7 @@ class LiveRuntimeCacheMaintenance:
         if not self._known:
             return
         previous = self._last_maintenance_at
-        if (
-            previous is not None
-            and now - previous < _CACHE_MAINTENANCE_INTERVAL
-        ):
+        if previous is not None and now - previous < _CACHE_MAINTENANCE_INTERVAL:
             return
 
         protected = set(self._managed_position_symbols)
@@ -157,11 +150,7 @@ class LiveRuntimeCacheMaintenance:
 
 
 def _normalize_symbols(symbols: Iterable[str]) -> set[str]:
-    return {
-        symbol.strip().upper()
-        for symbol in symbols
-        if symbol.strip()
-    }
+    return {symbol.strip().upper() for symbol in symbols if symbol.strip()}
 
 
 __all__ = ["LiveRuntimeCacheMaintenance"]

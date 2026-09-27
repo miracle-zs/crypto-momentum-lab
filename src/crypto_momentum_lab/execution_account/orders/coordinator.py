@@ -21,7 +21,6 @@ from typing import Any, Protocol, cast
 import structlog
 
 from crypto_momentum_lab.domain.execution import (
-    DispatchState,
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
@@ -29,19 +28,27 @@ from crypto_momentum_lab.domain.execution import (
     ExecutionScope,
     FuturesPositionSide,
     OrderExecutionPlan,
-    OutboxEntry,
-    TradeCommand,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_book import (
+    Accepted,
+    AlreadyAccepted,
+    Blocked,
+    CommandConflict,
+    ExecutionBook,
+    ExecutionRequest,
+    StaleView,
+)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
     ReservationConflictError,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitPolicyMode,
+    PositionReservation,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     OrderPreSubmissionError,
@@ -352,6 +359,8 @@ class OrderExecutionCoordinator:
             coordinator=self._domain_coordinator,
             reservation_repository=self._reservation_repository,
         )
+        if self._domain_coordinator is None and self._execution_book is not None:
+            self._domain_coordinator = self._execution_book.coordinator
         self._active_reservations: dict[str, PositionReservation] = {}
         self._settled_cumulative_quantities: dict[str, Decimal] = {}
         if initial_reservations:
@@ -381,9 +390,7 @@ class OrderExecutionCoordinator:
 
     @property
     def is_execution_book_enabled(self) -> bool:
-        raw = os.environ.get(
-            "CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all"
-        ).strip()
+        raw = os.environ.get("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all").strip()
         if raw.lower() in ("all", "*", "true", "1"):
             return True
         gray_accounts = raw.split(",")
@@ -523,9 +530,7 @@ class OrderExecutionCoordinator:
                     }
                 elif target_reservations:
                     first_res = target_reservations[0]
-                    batch_quantities = {
-                        first_res.batch_id: first_res.reserved_quantity
-                    }
+                    batch_quantities = {first_res.batch_id: first_res.reserved_quantity}
 
             saved_new: list[PositionReservation] = []
             try:
@@ -587,37 +592,62 @@ class OrderExecutionCoordinator:
                         symbol=plan.symbol,
                         position_side=plan.position_side,
                     )
-                    cmd = TradeCommand(
-                        command_id=plan.client_order_id,
-                        position_key=key,
-                        command_type=(
+                    current_view = await self._execution_book.read(scope)
+                    token = (
+                        proj_ver
+                        if (proj_ver and proj_ver == current_view.projection_version)
+                        else "*"
+                    )
+                    req = ExecutionRequest(
+                        request_id=plan.client_order_id,
+                        scope=scope,
+                        strategy_name=getattr(plan, "strategy_name", "live_strategy"),
+                        strategy_version=getattr(plan, "strategy_version", "v1"),
+                        run_id=getattr(plan, "run_id", self._account_label),
+                        decision_ref=getattr(
+                            plan, "decision_ref", plan.client_order_id
+                        ),
+                        expected_view_token=token,
+                        action=(
                             TradeCommandType.EXIT
                             if plan.reduce_only
                             else TradeCommandType.ENTRY
                         ),
-                        side=(
-                            StrategySide.LONG
-                            if plan.side.upper() == "BUY"
-                            else StrategySide.SHORT
-                        ),
-                        order_type=(
-                            EntryType(plan.order_type.lower())
-                            if isinstance(plan.order_type, str)
-                            else plan.order_type
-                        ),
                         requested_quantity=Decimal(str(plan.quantity)),
+                        order_type=(
+                            str(plan.order_type.value)
+                            if hasattr(plan.order_type, "value")
+                            else str(plan.order_type)
+                        ),
                         limit_price=(
                             Decimal(str(plan.price)) if plan.price is not None else None
                         ),
                         reduce_only=plan.reduce_only,
-                        expected_projection_version=proj_ver,
+                        target_batch_ids=tuple(r.batch_id for r in target_reservations),
+                        batch_quantities=batch_quantities,
+                        exit_policy_mode=getattr(
+                            plan,
+                            "exit_policy_mode",
+                            ExitPolicyMode.CONSOLIDATE_ELIGIBLE,
+                        ),
                         created_at=plan.created_at,
                     )
-                    self._execution_book.register_prepared_command(
-                        command=cmd,
-                        scope=scope,
-                        reservation_ids=[r.reservation_id for r in target_reservations],
-                    )
+                    act_res = await self._execution_book.act(req)
+                    if isinstance(act_res, Blocked):
+                        raise OrderPreSubmissionError(
+                            f"ExecutionBook blocked request: {act_res.reason}"
+                        )
+                    if isinstance(act_res, StaleView):
+                        raise OrderPreSubmissionError(
+                            f"ExecutionBook stale view: {act_res.reason}"
+                        )
+                    if isinstance(act_res, CommandConflict):
+                        raise OrderPreSubmissionError(
+                            f"ExecutionBook command conflict: {act_res.reason}"
+                        )
+                    if isinstance(act_res, (Accepted, AlreadyAccepted)):
+                        for r in act_res.receipt.reservations:
+                            self._active_reservations[r.reservation_id] = r
             except Exception as save_err:
                 # Atomicity rollback: release any newly created reservations
                 for saved in saved_new:
@@ -692,11 +722,7 @@ class OrderExecutionCoordinator:
         plan: OrderExecutionPlan,
         res: OrderExecutionResult,
     ) -> None:
-        if (
-            not plan.reduce_only
-            or self._reservation_repository is None
-            or res is None
-        ):
+        if not plan.reduce_only or self._reservation_repository is None or res is None:
             return
         is_terminal = res.state in {
             ExchangeOrderState.FILLED,
@@ -761,7 +787,9 @@ class OrderExecutionCoordinator:
                         if remaining_to_consume <= Decimal("0"):
                             break
                 settled_now = delta_to_consume - remaining_to_consume
-                self._settled_cumulative_quantities[order_key] = prev_settled + settled_now
+                self._settled_cumulative_quantities[order_key] = (
+                    prev_settled + settled_now
+                )
 
             # On terminal state, release any residual unconsumed reservations
             if is_terminal:
@@ -1084,7 +1112,6 @@ class OrderExecutionCoordinator:
                 operation=operation,
             ),
         )
-
 
     async def aclose(self) -> None:
         self.block_entry_submissions()

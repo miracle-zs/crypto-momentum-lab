@@ -212,9 +212,7 @@ def _prepare_transition_values(
         normalized_details = dict(details) if isinstance(details, dict) else {}
         normalized_details.setdefault("full_reason", reason)
         values["details"] = normalized_details
-        values["reason"] = (
-            reason[: _LIVE_SESSION_REASON_MAX_LENGTH - 3] + "..."
-        )
+        values["reason"] = reason[: _LIVE_SESSION_REASON_MAX_LENGTH - 3] + "..."
     return values
 
 

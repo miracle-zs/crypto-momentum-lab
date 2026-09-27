@@ -102,9 +102,7 @@ _live_equity_observations = _common_equity.live_equity_observations
 _live_aggregated_equity_observations = (
     _common_equity.live_aggregated_equity_observations
 )
-_apply_live_cash_flow_adjustments = (
-    _common_equity.apply_live_cash_flow_adjustments
-)
+_apply_live_cash_flow_adjustments = _common_equity.apply_live_cash_flow_adjustments
 LiveAccountMetricsQueries = _live_account_metrics_queries.LiveAccountMetricsQueries
 _AccountEquityPoint = _live_account_metrics_queries.AccountEquityPoint
 _account_equity_range = _live_account_metrics_queries.account_equity_range
@@ -140,9 +138,7 @@ _PaperEquityPoint = _paper_equity_queries._PaperEquityPoint
 _paper_run_values = _paper_equity_queries._paper_run_values
 _paper_first_equity_statement = _paper_equity_queries._paper_first_equity_statement
 _paper_latest_equity_statement = _paper_equity_queries._paper_latest_equity_statement
-_paper_common_equity_statement = (
-    _paper_equity_queries._paper_common_equity_statement
-)
+_paper_common_equity_statement = _paper_equity_queries._paper_common_equity_statement
 _paper_equity_statement = _paper_equity_queries._paper_equity_statement
 _live_common_equity_statement = _paper_equity_queries._live_common_equity_statement
 LiveAccountQueries = _account_queries.LiveAccountQueries
@@ -190,9 +186,7 @@ def parse_live_cash_flow_adjustments(
             "CML_DASHBOARD_LIVE_CASH_FLOWS_JSON must be valid JSON"
         ) from error
     if not isinstance(payload, list):
-        raise ValueError(
-            "CML_DASHBOARD_LIVE_CASH_FLOWS_JSON must be a JSON list"
-        )
+        raise ValueError("CML_DASHBOARD_LIVE_CASH_FLOWS_JSON must be a JSON list")
 
     adjustments: list[LiveCashFlowAdjustment] = []
     for index, item in enumerate(payload):
@@ -240,30 +234,23 @@ def parse_common_equity_start_at(value: str | None = None) -> datetime:
     if not raw_value.strip():
         return FIXED_COMMON_EQUITY_START_AT
     try:
-        parsed_at = datetime.fromisoformat(
-            raw_value.strip().replace("Z", "+00:00")
-        )
+        parsed_at = datetime.fromisoformat(raw_value.strip().replace("Z", "+00:00"))
     except ValueError as error:
         raise ValueError(
             "CML_DASHBOARD_COMMON_EQUITY_START_AT must be an ISO-8601 timestamp"
         ) from error
     if parsed_at.tzinfo is None:
-        raise ValueError(
-            "CML_DASHBOARD_COMMON_EQUITY_START_AT must include a timezone"
-        )
+        raise ValueError("CML_DASHBOARD_COMMON_EQUITY_START_AT must include a timezone")
     parsed_at = parsed_at.astimezone(UTC)
     if parsed_at != FIXED_COMMON_EQUITY_START_AT:
         raise ValueError(
-            "CML_DASHBOARD_COMMON_EQUITY_START_AT is fixed at "
-            "2026-08-21T02:45:00Z"
+            "CML_DASHBOARD_COMMON_EQUITY_START_AT is fixed at 2026-08-21T02:45:00Z"
         )
     return FIXED_COMMON_EQUITY_START_AT
 
 
 class DashboardQueries:
-    _live_account_summaries = staticmethod(
-        _overview_queries.live_account_summaries
-    )
+    _live_account_summaries = staticmethod(_overview_queries.live_account_summaries)
 
     def __init__(
         self,
@@ -272,8 +259,7 @@ class DashboardQueries:
         clock: Callable[[], datetime] | None = None,
         stale_after_seconds: float = 120.0,
         paper_run_ids: frozenset[str] | None = None,
-        live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment]
-        | None = None,
+        live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
         common_equity_start_at: datetime | None = None,
         research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
     ) -> None:
@@ -521,7 +507,8 @@ class DashboardQueries:
             if not snaps_list:
                 return {"status": "no_data", "account_label": account_label}
 
-            # If earliest snapshot does not bracket start_time, fetch the closest preceding snapshot
+            # If earliest snapshot does not bracket start_time,
+            # fetch the closest preceding snapshot
             if snaps_list[0].observed_at > start_time:
                 prev_snap = (
                     await session.scalars(

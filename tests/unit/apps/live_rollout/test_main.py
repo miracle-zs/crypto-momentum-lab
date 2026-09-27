@@ -797,8 +797,9 @@ def test_resolve_missing_order_requires_exact_confirmation() -> None:
     assert "RESOLVE MISSING LIVE ORDER" in result.output
 
 
-def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order(
-) -> None:
+def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order() -> (
+    None
+):
     main._validate_missing_order_resolution(
         state="unknown_pending_reconciliation",
         reduce_only=True,

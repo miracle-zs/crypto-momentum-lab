@@ -266,7 +266,6 @@ class DashboardQueryProtocol(Protocol):
 
     async def readiness(self) -> SystemReadinessResponse: ...
 
-
     async def decision_slo(
         self,
         window: str = "24h",
@@ -489,7 +488,6 @@ def create_dashboard_app(
         )
 
     @dashboard.get(
-
         "/api/readiness",
         response_model=SystemReadinessResponse,
         dependencies=[Depends(require_dashboard_auth)],

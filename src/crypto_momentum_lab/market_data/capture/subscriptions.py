@@ -96,15 +96,11 @@ def build_subscription_groups(
         key=lambda item: (item[0][0].value, item[0][1].value),
     ):
         stream_limit = stream_limits.get(stream, max_per_connection)
-        for chunk_index, offset in enumerate(
-            range(0, len(items), stream_limit)
-        ):
+        for chunk_index, offset in enumerate(range(0, len(items), stream_limit)):
             chunk = tuple(items[offset : offset + stream_limit])
             groups.append(
                 SubscriptionGroup(
-                    group_id=(
-                        f"{route.value}:{stream.value}:{chunk_index:04d}"
-                    ),
+                    group_id=(f"{route.value}:{stream.value}:{chunk_index:04d}"),
                     route=route,
                     stream=stream,
                     subscriptions=chunk,

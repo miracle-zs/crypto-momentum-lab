@@ -51,10 +51,7 @@ class AccountPositionExpectation:
             (self.created_at, "created_at"),
             (self.expires_at, "expires_at"),
         ):
-            if (
-                timestamp_value.tzinfo is None
-                or timestamp_value.utcoffset() is None
-            ):
+            if timestamp_value.tzinfo is None or timestamp_value.utcoffset() is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
         if self.expires_at <= self.created_at:
             raise ValueError("expires_at must be after created_at")
@@ -83,8 +80,7 @@ class AccountPositionExpectation:
         if registered_at.tzinfo is None or registered_at.utcoffset() is None:
             raise ValueError("registered_at must be timezone-aware")
         expires_at = plan.expires_at or (
-            registered_at
-            + timedelta(seconds=_DEFAULT_MARKET_EXPECTATION_TTL_SECONDS)
+            registered_at + timedelta(seconds=_DEFAULT_MARKET_EXPECTATION_TTL_SECONDS)
         )
         position_side = getattr(plan.position_side, "value", plan.position_side)
         return cls(

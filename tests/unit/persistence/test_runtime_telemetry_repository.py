@@ -56,7 +56,5 @@ async def test_runtime_telemetry_uses_non_durable_observability_commit() -> None
     )
 
     assert session.statements[0].text == "SET LOCAL synchronous_commit = OFF"
-    compiled = str(
-        session.statements[1].compile(dialect=postgresql.dialect())
-    )
+    compiled = str(session.statements[1].compile(dialect=postgresql.dialect()))
     assert "ON CONFLICT (event_id, occurred_at) DO NOTHING" in compiled

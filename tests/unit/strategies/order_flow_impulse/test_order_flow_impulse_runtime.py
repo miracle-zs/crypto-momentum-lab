@@ -195,9 +195,7 @@ def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
 def test_orderflow_impulse_prunes_only_inactive_unprotected_symbols() -> None:
     strategy = _strategy()
     strategy.on_market_state(_state(0, Decimal("100.00")))
-    strategy.on_market_state(
-        replace(_state(0, Decimal("200.00")), symbol="ETHUSDT")
-    )
+    strategy.on_market_state(replace(_state(0, Decimal("200.00")), symbol="ETHUSDT"))
 
     evicted = strategy.prune_inactive_symbols(
         now=datetime(2026, 7, 4, 0, 10, tzinfo=UTC),

@@ -131,17 +131,10 @@ class ClosedMarketStatePublisherConfig:
 
     def __post_init__(self) -> None:
         if self.realtime_closure_delay_seconds <= 0:
-            raise ValueError(
-                "realtime_closure_delay_seconds must be positive"
-            )
+            raise ValueError("realtime_closure_delay_seconds must be positive")
         if self.durable_closure_delay_seconds <= 0:
-            raise ValueError(
-                "durable_closure_delay_seconds must be positive"
-            )
-        if (
-            self.durable_closure_delay_seconds
-            < self.realtime_closure_delay_seconds
-        ):
+            raise ValueError("durable_closure_delay_seconds must be positive")
+        if self.durable_closure_delay_seconds < self.realtime_closure_delay_seconds:
             raise ValueError(
                 "durable_closure_delay_seconds must be >= "
                 "realtime_closure_delay_seconds"
@@ -206,16 +199,12 @@ class _EventLatenessCounters:
             return
 
         self.timestamped_event_count += 1
-        lateness_seconds = (
-            envelope.received_at - exchange_event_at
-        ).total_seconds()
+        lateness_seconds = (envelope.received_at - exchange_event_at).total_seconds()
         if lateness_seconds < 0:
             self.negative_lateness_count += 1
         lateness_ms = lateness_seconds * 1000
         bucket_index = len(_LATENESS_BUCKET_UPPER_BOUNDS_MS)
-        for index, upper_bound_ms in enumerate(
-            _LATENESS_BUCKET_UPPER_BOUNDS_MS
-        ):
+        for index, upper_bound_ms in enumerate(_LATENESS_BUCKET_UPPER_BOUNDS_MS):
             if lateness_ms <= upper_bound_ms:
                 bucket_index = index
                 break
@@ -241,9 +230,7 @@ class _EventLatenessCounters:
             "raw_event_count": self.raw_event_count,
             "timestamped_event_count": self.timestamped_event_count,
             "normalized_event_count": self.normalized_event_count,
-            "missing_exchange_event_at_count": (
-                self.missing_exchange_event_at_count
-            ),
+            "missing_exchange_event_at_count": (self.missing_exchange_event_at_count),
             "negative_lateness_count": self.negative_lateness_count,
             "lateness_histogram_ms": dict(
                 zip(
@@ -283,14 +270,8 @@ class ClosedMarketStatePublisher:
         self._realtime_state_sink = realtime_state_sink
         self._realtime_quote_sink = realtime_quote_sink
         self._on_durable_state_persisted = on_durable_state_persisted
-        self._config = (
-            ClosedMarketStatePublisherConfig()
-            if config is None
-            else config
-        )
-        self._accumulators_by_bucket: dict[
-            _BucketKey, MarketState15sAccumulator
-        ] = {}
+        self._config = ClosedMarketStatePublisherConfig() if config is None else config
+        self._accumulators_by_bucket: dict[_BucketKey, MarketState15sAccumulator] = {}
         self._latest_book_ticker_by_bucket: dict[
             _BucketKey,
             NormalizedBookTicker,
@@ -301,9 +282,7 @@ class ClosedMarketStatePublisher:
         self._realtime_latest_quotes: dict[
             tuple[str, str], tuple[Decimal, Decimal]
         ] = {}
-        self._durable_latest_quotes: dict[
-            tuple[str, str], tuple[Decimal, Decimal]
-        ] = {}
+        self._durable_latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
         self._max_seen_event_at: datetime | None = None
         self._latest_watermark_at: datetime | None = None
         self._latest_durable_watermark_at: datetime | None = None
@@ -487,9 +466,7 @@ class ClosedMarketStatePublisher:
                     6,
                 ),
                 "active_bucket_count": metrics.active_bucket_count,
-                "active_bucket_high_watermark": (
-                    metrics.active_bucket_high_watermark
-                ),
+                "active_bucket_high_watermark": (metrics.active_bucket_high_watermark),
             },
             "completeness": {
                 "synthetic_state_count": metrics.synthetic_state_count,
@@ -498,9 +475,7 @@ class ClosedMarketStatePublisher:
                 ),
                 "incomplete_gap_count": metrics.incomplete_gap_count,
                 "missing_agg_trade_count": metrics.missing_agg_trade_count,
-                "late_recovered_event_count": (
-                    metrics.late_recovered_event_count
-                ),
+                "late_recovered_event_count": (metrics.late_recovered_event_count),
             },
         }
 
@@ -591,10 +566,7 @@ class ClosedMarketStatePublisher:
             return
 
         self._normalized_event_count += 1
-        if (
-            self._max_seen_event_at is None
-            or event.event_at > self._max_seen_event_at
-        ):
+        if self._max_seen_event_at is None or event.event_at > self._max_seen_event_at:
             self._max_seen_event_at = event.event_at
         realtime_watermark = self._max_seen_event_at - timedelta(
             seconds=self._config.realtime_closure_delay_seconds
@@ -614,13 +586,10 @@ class ClosedMarketStatePublisher:
         key = _bucket_key(event)
         bucket_end = key[2] + timedelta(seconds=_BUCKET_SECONDS)
         simulated_close_drops = tuple(
-            bucket_end
-            <= self._max_seen_event_at - timedelta(seconds=threshold_seconds)
+            bucket_end <= self._max_seen_event_at - timedelta(seconds=threshold_seconds)
             for threshold_seconds in _LATENESS_THRESHOLDS_SECONDS
         )
-        counters.observe_normalized(
-            simulated_close_drops=simulated_close_drops
-        )
+        counters.observe_normalized(simulated_close_drops=simulated_close_drops)
         # The durable watermark is the point after which the event can no
         # longer be incorporated into the audit row. Events between the two
         # clocks are deliberately accepted after realtime publication and are
@@ -692,9 +661,7 @@ class ClosedMarketStatePublisher:
                 realtime_ready_keys,
                 latest_quotes=self._realtime_latest_quotes,
             )
-            realtime_states = tuple(
-                snapshot.state for snapshot in realtime_snapshots
-            )
+            realtime_states = tuple(snapshot.state for snapshot in realtime_snapshots)
             for state in realtime_states:
                 if (
                     state.last_bid_price is not None
@@ -730,18 +697,13 @@ class ClosedMarketStatePublisher:
             durable_ready_keys,
             latest_quotes=self._durable_latest_quotes,
         )
-        states_tuple = tuple(
-            snapshot.state for snapshot in durable_snapshots
-        )
+        states_tuple = tuple(snapshot.state for snapshot in durable_snapshots)
         for key in durable_ready_keys:
             self._accumulators_by_bucket.pop(key, None)
             self._latest_book_ticker_by_bucket.pop(key, None)
             self._incomplete_buckets.pop(key, None)
         for state in states_tuple:
-            if (
-                state.last_bid_price is not None
-                and state.last_ask_price is not None
-            ):
+            if state.last_bid_price is not None and state.last_ask_price is not None:
                 self._durable_latest_quotes[(state.environment, state.symbol)] = (
                     state.last_bid_price,
                     state.last_ask_price,
@@ -750,8 +712,7 @@ class ClosedMarketStatePublisher:
             return
 
         self._synthetic_state_count += sum(
-            snapshot.input_sequence_min is None
-            and snapshot.input_sequence_max is None
+            snapshot.input_sequence_min is None and snapshot.input_sequence_max is None
             for snapshot in durable_snapshots
         )
         for durable_batch in _durable_batches(
@@ -899,10 +860,7 @@ class ClosedMarketStatePublisher:
             snapshots.append(snapshot)
             state = snapshot.state
             self._last_state_by_symbol[(state.environment, state.symbol)] = state
-            if (
-                state.last_bid_price is not None
-                and state.last_ask_price is not None
-            ):
+            if state.last_bid_price is not None and state.last_ask_price is not None:
                 latest_quotes[(state.environment, state.symbol)] = (
                     state.last_bid_price,
                     state.last_ask_price,
@@ -926,8 +884,7 @@ class ClosedMarketStatePublisher:
         for key in tuple(self._incomplete_buckets):
             if (
                 key not in self._accumulators_by_bucket
-                and key[2] + timedelta(seconds=_BUCKET_SECONDS)
-                <= durable_watermark
+                and key[2] + timedelta(seconds=_BUCKET_SECONDS) <= durable_watermark
             ):
                 self._incomplete_buckets.pop(key, None)
 
@@ -973,9 +930,7 @@ class ClosedMarketStatePublisher:
                     except Exception:
                         # A local health marker must never interrupt durable
                         # market-state persistence or the capture loop.
-                        self._log.exception(
-                            "runtime_state_health_marker_failed"
-                        )
+                        self._log.exception("runtime_state_health_marker_failed")
                 return
             except asyncio.CancelledError:
                 raise

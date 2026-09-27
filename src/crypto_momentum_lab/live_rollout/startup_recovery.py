@@ -94,9 +94,7 @@ async def wait_for_durable_market_state_cutover(
                 environment=environment,
                 requested_cutover=requested_cutover.isoformat(),
                 latest_durable=(
-                    None
-                    if latest_durable is None
-                    else latest_durable.isoformat()
+                    None if latest_durable is None else latest_durable.isoformat()
                 ),
                 selected_cutover=fallback.isoformat(),
                 timeout_seconds=timeout_seconds,
@@ -267,20 +265,19 @@ def validate_live_warmup_coverage(
             for state in states_by_symbol.get(symbol, ())
             if all(getattr(state, field, None) is not None for field in required_fields)
         ]
-        valid_states.sort(
-            key=lambda state: getattr(state, "bucket_start", cutover_at)
-        )
+        valid_states.sort(key=lambda state: getattr(state, "bucket_start", cutover_at))
         if len(valid_states) < warmup_buckets:
-            missing.append(
-                f"{symbol}:have={len(valid_states)},need={warmup_buckets}"
-            )
+            missing.append(f"{symbol}:have={len(valid_states)},need={warmup_buckets}")
             continue
         window = valid_states[-warmup_buckets:]
         if all(hasattr(state, "bucket_start") for state in window):
-            if any(
-                current.bucket_start - previous.bucket_start != interval
-                for previous, current in zip(window, window[1:], strict=False)
-            ) or window[-1].bucket_start != cutover_at:
+            if (
+                any(
+                    current.bucket_start - previous.bucket_start != interval
+                    for previous, current in zip(window, window[1:], strict=False)
+                )
+                or window[-1].bucket_start != cutover_at
+            ):
                 gaps.append(symbol)
 
     if missing or gaps:
@@ -291,8 +288,7 @@ def validate_live_warmup_coverage(
             details.append("gaps=" + ",".join(gaps[:8]))
         raise RuntimeError(
             "live strategy warmup incomplete at "
-            f"{cutover_at.isoformat()}: "
-            + "; ".join(details)
+            f"{cutover_at.isoformat()}: " + "; ".join(details)
         )
 
 
@@ -491,18 +487,14 @@ async def restore_live_strategy_from_checkpoint(
 ) -> Mapping[str, datetime]:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
-        raise RuntimeError(
-            "strategy does not support compact checkpoint recovery"
-        )
+        raise RuntimeError("strategy does not support compact checkpoint recovery")
     clear_market_state_buffers = getattr(
         strategy,
         "clear_market_state_buffers",
         None,
     )
     if not callable(clear_market_state_buffers):
-        raise RuntimeError(
-            "strategy does not support forced durable market rewarm"
-        )
+        raise RuntimeError("strategy does not support forced durable market rewarm")
     # A checkpoint may come from an older worker that persisted derived
     # buffers.  Never combine those buffers with a new stream epoch: discard
     # them first and rebuild from the durable market-state table below.
@@ -511,9 +503,7 @@ async def restore_live_strategy_from_checkpoint(
         "live_strategy_market_buffers_discarded_before_durable_rewarm",
         environment=environment,
     )
-    recovery_cutover = cutover_at or live_market_state_cutover(
-        datetime.now(tz=UTC)
-    )
+    recovery_cutover = cutover_at or live_market_state_cutover(datetime.now(tz=UTC))
     checkpoint_symbols = set(checkpoint.last_processed_at_by_symbol)
     if warmup_symbols is None:
         expected_symbols = set(checkpoint_symbols)
@@ -583,9 +573,7 @@ async def restore_live_strategy_from_checkpoint(
         expected_symbols=complete_symbols,
         cutover_at=recovery_cutover,
     )
-    compact_checkpoint = strategy.checkpoint(
-        include_market_state_buffers=False
-    )
+    compact_checkpoint = strategy.checkpoint(include_market_state_buffers=False)
     log.info(
         "live_strategy_checkpoint_recovered",
         environment=environment,

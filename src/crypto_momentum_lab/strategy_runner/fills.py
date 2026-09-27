@@ -270,10 +270,9 @@ def fill_summary(
     for fill in simulated_fills:
         if fill.status is not SimulatedFillStatus.FILLED:
             continue
-        filled_notional_by_symbol[fill.symbol] = (
-            filled_notional_by_symbol.get(fill.symbol, Decimal("0"))
-            + (fill.filled_notional or Decimal("0"))
-        )
+        filled_notional_by_symbol[fill.symbol] = filled_notional_by_symbol.get(
+            fill.symbol, Decimal("0")
+        ) + (fill.filled_notional or Decimal("0"))
         fee_by_symbol[fill.symbol] = (
             fee_by_symbol.get(fill.symbol, Decimal("0")) + fill.fee
         )
@@ -328,11 +327,7 @@ def _marketable_quote(
     spread = state.spread
     midpoint = state.midpoint
     if require_market_quote and (
-        bid is None
-        or ask is None
-        or bid <= 0
-        or ask <= 0
-        or ask < bid
+        bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid
     ):
         return None
     if midpoint is None and bid is not None and ask is not None:

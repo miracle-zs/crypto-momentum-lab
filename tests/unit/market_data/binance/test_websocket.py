@@ -326,9 +326,7 @@ async def test_realtime_sink_does_not_block_socket_reader() -> None:
                 return next(self._messages)
             except StopIteration:
                 await self._blocked.wait()
-                raise AssertionError(
-                    "fake socket was unexpectedly released"
-                ) from None
+                raise AssertionError("fake socket was unexpectedly released") from None
 
     connection = BinanceWebSocketConnection(
         base_url="wss://example.test/ws",
@@ -393,8 +391,7 @@ def test_event_stream_silence_policy(
     )
 
     assert (
-        _silence_timeout_for_stream(stream, configured_timeout=30.0)
-        == expected_timeout
+        _silence_timeout_for_stream(stream, configured_timeout=30.0) == expected_timeout
     )
 
 
@@ -414,7 +411,4 @@ def test_ping_timeout_policy(
         _ping_timeout_for_stream,
     )
 
-    assert (
-        _ping_timeout_for_stream(stream, configured_timeout=10.0)
-        == expected_timeout
-    )
+    assert _ping_timeout_for_stream(stream, configured_timeout=10.0) == expected_timeout

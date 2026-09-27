@@ -507,4 +507,3 @@ async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> Non
         reference_price=Decimal("2000"),
     )
     assert res_eth is not None
-

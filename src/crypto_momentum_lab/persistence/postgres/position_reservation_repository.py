@@ -75,9 +75,7 @@ def _acquire_reservation_lock(session: Session, lock_key: str) -> None:
         ) from lock_err
 
 
-async def _acquire_reservation_lock_async(
-    session: AsyncSession, lock_key: str
-) -> None:
+async def _acquire_reservation_lock_async(session: AsyncSession, lock_key: str) -> None:
     bind = session.get_bind()
     if bind is not None and bind.dialect.name != "postgresql":
         return
@@ -149,8 +147,7 @@ def _require_capacity(
     """
     if pos_amt is None:
         raise ReservationConflictError(
-            "position snapshot missing; refusing to reserve without "
-            "proven capacity"
+            "position snapshot missing; refusing to reserve without proven capacity"
         )
     if abs(pos_amt) <= Decimal("0"):
         raise ReservationConflictError(
@@ -229,9 +226,7 @@ def _require_batch_capacity(
     if batch_quantity is None:
         return
     if batch_quantity <= Decimal("0"):
-        raise ReservationConflictError(
-            f"batch {batch_id} quantity must be positive"
-        )
+        raise ReservationConflictError(f"batch {batch_id} quantity must be positive")
     if total_active_for_batch + reserved_quantity > batch_quantity:
         raise ReservationConflictError(
             f"batch {batch_id} over-reserved: requested {reserved_quantity}, "
@@ -290,9 +285,7 @@ class PostgresPositionReservationRepository:
         strat = getattr(first.position_key, "strategy_name", self._strategy_name)
         batch_quantities = batch_quantities or {}
         with self._session_factory() as session, session.begin():
-            _acquire_reservation_lock(
-                session, f"res_{first.position_key.canonical_id}"
-            )
+            _acquire_reservation_lock(session, f"res_{first.position_key.canonical_id}")
             active_rows = session.scalars(
                 select(PositionReservationRow).where(
                     PositionReservationRow.environment
@@ -400,8 +393,7 @@ class PostgresPositionReservationRepository:
                     ) from snap_err
                 _require_capacity(
                     reserved_quantity=reservation.reserved_quantity,
-                    total_active=total_active
-                    - reservation.reserved_quantity,
+                    total_active=total_active - reservation.reserved_quantity,
                     pos_amt=pos_amt,
                 )
                 stmt = (
@@ -412,18 +404,14 @@ class PostgresPositionReservationRepository:
                         account_label=reservation.position_key.account_label,
                         strategy_name=strat,
                         symbol=reservation.position_key.symbol,
-                        position_side=(
-                            reservation.position_key.position_side.value
-                        ),
+                        position_side=(reservation.position_key.position_side.value),
                         batch_id=reservation.batch_id,
                         command_id=reservation.command_id,
                         client_order_id=None,
                         reserved_quantity=reservation.reserved_quantity,
                         consumed_quantity=reservation.consumed_quantity,
                         released_quantity=reservation.released_quantity,
-                        expected_projection_version=(
-                            expected_projection_version
-                        ),
+                        expected_projection_version=(expected_projection_version),
                         status="ACTIVE",
                         created_at=reservation.created_at,
                         updated_at=now,
@@ -710,18 +698,14 @@ class AsyncPostgresPositionReservationRepository:
                         account_label=reservation.position_key.account_label,
                         strategy_name=strat,
                         symbol=reservation.position_key.symbol,
-                        position_side=(
-                            reservation.position_key.position_side.value
-                        ),
+                        position_side=(reservation.position_key.position_side.value),
                         batch_id=reservation.batch_id,
                         command_id=reservation.command_id,
                         client_order_id=None,
                         reserved_quantity=reservation.reserved_quantity,
                         consumed_quantity=reservation.consumed_quantity,
                         released_quantity=reservation.released_quantity,
-                        expected_projection_version=(
-                            expected_projection_version
-                        ),
+                        expected_projection_version=(expected_projection_version),
                         status="ACTIVE",
                         created_at=reservation.created_at,
                         updated_at=now,
@@ -805,9 +789,7 @@ class AsyncPostgresPositionReservationRepository:
                 reservations.append(res)
         return tuple(reservations)
 
-    async def load_reservation(
-        self, reservation_id: str
-    ) -> PositionReservation | None:
+    async def load_reservation(self, reservation_id: str) -> PositionReservation | None:
         async with self._session_maker() as session:
             row = await session.get(PositionReservationRow, reservation_id)
             if row is None:

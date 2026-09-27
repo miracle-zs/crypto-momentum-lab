@@ -45,9 +45,7 @@ def deserialize_envelope_row(row: str) -> RawEnvelope:
                 decoded,
                 "received_monotonic_ns",
             ),
-            connection_session_id=UUID(
-                _required_str(decoded, "connection_session_id")
-            ),
+            connection_session_id=UUID(_required_str(decoded, "connection_session_id")),
             local_sequence=_required_int(decoded, "local_sequence"),
             exchange_sequence=_optional_str(decoded, "exchange_sequence"),
             subscription_generation=_required_int(
@@ -70,11 +68,7 @@ def iter_archive_file(path: Path) -> Iterator[RawEnvelope]:
 
 
 def replay_envelopes(paths: Iterable[Path]) -> tuple[RawEnvelope, ...]:
-    envelopes = [
-        envelope
-        for path in paths
-        for envelope in iter_archive_file(path)
-    ]
+    envelopes = [envelope for path in paths for envelope in iter_archive_file(path)]
     return tuple(
         sorted(
             envelopes,

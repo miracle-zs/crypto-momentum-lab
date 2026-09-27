@@ -410,7 +410,10 @@ async def test_audit_decision_trace_reproducibility(
     assert audit_res["decision_id"] == "trace_audit_001"
     assert audit_res["strategy_name"] == "orderflow_impulse"
     assert audit_res["evaluated_revisions_count"] == 1
-    assert audit_res["evaluated_revisions"][0]["revision_id"] == "live:BTCUSDT:15s:1790323200:testref"
+    assert (
+        audit_res["evaluated_revisions"][0]["revision_id"]
+        == "live:BTCUSDT:15s:1790323200:testref"
+    )
     assert audit_res["next_policy_state_version"] == 3
 
 
@@ -444,7 +447,11 @@ async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
         rejection_reason=None,
         input_hash="hash_orig_1111",
         frame_digest="frame_orig_1111",
-        trace_payload={"intent": "buy", "input_hash": "hash_orig_1111", "frame_digest": "frame_orig_1111"},
+        trace_payload={
+            "intent": "buy",
+            "input_hash": "hash_orig_1111",
+            "frame_digest": "frame_orig_1111",
+        },
     )
     # Seed the session with existing trace row
     session.trace_rows["dec_btc_001"] = DecisionTraceRow(
@@ -456,7 +463,11 @@ async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
         intent_id="cand-1",
         rejection_reason=None,
         evaluated_revision_ids=["live:BTCUSDT:15s:1:ref1"],
-        trace_payload={"intent": "buy", "input_hash": "hash_orig_1111", "frame_digest": "frame_orig_1111"},
+        trace_payload={
+            "intent": "buy",
+            "input_hash": "hash_orig_1111",
+            "frame_digest": "frame_orig_1111",
+        },
         created_at=t0,
     )
 

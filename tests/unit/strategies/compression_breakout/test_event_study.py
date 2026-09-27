@@ -37,12 +37,8 @@ def test_finds_upward_breakout_after_compressed_range() -> None:
     assert event.range_low == Decimal("99.95")
     assert event.breakout_price == Decimal("100.50")
     assert event.aggressive_imbalance == Decimal("0.6666666666666666666666666667")
-    assert event.forward_returns[1] == Decimal(
-        "0.004975124378109452736318407960"
-    )
-    assert event.forward_returns[2] == Decimal(
-        "-0.002487562189054726368159203980"
-    )
+    assert event.forward_returns[1] == Decimal("0.004975124378109452736318407960")
+    assert event.forward_returns[2] == Decimal("-0.002487562189054726368159203980")
     assert event.max_favorable_return == event.forward_returns[1]
     assert event.max_adverse_return == event.forward_returns[2]
 
@@ -69,9 +65,7 @@ def test_finds_downward_breakout_after_compressed_range() -> None:
     assert event.direction is BreakoutDirection.DOWN
     assert event.range_low == Decimal("99.95")
     assert event.breakout_price == Decimal("99.70")
-    assert event.forward_returns[1] == Decimal(
-        "0.006018054162487462387161484453"
-    )
+    assert event.forward_returns[1] == Decimal("0.006018054162487462387161484453")
 
 
 def test_rejects_breakout_when_prior_range_is_not_compressed() -> None:

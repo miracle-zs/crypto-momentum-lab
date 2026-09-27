@@ -141,15 +141,11 @@ class BoundedEnvelopeQueue:
                         timeout=remaining,
                     )
                 except TimeoutError as error:
-                    raise CaptureQueueFull(
-                        "queue backpressure timeout"
-                    ) from error
+                    raise CaptureQueueFull("queue backpressure timeout") from error
         finally:
             if wait_started_at is not None:
                 self._waiting_producers -= 1
-                self._backpressure_wait_seconds += (
-                    time.monotonic() - wait_started_at
-                )
+                self._backpressure_wait_seconds += time.monotonic() - wait_started_at
 
     async def put_nowait(self, envelope: RawEnvelope) -> None:
         item = _queue_item(envelope, streams=self._coalescing_streams)
@@ -173,9 +169,7 @@ class BoundedEnvelopeQueue:
             buffered = self._coalescing_buffers.get(coalesce_key)
             if buffered is not None:
                 if (
-                    self._current_bytes
-                    - buffered.encoded_size
-                    + encoded_size
+                    self._current_bytes - buffered.encoded_size + encoded_size
                     > self._max_bytes
                 ):
                     self._dropped_events += 1
@@ -188,9 +182,7 @@ class BoundedEnvelopeQueue:
             previous = self._pending_by_key.get(coalesce_key)
             if previous is not None:
                 if (
-                    self._current_bytes
-                    - previous.encoded_size
-                    + encoded_size
+                    self._current_bytes - previous.encoded_size + encoded_size
                     > self._max_bytes
                 ):
                     self._dropped_events += 1

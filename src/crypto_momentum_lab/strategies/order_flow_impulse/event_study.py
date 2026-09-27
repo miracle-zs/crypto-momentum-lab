@@ -15,9 +15,7 @@ class OrderFlowDirection(StrEnum):
 
 VOLUME_RATIO_RECENT_BUCKETS = 20
 VOLUME_RATIO_BASELINE_BUCKETS = 120
-VOLUME_RATIO_TOTAL_BUCKETS = (
-    VOLUME_RATIO_RECENT_BUCKETS + VOLUME_RATIO_BASELINE_BUCKETS
-)
+VOLUME_RATIO_TOTAL_BUCKETS = VOLUME_RATIO_RECENT_BUCKETS + VOLUME_RATIO_BASELINE_BUCKETS
 _VOLUME_RATIO_BUCKET = timedelta(seconds=15)
 
 
@@ -293,15 +291,10 @@ def _build_event(
         else None
     )
     if config.min_notional_5m_vs_30m > 0 and (
-        notional_5m_vs_30m is None
-        or notional_5m_vs_30m < config.min_notional_5m_vs_30m
+        notional_5m_vs_30m is None or notional_5m_vs_30m < config.min_notional_5m_vs_30m
     ):
         return None
-    if (
-        impulse_start_price is None
-        or impulse_end_price is None
-        or event_price is None
-    ):
+    if impulse_start_price is None or impulse_end_price is None or event_price is None:
         return None
     directional_return = (
         impulse_return if direction is OrderFlowDirection.UP else -impulse_return
@@ -398,7 +391,8 @@ def _notional_volume_ratio(
         Decimal("0"),
     )
     return (
-        recent_total * Decimal(VOLUME_RATIO_BASELINE_BUCKETS)
+        recent_total
+        * Decimal(VOLUME_RATIO_BASELINE_BUCKETS)
         / (baseline_total * Decimal(VOLUME_RATIO_RECENT_BUCKETS))
     )
 
@@ -462,9 +456,7 @@ def _impulse_metrics(
         (state.trade_notional for state in baseline),
         Decimal("0"),
     )
-    baseline_notional = (
-        baseline_total / Decimal(len(baseline)) * Decimal(len(impulse))
-    )
+    baseline_notional = baseline_total / Decimal(len(baseline)) * Decimal(len(impulse))
     if baseline_notional <= 0:
         return None
     impulse_notional = sum(

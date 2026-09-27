@@ -129,28 +129,50 @@ class PostgresDecisionTraceRepository:
                     # Diagnostic plane: do not block on synchronous commit
                     await session.execute(text("SET LOCAL synchronous_commit = OFF"))
 
-                    # Check for conflicting existing records to enforce immutable audit trail
+                    # Check for conflicting existing records to enforce
+                    # immutable audit trail
                     incoming_ids = [t.decision_id for t in traces]
-                    stmt_check = select(DecisionTraceRow).where(DecisionTraceRow.decision_id.in_(incoming_ids))
+                    stmt_check = select(DecisionTraceRow).where(
+                        DecisionTraceRow.decision_id.in_(incoming_ids)
+                    )
                     existing_rows = (await session.execute(stmt_check)).scalars().all()
                     incoming_by_id = {t.decision_id: t for t in traces}
                     for existing in existing_rows:
                         incoming = incoming_by_id.get(existing.decision_id)
                         if incoming is not None:
                             diffs = []
-                            existing_input_hash = str((existing.trace_payload or {}).get("input_hash", ""))
-                            if incoming.input_hash and incoming.input_hash != existing_input_hash:
-                                diffs.append(f"input_hash ({existing_input_hash} vs {incoming.input_hash})")
+                            existing_input_hash = str(
+                                (existing.trace_payload or {}).get("input_hash", "")
+                            )
+                            if (
+                                incoming.input_hash
+                                and incoming.input_hash != existing_input_hash
+                            ):
+                                diffs.append(
+                                    f"input_hash ({existing_input_hash} vs "
+                                    f"{incoming.input_hash})"
+                                )
                             if incoming.intent_produced != existing.intent_produced:
-                                diffs.append(f"intent_produced ({existing.intent_produced} vs {incoming.intent_produced})")
+                                diffs.append(
+                                    f"intent_produced ({existing.intent_produced} vs "
+                                    f"{incoming.intent_produced})"
+                                )
                             if incoming.intent_id != existing.intent_id:
-                                diffs.append(f"intent_id ({existing.intent_id} vs {incoming.intent_id})")
+                                diffs.append(
+                                    f"intent_id ({existing.intent_id} vs "
+                                    f"{incoming.intent_id})"
+                                )
                             if incoming.rejection_reason != existing.rejection_reason:
-                                diffs.append(f"rejection_reason ({existing.rejection_reason} vs {incoming.rejection_reason})")
+                                diffs.append(
+                                    f"rejection_reason ({existing.rejection_reason} vs "
+                                    f"{incoming.rejection_reason})"
+                                )
                             if diffs:
+                                conflict_details = ", ".join(diffs)
                                 raise ValueError(
-                                    f"Immutable audit conflict: DecisionTrace '{existing.decision_id}' "
-                                    f"already exists with conflicting contents: {', '.join(diffs)}"
+                                    f"Immutable audit conflict: DecisionTrace "
+                                    f"'{existing.decision_id}' already exists with "
+                                    f"conflicting contents: {conflict_details}"
                                 )
 
                     if revision_rows:
@@ -239,6 +261,26 @@ class PostgresDecisionTraceRepository:
             res = await session.execute(stmt)
             count = res.scalar()
             return int(count or 0)
+
+    async def load_latest_decision_trace(
+        self, strategy_name: str, account_label: str
+    ) -> DecisionTrace | None:
+        """Loads the most recent DecisionTrace recorded for strategy and account."""
+        async with self._session_factory() as session:
+            stmt = (
+                select(DecisionTraceRow)
+                .where(
+                    DecisionTraceRow.strategy_name == strategy_name,
+                    DecisionTraceRow.account_label == account_label,
+                )
+                .order_by(DecisionTraceRow.decision_time.desc())
+                .limit(1)
+            )
+            res = await session.execute(stmt)
+            row = res.scalar_one_or_none()
+            if row is None:
+                return None
+            return await self.load_decision_trace(row.decision_id)
 
 
 __all__ = ["PostgresDecisionTraceRepository"]

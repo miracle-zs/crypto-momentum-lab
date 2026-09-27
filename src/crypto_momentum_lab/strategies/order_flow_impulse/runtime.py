@@ -52,9 +52,7 @@ class OrderFlowImpulseRuntimeStrategy:
     ) -> None:
         self._config = config
         self._identity = identity
-        self._runtime = StrategyRuntimeState(
-            buffer_payload_key="market_state_buffers"
-        )
+        self._runtime = StrategyRuntimeState(buffer_payload_key="market_state_buffers")
 
     def metadata(self) -> StrategyMetadata:
         return StrategyMetadata(name="orderflow_impulse", version="v0")
@@ -145,9 +143,7 @@ class OrderFlowImpulseRuntimeStrategy:
         if inactive_after <= timedelta(0):
             raise ValueError("inactive_after must be positive")
         protected = {
-            symbol.strip().upper()
-            for symbol in protected_symbols
-            if symbol.strip()
+            symbol.strip().upper() for symbol in protected_symbols if symbol.strip()
         }
         protected.update(self.cache_protected_symbols())
         cutoff = now - inactive_after

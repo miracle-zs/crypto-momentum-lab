@@ -72,7 +72,6 @@ __all__ = [
     "FixedNotionalSizingModel",
     "IncompatibleCheckpointError",
     "OrderIntentCandidate",
-
     "PolicyInputSnapshot",
     "PositionExitPolicy",
     "RejectionReason",

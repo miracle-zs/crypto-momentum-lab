@@ -33,9 +33,7 @@ RUNTIME_STATE_PARTITION_INTERVAL: Final = timedelta(hours=6)
 # backups have to walk.
 RUNTIME_STATE_PARTITION_LOOKAHEAD: Final = timedelta(days=2)
 
-_RUNTIME_STATE_PRIMARY_KEY: Final = (
-    "pk_runtime_market_states_15s_partitioned"
-)
+_RUNTIME_STATE_PRIMARY_KEY: Final = "pk_runtime_market_states_15s_partitioned"
 _RUNTIME_STATE_INDEXES: Final[tuple[tuple[str, str], ...]] = (
     (
         "ix_runtime_market_states_15s_partitioned_polling",
@@ -206,9 +204,7 @@ async def drop_expired_runtime_state_partitions(
                         )
                     # A stuck reader must not turn retention into a database
                     # outage.  The next interval retries the partition.
-                    await drop_session.execute(
-                        text("SET LOCAL lock_timeout = '2s'")
-                    )
+                    await drop_session.execute(text("SET LOCAL lock_timeout = '2s'"))
                     await drop_session.execute(
                         text(f"DROP TABLE {_quote_identifier(name)}")
                     )
@@ -247,9 +243,7 @@ async def prepare_runtime_state_partition(
     async with session_factory() as session:
         async with session.begin():
             if await _table_is_partitioned(session, RUNTIME_STATE_TABLE):
-                raise RuntimeError(
-                    f"{RUNTIME_STATE_TABLE} is already partitioned"
-                )
+                raise RuntimeError(f"{RUNTIME_STATE_TABLE} is already partitioned")
             if await _table_exists(session, RUNTIME_STATE_SHADOW_TABLE):
                 raise RuntimeError(
                     f"shadow table already exists: {RUNTIME_STATE_SHADOW_TABLE}"
@@ -258,15 +252,19 @@ async def prepare_runtime_state_partition(
             source = _quote_identifier(RUNTIME_STATE_TABLE)
             shadow = _quote_identifier(RUNTIME_STATE_SHADOW_TABLE)
             summary = (
-                await session.execute(
-                    text(
-                        f"SELECT count(*)::bigint AS row_count, "
-                        f"min(\"bucket_start\") AS first_bucket, "
-                        f"max(\"bucket_start\") AS last_bucket "
-                        f"FROM {source}"
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT count(*)::bigint AS row_count, "
+                            f'min("bucket_start") AS first_bucket, '
+                            f'max("bucket_start") AS last_bucket '
+                            f"FROM {source}"
+                        )
                     )
                 )
-            ).one()._mapping
+                .one()
+                ._mapping
+            )
             source_rows = int(summary["row_count"])
             first_bucket = summary["first_bucket"]
             last_bucket = summary["last_bucket"]
@@ -279,12 +277,10 @@ async def prepare_runtime_state_partition(
                 text(
                     f"CREATE TABLE {shadow} "
                     f"(LIKE {source} INCLUDING DEFAULTS INCLUDING CONSTRAINTS) "
-                    f"PARTITION BY RANGE (\"bucket_start\")"
+                    f'PARTITION BY RANGE ("bucket_start")'
                 )
             )
-            first_partition_start = floor_runtime_state_partition_start(
-                first_bucket
-            )
+            first_partition_start = floor_runtime_state_partition_start(first_bucket)
             last_partition_end = _ceil_runtime_state_partition_end(
                 max(last_bucket, observed_at + lookahead)
             )
@@ -294,16 +290,10 @@ async def prepare_runtime_state_partition(
                 start=first_partition_start,
                 end=last_partition_end,
             )
-            await session.execute(
-                text(
-                    f"INSERT INTO {shadow} SELECT * FROM {source}"
-                )
-            )
+            await session.execute(text(f"INSERT INTO {shadow} SELECT * FROM {source}"))
             await _create_shadow_indexes(session)
             shadow_rows = int(
-                await session.scalar(
-                    text(f"SELECT count(*)::bigint FROM {shadow}")
-                )
+                await session.scalar(text(f"SELECT count(*)::bigint FROM {shadow}"))
                 or 0
             )
             if shadow_rows != source_rows:
@@ -329,24 +319,20 @@ async def cutover_runtime_state_partition(
     """Copy the final delta and atomically rename the shadow into place."""
 
     resolved_legacy_table = legacy_table or (
-        f"{RUNTIME_STATE_TABLE}_legacy_"
-        f"{datetime.now(UTC):%Y%m%d%H%M%S}"
+        f"{RUNTIME_STATE_TABLE}_legacy_{datetime.now(UTC):%Y%m%d%H%M%S}"
     )
     _validate_legacy_table_name(resolved_legacy_table)
 
     async with session_factory() as session:
         async with session.begin():
             if await _table_is_partitioned(session, RUNTIME_STATE_TABLE):
-                raise RuntimeError(
-                    f"{RUNTIME_STATE_TABLE} is already partitioned"
-                )
+                raise RuntimeError(f"{RUNTIME_STATE_TABLE} is already partitioned")
             if not await _table_is_partitioned(
                 session,
                 RUNTIME_STATE_SHADOW_TABLE,
             ):
                 raise RuntimeError(
-                    "partitioned shadow table is missing: "
-                    f"{RUNTIME_STATE_SHADOW_TABLE}"
+                    f"partitioned shadow table is missing: {RUNTIME_STATE_SHADOW_TABLE}"
                 )
             if await _table_exists(session, resolved_legacy_table):
                 raise RuntimeError(
@@ -466,15 +452,12 @@ async def _create_shadow_indexes(session: AsyncSession) -> None:
         text(
             f"ALTER TABLE {shadow} ADD CONSTRAINT "
             f"{_quote_identifier(_RUNTIME_STATE_PRIMARY_KEY)} PRIMARY KEY "
-            f"(\"environment\", \"symbol\", \"bucket_start\")"
+            f'("environment", "symbol", "bucket_start")'
         )
     )
     for index_name, columns in _RUNTIME_STATE_INDEXES:
         await session.execute(
-            text(
-                f"CREATE INDEX {_quote_identifier(index_name)} "
-                f"ON {shadow} {columns}"
-            )
+            text(f"CREATE INDEX {_quote_identifier(index_name)} ON {shadow} {columns}")
         )
 
 

@@ -58,10 +58,7 @@ class LiveEntryControlGate:
             raise TypeError("enabled must be a bool")
         if not reason.strip():
             raise ValueError("reason must not be empty")
-        if (
-            self._entry_enabled == enabled
-            and self._entry_enabled_reason == reason
-        ):
+        if self._entry_enabled == enabled and self._entry_enabled_reason == reason:
             return
         state_changed = self._entry_enabled != enabled
         self._entry_enabled = enabled
@@ -236,9 +233,7 @@ class LiveEntryControlGate:
 
     def _set_coordinator_entry_gate(self, *, blocked: bool) -> bool:
         method_name = (
-            "block_entry_submissions"
-            if blocked
-            else "unblock_entry_submissions"
+            "block_entry_submissions" if blocked else "unblock_entry_submissions"
         )
         method = getattr(self._state_machine, method_name, None)
         if not callable(method):

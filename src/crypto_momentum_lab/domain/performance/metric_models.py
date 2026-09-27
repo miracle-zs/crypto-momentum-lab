@@ -223,17 +223,15 @@ class AccountEquityCut:
                     "coverage_receipt interval_start is after cut start_time"
                 )
             if self.coverage_receipt.interval_end < self.end_time:
-                raise ValueError(
-                    "coverage_receipt interval_end is before cut end_time"
-                )
-        if any(
-            cf.asset != self.asset for cf in self.cash_flows
-        ) and not self.currency_conversion_source:
+                raise ValueError("coverage_receipt interval_end is before cut end_time")
+        if (
+            any(cf.asset != self.asset for cf in self.cash_flows)
+            and not self.currency_conversion_source
+        ):
             raise ValueError(
                 "multi-asset cash flows detected without explicit "
                 "currency_conversion_source"
             )
-
 
 
 @dataclass(frozen=True, slots=True)

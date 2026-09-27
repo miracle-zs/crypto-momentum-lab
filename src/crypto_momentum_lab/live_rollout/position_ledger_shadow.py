@@ -21,12 +21,12 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution import (
     ManagedLivePositionBatch,
     PositionObservation,
     PositionOrderFact,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.position_batches import (
     _EXIT_SUBMITTED_STATES,
 )
@@ -133,11 +133,7 @@ class LegacyOrderIdentityAdapter:
         if not fill_list and orders:
             has_synthetic = True
             for ord_idx, order in enumerate(orders):
-                oid = (
-                    order.exchange_order_id
-                    or order.client_order_id
-                    or "unknown"
-                )
+                oid = order.exchange_order_id or order.client_order_id or "unknown"
                 fill_dt = (
                     (fill_times.get(oid) if fill_times else None)
                     or (
@@ -165,7 +161,11 @@ class LegacyOrderIdentityAdapter:
                         fill_times is not None
                         and any(
                             k in fill_times
-                            for k in (oid, order.exchange_order_id, order.client_order_id)
+                            for k in (
+                                oid,
+                                order.exchange_order_id,
+                                order.client_order_id,
+                            )
                             if k
                         )
                     )

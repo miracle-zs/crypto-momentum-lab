@@ -183,7 +183,7 @@ class SimulationExecutionAdapter:
         command: TradeCommand,
         envelope: MarketEnvelope,
         journal: AccountJournal,
-        coordinator: ExecutionCoordinator,
+        coordinator: ExecutionCoordinator | None = None,
         *,
         reservation_id: str | None = None,
         fill_model: FillModel | None = None,
@@ -296,7 +296,7 @@ class SimulationExecutionAdapter:
         )
 
         # Reconcile in coordinator if reservation_id provided
-        if reservation_id is not None:
+        if reservation_id is not None and coordinator is not None:
             coordinator.reconcile_fill(
                 reservation_id=reservation_id,
                 filled_quantity=quantity,

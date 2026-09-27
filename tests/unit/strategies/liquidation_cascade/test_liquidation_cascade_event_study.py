@@ -50,15 +50,9 @@ def test_finds_upward_continuation_after_liquidation_cluster() -> None:
     assert event.breakout_distance_pct == Decimal("0.02")
     assert event.liquidation_count == 2
     assert event.liquidation_notional == Decimal("600")
-    assert event.aggressive_imbalance == Decimal(
-        "0.6666666666666666666666666667"
-    )
-    assert event.forward_returns[1] == Decimal(
-        "0.009803921568627450980392156863"
-    )
-    assert event.forward_returns[2] == Decimal(
-        "-0.004901960784313725490196078431"
-    )
+    assert event.aggressive_imbalance == Decimal("0.6666666666666666666666666667")
+    assert event.forward_returns[1] == Decimal("0.009803921568627450980392156863")
+    assert event.forward_returns[2] == Decimal("-0.004901960784313725490196078431")
     assert event.max_favorable_return == event.forward_returns[1]
     assert event.max_adverse_return == event.forward_returns[2]
 
@@ -95,9 +89,7 @@ def test_finds_downward_continuation_after_liquidation_cluster() -> None:
     assert event.direction is LiquidationCascadeDirection.DOWN
     assert event.cluster_move_pct == Decimal("0.02")
     assert event.breakout_level == Decimal("100.00")
-    assert event.forward_returns[1] == Decimal(
-        "0.01020408163265306122448979592"
-    )
+    assert event.forward_returns[1] == Decimal("0.01020408163265306122448979592")
 
 
 def test_rejects_price_move_without_liquidation_activity() -> None:
@@ -243,11 +235,9 @@ def test_summarizes_events_by_direction() -> None:
 
     assert summary.total_count == 1
     assert summary.by_direction[LiquidationCascadeDirection.UP].count == 1
-    assert summary.by_direction[
-        LiquidationCascadeDirection.UP
-    ].mean_forward_returns[1] == Decimal(
-        "0.009803921568627450980392156863"
-    )
+    assert summary.by_direction[LiquidationCascadeDirection.UP].mean_forward_returns[
+        1
+    ] == Decimal("0.009803921568627450980392156863")
     assert summary.by_direction[LiquidationCascadeDirection.DOWN].count == 0
 
 

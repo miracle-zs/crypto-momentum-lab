@@ -342,5 +342,3 @@ def test_filter_evaluates_open_position_exit_when_candidates_empty() -> None:
     assert res.next_policy_state.is_in_cooldown(
         "BTCUSDT", datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
     )
-
-

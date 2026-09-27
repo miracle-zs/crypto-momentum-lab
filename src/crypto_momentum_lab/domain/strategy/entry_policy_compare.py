@@ -364,9 +364,7 @@ def summarize_entry_policy_comparisons(
 
     comparison_tuple = tuple(comparisons)
     mismatches = tuple(
-        comparison
-        for comparison in comparison_tuple
-        if not comparison.matched
+        comparison for comparison in comparison_tuple if not comparison.matched
     )
     policy_reasons = Counter(
         reason
@@ -386,8 +384,7 @@ def summarize_entry_policy_comparisons(
             comparison.legacy_eligible for comparison in comparison_tuple
         ),
         policy_eligible=sum(
-            comparison.policy_decision.eligible
-            for comparison in comparison_tuple
+            comparison.policy_decision.eligible for comparison in comparison_tuple
         ),
         reduce_only_skipped=reduce_only_skipped,
         policy_reasons=dict(sorted(policy_reasons.items())),

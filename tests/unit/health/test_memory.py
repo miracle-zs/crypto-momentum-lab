@@ -22,12 +22,15 @@ def test_tracemalloc_is_disabled_by_default() -> None:
 def test_tracemalloc_can_be_enabled_with_bounded_frame_count() -> None:
     tracemalloc.stop()
     try:
-        assert configure_tracemalloc(
-            {
-                "CML_TRACEMALLOC": "true",
-                "CML_TRACEMALLOC_FRAMES": "999",
-            }
-        ) is True
+        assert (
+            configure_tracemalloc(
+                {
+                    "CML_TRACEMALLOC": "true",
+                    "CML_TRACEMALLOC_FRAMES": "999",
+                }
+            )
+            is True
+        )
 
         snapshot = tracemalloc_memory_snapshot()
         assert snapshot["tracemalloc_enabled"] is True

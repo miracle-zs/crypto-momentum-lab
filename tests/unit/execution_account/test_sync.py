@@ -249,19 +249,15 @@ async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> 
 
     first = await service.sync_once()
     service._tracked_fill_symbols.add("ETHUSDT")
-    second = await service.sync_once(
-        observed_at=datetime(2026, 7, 4, 6, 0, tzinfo=UTC)
-    )
+    second = await service.sync_once(observed_at=datetime(2026, 7, 4, 6, 0, tzinfo=UTC))
 
     # Uncursored symbols are bounded by the historical lookback instead of
     # falling through to an unbounded "latest 1000" pull.
     first_window = int(
-        (datetime(2026, 7, 4, 0, 0, tzinfo=UTC) - timedelta(days=7)).timestamp()
-        * 1000
+        (datetime(2026, 7, 4, 0, 0, tzinfo=UTC) - timedelta(days=7)).timestamp() * 1000
     )
     second_window = int(
-        (datetime(2026, 7, 4, 6, 0, tzinfo=UTC) - timedelta(days=7)).timestamp()
-        * 1000
+        (datetime(2026, 7, 4, 6, 0, tzinfo=UTC) - timedelta(days=7)).timestamp() * 1000
     )
     assert client.calls[0] == (
         ("BTCUSDT",),
@@ -340,12 +336,8 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
     assert [item.asset for item in repository.balances] == ["USDT", "USDT"]
     assert repository.configs[-1].observed_at == initial.snapshot.config.observed_at
     assert repository.configs[-1].observed_at != event.received_at
-    assert repository.configs[-1].raw_payload == {
-        "totalInitialMargin": "12.34"
-    }
-    assert repository.reconciliation_runs[-1].details["source"] == (
-        "user_data_stream"
-    )
+    assert repository.configs[-1].raw_payload == {"totalInitialMargin": "12.34"}
+    assert repository.reconciliation_runs[-1].details["source"] == ("user_data_stream")
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
 
 
@@ -676,7 +668,9 @@ def _fill(symbol: str, trade_id: str) -> AccountFillEvent:
     )
 
 
-async def test_persist_reconciliation_result_stale_snapshot_still_persists_fills_and_cursors() -> None:
+async def test_persist_reconciliation_result_stale_snapshot_still_persists_fills_and_cursors() -> (
+    None
+):
     repository = FakeRepository()
     service = ExecutionAccountSyncService(
         client=FakeClient(),
@@ -753,6 +747,7 @@ async def test_persist_reconciliation_result_cursors_do_not_regress() -> None:
 
     # Initialize in-memory cursor at higher from_id = 200
     from crypto_momentum_lab.execution_account.sync import _FillCursor
+
     service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=200, start_time_ms=None)
     service._fill_cursor_checked_at["BTCUSDT"] = t_base
 
@@ -794,7 +789,9 @@ async def test_persist_reconciliation_result_cursors_do_not_regress() -> None:
     assert service._fill_cursor_checked_at["BTCUSDT"] == t_base
 
 
-async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor() -> None:
+async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor() -> (
+    None
+):
     class FailingRepository(FakeRepository):
         async def save_reconciliation_fills_and_cursors(self, *, fills, cursors=()):
             raise RuntimeError("Database connection dropped during cursor update")
@@ -812,6 +809,7 @@ async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor(
     service._remember_observation(t)
 
     from crypto_momentum_lab.execution_account.sync import _FillCursor
+
     service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=50, start_time_ms=None)
 
     new_cursor = AccountFillReconciliationCursor(
@@ -845,6 +843,7 @@ async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor(
     )
 
     import pytest
+
     with pytest.raises(RuntimeError, match="Database connection dropped"):
         await service.persist_reconciliation_result(result)
 
@@ -893,7 +892,9 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     # Persisted run must record catching_up and details
     assert repository.reconciliation_runs[-1].status == "catching_up"
     assert repository.reconciliation_runs[-1].details["fills_catching_up"] is True
-    assert repository.reconciliation_runs[-1].details["incomplete_symbols"] == ["BTCUSDT"]
+    assert repository.reconciliation_runs[-1].details["incomplete_symbols"] == [
+        "BTCUSDT"
+    ]
 
     # Persisted process state must be SYNCING, not READY_READONLY
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
@@ -904,6 +905,3 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
     assert repository.process_states[-1].reason == "fills_catching_up"
-
-
-

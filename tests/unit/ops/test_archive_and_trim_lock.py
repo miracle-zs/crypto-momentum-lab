@@ -191,9 +191,7 @@ def test_save_dependency_takes_advisory_xact_lock() -> None:
 
     mod._psql = fake_psql
     mod._scalar = lambda sql, **kw: "t"
-    repo = mod.PsqlRetentionRepository(
-        {"container": "c", "database": "d", "user": "u"}
-    )
+    repo = mod.PsqlRetentionRepository({"container": "c", "database": "d", "user": "u"})
     spec = mod.RecoverySpec(
         source_dataset="demo_table",
         earliest_needed_watermark=datetime(2026, 1, 1, tzinfo=UTC),
@@ -216,11 +214,13 @@ def test_save_dependency_takes_advisory_xact_lock() -> None:
 
 def test_frozen_content_fingerprint_mismatch_aborts_without_delete() -> None:
     mod = _load_module()
-    session = FakeSession({
-        "count(*) FROM prune_targets": "3",
-        "md5(string_agg(id::text": "3|targethash",
-        "md5(t::text)": "3|wronghash",
-    })
+    session = FakeSession(
+        {
+            "count(*) FROM prune_targets": "3",
+            "md5(string_agg(id::text": "3|targethash",
+            "md5(t::text)": "3|wronghash",
+        }
+    )
     authority = FakeAuthority()
     with pytest.raises(RuntimeError, match="Frozen prune targets content fingerprint"):
         mod.run_locked_prune(

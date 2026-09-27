@@ -53,8 +53,7 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
     if context.active_halts:
         reasons.append("active_risk_halt")
     if any(
-        order_state_is_uncertain(state)
-        for state in context.unresolved_order_states
+        order_state_is_uncertain(state) for state in context.unresolved_order_states
     ):
         reasons.append("unresolved_order_uncertainty")
     return LiveGateDecision(
@@ -131,8 +130,7 @@ def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
             "approval_commit_mismatch",
         ),
         (
-            approval.database_migration_revision
-            == context.database_migration_revision,
+            approval.database_migration_revision == context.database_migration_revision,
             "approval_migration_mismatch",
         ),
         (

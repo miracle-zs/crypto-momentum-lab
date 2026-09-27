@@ -250,9 +250,7 @@ class LiveRiskControlRuntime:
         self._state_ready = False
         if not available:
             self._entry_blocked = True
-            self._entry_block_reason = (
-                reason or "risk_control_stream_unavailable"
-            )
+            self._entry_block_reason = reason or "risk_control_stream_unavailable"
             self._invalidate_contexts()
         else:
             self._invalidate_contexts()
@@ -291,10 +289,7 @@ class LiveRiskControlRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                failure = (
-                    "risk_control_action_dispatch_failed:"
-                    f"{type(error).__name__}"
-                )
+                failure = f"risk_control_action_dispatch_failed:{type(error).__name__}"
                 log.exception(
                     "live_risk_control_action_dispatch_failed",
                     session_id=self._session_id,

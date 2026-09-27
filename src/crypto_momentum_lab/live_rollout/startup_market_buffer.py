@@ -25,9 +25,7 @@ class StartupMarketStateBuffer:
     ) -> None:
         if max_states <= 0:
             raise ValueError("max_states must be positive")
-        self._queue: asyncio.Queue[MarketState15s] = asyncio.Queue(
-            maxsize=max_states
-        )
+        self._queue: asyncio.Queue[MarketState15s] = asyncio.Queue(maxsize=max_states)
         self._on_state_skipped = on_state_skipped
         self._connection_available = False
         self._connection_reason = "market_state_hub_connecting"

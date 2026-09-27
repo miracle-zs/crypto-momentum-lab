@@ -52,9 +52,7 @@ class LiveOrderReconciliation:
 
         if not event.client_order_id:
             return
-        unresolved = await self.order_repository.load_unresolved_orders(
-            self.run_id
-        )
+        unresolved = await self.order_repository.load_unresolved_orders(self.run_id)
         for order in unresolved:
             if order.plan.client_order_id == event.client_order_id:
                 await self.state_machine.reconcile_order(order.plan)
@@ -88,9 +86,7 @@ class LiveOrderReconciliation:
     async def reconcile_all(self) -> None:
         """Reconcile every unresolved order for the live session."""
 
-        for order in await self.order_repository.load_unresolved_orders(
-            self.run_id
-        ):
+        for order in await self.order_repository.load_unresolved_orders(self.run_id):
             await self.state_machine.reconcile_order(order.plan)
 
     async def run_periodically(

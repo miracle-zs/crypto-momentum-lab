@@ -51,8 +51,9 @@ def _market_state(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_controller_reports_pending_during_startup_market_wait(
-) -> None:
+async def test_scheduled_controller_reports_pending_during_startup_market_wait() -> (
+    None
+):
     # 23:45 UTC is FLATTENING phase under default Asia/Shanghai schedule
     current_time = datetime(2026, 7, 3, 23, 45, 0, tzinfo=UTC)
 
@@ -157,8 +158,9 @@ async def test_scheduled_controller_reports_error_when_market_wait_times_out() -
 
 
 @pytest.mark.asyncio
-async def test_scheduled_controller_completes_flatten_after_market_state_arrives(
-) -> None:
+async def test_scheduled_controller_completes_flatten_after_market_state_arrives() -> (
+    None
+):
     current_time = datetime(2026, 7, 3, 23, 45, 0, tzinfo=UTC)
 
     async def fetch_positions() -> tuple:

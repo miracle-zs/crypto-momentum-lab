@@ -315,4 +315,3 @@ async def test_risk_control_source_raises_after_continuous_unavailable_timeout(
         match="risk-control hub unavailable beyond timeout",
     ):
         await anext(source.__aiter__())
-

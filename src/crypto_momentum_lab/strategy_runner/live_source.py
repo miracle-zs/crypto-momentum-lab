@@ -301,9 +301,7 @@ class _AsyncPostgresRuntimeStateWakeup:
     ) -> None:
         if channel != self._channel:
             return
-        if payload == self._environment or payload.startswith(
-            f"{self._environment}|"
-        ):
+        if payload == self._environment or payload.startswith(f"{self._environment}|"):
             self._event.set()
 
     def _notification_dsn(self) -> str:
@@ -463,9 +461,7 @@ class AsyncPostgresRuntimeStateLoader:
             return
         try:
             if self._notification_wakeup is not None:
-                self._event_loop.run_until_complete(
-                    self._notification_wakeup.close()
-                )
+                self._event_loop.run_until_complete(self._notification_wakeup.close())
             if self.shutdown is not None:
                 self._event_loop.run_until_complete(self.shutdown())
         finally:

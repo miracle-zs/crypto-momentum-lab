@@ -22,9 +22,7 @@ def test_duplicate_exchange_sequence_is_recorded(
     assert tracker.observe(raw_envelope) == ()
     events = tracker.observe(raw_envelope)
 
-    assert [event.category for event in events] == [
-        QualityCategory.DUPLICATE
-    ]
+    assert [event.category for event in events] == [QualityCategory.DUPLICATE]
 
 
 def test_numeric_sequence_gap_is_recorded(
@@ -103,9 +101,7 @@ def test_tracker_preserves_continuity_for_symbols_still_monitored(
     tracker.set_monitored_symbols(frozenset({raw_envelope.symbol}))
     tracker.observe(replace(raw_envelope, exchange_sequence="10"))
 
-    tracker.set_monitored_symbols(
-        frozenset({raw_envelope.symbol, "ETHUSDT"})
-    )
+    tracker.set_monitored_symbols(frozenset({raw_envelope.symbol, "ETHUSDT"}))
     events = tracker.observe(
         replace(
             raw_envelope,
@@ -114,9 +110,7 @@ def test_tracker_preserves_continuity_for_symbols_still_monitored(
         )
     )
 
-    assert [event.category for event in events] == [
-        QualityCategory.SEQUENCE_GAP
-    ]
+    assert [event.category for event in events] == [QualityCategory.SEQUENCE_GAP]
 
 
 def test_event_time_regression_and_silence_are_recorded(
@@ -130,8 +124,7 @@ def test_event_time_regression_and_silence_are_recorded(
         replace(
             raw_envelope,
             local_sequence=2,
-            exchange_event_at=raw_envelope.exchange_event_at
-            - timedelta(seconds=1),
+            exchange_event_at=raw_envelope.exchange_event_at - timedelta(seconds=1),
         )
     )
     silence = tracker.check_silence(
@@ -176,9 +169,7 @@ def test_closed_sessions_skip_silence_and_are_pruned_after_retention(
         closed_session_retention_seconds=10,
     )
     tracker.observe(replace(raw_envelope, exchange_sequence="10"))
-    tracker.observe(
-        replace(raw_envelope, local_sequence=2, exchange_sequence="12")
-    )
+    tracker.observe(replace(raw_envelope, local_sequence=2, exchange_sequence="12"))
     closed_at = raw_envelope.received_at + timedelta(seconds=2)
     tracker.observe_lifecycle(
         ConnectionLifecycleEvent(

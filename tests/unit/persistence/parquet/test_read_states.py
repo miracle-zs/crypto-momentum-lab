@@ -23,9 +23,7 @@ def test_read_market_states_15s_dataset_reconstructs_typed_states(
         input_paths=(input_path,),
     )
 
-    states = read_market_states_15s_dataset(
-        (derived_root / "market_states_15s",)
-    )
+    states = read_market_states_15s_dataset((derived_root / "market_states_15s",))
 
     assert states == (state,)
 

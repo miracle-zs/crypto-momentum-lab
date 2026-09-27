@@ -94,9 +94,7 @@ def _aggregate_account_fills(
                 side=row.side,
                 strategy_name=strategy_by_order.get(row.order_id),
                 reduce_only=bool(metadata.get("reduce_only", False)),
-                close_reason=(
-                    close_reason if isinstance(close_reason, str) else None
-                ),
+                close_reason=(close_reason if isinstance(close_reason, str) else None),
             )
             grouped[key] = aggregate
         aggregate.fee_assets.add(row.fee_asset)
@@ -113,8 +111,7 @@ def _aggregate_account_fills(
 
     ordered = sorted(
         grouped.values(),
-        key=lambda aggregate: aggregate.trade_at
-        or datetime.min.replace(tzinfo=UTC),
+        key=lambda aggregate: aggregate.trade_at or datetime.min.replace(tzinfo=UTC),
         reverse=True,
     )[:limit]
     return [
@@ -132,9 +129,7 @@ def _aggregate_account_fills(
             "fee": str(aggregate.fee),
             "fee_asset": " / ".join(sorted(aggregate.fee_assets)),
             "trade_at": (
-                None
-                if aggregate.trade_at is None
-                else aggregate.trade_at.isoformat()
+                None if aggregate.trade_at is None else aggregate.trade_at.isoformat()
             ),
             "fill_count": aggregate.fill_count,
             "strategy_name": aggregate.strategy_name,
@@ -191,8 +186,7 @@ class LiveAccountQueries:
             ).all()
             leases = (
                 await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
+                    select(TradingLeaseRow).where(
                         TradingLeaseRow.environment == "live",
                         TradingLeaseRow.state == "active",
                         TradingLeaseRow.expires_at > equity_window_end,
@@ -228,9 +222,7 @@ class LiveAccountQueries:
                 live_signals = (
                     await session.scalars(
                         select(LiveStrategySignalRow)
-                        .where(
-                            LiveStrategySignalRow.account_label == account_label
-                        )
+                        .where(LiveStrategySignalRow.account_label == account_label)
                         .order_by(
                             LiveStrategySignalRow.detected_at.desc(),
                             LiveStrategySignalRow.recorded_at.desc(),
@@ -353,15 +345,12 @@ class LiveAccountQueries:
                         )
                     ).all()
 
-        execution_by_client = {
-            row.client_order_id: row for row in execution_orders
-        }
+        execution_by_client = {row.client_order_id: row for row in execution_orders}
         intent_by_id = {row.intent_id: row for row in intent_rows}
         strategy_by_order = {
             row.exchange_order_id: intent_by_id[row.intent_id].strategy_name
             for row in execution_orders
-            if row.exchange_order_id is not None
-            and row.intent_id in intent_by_id
+            if row.exchange_order_id is not None and row.intent_id in intent_by_id
         }
         order_metadata_by_order = {
             row.exchange_order_id: {

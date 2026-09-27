@@ -35,19 +35,11 @@ def test_finds_upward_impulse_with_aligned_aggression_and_intensity() -> None:
     assert event.impulse_end_price == Decimal("102.00")
     assert event.impulse_return_pct == Decimal("0.02")
     assert event.breakout_level == Decimal("101.00")
-    assert event.breakout_distance_pct == Decimal(
-        "0.009900990099009900990099009901"
-    )
-    assert event.aggressive_imbalance == Decimal(
-        "0.6666666666666666666666666667"
-    )
+    assert event.breakout_distance_pct == Decimal("0.009900990099009900990099009901")
+    assert event.aggressive_imbalance == Decimal("0.6666666666666666666666666667")
     assert event.notional_intensity == Decimal("3")
-    assert event.forward_returns[1] == Decimal(
-        "0.009803921568627450980392156863"
-    )
-    assert event.forward_returns[2] == Decimal(
-        "-0.004901960784313725490196078431"
-    )
+    assert event.forward_returns[1] == Decimal("0.009803921568627450980392156863")
+    assert event.forward_returns[2] == Decimal("-0.004901960784313725490196078431")
     assert event.max_favorable_return == event.forward_returns[1]
     assert event.max_adverse_return == event.forward_returns[2]
 
@@ -71,9 +63,7 @@ def test_finds_downward_impulse_with_aligned_aggression_and_intensity() -> None:
     assert event.direction is OrderFlowDirection.DOWN
     assert event.impulse_return_pct == Decimal("0.02")
     assert event.breakout_level == Decimal("99.00")
-    assert event.forward_returns[1] == Decimal(
-        "0.01020408163265306122448979592"
-    )
+    assert event.forward_returns[1] == Decimal("0.01020408163265306122448979592")
 
 
 def test_rejects_price_impulse_when_aggressive_imbalance_is_weak() -> None:
@@ -197,10 +187,13 @@ def test_applies_causal_five_minute_volume_ratio_filter() -> None:
     assert len(events) == 1
     assert events[0].detected_at == states[-1].bucket_start
     assert events[0].notional_5m_vs_30m == Decimal("1.3")
-    assert find_order_flow_impulses(
-        tuple(states),
-        replace(enabled, min_notional_5m_vs_30m=Decimal("1.50")),
-    ) == ()
+    assert (
+        find_order_flow_impulses(
+            tuple(states),
+            replace(enabled, min_notional_5m_vs_30m=Decimal("1.50")),
+        )
+        == ()
+    )
 
 
 def _config() -> OrderFlowImpulseConfig:

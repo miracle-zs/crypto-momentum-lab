@@ -43,10 +43,7 @@ class LiveOperatorApproval:
     def __post_init__(self) -> None:
         if self.approval_text != LIVE_APPROVAL_CONFIRMATION:
             raise ValueError("approval_text does not match confirmation phrase")
-        if (
-            self.approved_notional_cap is not None
-            and self.approved_notional_cap <= 0
-        ):
+        if self.approved_notional_cap is not None and self.approved_notional_cap <= 0:
             raise ValueError("approved_notional_cap must be positive")
         if (
             self.approved_max_open_positions is not None

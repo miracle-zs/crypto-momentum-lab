@@ -122,12 +122,8 @@ def _manifest_to_payload(manifest: ArchiveManifest) -> dict[str, Any]:
         "subscription_generation_max": manifest.subscription_generation_max,
         "row_count": manifest.row_count,
         "compressed_bytes": manifest.compressed_bytes,
-        "first_exchange_event_at": _datetime_to_json(
-            manifest.first_exchange_event_at
-        ),
-        "last_exchange_event_at": _datetime_to_json(
-            manifest.last_exchange_event_at
-        ),
+        "first_exchange_event_at": _datetime_to_json(manifest.first_exchange_event_at),
+        "last_exchange_event_at": _datetime_to_json(manifest.last_exchange_event_at),
         "first_received_at": manifest.first_received_at.isoformat(),
         "last_received_at": manifest.last_received_at.isoformat(),
         "sha256": manifest.sha256,
@@ -155,12 +151,8 @@ def _manifest_from_payload(payload: dict[str, Any]) -> ArchiveManifest:
         subscription_generation_max=payload["subscription_generation_max"],
         row_count=payload["row_count"],
         compressed_bytes=payload["compressed_bytes"],
-        first_exchange_event_at=_datetime_from_json(
-            payload["first_exchange_event_at"]
-        ),
-        last_exchange_event_at=_datetime_from_json(
-            payload["last_exchange_event_at"]
-        ),
+        first_exchange_event_at=_datetime_from_json(payload["first_exchange_event_at"]),
+        last_exchange_event_at=_datetime_from_json(payload["last_exchange_event_at"]),
         first_received_at=datetime.fromisoformat(payload["first_received_at"]),
         last_received_at=datetime.fromisoformat(payload["last_received_at"]),
         sha256=payload["sha256"],

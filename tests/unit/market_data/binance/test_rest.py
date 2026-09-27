@@ -231,9 +231,7 @@ async def test_limits_daily_open_concurrency() -> None:
             ],
         )
 
-    respx.get("https://fapi.binance.com/fapi/v1/klines").mock(
-        side_effect=handler
-    )
+    respx.get("https://fapi.binance.com/fapi/v1/klines").mock(side_effect=handler)
     async with BinanceUsdMRestClient(
         "https://fapi.binance.com",
         daily_open_concurrency=2,

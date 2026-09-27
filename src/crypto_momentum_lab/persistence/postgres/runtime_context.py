@@ -72,9 +72,7 @@ async def load_trading_rules(
             func.max(ContractMetadataRow.effective_at).label("effective_at"),
         ).group_by(ContractMetadataRow.symbol)
         if symbols is not None:
-            latest_query = latest_query.where(
-                ContractMetadataRow.symbol.in_(symbols)
-            )
+            latest_query = latest_query.where(ContractMetadataRow.symbol.in_(symbols))
         latest_effective_at = latest_query.subquery()
         statement = (
             select(ContractMetadataRow)

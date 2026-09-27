@@ -135,10 +135,7 @@ class CapabilityEvaluator:
             return _decision(False, "fencing_epoch_mismatch")
 
         # Check plan hash alignment if supplied in evidence
-        if (
-            evidence.plan_hash is not None
-            and evidence.plan_hash != plan.plan_hash
-        ):
+        if evidence.plan_hash is not None and evidence.plan_hash != plan.plan_hash:
             return _decision(False, "plan_hash_mismatch")
 
         # Check runtime generation alignment if supplied in evidence
@@ -166,9 +163,7 @@ class CapabilityEvaluator:
             if evidence.unresolved_inflight_orders_count > 0:
                 return _decision(False, "unresolved_inflight_orders_present")
             if evidence.market_freshness_seconds > self._max_exit_age:
-                return _decision(
-                    False, "market_data_too_stale_for_normal_exit"
-                )
+                return _decision(False, "market_data_too_stale_for_normal_exit")
             return _decision(True, "normal_exit_prerequisites_satisfied")
 
         # 5. ENTER: Strictest prerequisites
@@ -179,10 +174,7 @@ class CapabilityEvaluator:
                     evidence.declared_schema_compatibility
                     or plan.declared_schema_compatibility
                 )
-                if (
-                    expected_rev
-                    and evidence.observed_database_revision != expected_rev
-                ):
+                if expected_rev and evidence.observed_database_revision != expected_rev:
                     return _decision(False, "schema_compatibility_mismatch")
 
             if not evidence.is_approval_valid:

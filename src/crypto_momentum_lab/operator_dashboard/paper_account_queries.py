@@ -132,9 +132,7 @@ def _paper_account_summary(
                 None if latest_equity is None else str(latest_equity.realized_pnl)
             ),
             "unrealized_pnl": (
-                None
-                if latest_equity is None
-                else str(latest_equity.unrealized_pnl)
+                None if latest_equity is None else str(latest_equity.unrealized_pnl)
             ),
             "total_fees": (
                 None if latest_equity is None else str(latest_equity.total_fees)
@@ -188,9 +186,7 @@ class PaperAccountQueries:
             )
         ).all()
         if self._paper_run_ids is not None:
-            selected_runs = [
-                run for run in runs if run.run_id in self._paper_run_ids
-            ]
+            selected_runs = [run for run in runs if run.run_id in self._paper_run_ids]
         else:
             current_runs = [
                 run for run in runs if run.run_id.startswith("paper-account-")
@@ -206,11 +202,7 @@ class PaperAccountQueries:
             "liquidation_cascade",
         ):
             strategy_runs = sorted(
-                (
-                    run
-                    for run in selected_runs
-                    if run.strategy_name == strategy_name
-                ),
+                (run for run in selected_runs if run.strategy_name == strategy_name),
                 key=lambda run: (run.created_at, run.run_id),
             )
             selected.extend(strategy_runs)
@@ -373,8 +365,7 @@ class PaperAccountQueries:
             run_id=run_id,
             closed_trade_count=int(closed_trade_count or 0),
             history_complete=(
-                full
-                or int(closed_trade_count or 0) <= _PAPER_HISTORY_RECENT_LIMIT
+                full or int(closed_trade_count or 0) <= _PAPER_HISTORY_RECENT_LIMIT
             ),
             closed_trades=[_paper_position(row) for row in closed_positions],
             trade_events=trade_events,
@@ -540,9 +531,7 @@ class PaperAccountQueries:
                 "balance": None
                 if latest_equity is None
                 else str(latest_equity.balance),
-                "equity": None
-                if latest_equity is None
-                else str(latest_equity.equity),
+                "equity": None if latest_equity is None else str(latest_equity.equity),
                 "realized_pnl": None
                 if latest_equity is None
                 else str(latest_equity.realized_pnl),

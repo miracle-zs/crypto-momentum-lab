@@ -70,9 +70,7 @@ class FakeSyncService:
         publish_transient_states: bool,
         include_fills: bool,
     ) -> ExecutionAccountSyncResult:
-        self.calls.append(
-            (observed_at, publish_transient_states, include_fills)
-        )
+        self.calls.append((observed_at, publish_transient_states, include_fills))
         return ExecutionAccountSyncResult(
             status=ExecutionAccountStatus.READY_READONLY,
             reconciliation_id=f"sync-{len(self.calls)}",
@@ -88,9 +86,7 @@ class RateLimitedSyncService(FakeSyncService):
         publish_transient_states: bool,
         include_fills: bool,
     ) -> ExecutionAccountSyncResult:
-        self.calls.append(
-            (observed_at, publish_transient_states, include_fills)
-        )
+        self.calls.append((observed_at, publish_transient_states, include_fills))
         if len(self.calls) <= 2:
             error = RuntimeError("429 Too Many Requests")
             error.retry_after_seconds = 15.0

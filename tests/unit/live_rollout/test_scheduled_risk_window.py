@@ -52,7 +52,9 @@ def test_schedule_requires_timezone_aware_input() -> None:
         ScheduledRiskWindowConfig().phase(datetime(2026, 7, 3, 23, 45))
 
 
-def test_resolve_scheduled_risk_window_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_scheduled_risk_window_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Default is 09:00
     monkeypatch.delenv("CML_SCHEDULED_REOPEN_AT", raising=False)
     default_config = _resolve_scheduled_risk_window()
@@ -67,4 +69,3 @@ def test_resolve_scheduled_risk_window_from_env(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("CML_SCHEDULED_REOPEN_AT", "invalid")
     fallback_config = _resolve_scheduled_risk_window()
     assert fallback_config.reopen_at == time(9, 0)
-

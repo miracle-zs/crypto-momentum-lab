@@ -484,7 +484,9 @@ def test_build_position_batches_preserves_recovery_order_fields_under_cutover() 
         assert batch.exit_order_submitted_at == t1
 
 
-def test_build_position_batches_discards_stale_fills_and_maintains_concordance() -> None:
+def test_build_position_batches_discards_stale_fills_and_maintains_concordance() -> (
+    None
+):
     """Verify that account_fills from a prior episode (>5 min before entry) do not cause false reconciliation gap."""
     t_old = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
     t_entry = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
@@ -565,5 +567,3 @@ def test_build_position_batches_discards_stale_fills_and_maintains_concordance()
         assert batches[0].quantity == Decimal("22799")
         assert batches[0].entry_price == Decimal("0.004386")
         assert batches[0].opened_at == t_entry
-
-

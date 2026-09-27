@@ -20,10 +20,10 @@ class SnapshotService:
 class WatchdogStream:
     def __init__(self) -> None:
         self.metrics = SimpleNamespace(
-        parsed_event_count=4,
-        fill_event_count=1,
-        fill_event_keys=(),
-        last_event_received_at=None,
+            parsed_event_count=4,
+            fill_event_count=1,
+            fill_event_keys=(),
+            last_event_received_at=None,
         )
         self.reconnect_reasons = []
 
@@ -57,9 +57,7 @@ async def test_daemon_runs_lightweight_snapshot_with_injected_clock() -> None:
 
     await daemon._snapshot()
 
-    assert service.snapshot_times == [
-        datetime(2026, 8, 28, 0, 0, 15, tzinfo=UTC)
-    ]
+    assert service.snapshot_times == [datetime(2026, 8, 28, 0, 0, 15, tzinfo=UTC)]
 
 
 async def test_daemon_does_not_reconnect_for_historical_fill_count_growth() -> None:
@@ -94,15 +92,11 @@ async def test_daemon_reconnects_after_a_fill_key_stays_unmatched() -> None:
 
     await daemon._inspect_reconciliation(_result(fill_count=12))
 
-    assert stream.reconnect_reasons == [
-        "rest_reconciliation_found_unmatched_fill_keys"
-    ]
+    assert stream.reconnect_reasons == ["rest_reconciliation_found_unmatched_fill_keys"]
 
     await daemon._inspect_reconciliation(_result(fill_count=12))
 
-    assert stream.reconnect_reasons == [
-        "rest_reconciliation_found_unmatched_fill_keys"
-    ]
+    assert stream.reconnect_reasons == ["rest_reconciliation_found_unmatched_fill_keys"]
     assert fill_key in daemon._pending_missing_fill_keys
 
 
@@ -125,8 +119,9 @@ async def test_daemon_accepts_a_fill_key_seen_by_the_stream() -> None:
     assert stream.reconnect_reasons == []
 
 
-async def test_daemon_expires_unmatched_fill_without_waiting_or_reconnecting_again(
-) -> None:
+async def test_daemon_expires_unmatched_fill_without_waiting_or_reconnecting_again() -> (
+    None
+):
     stream = WatchdogStream()
     current_time = [datetime(2026, 8, 28, 0, 0, 0, tzinfo=UTC)]
     daemon = UserDataAccountSyncDaemon(
@@ -142,14 +137,10 @@ async def test_daemon_expires_unmatched_fill_without_waiting_or_reconnecting_aga
     )
     current_time[0] = current_time[0].replace(second=1)
     await daemon._inspect_reconciliation(_result(fill_count=1))
-    assert stream.reconnect_reasons == [
-        "rest_reconciliation_found_unmatched_fill_keys"
-    ]
+    assert stream.reconnect_reasons == ["rest_reconciliation_found_unmatched_fill_keys"]
 
     current_time[0] = current_time[0].replace(second=11)
     await daemon._inspect_reconciliation(_result(fill_count=1))
 
     assert daemon._pending_missing_fill_keys == {}
-    assert stream.reconnect_reasons == [
-        "rest_reconciliation_found_unmatched_fill_keys"
-    ]
+    assert stream.reconnect_reasons == ["rest_reconciliation_found_unmatched_fill_keys"]

@@ -240,8 +240,9 @@ def test_unregister_dependency_requires_explicit_retired_by() -> None:
     assert v_after == "dep_v0_empty"
 
 
-def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_plan(
-) -> None:
+def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_plan() -> (
+    None
+):
     """Regression test: Stale PrunePlan cannot bypass dependency fencing."""
     authority = RetentionAuthority()
     t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
@@ -419,4 +420,3 @@ def test_execute_prune_with_structured_prune_outcome() -> None:
     assert receipt.bytes_deleted == 20480
     assert receipt.batches == 4
     assert "dropped 2 partitions" in receipt.details
-

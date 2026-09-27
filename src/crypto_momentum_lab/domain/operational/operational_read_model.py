@@ -250,14 +250,10 @@ def evaluate_standard_health(
 
     # 1. Process Liveness
     live_status = (
-        HealthDimensionStatus.HEALTHY
-        if liveness_ok
-        else HealthDimensionStatus.CRITICAL
+        HealthDimensionStatus.HEALTHY if liveness_ok else HealthDimensionStatus.CRITICAL
     )
     details_msg = (
-        liveness_details
-        if liveness_ok
-        else f"liveness_failed: {liveness_details}"
+        liveness_details if liveness_ok else f"liveness_failed: {liveness_details}"
     )
     dim_liveness = HealthDimension(
         name=HealthDimensionName.PROCESS_LIVENESS,
@@ -265,7 +261,6 @@ def evaluate_standard_health(
         details=details_msg,
         observed_at=now,
     )
-
 
     # 2. Consumption Lag
     if lag_seconds <= max_lag_seconds:
@@ -335,4 +330,3 @@ def evaluate_standard_health(
         dimensions=(dim_liveness, dim_lag, dim_fact, dim_cap, dim_rec),
         evidence_cut=now,
     )
-

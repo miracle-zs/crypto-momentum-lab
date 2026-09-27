@@ -15,9 +15,7 @@ LEGACY_BINANCE_CREDENTIAL_REF = BinanceCredentialRef(
     api_secret_env="BINANCE_API_SECRET",
 )
 
-_DEFAULT_ROLE_ENV_NAMES: dict[
-    BinanceCredentialRole, tuple[str, str]
-] = {
+_DEFAULT_ROLE_ENV_NAMES: dict[BinanceCredentialRole, tuple[str, str]] = {
     BinanceCredentialRole.READ: (
         "BINANCE_READ_API_KEY",
         "BINANCE_READ_API_SECRET",
@@ -106,9 +104,7 @@ def resolve_binance_credentials(
     fallback_ref = legacy_ref
     legacy_missing = _missing_names(fallback_ref, values)
     if legacy_missing:
-        primary_names = ", ".join(
-            (reference.api_key_env, reference.api_secret_env)
-        )
+        primary_names = ", ".join((reference.api_key_env, reference.api_secret_env))
         legacy_names = ", ".join(
             (fallback_ref.api_key_env, fallback_ref.api_secret_env)
         )

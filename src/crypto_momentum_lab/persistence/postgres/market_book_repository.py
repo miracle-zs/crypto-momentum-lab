@@ -377,8 +377,7 @@ class PostgresMarketBookRepository:
                             "manifest_id": manifest_id,
                             "status": "UNREPRODUCIBLE",
                             "error": (
-                                f"Manifest is unreproducible: "
-                                f"missing revision {rid}"
+                                f"Manifest is unreproducible: missing revision {rid}"
                             ),
                             "verified": False,
                         }
@@ -633,6 +632,5 @@ class PostgresMarketBookRepository:
                     d = date.fromisoformat(str(d_val))
                 date_to_symbols.setdefault(d, set()).add(sym)
             return [
-                (d, tuple(sorted(syms)))
-                for d, syms in sorted(date_to_symbols.items())
+                (d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())
             ]

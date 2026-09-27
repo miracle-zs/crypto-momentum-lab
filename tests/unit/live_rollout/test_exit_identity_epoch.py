@@ -83,4 +83,3 @@ def test_order_identity_conflict_detector() -> None:
     assert _is_order_identity_conflict(nested)
 
     assert not _is_order_identity_conflict(ValueError("some random error"))
-

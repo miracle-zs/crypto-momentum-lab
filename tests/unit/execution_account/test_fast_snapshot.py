@@ -147,9 +147,7 @@ async def test_fast_snapshot_skips_zero_balances_but_records_zero_transition() -
         ),
     )
 
-    await service.snapshot_once(
-        observed_at=datetime(2026, 8, 28, 0, 0, 15, tzinfo=UTC)
-    )
+    await service.snapshot_once(observed_at=datetime(2026, 8, 28, 0, 0, 15, tzinfo=UTC))
     assert [item.asset for item in repository.calls[-1][0]] == ["USDT"]
 
     client.balances = (
@@ -160,18 +158,12 @@ async def test_fast_snapshot_skips_zero_balances_but_records_zero_transition() -
             available_balance=Decimal("2"),
         ),
     )
-    await service.snapshot_once(
-        observed_at=datetime(2026, 8, 28, 0, 0, 30, tzinfo=UTC)
-    )
+    await service.snapshot_once(observed_at=datetime(2026, 8, 28, 0, 0, 30, tzinfo=UTC))
     assert [item.asset for item in repository.calls[-1][0]] == ["USDT", "BNB"]
 
     client.balances = (*client.balances[:1], zero_bnb)
-    await service.snapshot_once(
-        observed_at=datetime(2026, 8, 28, 0, 0, 45, tzinfo=UTC)
-    )
+    await service.snapshot_once(observed_at=datetime(2026, 8, 28, 0, 0, 45, tzinfo=UTC))
     assert [item.asset for item in repository.calls[-1][0]] == ["USDT", "BNB"]
 
-    await service.snapshot_once(
-        observed_at=datetime(2026, 8, 28, 0, 1, tzinfo=UTC)
-    )
+    await service.snapshot_once(observed_at=datetime(2026, 8, 28, 0, 1, tzinfo=UTC))
     assert [item.asset for item in repository.calls[-1][0]] == ["USDT"]

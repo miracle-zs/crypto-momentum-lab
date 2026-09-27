@@ -57,9 +57,8 @@ class BinanceConnectionPool:
         connection_factory: Callable[[SubscriptionGroup], PoolConnection],
         max_subscriptions_per_connection: int,
         control_messages_per_second: float,
-        max_subscriptions_per_connection_by_stream: Mapping[
-            CaptureStream, int
-        ] | None = None,
+        max_subscriptions_per_connection_by_stream: Mapping[CaptureStream, int]
+        | None = None,
         use_all_book_ticker_stream: bool = False,
     ) -> None:
         self._connection_factory = connection_factory
@@ -97,8 +96,7 @@ class BinanceConnectionPool:
                     desired_items.add(Subscription.global_book_ticker())
                     continue
                 desired_items.update(
-                    Subscription.for_symbol(stream, symbol)
-                    for symbol in symbols
+                    Subscription.for_symbol(stream, symbol) for symbol in symbols
                 )
             desired = frozenset(desired_items)
             groups = build_subscription_groups(
@@ -138,8 +136,7 @@ class BinanceConnectionPool:
                 current = frozenset(
                     subscription
                     for subscription in self._active_subscriptions
-                    if self._subscription_connections.get(subscription)
-                    == group_id
+                    if self._subscription_connections.get(subscription) == group_id
                 )
                 plan = plan_subscription_change(
                     current,
@@ -173,25 +170,20 @@ class BinanceConnectionPool:
 
     def metrics_snapshot(self) -> BinanceConnectionPoolMetricsSnapshot:
         snapshots = tuple(
-            connection.metrics_snapshot()
-            for connection in self._connections.values()
+            connection.metrics_snapshot() for connection in self._connections.values()
         )
         return BinanceConnectionPoolMetricsSnapshot(
             active_connections=len(self._connections),
             ready_connections=sum(snapshot.ready for snapshot in snapshots),
             desired_subscriptions=len(self._active_subscriptions),
-            reconnect_count=sum(
-                snapshot.reconnect_count for snapshot in snapshots
-            ),
+            reconnect_count=sum(snapshot.reconnect_count for snapshot in snapshots),
             ack_mismatch_count=sum(
                 snapshot.ack_mismatch_count for snapshot in snapshots
             ),
             control_commands_sent=sum(
                 snapshot.control_commands_sent for snapshot in snapshots
             ),
-            received_messages=sum(
-                snapshot.received_messages for snapshot in snapshots
-            ),
+            received_messages=sum(snapshot.received_messages for snapshot in snapshots),
             connection_snapshots=snapshots,
         )
 

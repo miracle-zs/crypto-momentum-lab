@@ -266,11 +266,7 @@ def _build_event(
     cluster_start_price = _state_price(cluster[0])
     cluster_end_price = _state_price(cluster[-1])
     event_price = _state_price(states[detection_index])
-    if (
-        cluster_start_price is None
-        or cluster_end_price is None
-        or event_price is None
-    ):
+    if cluster_start_price is None or cluster_end_price is None or event_price is None:
         return None
     directional_move = (
         raw_move if direction is LiquidationCascadeDirection.UP else -raw_move

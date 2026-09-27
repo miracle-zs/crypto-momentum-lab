@@ -139,9 +139,7 @@ class DatasetManifest:
         object.__setattr__(
             self, "start_time", _require_aware(self.start_time, "start_time")
         )
-        object.__setattr__(
-            self, "end_time", _require_aware(self.end_time, "end_time")
-        )
+        object.__setattr__(self, "end_time", _require_aware(self.end_time, "end_time"))
         object.__setattr__(
             self, "created_at", _require_aware(self.created_at, "created_at")
         )
@@ -165,9 +163,7 @@ class DatasetManifest:
             "feature_algorithm_version": self.feature_algorithm_version,
             "coverage_ratio": str(self.coverage_ratio),
             "revision_ids": [r.revision_id for r in self.revision_refs],
-            "holes": [
-                [h[0].isoformat(), h[1].isoformat()] for h in self.holes
-            ],
+            "holes": [[h[0].isoformat(), h[1].isoformat()] for h in self.holes],
         }
         dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(dumped.encode("utf-8")).hexdigest()

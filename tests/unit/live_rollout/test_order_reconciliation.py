@@ -40,8 +40,9 @@ async def test_account_event_reconciles_only_the_matching_unresolved_order() -> 
 
 
 @pytest.mark.asyncio
-async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache(
-) -> None:
+async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache() -> (
+    None
+):
     plan = SimpleNamespace(client_order_id="entry-1")
     reconciled: list[object] = []
 
@@ -74,8 +75,9 @@ async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache(
 
 
 @pytest.mark.asyncio
-async def test_account_event_missing_from_local_journal_requests_snapshot_recovery(
-) -> None:
+async def test_account_event_missing_from_local_journal_requests_snapshot_recovery() -> (
+    None
+):
     recovery_reasons: list[str] = []
 
     class Repository:

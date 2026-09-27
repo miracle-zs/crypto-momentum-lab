@@ -48,13 +48,9 @@ def main() -> None:
 
 def parse_paper_run_ids(value: str | None = None) -> frozenset[str] | None:
     raw_value = (
-        os.environ.get("CML_PAPER_ACCOUNT_RUN_IDS", "")
-        if value is None
-        else value
+        os.environ.get("CML_PAPER_ACCOUNT_RUN_IDS", "") if value is None else value
     )
-    run_ids = frozenset(
-        item.strip() for item in raw_value.split(",") if item.strip()
-    )
+    run_ids = frozenset(item.strip() for item in raw_value.split(",") if item.strip())
     return run_ids or None
 
 

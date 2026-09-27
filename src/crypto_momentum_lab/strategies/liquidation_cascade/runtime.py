@@ -50,9 +50,7 @@ class LiquidationCascadeRuntimeStrategy:
     ) -> None:
         self._config = config
         self._identity = identity
-        self._runtime = StrategyRuntimeState(
-            buffer_payload_key="market_state_buffers"
-        )
+        self._runtime = StrategyRuntimeState(buffer_payload_key="market_state_buffers")
 
     def metadata(self) -> StrategyMetadata:
         return StrategyMetadata(name="liquidation_cascade", version="v0")

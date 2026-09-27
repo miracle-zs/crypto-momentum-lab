@@ -21,7 +21,6 @@ from crypto_momentum_lab.domain.operational.operational_read_model import (
 )
 
 
-
 def test_operational_read_model_all_healthy() -> None:
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
@@ -156,7 +155,9 @@ def test_aggregate_operational_views_partial_unknown_not_masked() -> None:
     assert view_2.overall_status == HealthDimensionStatus.UNKNOWN
 
     # Aggregate: "部分未知不能被其它账户绿色抵消"
-    composite = aggregate_operational_views((view_1, view_2), composite_scope="fleet", evaluated_at=t0)
+    composite = aggregate_operational_views(
+        (view_1, view_2), composite_scope="fleet", evaluated_at=t0
+    )
     assert composite.overall_status == HealthDimensionStatus.UNKNOWN
     assert composite.is_execution_ready is False
     assert "account_2:unknown" in composite.details["unhealthy_scopes"]
@@ -190,7 +191,9 @@ def test_aggregate_operational_views_critical_escalation() -> None:
     )
     assert view_2.overall_status == HealthDimensionStatus.CRITICAL
 
-    composite = aggregate_operational_views((view_1, view_2), composite_scope="fleet", evaluated_at=t0)
+    composite = aggregate_operational_views(
+        (view_1, view_2), composite_scope="fleet", evaluated_at=t0
+    )
     assert composite.overall_status == HealthDimensionStatus.CRITICAL
     assert composite.is_execution_ready is False
     # Preserves earliest source_as_of (t_stale)
@@ -224,4 +227,3 @@ def test_evaluate_standard_health_dimensions_structure() -> None:
         HealthDimensionName.EXECUTABLE_CAPABILITY,
         HealthDimensionName.RECONCILIATION_CONCORDANCE,
     }
-

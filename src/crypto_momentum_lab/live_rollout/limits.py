@@ -50,9 +50,7 @@ def evaluate_fixed_live_limits(
         limits.max_concurrency_per_symbol is not None
         and context.symbol_concurrency >= limits.max_concurrency_per_symbol
     ):
-        return LiveLimitDecision(
-            False, "max_concurrency_per_symbol_exceeded", None
-        )
+        return LiveLimitDecision(False, "max_concurrency_per_symbol_exceeded", None)
     if (
         limits.max_open_positions is not None
         and len(context.open_position_symbols) >= limits.max_open_positions

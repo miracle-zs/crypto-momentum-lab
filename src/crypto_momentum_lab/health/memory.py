@@ -40,9 +40,7 @@ def current_rss_bytes() -> int | None:
 def cgroup_memory_snapshot() -> dict[str, int | None]:
     """Return cgroup current/limit values when the container exposes them."""
     return {
-        "cgroup_memory_current_bytes": _read_cgroup_bytes(
-            _CGROUP_MEMORY_CURRENT_PATHS
-        ),
+        "cgroup_memory_current_bytes": _read_cgroup_bytes(_CGROUP_MEMORY_CURRENT_PATHS),
         "cgroup_memory_limit_bytes": _read_cgroup_bytes(_CGROUP_MEMORY_LIMIT_PATHS),
     }
 

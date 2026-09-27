@@ -5,10 +5,13 @@ function fragmentFromHtml(ownerDocument, html) {
 }
 
 export function captureViewState(root) {
-  const view = root.ownerDocument.defaultView;
+  const doc = root.ownerDocument;
+  const view = doc?.defaultView;
+  const pageX = view?.scrollX ?? doc?.documentElement?.scrollLeft ?? doc?.body?.scrollLeft ?? 0;
+  const pageY = view?.scrollY ?? doc?.documentElement?.scrollTop ?? doc?.body?.scrollTop ?? 0;
   return {
-    pageX: view.scrollX,
-    pageY: view.scrollY,
+    pageX,
+    pageY,
     containers: Array.from(root.querySelectorAll(".table-scroll")).map((container) => ({
       key: container.dataset.stateKey || null,
       left: container.scrollLeft,
@@ -23,7 +26,8 @@ export function captureViewState(root) {
 
 export function restoreViewState(root, state) {
   if (!state) return;
-  const view = root.ownerDocument.defaultView;
+  const doc = root.ownerDocument;
+  const view = doc?.defaultView;
   const disclosureStates = new Map(
     state.disclosures.filter((saved) => saved.key).map((saved) => [saved.key, saved]),
   );
@@ -46,18 +50,26 @@ export function restoreViewState(root, state) {
     container.scrollTop = saved.top;
   });
 
-  const documentElement = root.ownerDocument.documentElement;
-  const previousBehavior = documentElement.style.scrollBehavior;
-  documentElement.style.scrollBehavior = "auto";
-  view.scrollTo(state.pageX, state.pageY);
-  if (typeof view.scrollTo === "function" && (view.scrollX !== state.pageX || view.scrollY !== state.pageY)) {
+  const documentElement = doc?.documentElement;
+  const body = doc?.body;
+  const previousBehavior = documentElement?.style?.scrollBehavior;
+  if (documentElement?.style) documentElement.style.scrollBehavior = "auto";
+  if (view && typeof view.scrollTo === "function") {
     try {
       view.scrollTo({ left: state.pageX, top: state.pageY, behavior: "instant" });
     } catch {
-      // Ignore browsers lacking scrollTo options
+      view.scrollTo(state.pageX, state.pageY);
     }
   }
-  documentElement.style.scrollBehavior = previousBehavior;
+  if (documentElement && (documentElement.scrollTop !== state.pageY || documentElement.scrollLeft !== state.pageX)) {
+    documentElement.scrollTop = state.pageY;
+    documentElement.scrollLeft = state.pageX;
+  }
+  if (body && (body.scrollTop !== state.pageY || body.scrollLeft !== state.pageX)) {
+    body.scrollTop = state.pageY;
+    body.scrollLeft = state.pageX;
+  }
+  if (documentElement?.style) documentElement.style.scrollBehavior = previousBehavior;
 }
 
 export function replaceChildrenFromHtml(root, html) {

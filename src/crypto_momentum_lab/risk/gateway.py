@@ -76,8 +76,7 @@ class RiskGateway:
             )
         if (
             context.required_account_label is not None
-            and context.active_lease.account_label
-            != context.required_account_label
+            and context.active_lease.account_label != context.required_account_label
         ):
             return _evaluation(
                 intent,
@@ -87,8 +86,7 @@ class RiskGateway:
             )
         if (
             context.required_strategy_name is not None
-            and context.active_lease.strategy_name
-            != context.required_strategy_name
+            and context.active_lease.strategy_name != context.required_strategy_name
         ):
             return _evaluation(
                 intent,

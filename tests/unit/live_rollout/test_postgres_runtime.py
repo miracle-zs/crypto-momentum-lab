@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -50,6 +52,11 @@ from tests.unit.live_rollout.test_gates import _context as gate_context
 from tests.unit.shadow_operation.test_service import _context as shadow_context
 
 NOW = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_attribution_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CML_POSITION_LEDGER_PRIMARY_ENABLED", "0")
 
 
 def test_classifies_position_opened_by_current_run_as_managed() -> None:
@@ -768,7 +775,10 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
     ] == [("BTCUSDT:LONG:reopened-entry", Decimal("386"), reopened_at)]
 
 
-def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
+def test_historical_exit_fill_is_not_rebound_to_current_episode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CML_POSITION_LEDGER_PRIMARY_ENABLED", "1")
     """A five-day-old reduce-only fill cannot close today's lot.
 
     Order loading keeps the latest 1000 rows per run+symbol with no time
@@ -1460,9 +1470,7 @@ def test_postgres_live_context_provider_implements_live_context_reader() -> None
     )
     assert provider.is_current(ctx_matching) is True
 
-    ctx_stale = replace(
-        _runtime_context(), context_epoch=9, account_snapshot_version=5
-    )
+    ctx_stale = replace(_runtime_context(), context_epoch=9, account_snapshot_version=5)
     assert provider.is_current(ctx_stale) is False
 
     event = ContextInvalidation(
@@ -1473,8 +1481,6 @@ def test_postgres_live_context_provider_implements_live_context_reader() -> None
     provider.invalidate(event)
     assert provider._cache_epoch == 11
     assert provider._cached_context is None
-
-
 
 
 async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
@@ -1873,7 +1879,10 @@ def test_opening_anchor_absent_when_symbol_is_flat_in_lookback() -> None:
     assert anchors == {}
 
 
-def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> None:
+def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CML_POSITION_LEDGER_PRIMARY_ENABLED", "1")
     """MARSCOIN scenario: a legacy full exit (1674) must close both 839 and 835.
 
     When a new position (1077) opens 5 days later, the old 835 batch must not
@@ -2005,7 +2014,9 @@ async def test_load_order_anchor_events_tracks_latest_entry_times() -> None:
     assert _opening_anchors_from_events(events, ("BTCUSDT",)) == {}
 
 
-async def test_load_order_anchor_events_preserves_pre_zero_order_filled_post_zero() -> None:
+async def test_load_order_anchor_events_preserves_pre_zero_order_filled_post_zero() -> (
+    None
+):
     class DummyScalars:
         def __init__(self, items):
             self.items = items
@@ -2137,7 +2148,9 @@ async def test_load_order_anchor_events_isolates_position_side_zero_crossing() -
 
 
 def test_resolve_symbol_fill_horizon_anchors_to_earliest_order() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+        _resolve_symbol_fill_horizon,
+    )
 
     t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     t_order_old = t_now - timedelta(days=3)  # Order 72h ago
@@ -2163,7 +2176,9 @@ def test_resolve_symbol_fill_horizon_anchors_to_earliest_order() -> None:
 
 
 def test_resolve_symbol_fill_horizon_falls_back_to_7d_when_no_orders() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+        _resolve_symbol_fill_horizon,
+    )
 
     t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     active = [SimpleNamespace(observed_at=t_now, symbol="ETHUSDT")]
@@ -2173,13 +2188,17 @@ def test_resolve_symbol_fill_horizon_falls_back_to_7d_when_no_orders() -> None:
 
 
 def test_resolve_symbol_fill_horizon_safe_on_empty() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+        _resolve_symbol_fill_horizon,
+    )
 
     assert _resolve_symbol_fill_horizon([], []) is None
 
 
 async def test_load_order_identity_metadata_dual_track_query() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import _load_order_identity_metadata
+    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+        _load_order_identity_metadata,
+    )
 
     captured_query = None
 
@@ -2187,9 +2206,11 @@ async def test_load_order_identity_metadata_dual_track_query() -> None:
         async def scalars(self, query):
             nonlocal captured_query
             captured_query = query
+
             class Result:
                 def all(self):
                     return []
+
             return Result()
 
     t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
@@ -2220,7 +2241,3 @@ async def test_load_order_identity_metadata_dual_track_query() -> None:
     assert "account_fill_events.order_id IN" in query_str
     assert "account_fill_events.symbol IN" in query_str
     assert "account_fill_events.trade_at >=" in query_str
-
-
-
-

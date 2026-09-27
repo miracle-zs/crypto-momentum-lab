@@ -165,8 +165,9 @@ async def test_scheduler_close_releases_queued_submitters() -> None:
     assert calls == ["first"]
 
 
-async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel(
-) -> None:
+async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel() -> (
+    None
+):
     backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
@@ -201,9 +202,7 @@ async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> No
     await backend.submit_started.wait()
 
     coordinator.block_entry_submissions()
-    drain_task = asyncio.create_task(
-        coordinator.wait_for_entry_submissions_idle()
-    )
+    drain_task = asyncio.create_task(coordinator.wait_for_entry_submissions_idle())
     await asyncio.sleep(0)
     assert drain_task.done() is False
 
@@ -379,7 +378,9 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     backend.release_query.set()
     await block_task
 
-    with pytest.raises(OrderPreSubmissionError, match="waited .* in queue exceeding limit"):
+    with pytest.raises(
+        OrderPreSubmissionError, match="waited .* in queue exceeding limit"
+    ):
         await entry_task
 
     await coordinator.aclose()
@@ -431,7 +432,9 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
 
     # Entry command submitted while worker is hung.
     # The caller must time out within max_queue_wait_seconds without waiting forever for worker
-    with pytest.raises(OrderPreSubmissionError, match="waited .* in queue exceeding limit"):
+    with pytest.raises(
+        OrderPreSubmissionError, match="waited .* in queue exceeding limit"
+    ):
         await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
     backend.release_query.set()
@@ -455,8 +458,12 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
     await backend.query_started.wait()
 
     # Fill entry capacity (limit = 2)
-    e1_task = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
-    e2_task = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
+    e1_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+    e2_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
     await asyncio.sleep(0.01)
 
     # Attempting another entry fails due to entry capacity
@@ -534,7 +541,9 @@ async def test_cancel_order_releases_reservation_after_backend_success() -> None
     await coordinator.aclose()
 
 
-async def test_cancel_order_does_not_release_reservation_if_state_not_canceled() -> None:
+async def test_cancel_order_does_not_release_reservation_if_state_not_canceled() -> (
+    None
+):
     from decimal import Decimal
 
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
@@ -656,7 +665,8 @@ async def test_multi_batch_reservation_release_all_on_failure() -> None:
 
         def load_active_reservations(self, key: Any) -> list[Any]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
@@ -682,6 +692,7 @@ async def test_multi_batch_reservation_release_all_on_failure() -> None:
     coordinator._backend = FailingBackend()
 
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+
     allocs = (
         ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
         ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("20.0")),
@@ -721,7 +732,8 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
 
         def load_active_reservations(self, key: Any) -> list[Any]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
@@ -751,6 +763,7 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
     )
 
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+
     allocs = (
         ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
         ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("15.0")),
@@ -797,7 +810,8 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
 
         def load_active_reservations(self, key: Any) -> list[Any]:
             active = [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
             # Simulate SQL ORDER BY created_at, reservation_id
@@ -1003,7 +1017,9 @@ async def test_unallocated_exit_order_fails_closed_without_inventing_batch() -> 
         created_at=NOW,
         quantized=True,
     )
-    with pytest.raises(OrderPreSubmissionError, match="has no allocated batches or batch_id"):
+    with pytest.raises(
+        OrderPreSubmissionError, match="has no allocated batches or batch_id"
+    ):
         await coordinator.submit(plan)
     await coordinator.aclose()
 
@@ -1018,14 +1034,17 @@ async def test_reconcile_order_consumes_filled_reservation() -> None:
 
         def load_active_reservations(self, key: Any) -> list[PositionReservation]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
         def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
-        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+        def update_reservation(
+            self, res: PositionReservation, release_reason: str = ""
+        ) -> None:
             self.reservations[res.reservation_id] = res
 
     class ReconcileFillBackend(BlockingBackend):
@@ -1094,14 +1113,17 @@ async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
 
         def load_active_reservations(self, key: Any) -> list[PositionReservation]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
         def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
-        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+        def update_reservation(
+            self, res: PositionReservation, release_reason: str = ""
+        ) -> None:
             self.reservations[res.reservation_id] = res
 
     class SnapshotBackend(BlockingBackend):
@@ -1181,14 +1203,17 @@ async def test_cancel_order_releases_all_allocations_for_command() -> None:
 
         def load_active_reservations(self, key: Any) -> list[PositionReservation]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
         def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
-        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+        def update_reservation(
+            self, res: PositionReservation, release_reason: str = ""
+        ) -> None:
             self.reservations[res.reservation_id] = res
             if release_reason:
                 self.release_reasons[res.reservation_id] = release_reason
@@ -1270,14 +1295,17 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
 
         def load_active_reservations(self, key: Any) -> list[PositionReservation]:
             return [
-                r for r in self.reservations.values()
+                r
+                for r in self.reservations.values()
                 if r.active_quantity > Decimal("0")
             ]
 
         def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
-        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+        def update_reservation(
+            self, res: PositionReservation, release_reason: str = ""
+        ) -> None:
             self.reservations[res.reservation_id] = res
             if release_reason:
                 self.release_reasons[res.reservation_id] = release_reason
@@ -1320,14 +1348,21 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
     res = repo.reservations["res_order-reject"]
     assert res.active_quantity == Decimal("0")
     assert res.released_quantity == Decimal("5.0")
-    assert "order_finished_residual_release_rejected" in repo.release_reasons.get(res.reservation_id, "")
+    assert "order_finished_residual_release_rejected" in repo.release_reasons.get(
+        res.reservation_id, ""
+    )
     await coordinator.aclose()
 
 
 @pytest.mark.asyncio
 async def test_coordinator_execution_book_integration() -> None:
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook, ExecutionScope
-    from crypto_momentum_lab.domain.execution.execution_coordinator import InMemoryPositionReservationRepository
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        ExecutionBook,
+        ExecutionScope,
+    )
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
 
     backend = BlockingBackend()
     repo = InMemoryPositionReservationRepository()
@@ -1674,10 +1709,14 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
         def __init__(self, initial: PositionReservation) -> None:
             self.res = initial
 
-        def load_active_reservations(self, k: PositionKey | None = None) -> list[PositionReservation]:
+        def load_active_reservations(
+            self, k: PositionKey | None = None
+        ) -> list[PositionReservation]:
             return [self.res] if self.res.active_quantity > 0 else []
 
-        def update_reservation(self, updated: PositionReservation, **kwargs: Any) -> None:
+        def update_reservation(
+            self, updated: PositionReservation, **kwargs: Any
+        ) -> None:
             self.res = updated
 
     repo = InMemoryRepo(res)
@@ -1740,6 +1779,3 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
     assert repo.res.active_quantity == Decimal("5.0")
 
     await coord.aclose()
-
-
-

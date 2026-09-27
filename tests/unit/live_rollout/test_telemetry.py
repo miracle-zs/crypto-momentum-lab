@@ -179,7 +179,6 @@ async def test_live_telemetry_record_operational_event() -> None:
     assert batches[0][0]["details"]["commit"] == "abc"
 
 
-
 async def test_transient_persist_timeout_is_retried_before_dropping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

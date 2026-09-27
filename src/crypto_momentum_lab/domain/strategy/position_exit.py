@@ -105,9 +105,8 @@ def position_exit_reason(
         )
         if candle_reason is not None:
             return candle_reason
-    if (
-        policy.max_holding_seconds is not None
-        and held_until >= opened_at + timedelta(seconds=policy.max_holding_seconds)
+    if policy.max_holding_seconds is not None and held_until >= opened_at + timedelta(
+        seconds=policy.max_holding_seconds
     ):
         return "max_holding_period"
     return None
@@ -130,9 +129,7 @@ def _candle_exit_reason(
     candles = list(closed_candles)
     if not candles or candles[-1].candle_start != closed_candle.candle_start:
         candles.append(closed_candle)
-    minimum_end = opened_at + timedelta(
-        seconds=policy.minimum_holding_seconds
-    )
+    minimum_end = opened_at + timedelta(seconds=policy.minimum_holding_seconds)
     first_eligible_start = first_candle_start_after_entry(opened_at)
     eligible = [
         candle
@@ -169,8 +166,7 @@ def _candle_exit_reason(
 
 def _consecutive_candles(candles: tuple[ClosedCandle15m, ...]) -> bool:
     return all(
-        current.candle_start
-        == previous.candle_start + timedelta(minutes=15)
+        current.candle_start == previous.candle_start + timedelta(minutes=15)
         for previous, current in zip(candles, candles[1:], strict=False)
     )
 

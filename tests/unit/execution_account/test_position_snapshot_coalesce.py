@@ -43,7 +43,9 @@ def _config(observed_at: datetime) -> ExecutionAccountSyncConfig:
     )
 
 
-def _position(amt: str, *, entry: str, observed_at: datetime) -> AccountPositionSnapshot:
+def _position(
+    amt: str, *, entry: str, observed_at: datetime
+) -> AccountPositionSnapshot:
     return AccountPositionSnapshot(
         environment="live",
         account_label="primary",
@@ -89,9 +91,14 @@ def test_identical_position_snapshots_coalesce_within_window() -> None:
         entry="0.2317431",
         observed_at=t0 + timedelta(seconds=3),
     )
-    assert len(
-        service._positions_to_persist((after_window,), observed_at=after_window.observed_at)
-    ) == 1
+    assert (
+        len(
+            service._positions_to_persist(
+                (after_window,), observed_at=after_window.observed_at
+            )
+        )
+        == 1
+    )
 
 
 def test_zero_position_persisted_only_as_close_transition() -> None:
@@ -103,10 +110,13 @@ def test_zero_position_persisted_only_as_close_transition() -> None:
     )
     t0 = datetime(2026, 9, 16, 23, 45, 0, tzinfo=UTC)
     # Never seen this symbol: a zero row is noise.
-    assert service._positions_to_persist(
-        (_position("0", entry="0", observed_at=t0),),
-        observed_at=t0,
-    ) == ()
+    assert (
+        service._positions_to_persist(
+            (_position("0", entry="0", observed_at=t0),),
+            observed_at=t0,
+        )
+        == ()
+    )
 
     open_pos = _position("266", entry="0.23", observed_at=t0)
     assert service._positions_to_persist((open_pos,), observed_at=t0) == (open_pos,)

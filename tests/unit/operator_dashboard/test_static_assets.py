@@ -42,14 +42,12 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert (
-        'href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges"'
-        in index
+        'href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges"' in index
     )
     assert 'src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"' in index
     assert (
         'type="module" src="static/dashboard.js?v=20260824-control-room-'
-        'v18-equity-ranges"'
-        in index
+        'v18-equity-ranges"' in index
     )
     assert "dashboard.css?v=20260903-research-collector-v1" in index
     assert "dashboard.js?v=20260903-research-collector-v1" in index
@@ -66,7 +64,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
 
     assert 'type="module"' in index
     for module in (
-        "from \"./dashboard-config.js?v=20260903-research-collector-v1\"",
+        'from "./dashboard-config.js?v=20260903-research-collector-v1"',
         'from "./dashboard-formatters.js"',
         'from "./dashboard-dom.js"',
         'from "./dashboard-readiness.js"',
@@ -201,7 +199,7 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "实盘 Top10",
         "每日 08:00 UTC+8 起算",
         "comparisonAnchorText",
-        "source === \"live\"",
+        'source === "live"',
         "个模拟账户 + ${liveAccounts.length} 个实盘账户",
         "ROLLING 24H",
         "CLOSED TRADES · LATEST 30",
@@ -388,7 +386,7 @@ def test_universe_panel_uses_one_monitoring_table_without_duplicate_chips() -> N
         "监控池 ${monitored.length}",
         "补充监控",
         "MONITORING ADDITIONS",
-            "涨幅榜中的目标标的已计入监控池",
+        "涨幅榜中的目标标的已计入监控池",
         "监控状态",
         "rank",
         "utc_day_return",
@@ -463,7 +461,7 @@ def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
     assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in (
         STATIC / "dashboard-config.js"
     ).read_text(encoding="utf-8")
-    assert 'timeZone: DISPLAY_TIME_ZONE' in formatters
+    assert "timeZone: DISPLAY_TIME_ZONE" in formatters
     assert "DISPLAY_TIME_FORMATTER.formatToParts" in formatters
     assert "toISOString().slice" not in text
     assert "UTC+8" in config
@@ -499,22 +497,21 @@ def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:
         "viewport-fit=cover",
         "env(safe-area-inset-bottom)",
     ):
-        assert marker in stylesheet or marker in (
-            STATIC / "index.html"
-        ).read_text(encoding="utf-8")
+        assert marker in stylesheet or marker in (STATIC / "index.html").read_text(
+            encoding="utf-8"
+        )
 
 
 def test_paper_account_cards_use_responsive_variant_grid() -> None:
     text = (STATIC / "styles/sections/strategy.css").read_text(encoding="utf-8")
 
-    card_styles = text[text.index(".acct-cards"):text.index(".acct-strategy-column")]
+    card_styles = text[text.index(".acct-cards") : text.index(".acct-strategy-column")]
     variant_styles = text[
-        text.index(".acct-strategy-cards"):text.index(".acct-card {")
+        text.index(".acct-strategy-cards") : text.index(".acct-card {")
     ]
     assert "grid-template-columns: minmax(0, 1fr)" in card_styles
     assert (
-        "grid-template-columns: repeat(auto-fit, minmax(250px, 1fr))"
-        in variant_styles
+        "grid-template-columns: repeat(auto-fit, minmax(250px, 1fr))" in variant_styles
     )
     assert ".acct-strategy-column" in text
     assert "grid-auto-flow: column" not in text
