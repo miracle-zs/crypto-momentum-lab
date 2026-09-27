@@ -116,18 +116,119 @@ class StrategyPolicy(Protocol):
     ) -> PolicyTransition: ...
 
 
+def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
+    """Extracts a canonical sorted dictionary of all policy parameters."""
+    if policy is None:
+        return {}
+    if isinstance(policy, dict):
+        return {k: str(v) for k, v in sorted(policy.items())}
+    fields = [
+        "policy_id",
+        "strategy_name",
+        "policy_version",
+        "entry_threshold",
+        "short_entry_threshold",
+        "order_type",
+        "target_notional",
+        "max_open_positions",
+        "cooldown_duration",
+        "position_mode",
+        "grace_period",
+        "parameters",
+        "config",
+    ]
+    res: dict[str, Any] = {}
+    for f in fields:
+        if hasattr(policy, f):
+            val = getattr(policy, f)
+            if hasattr(val, "total_seconds"):
+                res[f] = int(val.total_seconds())
+            elif hasattr(val, "value"):
+                res[f] = val.value
+            elif isinstance(val, (int, float, bool, str)) or val is None:
+                res[f] = val
+            elif isinstance(val, Decimal):
+                res[f] = str(val)
+            else:
+                res[f] = str(val)
+    if hasattr(policy, "__dict__"):
+        for k, v in sorted(policy.__dict__.items()):
+            if not k.startswith("_") and k not in res:
+                if hasattr(v, "total_seconds"):
+                    res[k] = int(v.total_seconds())
+                elif hasattr(v, "value"):
+                    res[k] = v.value
+                elif isinstance(v, (int, float, bool, str)) or v is None:
+                    res[k] = v
+                else:
+                    res[k] = str(v)
+    return res
+
+
+def compute_policy_parameters_digest(policy: Any) -> str:
+    params = serialize_policy_parameters(policy)
+    dumped = json.dumps(params, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+
+
+def serialize_policy_state(state: Any) -> dict[str, Any]:
+    if state is None:
+        return {}
+    if isinstance(state, dict):
+        return {k: str(v) for k, v in sorted(state.items())}
+    res: dict[str, Any] = {
+        "policy_version": getattr(state, "policy_version", 1),
+    }
+    if hasattr(state, "cooldown_until_by_symbol"):
+        res["cooldown_until_by_symbol"] = {
+            k: v.isoformat() if hasattr(v, "isoformat") else str(v)
+            for k, v in sorted(state.cooldown_until_by_symbol.items())
+        }
+    if hasattr(state, "anchor_prices_by_symbol"):
+        res["anchor_prices_by_symbol"] = {
+            k: str(v) for k, v in sorted(state.anchor_prices_by_symbol.items())
+        }
+    if hasattr(state, "active_intent_ids_by_symbol"):
+        res["active_intent_ids_by_symbol"] = dict(
+            sorted(state.active_intent_ids_by_symbol.items())
+        )
+    if hasattr(state, "warmup_status"):
+        res["warmup_status"] = dict(sorted(state.warmup_status.items()))
+    return res
+
+
+def compute_policy_state_digest(state: Any) -> str:
+    payload = serialize_policy_state(state)
+    dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+
+
 def compute_transition_input_hash(
     frame: DecisionFrame,
     prior_state_version: int,
     policy_id: str,
     policy_version: int,
+    policy_parameters_digest: str | None = None,
+    policy_state_digest: str | None = None,
 ) -> str:
     """Deterministic cryptographic hash binding frame and policy context."""
+    param_digest = (
+        policy_parameters_digest
+        if policy_parameters_digest is not None
+        else getattr(frame, "policy_parameters_digest", "")
+    )
+    state_digest = (
+        policy_state_digest
+        if policy_state_digest is not None
+        else getattr(frame, "policy_state_digest", "")
+    )
     payload = {
         "frame_digest": frame.frame_digest,
         "prior_state_version": prior_state_version,
         "policy_id": policy_id,
         "policy_version": policy_version,
+        "policy_parameters_digest": param_digest,
+        "policy_state_digest": state_digest,
     }
     dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
@@ -212,11 +313,15 @@ def execute_policy_transition(
     if position_view.key.symbol != symbol:
         raise ValueError(f"position_view symbol {position_view.key.symbol} != {symbol}")
 
+    param_digest = compute_policy_parameters_digest(policy_artifact)
+    state_digest = compute_policy_state_digest(prior_state)
     input_hash = compute_transition_input_hash(
         frame=frame,
         prior_state_version=prior_state.policy_version,
         policy_id=policy_artifact.policy_id,
         policy_version=policy_artifact.policy_version,
+        policy_parameters_digest=param_digest,
+        policy_state_digest=state_digest,
     )
     decision_id = f"dec_{symbol}_{input_hash[:16]}"
     state_15s = market_envelope.state

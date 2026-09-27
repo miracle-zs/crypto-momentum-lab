@@ -27,6 +27,8 @@ from crypto_momentum_lab.domain.decision.decision_frame import (
 from crypto_momentum_lab.domain.decision.policy_transition import (
     PolicyTransition,
     StrategyPositionMode,
+    compute_policy_parameters_digest,
+    compute_policy_state_digest,
     execute_policy_transition,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -473,9 +475,9 @@ def decide(
             position_view_token=decision_input.position_view.projection_version,
             universe_version=decision_input.universe_version,
             risk_config_version=decision_input.risk_config_version,
-            policy_code_digest=f"policy_{state.policy_version}",
-            policy_parameters_digest=f"param_{state.policy_version}",
-            policy_state_digest=f"state_{state.policy_version}",
+            policy_code_digest=f"policy_{policy.strategy_name}_{state.policy_version}",
+            policy_parameters_digest=compute_policy_parameters_digest(policy),
+            policy_state_digest=compute_policy_state_digest(state),
             risk_plan_digest=decision_input.risk_config_version,
             clock_event=clock_event,
             cash_balance=decision_input.cash_balance,
@@ -549,6 +551,7 @@ def build_decision_input(
     market_ref: MarketRevisionRef | None = None,
     market_envelope: MarketEnvelope | None = None,
     frame: DecisionFrame | None = None,
+    policy: EffectivePolicy | None = None,
 ) -> DecisionInput:
     """Shared DecisionInput assembly for live, paper, and research paths.
 
@@ -581,6 +584,16 @@ def build_decision_input(
 
     clock_event = ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence)
     if frame is None:
+        p_code = (
+            f"policy_{policy.strategy_name}_{frozen.policy_state.policy_version}"
+            if policy is not None
+            else f"policy_{frozen.policy_state.policy_version}"
+        )
+        p_params = (
+            compute_policy_parameters_digest(policy)
+            if policy is not None
+            else f"param_{frozen.policy_state.policy_version}"
+        )
         frame = DecisionFrame(
             scope=effective_scope,
             symbol=state.symbol,
@@ -588,9 +601,9 @@ def build_decision_input(
             position_view_token=frozen.position_view.projection_version,
             universe_version=frozen.universe_version,
             risk_config_version=frozen.risk_config_version,
-            policy_code_digest=f"policy_{frozen.policy_state.policy_version}",
-            policy_parameters_digest=f"param_{frozen.policy_state.policy_version}",
-            policy_state_digest=f"state_{frozen.policy_state.policy_version}",
+            policy_code_digest=p_code,
+            policy_parameters_digest=p_params,
+            policy_state_digest=compute_policy_state_digest(frozen.policy_state),
             risk_plan_digest=frozen.risk_config_version,
             clock_event=clock_event,
             cash_balance=frozen.cash_balance,
@@ -745,18 +758,19 @@ def create_authoritative_decision_filter(
                     and frozen.position_view.total_quantity > Decimal("0")
                 ):
                     scope_to_use = getattr(state, "environment", None) or "live"
+                    policy = EffectivePolicy(
+                        policy_id=f"policy_{strategy_name}",
+                        strategy_name=strategy_name,
+                        target_notional=notional,
+                        candidate_generator=lambda inp, st: None,
+                    )
                     dec_input = build_decision_input(
                         state=state,
                         frozen=frozen,
                         clock_sequence=1,
                         scope=scope_to_use,
                         source_epoch=f"ep_{scope_to_use}",
-                    )
-                    policy = EffectivePolicy(
-                        policy_id=f"policy_{strategy_name}",
-                        strategy_name=strategy_name,
-                        target_notional=notional,
-                        candidate_generator=lambda inp, st: None,
+                        policy=policy,
                     )
                     dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
                     if trace_recorder is not None:

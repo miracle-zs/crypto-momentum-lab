@@ -253,6 +253,7 @@ class LiveDecisionFactSource:
         self._policy_state = PolicyState()
         self._trace_repository = trace_repository
         self._strategy_name = strategy_name
+        self._active_tasks: set[asyncio.Task[Any]] = set()
 
     def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
         self._context = context
@@ -265,12 +266,14 @@ class LiveDecisionFactSource:
         self._policy_state = state
 
     def record_trace(self, trace: DecisionTrace) -> None:
-        """Saves a trace via the trace repository asynchronously."""
+        """Saves a trace via the trace repository asynchronously with supervisor tracking."""
         if self._trace_repository is None:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._safe_persist_trace(trace))
+            task = loop.create_task(self._safe_persist_trace(trace))
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
         except RuntimeError:
             pass
 
@@ -283,6 +286,22 @@ class LiveDecisionFactSource:
                 "async_save_decision_trace_failed",
                 decision_id=trace.decision_id,
                 error=str(exc),
+            )
+
+    async def drain(self, timeout_seconds: float = 5.0) -> None:
+        """Awaits all pending background trace persistence tasks before teardown."""
+        if not self._active_tasks:
+            return
+        tasks = list(self._active_tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            log.warning(
+                "drain_traces_timeout",
+                remaining=len(self._active_tasks),
             )
 
     def on_decision_result(

@@ -1652,4 +1652,94 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
     await coord.aclose()
 
 
+async def test_cumulative_executed_quantity_settlement_watermark() -> None:
+    """Verifies Blueprint §7.2: cumulative fill reports 3 -> 3 -> 5 only consume 5, not 11."""
+    from crypto_momentum_lab.domain.execution import PositionKey, PositionReservation
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    res = PositionReservation(
+        reservation_id="res-1",
+        command_id="order-exit-1",
+        position_key=key,
+        batch_id="batch-1",
+        reserved_quantity=Decimal("10.0"),
+    )
+
+    class InMemoryRepo:
+        def __init__(self, initial: PositionReservation) -> None:
+            self.res = initial
+
+        def load_active_reservations(self, k: PositionKey | None = None) -> list[PositionReservation]:
+            return [self.res] if self.res.active_quantity > 0 else []
+
+        def update_reservation(self, updated: PositionReservation, **kwargs: Any) -> None:
+            self.res = updated
+
+    repo = InMemoryRepo(res)
+    backend = BlockingBackend()
+    coord = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+        initial_reservations=[res],
+    )
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-exit",
+        run_id="run-1",
+        client_order_id="order-exit-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("10.0"),
+        price=Decimal("65000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+    )
+
+    # 1st report: partial fill cum_qty = 3
+    result_1 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        executed_quantity=Decimal("3.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-1",
+    )
+    await coord._consume_reservation_if_filled(plan, result_1)
+    assert repo.res.consumed_quantity == Decimal("3.0")
+    assert repo.res.active_quantity == Decimal("7.0")
+
+    # 2nd report: unchanged poll with same cum_qty = 3
+    result_2 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        executed_quantity=Decimal("3.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-1",
+    )
+    await coord._consume_reservation_if_filled(plan, result_2)
+    assert repo.res.consumed_quantity == Decimal("3.0")
+    assert repo.res.active_quantity == Decimal("7.0")
+
+    # 3rd report: further fill cum_qty = 5
+    result_3 = OrderExecutionResult(
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        executed_quantity=Decimal("5.0"),
+        average_price=Decimal("65000"),
+        exchange_order_id="ex-1",
+    )
+    await coord._consume_reservation_if_filled(plan, result_3)
+    assert repo.res.consumed_quantity == Decimal("5.0")
+    assert repo.res.active_quantity == Decimal("5.0")
+
+    await coord.aclose()
+
+
 

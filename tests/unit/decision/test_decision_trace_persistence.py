@@ -142,9 +142,9 @@ class _FakeAsyncSession:
             return _FakeQueryResult(scalar_val=len(self.trace_rows))
 
         if "FROM decision_traces" in compiled_str:
-            # Return first or matching trace row
-            row = next(iter(self.trace_rows.values()), None)
-            return _FakeQueryResult(scalar_val=row)
+            rows = list(self.trace_rows.values())
+            row = rows[0] if rows else None
+            return _FakeQueryResult(scalar_val=row, scalars_list=rows)
 
         if "FROM market_revision_refs" in compiled_str:
             return _FakeQueryResult(scalars_list=list(self.rev_rows.values()))
@@ -204,18 +204,21 @@ async def test_postgres_decision_trace_repository_saves_with_non_durable_commit(
     # 1. Non-durable commit policy executed
     assert session.statements[0].text == "SET LOCAL synchronous_commit = OFF"
 
-    # 2. Both market_revision_refs and decision_traces upserted
-    compiled_rev = str(
-        session.statements[1].compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+    # 2. Both market_revision_refs and decision_traces upserted with DO NOTHING immutability
+    sql_texts = [
+        str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+        for stmt in session.statements[1:]
+    ]
+    assert any(
+        "INSERT INTO market_revision_refs" in s
+        and "ON CONFLICT (revision_id) DO NOTHING" in s
+        for s in sql_texts
     )
-    assert "INSERT INTO market_revision_refs" in compiled_rev
-    assert "ON CONFLICT (revision_id) DO NOTHING" in compiled_rev
-
-    compiled_trace = str(
-        session.statements[2].compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+    assert any(
+        "INSERT INTO decision_traces" in s
+        and "ON CONFLICT (decision_id) DO NOTHING" in s
+        for s in sql_texts
     )
-    assert "INSERT INTO decision_traces" in compiled_trace
-    assert "ON CONFLICT (decision_id) DO UPDATE" in compiled_trace
 
 
 @pytest.mark.asyncio
@@ -407,8 +410,72 @@ async def test_audit_decision_trace_reproducibility(
     assert audit_res["decision_id"] == "trace_audit_001"
     assert audit_res["strategy_name"] == "orderflow_impulse"
     assert audit_res["evaluated_revisions_count"] == 1
-    assert (
-        audit_res["evaluated_revisions"][0]["revision_id"]
-        == "live:BTCUSDT:15s:1790323200:testref"
-    )
+    assert audit_res["evaluated_revisions"][0]["revision_id"] == "live:BTCUSDT:15s:1790323200:testref"
     assert audit_res["next_policy_state_version"] == 3
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
+    """Verifies Sol's F4: PostgresDecisionTraceRepository rejects attempts to overwrite an existing trace with conflicting content."""
+    session = _FakeAsyncSession()
+    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
+
+    t0 = datetime(2026, 9, 27, 5, 0, tzinfo=UTC)
+    ref = MarketRevisionRef(
+        scope="live",
+        symbol="BTCUSDT",
+        interval="15s",
+        bucket_start=t0,
+        bucket_end=t0 + timedelta(seconds=15),
+        revision_id="live:BTCUSDT:15s:1:ref1",
+        content_hash="content_hash_1",
+        published_at=t0,
+        source_epoch="ep_live",
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    trace_1 = DecisionTrace(
+        decision_id="dec_btc_001",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0,
+        evaluated_market_refs=(ref,),
+        intent_produced=True,
+        intent_id="cand-1",
+        rejection_reason=None,
+        input_hash="hash_orig_1111",
+        frame_digest="frame_orig_1111",
+        trace_payload={"intent": "buy", "input_hash": "hash_orig_1111", "frame_digest": "frame_orig_1111"},
+    )
+    # Seed the session with existing trace row
+    session.trace_rows["dec_btc_001"] = DecisionTraceRow(
+        decision_id="dec_btc_001",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0,
+        intent_produced=True,
+        intent_id="cand-1",
+        rejection_reason=None,
+        evaluated_revision_ids=["live:BTCUSDT:15s:1:ref1"],
+        trace_payload={"intent": "buy", "input_hash": "hash_orig_1111", "frame_digest": "frame_orig_1111"},
+        created_at=t0,
+    )
+
+    # 1. Saving the exact same trace again is idempotent and succeeds
+    await repo.save_decision_traces([trace_1])
+
+    # 2. Saving a conflicting trace with the SAME decision_id but different input_hash / intent raises ValueError
+    conflicting_trace = DecisionTrace(
+        decision_id="dec_btc_001",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0,
+        evaluated_market_refs=(ref,),
+        intent_produced=False,
+        intent_id=None,
+        rejection_reason="below_entry_threshold",
+        input_hash="hash_conflict_2222",
+        frame_digest="frame_conflict_2222",
+        trace_payload={"intent": None},
+    )
+    with pytest.raises(ValueError, match="Immutable audit conflict"):
+        await repo.save_decision_traces([conflicting_trace])

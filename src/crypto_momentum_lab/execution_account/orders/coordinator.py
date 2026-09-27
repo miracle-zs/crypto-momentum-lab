@@ -353,6 +353,7 @@ class OrderExecutionCoordinator:
             reservation_repository=self._reservation_repository,
         )
         self._active_reservations: dict[str, PositionReservation] = {}
+        self._settled_cumulative_quantities: dict[str, Decimal] = {}
         if initial_reservations:
             for r in initial_reservations:
                 self._active_reservations[r.reservation_id] = r
@@ -610,21 +611,11 @@ class OrderExecutionCoordinator:
                         expected_projection_version=proj_ver,
                         created_at=plan.created_at,
                     )
-                    self._execution_book._outbox_by_command_id[plan.client_order_id] = (
-                        OutboxEntry(
-                            command_id=plan.client_order_id,
-                            request_id=plan.client_order_id,
-                            scope=scope,
-                            command=cmd,
-                            state=DispatchState.PREPARED,
-                            created_at=plan.created_at,
-                            updated_at=plan.created_at,
-                        )
+                    self._execution_book.register_prepared_command(
+                        command=cmd,
+                        scope=scope,
+                        reservation_ids=[r.reservation_id for r in target_reservations],
                     )
-                    if target_reservations:
-                        self._execution_book._command_reservations[
-                            plan.client_order_id
-                        ] = [r.reservation_id for r in target_reservations]
             except Exception as save_err:
                 # Atomicity rollback: release any newly created reservations
                 for saved in saved_new:
@@ -724,33 +715,51 @@ class OrderExecutionCoordinator:
             active_res = await _maybe_await(
                 self._reservation_repository.load_active_reservations(key)
             )
-            remaining_to_consume = Decimal(str(res.executed_quantity))
+            order_key = plan.client_order_id or str(res.exchange_order_id or "")
+            cum_executed = Decimal(str(res.executed_quantity))
+            if order_key in self._settled_cumulative_quantities:
+                prev_settled = self._settled_cumulative_quantities[order_key]
+            else:
+                prev_settled = sum(
+                    (
+                        r.consumed_quantity
+                        for r in active_res
+                        if r.command_id == plan.client_order_id
+                    ),
+                    Decimal("0"),
+                )
+
+            delta_to_consume = max(Decimal("0"), cum_executed - prev_settled)
             consumed_by_id: dict[str, PositionReservation] = {}
-            for r in active_res:
-                if (
-                    r.command_id == plan.client_order_id
-                    and r.active_quantity > Decimal("0")
-                    and remaining_to_consume > Decimal("0")
-                ):
-                    qty_to_consume = min(remaining_to_consume, r.active_quantity)
-                    updated = r.consume(qty_to_consume)
-                    await _maybe_await(
-                        self._reservation_repository.update_reservation(updated)
-                    )
-                    consumed_by_id[r.reservation_id] = updated
-                    if updated.active_quantity <= Decimal("0"):
-                        self._active_reservations.pop(r.reservation_id, None)
-                        if self._domain_coordinator is not None:
-                            self._domain_coordinator.unregister_reservation(
-                                r.reservation_id
-                            )
-                    else:
-                        self._active_reservations[r.reservation_id] = updated
-                        if self._domain_coordinator is not None:
-                            self._domain_coordinator.update_reservation(updated)
-                    remaining_to_consume -= qty_to_consume
-                    if remaining_to_consume <= Decimal("0"):
-                        break
+            if delta_to_consume > Decimal("0"):
+                remaining_to_consume = delta_to_consume
+                for r in active_res:
+                    if (
+                        r.command_id == plan.client_order_id
+                        and r.active_quantity > Decimal("0")
+                        and remaining_to_consume > Decimal("0")
+                    ):
+                        qty_to_consume = min(remaining_to_consume, r.active_quantity)
+                        updated = r.consume(qty_to_consume)
+                        await _maybe_await(
+                            self._reservation_repository.update_reservation(updated)
+                        )
+                        consumed_by_id[r.reservation_id] = updated
+                        if updated.active_quantity <= Decimal("0"):
+                            self._active_reservations.pop(r.reservation_id, None)
+                            if self._domain_coordinator is not None:
+                                self._domain_coordinator.unregister_reservation(
+                                    r.reservation_id
+                                )
+                        else:
+                            self._active_reservations[r.reservation_id] = updated
+                            if self._domain_coordinator is not None:
+                                self._domain_coordinator.update_reservation(updated)
+                        remaining_to_consume -= qty_to_consume
+                        if remaining_to_consume <= Decimal("0"):
+                            break
+                settled_now = delta_to_consume - remaining_to_consume
+                self._settled_cumulative_quantities[order_key] = prev_settled + settled_now
 
             # On terminal state, release any residual unconsumed reservations
             if is_terminal:
@@ -773,6 +782,7 @@ class OrderExecutionCoordinator:
                                 self._domain_coordinator.unregister_reservation(
                                     r.reservation_id
                                 )
+                self._settled_cumulative_quantities.pop(order_key, None)
         except Exception as consume_err:
             log.warning(
                 "order_reservation_consume_failed",

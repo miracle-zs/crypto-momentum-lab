@@ -429,6 +429,27 @@ class ExecutionBook:
         self._receipts_by_id[request.request_id] = receipt
         return Accepted(receipt)
 
+    def register_prepared_command(
+        self,
+        command: TradeCommand,
+        scope: ExecutionScope,
+        reservation_ids: list[str] | tuple[str, ...] = (),
+    ) -> OutboxEntry:
+        """Registers a prepared command into the outbox and links reservations."""
+        entry = OutboxEntry(
+            command_id=command.command_id,
+            request_id=command.command_id,
+            scope=scope,
+            command=command,
+            state=DispatchState.PREPARED,
+            created_at=command.created_at,
+            updated_at=command.created_at,
+        )
+        self._outbox_by_command_id[command.command_id] = entry
+        if reservation_ids:
+            self._command_reservations[command.command_id] = list(reservation_ids)
+        return entry
+
     def get_outbox(self, command_id: str) -> OutboxEntry | None:
         """Returns the outbox record for command_id if found."""
         return self._outbox_by_command_id.get(command_id)

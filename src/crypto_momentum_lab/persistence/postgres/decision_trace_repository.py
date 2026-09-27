@@ -129,6 +129,30 @@ class PostgresDecisionTraceRepository:
                     # Diagnostic plane: do not block on synchronous commit
                     await session.execute(text("SET LOCAL synchronous_commit = OFF"))
 
+                    # Check for conflicting existing records to enforce immutable audit trail
+                    incoming_ids = [t.decision_id for t in traces]
+                    stmt_check = select(DecisionTraceRow).where(DecisionTraceRow.decision_id.in_(incoming_ids))
+                    existing_rows = (await session.execute(stmt_check)).scalars().all()
+                    incoming_by_id = {t.decision_id: t for t in traces}
+                    for existing in existing_rows:
+                        incoming = incoming_by_id.get(existing.decision_id)
+                        if incoming is not None:
+                            diffs = []
+                            existing_input_hash = str((existing.trace_payload or {}).get("input_hash", ""))
+                            if incoming.input_hash and incoming.input_hash != existing_input_hash:
+                                diffs.append(f"input_hash ({existing_input_hash} vs {incoming.input_hash})")
+                            if incoming.intent_produced != existing.intent_produced:
+                                diffs.append(f"intent_produced ({existing.intent_produced} vs {incoming.intent_produced})")
+                            if incoming.intent_id != existing.intent_id:
+                                diffs.append(f"intent_id ({existing.intent_id} vs {incoming.intent_id})")
+                            if incoming.rejection_reason != existing.rejection_reason:
+                                diffs.append(f"rejection_reason ({existing.rejection_reason} vs {incoming.rejection_reason})")
+                            if diffs:
+                                raise ValueError(
+                                    f"Immutable audit conflict: DecisionTrace '{existing.decision_id}' "
+                                    f"already exists with conflicting contents: {', '.join(diffs)}"
+                                )
+
                     if revision_rows:
                         stmt_rev = (
                             insert(MarketRevisionRefRow)
@@ -140,23 +164,7 @@ class PostgresDecisionTraceRepository:
                     stmt_trace = (
                         insert(DecisionTraceRow)
                         .values(trace_rows)
-                        .on_conflict_do_update(
-                            index_elements=["decision_id"],
-                            set_={
-                                "intent_produced": insert(
-                                    DecisionTraceRow
-                                ).excluded.intent_produced,
-                                "intent_id": insert(
-                                    DecisionTraceRow
-                                ).excluded.intent_id,
-                                "rejection_reason": insert(
-                                    DecisionTraceRow
-                                ).excluded.rejection_reason,
-                                "trace_payload": insert(
-                                    DecisionTraceRow
-                                ).excluded.trace_payload,
-                            },
-                        )
+                        .on_conflict_do_nothing(index_elements=["decision_id"])
                     )
                     await session.execute(stmt_trace)
         except Exception as exc:

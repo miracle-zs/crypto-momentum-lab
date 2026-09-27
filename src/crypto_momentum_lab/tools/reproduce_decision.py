@@ -29,23 +29,31 @@ from crypto_momentum_lab.persistence.postgres.session import (
 async def audit_decision_trace(
     decision_id: str,
     database_url: str | None = None,
+    trace_override: Any | None = None,
 ) -> dict[str, Any]:
     """Audits and verifies exact reproducibility of a DecisionTrace."""
-    url = resolve_database_url(
-        database_url,
-        "CML_OBSERVABILITY_DATABASE_URL",
-        "CML_DATABASE_URL",
-    )
-    if not url:
-        raise ValueError(
-            "Database URL must be provided or configured via CML_DATABASE_URL"
+    if trace_override is not None:
+        trace = trace_override
+    else:
+        url = resolve_database_url(
+            database_url,
+            "CML_OBSERVABILITY_DATABASE_URL",
+            "CML_DATABASE_URL",
         )
-    engine = create_async_database_engine(url, pool_size=1, max_overflow=0)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    repo = PostgresDecisionTraceRepository(session_factory)
+        if not url:
+            raise ValueError(
+                "Database URL must be provided or configured via CML_DATABASE_URL"
+            )
+        engine = create_async_database_engine(url, pool_size=1, max_overflow=0)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        repo = PostgresDecisionTraceRepository(session_factory)
+
+        try:
+            trace = await repo.load_decision_trace(decision_id)
+        finally:
+            await engine.dispose()
 
     try:
-        trace = await repo.load_decision_trace(decision_id)
         if trace is None:
             return {
                 "decision_id": decision_id,
@@ -54,8 +62,50 @@ async def audit_decision_trace(
                 "reproduced": False,
             }
 
+        # 1. Structural evidence checks
+        if not trace.evaluated_market_refs:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "EVIDENCE_INSUFFICIENT",
+                "error": "DecisionTrace has no evaluated market references",
+                "reproduced": False,
+            }
+
+        if not trace.input_hash or not trace.frame_digest:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "EVIDENCE_INSUFFICIENT",
+                "error": "DecisionTrace missing cryptographic input_hash or frame_digest",
+                "reproduced": False,
+            }
+
+        payload = trace.trace_payload or {}
+
+        # 2. Hash consistency checks
+        if payload.get("input_hash") and payload.get("input_hash") != trace.input_hash:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": f"input_hash mismatch: trace {trace.input_hash} vs payload {payload.get('input_hash')}",
+                "reproduced": False,
+            }
+        if payload.get("frame_digest") and payload.get("frame_digest") != trace.frame_digest:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": f"frame_digest mismatch: trace {trace.frame_digest} vs payload {payload.get('frame_digest')}",
+                "reproduced": False,
+            }
+
         revisions_summary = []
         for ref in trace.evaluated_market_refs:
+            if not getattr(ref, "revision_id", None) or not getattr(ref, "content_hash", None):
+                return {
+                    "decision_id": trace.decision_id,
+                    "status": "EVIDENCE_INSUFFICIENT",
+                    "error": f"Market revision ref {getattr(ref, 'revision_id', '?')} has invalid content_hash",
+                    "reproduced": False,
+                }
             revisions_summary.append(
                 {
                     "revision_id": ref.revision_id,
@@ -71,9 +121,35 @@ async def audit_decision_trace(
                 }
             )
 
-        payload = trace.trace_payload or {}
         output_intent = payload.get("output_intent")
         next_policy_state = payload.get("next_policy_state")
+
+        # 3. Intent presence and consistency check
+        if bool(output_intent) != trace.intent_produced:
+            return {
+                "decision_id": trace.decision_id,
+                "status": "UNREPRODUCIBLE",
+                "error": f"Output intent presence mismatch: {bool(output_intent)} vs {trace.intent_produced}",
+                "reproduced": False,
+            }
+
+        # 4. Semantic Replay verification (if market_state payload is available)
+        market_state_payload = payload.get("market_state")
+        if market_state_payload:
+            from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
+            from crypto_momentum_lab.market_data.hub import market_state_from_payload
+
+            m_state = market_state_from_payload(market_state_payload)
+            ref0 = trace.evaluated_market_refs[0]
+            envelope = MarketEnvelope(ref=ref0, state=m_state)
+
+            if envelope.state.symbol != ref0.symbol:
+                return {
+                    "decision_id": trace.decision_id,
+                    "status": "UNREPRODUCIBLE",
+                    "error": f"Envelope symbol {envelope.state.symbol} does not match ref symbol {ref0.symbol}",
+                    "reproduced": False,
+                }
 
         return {
             "decision_id": trace.decision_id,
@@ -103,8 +179,13 @@ async def audit_decision_trace(
             "error": str(exc),
             "reproduced": False,
         }
-    finally:
-        await engine.dispose()
+    except Exception as exc:
+        return {
+            "decision_id": decision_id,
+            "status": "UNREPRODUCIBLE",
+            "error": f"Replay audit error: {exc}",
+            "reproduced": False,
+        }
 
 
 def main() -> None:

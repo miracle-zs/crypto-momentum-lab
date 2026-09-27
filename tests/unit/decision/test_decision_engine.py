@@ -508,5 +508,104 @@ def test_decision_trace_from_result_and_replay() -> None:
     assert "next policy version mismatch" in replay_fail_version.divergence_explanation
 
 
+def test_decision_parameters_digest_divergence() -> None:
+    """Verifies Sol's F2: Different policy parameters produce distinct input_hash and decision_id even with same policy_version."""
+    now = datetime(2026, 9, 27, 5, 0, 0, tzinfo=UTC)
+    ref, env = _make_market_envelope("BTCUSDT", now, Decimal("65500.00"))
+    pos_view = _make_flat_position_view("BTCUSDT")
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=ref,
+        market_envelope=env,
+        position_view=pos_view,
+        universe_version="u1",
+        clock_event=ClockEvent(sequence=1, timestamp=now),
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+    )
+    state = PolicyState(policy_version=1)
+
+    # Policy A: threshold = 65000 -> entry candidate
+    policy_a = EffectivePolicy(
+        policy_id="pol-1",
+        strategy_name="orderflow_impulse",
+        policy_version=1,
+        entry_threshold=Decimal("65000.00"),
+        target_notional=Decimal("1000.00"),
+    )
+    # Policy B: threshold = 66000 -> below entry threshold, rejection
+    policy_b = EffectivePolicy(
+        policy_id="pol-1",
+        strategy_name="orderflow_impulse",
+        policy_version=1,
+        entry_threshold=Decimal("66000.00"),
+        target_notional=Decimal("1000.00"),
+    )
+
+    res_a = decide(inp, state, policy_a)
+    res_b = decide(inp, state, policy_b)
+
+    assert res_a.intent is not None
+    assert res_b.intent is None
+    assert res_b.rejection_reason == "below_entry_threshold"
+
+    # Crucial F2 assertions:
+    assert res_a.input_hash != res_b.input_hash
+    assert res_a.decision_id != res_b.decision_id
+    assert res_a.frame_digest != res_b.frame_digest
+
+
+@pytest.mark.asyncio
+async def test_reproduce_decision_rejects_tampered_or_empty_trace() -> None:
+    """Verifies Sol's F3: reproduce_decision audit fails on empty refs, wrong input_hash, or missing market_state."""
+    from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
+
+    now = datetime(2026, 9, 27, 5, 0, 0, tzinfo=UTC)
+    ref, env = _make_market_envelope("BTCUSDT", now, Decimal("65500.00"))
+    pos_view = _make_flat_position_view("BTCUSDT")
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=ref,
+        market_envelope=env,
+        position_view=pos_view,
+        universe_version="u1",
+        clock_event=ClockEvent(sequence=1, timestamp=now),
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+    )
+    state = PolicyState(policy_version=1)
+    policy = EffectivePolicy(
+        policy_id="pol-1",
+        strategy_name="orderflow_impulse",
+        policy_version=1,
+        entry_threshold=Decimal("65000.00"),
+        target_notional=Decimal("1000.00"),
+    )
+    res = decide(inp, state, policy)
+    trace = decision_trace_from_result(res, inp, "orderflow_impulse", "primary")
+
+    # 1. Authentic trace with preserved market_state passes audit
+    audit_ok = await audit_decision_trace(trace.decision_id, trace_override=trace)
+    assert audit_ok["status"] == "VERIFIED_REPRODUCIBLE"
+    assert audit_ok["reproduced"] is True
+
+    # 2. Tampered input_hash fails audit
+    tampered_hash_trace = replace(trace, input_hash="WRONG_HASH_000000")
+    audit_tampered = await audit_decision_trace(trace.decision_id, trace_override=tampered_hash_trace)
+    assert audit_tampered["status"] == "UNREPRODUCIBLE"
+    assert audit_tampered["reproduced"] is False
+
+    # 3. Empty evaluated_market_refs fails audit
+    class _MalformedTrace:
+        pass
+    empty_refs_trace = _MalformedTrace()
+    for attr in ("decision_id", "strategy_name", "account_label", "decision_time", "intent_produced", "intent_id", "rejection_reason", "input_hash", "frame_digest", "trace_payload"):
+        setattr(empty_refs_trace, attr, getattr(trace, attr))
+    empty_refs_trace.evaluated_market_refs = ()
+    audit_empty = await audit_decision_trace(trace.decision_id, trace_override=empty_refs_trace)
+    assert audit_empty["status"] == "EVIDENCE_INSUFFICIENT"
+    assert audit_empty["reproduced"] is False
+
+
 
 
