@@ -2433,8 +2433,8 @@ def _build_position_batches(
                 reassigned_quantity=str(diag.reassigned_quantity),
             )
 
-    # Read-only shadow comparison: run PositionLedger in parallel
-    # without affecting execution
+    # Authoritative PositionLedger projection: builds primary batches
+    # with zero-gap reconciliation.
     try:
         position_key = PositionKey(
             environment=getattr(position, "environment", "live"),

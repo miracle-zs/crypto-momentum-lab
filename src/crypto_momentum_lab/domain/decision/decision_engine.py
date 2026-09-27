@@ -813,12 +813,19 @@ def create_authoritative_decision_filter(
             )
 
         scope_to_use = getattr(state, "environment", None) or "live"
+        base_policy = EffectivePolicy(
+            policy_id=f"policy_{strategy_name}",
+            strategy_name=strategy_name,
+            target_notional=notional,
+            candidate_generator=lambda inp, st: None,
+        )
         dec_input = build_decision_input(
             state=state,
             frozen=frozen,
             clock_sequence=1,
             scope=scope_to_use,
             source_epoch=f"ep_{scope_to_use}",
+            policy=base_policy,
         )
 
         filtered_candidates: list[OrderIntentCandidate] = []

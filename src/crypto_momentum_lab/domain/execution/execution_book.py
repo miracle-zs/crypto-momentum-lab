@@ -252,6 +252,22 @@ class ExecutionBook:
                 active.append(r)
         return active
 
+    def get_active_reservations(
+        self, key: PositionKey | None = None
+    ) -> tuple[PositionReservation, ...]:
+        """Returns all currently active reservations tracked by the domain coordinator."""
+        if hasattr(self._coordinator, "get_active_reservations"):
+            if key is not None:
+                return self._coordinator.get_active_reservations(key)
+            active = [
+                r
+                for r in getattr(self._coordinator, "_reservations_by_id", {}).values()
+                if r.active_quantity > Decimal("0")
+            ]
+            active.sort(key=lambda r: (r.created_at, r.reservation_id))
+            return tuple(active)
+        return ()
+
     async def read(
         self,
         scope: ExecutionScope,

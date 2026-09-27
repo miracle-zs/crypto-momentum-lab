@@ -393,6 +393,8 @@ class OrderExecutionCoordinator:
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
         """Returns currently tracked active reservations."""
+        if self.is_execution_book_enabled and self._execution_book is not None:
+            return self._execution_book.get_active_reservations(key)
         if key is None:
             return tuple(
                 r
