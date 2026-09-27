@@ -390,8 +390,16 @@ class BinanceUsdMPrivateReadClient:
             for item in _require_sequence_of_mappings(payload)
         )
 
-    async def fetch_positions(self) -> tuple[AccountPositionSnapshot, ...]:
-        payload = await self._signed_get("/fapi/v3/positionRisk")
+    async def fetch_positions(
+        self, *, include_flat: bool = False
+    ) -> tuple[AccountPositionSnapshot, ...]:
+        """Read actual position rows; V2 retains explicit flat rows for bootstrap.
+
+        V3 omits symbols without positions/open orders. Absence in that response
+        must never be converted into an invented zero-position observation.
+        """
+        path = "/fapi/v2/positionRisk" if include_flat else "/fapi/v3/positionRisk"
+        payload = await self._signed_get(path)
         observed_at = self._now()
         return tuple(
             AccountPositionSnapshot(

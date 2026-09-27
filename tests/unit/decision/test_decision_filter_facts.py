@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.decision.decision_engine import (
     FrozenDecisionInputs,
     PolicyState,
@@ -185,13 +187,18 @@ def test_frozen_inputs_reject_negative_cash() -> None:
         raise AssertionError("negative cash must be rejected")
 
 
-def test_filter_invokes_on_decision_result_callback() -> None:
-    from crypto_momentum_lab.domain.decision.decision_engine import DecisionResult
+@pytest.mark.asyncio
+async def test_filter_invokes_on_decision_result_callback() -> None:
+    from crypto_momentum_lab.domain.decision.decision_engine import (
+        DecisionResult,
+        EffectivePolicy,
+    )
     from crypto_momentum_lab.domain.strategy.models import (
         EntryType,
         OrderIntentCandidate,
         StrategySide,
     )
+    from crypto_momentum_lab.domain.strategy.sizing import FixedNotionalSizingModel
 
     key = PositionKey(
         environment="live",
@@ -226,11 +233,20 @@ def test_filter_invokes_on_decision_result_callback() -> None:
     )
 
     results_captured: list[DecisionResult] = []
+    traces_captured = []
+    effective_policy = EffectivePolicy(
+        policy_id="sized-policy",
+        strategy_name="orderflow_impulse",
+        target_notional=Decimal("500"),
+        sizing_model=FixedNotionalSizingModel(target_notional=Decimal("21")),
+    )
     filt = create_authoritative_decision_filter(
         "orderflow_impulse",
         target_notional=Decimal("500"),
         fact_provider=lambda state: frozen,
         on_decision_result=results_captured.append,
+        trace_recorder=traces_captured.append,
+        effective_policy=effective_policy,
     )
 
     from crypto_momentum_lab.domain.strategy.models import (
@@ -267,7 +283,7 @@ def test_filter_invokes_on_decision_result_callback() -> None:
         expires_at=datetime(2026, 9, 25, 8, 1, tzinfo=UTC),
         created_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
         reason="momentum_entry",
-        features={},
+        features={"business_value": "01.00"},
     )
     dec = StrategyDecision(signals=(sig,), candidates=(cand,), rejections=())
     out = filt(dec, _state())
@@ -275,6 +291,60 @@ def test_filter_invokes_on_decision_result_callback() -> None:
     assert len(results_captured) == 1
     assert results_captured[0].next_policy_state.policy_version > 3
     assert len(out.candidates) == 1
+    assert out.candidates[0].desired_notional == Decimal("21.000")
+    assert out.candidates[0].features["quantized_quantity"] == "0.21"
+    assert out.candidates[0].features["business_value"] == "01.00"
+    assert (
+        traces_captured[0].trace_payload["input_candidate"]["desired_notional"] == "500"
+    )
+    assert (
+        traces_captured[0].trace_payload["input_candidate"]["features"][
+            "business_value"
+        ]
+        == "01.00"
+    )
+    assert traces_captured[0].trace_payload["output_intent"]["desired_notional"] == "21"
+
+    from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
+
+    replay = await audit_decision_trace(
+        traces_captured[0].decision_id,
+        trace_override=traces_captured[0],
+    )
+    assert replay["status"] == "VERIFIED_REPRODUCIBLE", replay
+    assert replay["reproduced"] is True
+
+    # A callback's own TypeError is a real callback failure. It must not be
+    # mistaken for the legacy one-argument callback signature and invoked twice.
+    callback_calls = []
+
+    def broken_callback(result, decision_input=None):
+        callback_calls.append((result, decision_input))
+        raise TypeError("callback implementation failed")
+
+    broken_callback_filter = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        fact_provider=lambda state: frozen,
+        on_decision_result=broken_callback,
+        effective_policy=effective_policy,
+    )
+    with pytest.raises(TypeError, match="callback implementation failed"):
+        broken_callback_filter(dec, _state())
+    assert len(callback_calls) == 1
+
+    # A failed authoritative trace write is surfaced so the caller cannot
+    # silently proceed with a decision that has no durable audit record.
+    def broken_trace_recorder(trace):
+        raise RuntimeError("trace write failed")
+
+    broken_trace_filter = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        fact_provider=lambda state: frozen,
+        trace_recorder=broken_trace_recorder,
+        effective_policy=effective_policy,
+    )
+    with pytest.raises(RuntimeError, match="trace write failed"):
+        broken_trace_filter(dec, _state())
 
 
 def test_filter_evaluates_open_position_exit_when_candidates_empty() -> None:

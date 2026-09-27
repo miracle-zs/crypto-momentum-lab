@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from crypto_momentum_lab.domain.market.market_book import (
@@ -195,16 +196,25 @@ class DecisionTraceService:
         elif trace.trace_payload:
             orig_intent = trace.trace_payload.get("output_intent")
             if orig_intent is not None and replayed_notional is not None:
-                expected_notional = str(
-                    orig_intent.get("desired_notional")
-                    or orig_intent.get("target_notional")
-                )
-                if replayed_notional != expected_notional:
+                expected_value = orig_intent.get("desired_notional")
+                if expected_value is None:
+                    expected_value = orig_intent.get("target_notional")
+                try:
+                    expected_notional = Decimal(str(expected_value))
+                    actual_notional = Decimal(str(replayed_notional))
+                    notional_matches = (
+                        expected_notional.is_finite()
+                        and actual_notional.is_finite()
+                        and expected_notional == actual_notional
+                    )
+                except (InvalidOperation, ValueError):
+                    notional_matches = False
+                if not notional_matches:
                     reproduced = False
                     divergence = (
                         f"Divergence in {replay_mode.value} replay: "
                         f"target notional mismatch "
-                        f"(original={expected_notional}, replayed={replayed_notional})"
+                        f"(original={expected_value}, replayed={replayed_notional})"
                     )
             orig_state = trace.trace_payload.get("next_policy_state")
             if (

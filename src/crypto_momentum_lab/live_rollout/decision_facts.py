@@ -20,7 +20,6 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     DecisionResult,
     FrozenDecisionInputs,
     PolicyState,
-    build_decision_trace,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -274,54 +273,53 @@ class LiveDecisionFactSource:
                 if trace is not None and trace.trace_payload:
                     st_data = trace.trace_payload.get("next_policy_state")
                     if st_data:
-                        cooldown_raw = (
-                            st_data.get("cooldown_until_by_symbol")
-                            or st_data.get("cooldown_until", {})
-                        )
-                        anchor_raw = (
-                            st_data.get("anchor_prices_by_symbol")
-                            or st_data.get("anchor_prices", {})
-                        )
-                        intent_raw = (
-                            st_data.get("active_intent_ids_by_symbol")
-                            or st_data.get("active_intent_ids", {})
-                        )
+                        cooldown_raw = st_data.get(
+                            "cooldown_until_by_symbol"
+                        ) or st_data.get("cooldown_until", {})
+                        anchor_raw = st_data.get(
+                            "anchor_prices_by_symbol"
+                        ) or st_data.get("anchor_prices", {})
+                        intent_raw = st_data.get(
+                            "active_intent_ids_by_symbol"
+                        ) or st_data.get("active_intent_ids", {})
                         warmup_raw = st_data.get("warmup_status", {})
-                        grace_raw = (
-                            st_data.get("grace_until_by_symbol")
-                            or st_data.get("grace_until", {})
+                        grace_raw = st_data.get("grace_until_by_symbol") or st_data.get(
+                            "grace_until", {}
                         )
-                        deadline_raw = (
-                            st_data.get("holding_deadline_by_symbol")
-                            or st_data.get("holding_deadline", {})
-                        )
+                        deadline_raw = st_data.get(
+                            "holding_deadline_by_symbol"
+                        ) or st_data.get("holding_deadline", {})
                         custom_raw = st_data.get("custom_state", {})
                         signal_raw = st_data.get("signal_memory", {})
-                        sizing_raw = (
-                            st_data.get("sizing_state_by_symbol")
-                            or st_data.get("sizing_state", {})
-                        )
+                        sizing_raw = st_data.get(
+                            "sizing_state_by_symbol"
+                        ) or st_data.get("sizing_state", {})
 
                         self._policy_state = PolicyState(
                             policy_version=int(st_data.get("policy_version", 1)),
                             cooldown_until_by_symbol={
-                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                k: datetime.fromisoformat(v)
+                                if isinstance(v, str)
+                                else v
                                 for k, v in cooldown_raw.items()
                             },
                             anchor_prices_by_symbol={
-                                k: Decimal(str(v))
-                                for k, v in anchor_raw.items()
+                                k: Decimal(str(v)) for k, v in anchor_raw.items()
                             },
                             active_intent_ids_by_symbol=dict(intent_raw),
                             custom_state=dict(custom_raw),
                             signal_memory=dict(signal_raw),
                             warmup_status=dict(warmup_raw),
                             grace_until_by_symbol={
-                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                k: datetime.fromisoformat(v)
+                                if isinstance(v, str)
+                                else v
                                 for k, v in grace_raw.items()
                             },
                             holding_deadline_by_symbol={
-                                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                                k: datetime.fromisoformat(v)
+                                if isinstance(v, str)
+                                else v
                                 for k, v in deadline_raw.items()
                             },
                             sizing_state_by_symbol=dict(sizing_raw),
@@ -417,14 +415,9 @@ class LiveDecisionFactSource:
         decision_input: DecisionInput | None = None,
     ) -> None:
         self.set_policy_state(result.next_policy_state)
-        if self._trace_repository is not None and decision_input is not None:
-            trace = build_decision_trace(
-                result,
-                decision_input,
-                strategy_name=self._strategy_name,
-                account_label=self._account_label,
-            )
-            self.record_trace(trace)
+        # The engine's trace_recorder owns the complete frozen trace, including
+        # policy, prior state and original candidate. Do not overwrite it with
+        # an incomplete second trace under the same decision ID.
         if result.exit_command is not None and self._exit_handler is not None:
             try:
                 res = self._exit_handler(result.exit_command)

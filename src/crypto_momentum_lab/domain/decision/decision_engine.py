@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from inspect import signature
 from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
@@ -27,10 +29,12 @@ from crypto_momentum_lab.domain.decision.decision_frame import (
 from crypto_momentum_lab.domain.decision.policy_transition import (
     PolicyTransition,
     StrategyPositionMode,
+    canonicalize_policy_value,
     compute_policy_parameters_digest,
     compute_policy_state_digest,
     execute_policy_transition,
     serialize_policy_parameters,
+    serialize_policy_state,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
@@ -56,6 +60,8 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitPolicy,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _require_aware(dt: datetime, name: str) -> datetime:
@@ -346,6 +352,7 @@ class DecisionResult:
     evaluated_at: datetime
     frame_digest: str = ""
     transition: PolicyTransition | None = None
+    decision_frame: DecisionFrame | None = None
 
 
 def compute_decision_input_hash(
@@ -359,20 +366,25 @@ def compute_decision_input_hash(
     universe, clock, risk parameters, full policy parameters, and complete policy state.
     """
     pos_key = decision_input.position_view.key
-    batches_summary = [
-        (
-            b.batch_id,
-            str(b.original_quantity),
-            str(
-                getattr(b, "remaining_quantity", None)
-                or getattr(b, "quantity", None)
-                or "0"
-            ),
-            str(b.entry_price),
-            b.opened_at.isoformat(),
+    batches_summary = []
+    for batch in decision_input.position_view.batches:
+        remaining_quantity = getattr(batch, "remaining_quantity", None)
+        if remaining_quantity is None:
+            remaining_quantity = getattr(batch, "quantity", Decimal("0"))
+        batches_summary.append(
+            (
+                getattr(batch, "batch_id", ""),
+                getattr(batch, "episode_id", ""),
+                str(getattr(batch, "original_quantity", "0")),
+                str(remaining_quantity),
+                str(getattr(batch, "entry_price", "0")),
+                (
+                    batch.opened_at.isoformat()
+                    if hasattr(getattr(batch, "opened_at", None), "isoformat")
+                    else str(getattr(batch, "opened_at", ""))
+                ),
+            )
         )
-        for b in decision_input.position_view.batches
-    ]
     payload: dict[str, Any] = {
         "symbol": decision_input.symbol,
         "market_revision_id": decision_input.market_ref.revision_id,
@@ -400,27 +412,7 @@ def compute_decision_input_hash(
         "cash_balance": str(decision_input.cash_balance),
         "risk_config_version": decision_input.risk_config_version,
         "policy_parameters": serialize_policy_parameters(policy),
-        "policy_state": {
-            "policy_version": state.policy_version,
-            "cooldown_until_by_symbol": {
-                k: v.isoformat()
-                for k, v in sorted(state.cooldown_until_by_symbol.items())
-            },
-            "anchor_prices_by_symbol": {
-                k: str(v) for k, v in sorted(state.anchor_prices_by_symbol.items())
-            },
-            "active_intent_ids_by_symbol": dict(
-                sorted(state.active_intent_ids_by_symbol.items())
-            ),
-            "warmup_status": dict(sorted(state.warmup_status.items())),
-            "grace_until_by_symbol": {
-                k: v.isoformat() for k, v in sorted(state.grace_until_by_symbol.items())
-            },
-            "holding_deadline_by_symbol": {
-                k: v.isoformat()
-                for k, v in sorted(state.holding_deadline_by_symbol.items())
-            },
-        },
+        "policy_state": serialize_policy_state(state),
     }
     if decision_input.frame is not None:
         payload["frame_digest"] = decision_input.frame.frame_digest
@@ -490,6 +482,7 @@ def decide(
         evaluated_at=transition.transition_time,
         frame_digest=transition.frame_digest,
         transition=transition,
+        decision_frame=frame,
     )
 
 
@@ -625,98 +618,150 @@ def decision_trace_from_result(
     account_label: str = "primary",
     prior_policy_state: PolicyState | None = None,
     policy: EffectivePolicy | None = None,
+    input_candidate: OrderIntentCandidate | None = None,
 ) -> DecisionTrace:
     """Builds an immutable DecisionTrace with semantic outputs and next state."""
-    cd_items = result.next_policy_state.cooldown_until_by_symbol.items()
-    anchor_items = result.next_policy_state.anchor_prices_by_symbol.items()
-    intent_items = result.next_policy_state.active_intent_ids_by_symbol.items()
-    warmup_items = result.next_policy_state.warmup_status.items()
-    grace_items = getattr(result.next_policy_state, "grace_until_by_symbol", {}).items()
-    deadline_items = getattr(result.next_policy_state, "holding_deadline_by_symbol", {}).items()
-    sig_mem = getattr(result.next_policy_state, "signal_memory", {})
-    custom_st = getattr(result.next_policy_state, "custom_state", {})
-    sizing_st = getattr(result.next_policy_state, "sizing_state_by_symbol", {})
-
+    frame = result.decision_frame or decision_input.frame
     payload: dict[str, Any] = {
+        "trace_schema_version": 1,
         "input_hash": result.input_hash,
         "frame_digest": result.frame_digest,
-        "next_policy_state": {
-            "policy_version": result.next_policy_state.policy_version,
-            "cooldown_until": {k: v.isoformat() for k, v in sorted(cd_items)},
-            "anchor_prices": {k: str(v) for k, v in sorted(anchor_items)},
-            "active_intent_ids": dict(sorted(intent_items)),
-            "warmup_status": dict(sorted(warmup_items)),
-            "grace_until": {k: v.isoformat() for k, v in sorted(grace_items)},
-            "holding_deadline": {k: v.isoformat() for k, v in sorted(deadline_items)},
-            "signal_memory": dict(sig_mem),
-            "custom_state": dict(custom_st),
-            "sizing_state": dict(sizing_st),
+        "next_policy_state": serialize_policy_state(result.next_policy_state),
+        "clock_event": {
+            "timestamp": decision_input.clock_event.timestamp.isoformat(),
+            "sequence": decision_input.clock_event.sequence,
+            "event_type": decision_input.clock_event.event_type,
         },
     }
     if prior_policy_state is not None:
-        prior_cd = prior_policy_state.cooldown_until_by_symbol.items()
-        prior_anchors = prior_policy_state.anchor_prices_by_symbol.items()
-        prior_intents = prior_policy_state.active_intent_ids_by_symbol.items()
-        prior_warmup = prior_policy_state.warmup_status.items()
-        prior_grace = getattr(prior_policy_state, "grace_until_by_symbol", {}).items()
-        prior_deadlines = getattr(prior_policy_state, "holding_deadline_by_symbol", {}).items()
-        payload["prior_policy_state"] = {
-            "policy_version": prior_policy_state.policy_version,
-            "cooldown_until": {k: v.isoformat() for k, v in sorted(prior_cd)},
-            "anchor_prices": {k: str(v) for k, v in sorted(prior_anchors)},
-            "active_intent_ids": dict(sorted(prior_intents)),
-            "warmup_status": dict(sorted(prior_warmup)),
-            "grace_until": {k: v.isoformat() for k, v in sorted(prior_grace)},
-            "holding_deadline": {k: v.isoformat() for k, v in sorted(prior_deadlines)},
-            "signal_memory": dict(getattr(prior_policy_state, "signal_memory", {})),
-            "custom_state": dict(getattr(prior_policy_state, "custom_state", {})),
-            "sizing_state": dict(getattr(prior_policy_state, "sizing_state_by_symbol", {})),
-        }
+        payload["prior_policy_state"] = serialize_policy_state(prior_policy_state)
     if policy is not None:
         payload["policy_parameters"] = serialize_policy_parameters(policy)
+        if callable(
+            getattr(policy, "candidate_generator", None)
+        ) and decision_input.position_view.total_quantity == Decimal("0"):
+            payload["candidate_generation_mode"] = "injected_candidate"
+            if input_candidate is not None:
+                payload["input_candidate"] = _serialize_intent_candidate(
+                    input_candidate
+                )
+        else:
+            payload["candidate_generation_mode"] = "policy"
 
-    if hasattr(decision_input, "position_view") and decision_input.position_view is not None:
-        pv = decision_input.position_view
-        batches_data = []
-        for b in getattr(pv, "batches", ()):
-            qty_val = getattr(b, "quantity", None)
-            if qty_val is None:
-                qty_val = getattr(b, "allocated_quantity", "0")
-            batches_data.append({
-                "batch_id": getattr(b, "batch_id", ""),
-                "symbol": getattr(b, "symbol", pv.key.symbol),
-                "side": (
-                    b.side.value if hasattr(getattr(b, "side", None), "value") else str(getattr(b, "side", ""))
-                ),
-                "allocated_quantity": str(qty_val),
-                "quantity": str(qty_val),
-                "entry_price": str(getattr(b, "entry_price", "0")),
-                "opened_at": (
-                    b.opened_at.isoformat() if hasattr(getattr(b, "opened_at", None), "isoformat") else str(getattr(b, "opened_at", ""))
-                ),
-            })
-        payload["decision_context"] = {
-            "cash_balance": str(getattr(decision_input, "cash_balance", "10000.00")),
-            "universe_version": getattr(decision_input, "universe_version", "u1"),
-            "risk_config_version": getattr(decision_input, "risk_config_version", "risk_v1"),
-            "position_view": {
-                "symbol": pv.key.symbol,
-                "position_side": (
-                    pv.key.position_side.value
-                    if hasattr(pv.key.position_side, "value")
-                    else str(pv.key.position_side)
-                ),
-                "total_quantity": str(getattr(pv, "total_quantity", "0")),
-                "unallocated_quantity": str(getattr(pv, "unallocated_quantity", "0")),
-                "health_status": (
-                    pv.health_status.value
-                    if hasattr(pv.health_status, "value")
-                    else str(pv.health_status)
-                ),
-                "projection_version": getattr(pv, "projection_version", "pv_replay_0"),
-                "batches": batches_data,
+    if frame is not None:
+        payload["decision_frame"] = {
+            "scope": frame.scope,
+            "symbol": frame.symbol,
+            "market_revision_ids": [ref.revision_id for ref in frame.market_refs],
+            "position_view_token": frame.position_view_token,
+            "clock_event": {
+                "timestamp": frame.clock_event.timestamp.isoformat(),
+                "sequence": frame.clock_event.sequence,
+                "event_type": frame.clock_event.event_type,
             },
+            "universe_version": frame.universe_version,
+            "risk_config_version": frame.risk_config_version,
+            "policy_code_digest": frame.policy_code_digest,
+            "policy_parameters_digest": frame.policy_parameters_digest,
+            "policy_state_digest": frame.policy_state_digest,
+            "risk_plan_digest": frame.risk_plan_digest,
+            "cash_balance": str(frame.cash_balance),
+            "max_clock_skew_seconds": str(frame.max_clock_skew.total_seconds()),
         }
+
+    pv = decision_input.position_view
+    batches_data = []
+    for batch in getattr(pv, "batches", ()):
+        quantity = getattr(batch, "quantity", None)
+        if quantity is None:
+            quantity = getattr(batch, "allocated_quantity", "0")
+        remaining_quantity = getattr(batch, "remaining_quantity", None)
+        if remaining_quantity is None:
+            remaining_quantity = quantity
+        opened_at = getattr(batch, "opened_at", None)
+        exit_submitted_at = getattr(batch, "exit_order_submitted_at", None)
+        batches_data.append(
+            {
+                "batch_id": getattr(batch, "batch_id", ""),
+                "episode_id": getattr(batch, "episode_id", ""),
+                "symbol": getattr(batch, "symbol", pv.key.symbol),
+                "side": _enum_value(getattr(batch, "side", pv.key.position_side)),
+                "quantity": str(quantity),
+                "remaining_quantity": str(remaining_quantity),
+                "allocated_quantity": str(quantity),
+                "original_quantity": str(getattr(batch, "original_quantity", quantity)),
+                "entry_price": str(getattr(batch, "entry_price", "0")),
+                "opened_at": opened_at.isoformat()
+                if hasattr(opened_at, "isoformat")
+                else str(opened_at or ""),
+                "exit_order_submitted_at": (
+                    exit_submitted_at.isoformat()
+                    if hasattr(exit_submitted_at, "isoformat")
+                    else None
+                ),
+            }
+        )
+
+    active_episode = getattr(pv, "active_episode", None)
+    active_episode_data = None
+    if active_episode is not None:
+        active_episode_data = {
+            "episode_id": active_episode.episode_id,
+            "side": _enum_value(active_episode.side),
+            "opened_at": active_episode.opened_at.isoformat(),
+            "closed_at": (
+                active_episode.closed_at.isoformat()
+                if active_episode.closed_at is not None
+                else None
+            ),
+            "is_active": active_episode.is_active,
+            "cumulative_bought": str(active_episode.cumulative_bought),
+            "cumulative_sold": str(active_episode.cumulative_sold),
+            "peak_quantity": str(active_episode.peak_quantity),
+        }
+    key = pv.key
+    payload["decision_context"] = {
+        "cash_balance": str(decision_input.cash_balance),
+        "universe_version": decision_input.universe_version,
+        "risk_config_version": decision_input.risk_config_version,
+        "position_view": {
+            "position_key": {
+                "environment": key.environment,
+                "account_label": key.account_label,
+                "symbol": key.symbol,
+                "position_side": _enum_value(key.position_side),
+            },
+            "symbol": pv.key.symbol,
+            "position_side": _enum_value(pv.key.position_side),
+            "total_quantity": str(pv.total_quantity),
+            "unallocated_quantity": str(pv.unallocated_quantity),
+            "health_status": _enum_value(pv.health_status),
+            "projection_version": pv.projection_version,
+            "input_revision": pv.input_revision,
+            "event_cut": pv.event_cut.isoformat() if pv.event_cut else None,
+            "policy_version": pv.policy_version,
+            "schema_version": pv.schema_version,
+            "reconciliation_gap": (
+                str(pv.reconciliation_gap)
+                if pv.reconciliation_gap is not None
+                else None
+            ),
+            "is_comparable": pv.is_comparable,
+            "active_episode": active_episode_data,
+            "batches": batches_data,
+        },
+    }
+    payload["closed_candles"] = [
+        {
+            "symbol": candle.symbol,
+            "candle_start": candle.candle_start.isoformat(),
+            "candle_end": candle.candle_end.isoformat(),
+            "open_price": str(candle.open_price),
+            "close_price": str(candle.close_price),
+        }
+        for candle in decision_input.closed_candles
+    ]
+
     if (
         hasattr(decision_input, "market_envelope")
         and decision_input.market_envelope is not None
@@ -728,33 +773,19 @@ def decision_trace_from_result(
                 decision_input.market_envelope.state
             )
         except Exception:
-            pass
+            log.exception("decision_trace_market_state_serialization_failed")
     if result.intent is not None:
-        notional = getattr(result.intent, "desired_notional", None)
-        if notional is None:
-            notional = getattr(result.intent, "target_notional", None)
-        lim = result.intent.limit_price
-        payload["output_intent"] = {
-            "candidate_id": result.intent.candidate_id,
-            "symbol": result.intent.symbol,
-            "desired_notional": str(notional) if notional is not None else None,
-            "target_notional": str(notional) if notional is not None else None,
-            "limit_price": str(lim) if lim is not None else None,
-        }
+        payload["output_intent"] = _serialize_intent_candidate(result.intent)
     if result.exit_command is not None:
-        cmd = result.exit_command
-        payload["output_exit_command"] = {
-            "command_id": cmd.command_id,
-            "symbol": cmd.position_key.symbol,
-            "quantity": str(cmd.requested_quantity),
-            "side": (cmd.side.value if hasattr(cmd.side, "value") else str(cmd.side)),
-        }
+        payload["output_exit_command"] = canonicalize_policy_value(result.exit_command)
     return DecisionTrace(
         decision_id=result.decision_id,
         strategy_name=strategy_name,
         account_label=account_label,
         decision_time=result.evaluated_at,
-        evaluated_market_refs=(decision_input.market_ref,),
+        evaluated_market_refs=(
+            frame.market_refs if frame is not None else (decision_input.market_ref,)
+        ),
         intent_produced=result.intent is not None,
         intent_id=result.intent.candidate_id if result.intent is not None else None,
         rejection_reason=result.rejection_reason,
@@ -764,7 +795,77 @@ def decision_trace_from_result(
     )
 
 
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, Any]:
+    notional = candidate.desired_notional
+    features = canonicalize_policy_value(candidate.features)
+    if isinstance(features, dict) and features.get("sizing_model"):
+        for key in (
+            "quantized_quantity",
+            "lot_remainder",
+            "target_notional",
+            "actual_notional",
+            "step_size",
+            "margin_required",
+        ):
+            value = features.get(key)
+            if isinstance(value, str):
+                try:
+                    features[key] = canonicalize_policy_value(Decimal(value))
+                except InvalidOperation:
+                    continue
+    return {
+        "candidate_id": candidate.candidate_id,
+        "signal_id": candidate.signal_id,
+        "run_id": candidate.run_id,
+        "strategy_name": candidate.strategy_name,
+        "strategy_version": candidate.strategy_version,
+        "config_hash": candidate.config_hash,
+        "symbol": candidate.symbol,
+        "side": _enum_value(candidate.side),
+        "entry_type": _enum_value(candidate.entry_type),
+        "limit_price": (
+            canonicalize_policy_value(candidate.limit_price)
+            if candidate.limit_price is not None
+            else None
+        ),
+        "desired_notional": (
+            canonicalize_policy_value(notional) if notional is not None else None
+        ),
+        "target_notional": (
+            canonicalize_policy_value(notional) if notional is not None else None
+        ),
+        "reduce_only": candidate.reduce_only,
+        "expires_at": candidate.expires_at.isoformat(),
+        "created_at": candidate.created_at.isoformat(),
+        "reason": candidate.reason,
+        "features": features,
+    }
+
+
 build_decision_trace = decision_trace_from_result
+
+
+def _invoke_decision_callback(
+    callback: Callable[..., Any],
+    result: DecisionResult,
+    decision_input: DecisionInput,
+) -> None:
+    """Adapt the supported one/two-argument callback forms without retrying it."""
+    try:
+        callback_signature = signature(callback)
+    except (TypeError, ValueError):
+        callback(result, decision_input)
+        return
+    try:
+        callback_signature.bind(result, decision_input)
+    except TypeError:
+        callback(result)
+    else:
+        callback(result, decision_input)
 
 
 def map_decision_rejection_reason(raw_reason: str | None) -> str:
@@ -855,21 +956,21 @@ def create_authoritative_decision_filter(
                     )
                     dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
                     if trace_recorder is not None:
-                        try:
-                            trace = build_decision_trace(
-                                dec_res,
-                                dec_input,
-                                strategy_name=strategy_name,
-                                account_label=frozen.position_view.key.account_label,
-                            )
-                            trace_recorder(trace)
-                        except Exception:
-                            pass
+                        trace = build_decision_trace(
+                            dec_res,
+                            dec_input,
+                            strategy_name=strategy_name,
+                            account_label=frozen.position_view.key.account_label,
+                            prior_policy_state=frozen.policy_state,
+                            policy=policy,
+                        )
+                        trace_recorder(trace)
                     if on_decision_result is not None:
-                        try:
-                            on_decision_result(dec_res, dec_input)
-                        except TypeError:
-                            on_decision_result(dec_res)
+                        _invoke_decision_callback(
+                            on_decision_result,
+                            dec_res,
+                            dec_input,
+                        )
             return decision
 
         if fact_provider is None:
@@ -936,23 +1037,22 @@ def create_authoritative_decision_filter(
             # Shared starting PolicyState — never a fresh empty state.
             dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
             if trace_recorder is not None:
-                try:
-                    trace = build_decision_trace(
-                        dec_res,
-                        dec_input,
-                        strategy_name=strategy_name,
-                        account_label=frozen.position_view.key.account_label,
-                        prior_policy_state=frozen.policy_state,
-                        policy=policy,
-                    )
-                    trace_recorder(trace)
-                except Exception:
-                    pass
+                trace = build_decision_trace(
+                    dec_res,
+                    dec_input,
+                    strategy_name=strategy_name,
+                    account_label=frozen.position_view.key.account_label,
+                    prior_policy_state=frozen.policy_state,
+                    policy=policy,
+                    input_candidate=cand,
+                )
+                trace_recorder(trace)
             if on_decision_result is not None:
-                try:
-                    on_decision_result(dec_res, dec_input)
-                except TypeError:
-                    on_decision_result(dec_res)
+                _invoke_decision_callback(
+                    on_decision_result,
+                    dec_res,
+                    dec_input,
+                )
             if dec_res.intent is not None:
                 filtered_candidates.append(dec_res.intent)
             else:

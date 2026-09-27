@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -6,6 +5,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+
+import structlog
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -45,7 +46,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-import structlog
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +54,13 @@ async def _maybe_await(val: Any) -> Any:
     if inspect.isawaitable(val):
         return await val
     return val
+
+
+def _required_text(values: Mapping[str, Any], field_name: str) -> str:
+    value = values.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"execution command {field_name} is missing or invalid")
+    return value
 
 
 class DispatchState(StrEnum):
@@ -189,6 +196,8 @@ class Applied:
     updated_view_token: str
     consumed_quantity: Decimal = Decimal("0")
     released_quantity: Decimal = Decimal("0")
+    recovery_required: bool = False
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,113 +248,102 @@ class ExecutionBook:
         self._outbox_by_command_id: dict[str, OutboxEntry] = {}
         self._command_reservations: dict[str, list[str]] = {}
         self._order_cumulative_fills: dict[str, Decimal] = {}
-        self._active_persist_tasks: set[asyncio.Task[Any]] = set()
+        self._order_cumulative_quotes: dict[str, Decimal] = {}
+        self._persistence_failed = False
+        self._recovery_required_commands: set[str] = set()
+        self._dispatch_reconciliation_required_commands: set[str] = set()
 
     @property
     def coordinator(self) -> ExecutionCoordinator:
         return self._coordinator
 
+    @property
+    def has_command_repository(self) -> bool:
+        return self._command_repo is not None
+
     async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
-        if self._command_repo is not None:
-            try:
-                upserter = getattr(self._command_repo, "upsert_execution_command", None)
-                if callable(upserter):
-                    details = {
-                        "scope": {
-                            "environment": entry.scope.environment,
-                            "account_label": entry.scope.account_label,
-                            "symbol": entry.scope.symbol,
-                            "position_side": (
-                                entry.scope.position_side.value
-                                if hasattr(entry.scope.position_side, "value")
-                                else str(entry.scope.position_side)
-                            ),
-                        },
-                        "request_id": entry.request_id,
-                        "attempt_count": entry.attempt_count,
-                        "external_order_id": entry.external_order_id,
-                        "last_error": entry.last_error,
-                        "quantity": str(entry.command.requested_quantity),
-                        "side": (
-                            entry.command.side.value
-                            if hasattr(entry.command.side, "value")
-                            else str(entry.command.side)
-                        ),
-                        "order_type": (
-                            entry.command.order_type.value
-                            if hasattr(entry.command.order_type, "value")
-                            else str(entry.command.order_type)
-                        ),
-                        "limit_price": (
-                            str(entry.command.limit_price)
-                            if entry.command.limit_price is not None
-                            else None
-                        ),
-                        "reduce_only": entry.command.reduce_only,
-                        "expected_projection_version": entry.command.expected_projection_version,
-                        "reservations": self._command_reservations.get(
-                            entry.command_id, []
-                        ),
-                    }
-                    await _maybe_await(
-                        upserter(
-                            command_id=entry.command_id,
-                            client_order_id=entry.command.command_id,
-                            command=(
-                                entry.command.command_type.value
-                                if hasattr(entry.command.command_type, "value")
-                                else str(entry.command.command_type)
-                            ),
-                            status=entry.state.value,
-                            requested_at=entry.created_at,
-                            details=details,
-                        )
-                    )
-            except Exception as err:
-                log.error(
-                    "persist_outbox_state_failed",
+        if self._command_repo is None:
+            return
+        upserter = getattr(self._command_repo, "upsert_execution_command", None)
+        if not callable(upserter):
+            raise RuntimeError(
+                "command repository does not implement upsert_execution_command"
+            )
+        watermark_key = self._order_watermark_key(
+            entry.scope.to_position_key(), entry.command.command_id
+        )
+        details = {
+            "scope": {
+                "environment": entry.scope.environment,
+                "account_label": entry.scope.account_label,
+                "symbol": entry.scope.symbol,
+                "position_side": (
+                    entry.scope.position_side.value
+                    if hasattr(entry.scope.position_side, "value")
+                    else str(entry.scope.position_side)
+                ),
+            },
+            "request_id": entry.request_id,
+            "attempt_count": entry.attempt_count,
+            "external_order_id": entry.external_order_id,
+            "last_error": entry.last_error,
+            "quantity": str(entry.command.requested_quantity),
+            "side": (
+                entry.command.side.value
+                if hasattr(entry.command.side, "value")
+                else str(entry.command.side)
+            ),
+            "order_type": (
+                entry.command.order_type.value
+                if hasattr(entry.command.order_type, "value")
+                else str(entry.command.order_type)
+            ),
+            "limit_price": (
+                str(entry.command.limit_price)
+                if entry.command.limit_price is not None
+                else None
+            ),
+            "reduce_only": entry.command.reduce_only,
+            "expected_projection_version": entry.command.expected_projection_version,
+            "reservations": self._command_reservations.get(entry.command_id, []),
+            "cumulative_filled_quantity": str(
+                self._order_cumulative_fills.get(watermark_key, Decimal("0"))
+            ),
+            "cumulative_filled_quote": str(
+                self._order_cumulative_quotes.get(watermark_key, Decimal("0"))
+            ),
+        }
+        try:
+            await _maybe_await(
+                upserter(
                     command_id=entry.command_id,
-                    error=str(err),
+                    client_order_id=entry.command.command_id,
+                    command=(
+                        entry.command.command_type.value
+                        if hasattr(entry.command.command_type, "value")
+                        else str(entry.command.command_type)
+                    ),
+                    status=entry.state.value,
+                    requested_at=entry.created_at,
+                    details=details,
                 )
-
-    def _trigger_persist_outbox(self, entry: OutboxEntry) -> None:
-        if self._command_repo is not None:
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._persist_outbox_state(entry))
-                self._active_persist_tasks.add(task)
-
-                def _on_done(t: asyncio.Task[Any]) -> None:
-                    self._active_persist_tasks.discard(t)
-                    if not t.cancelled() and t.exception():
-                        log.error(
-                            "persist_outbox_task_failed",
-                            command_id=entry.command_id,
-                            error=str(t.exception()),
-                        )
-
-                task.add_done_callback(_on_done)
-            except RuntimeError:
-                pass
+            )
+        except Exception as err:
+            self._persistence_failed = True
+            log.error(
+                "persist_outbox_state_failed",
+                command_id=entry.command_id,
+                error=str(err),
+            )
+            raise
 
     async def drain(self, timeout_seconds: float = 5.0) -> None:
-        """Awaits in-flight asynchronous outbox persistence tasks before shutdown."""
-        if not self._active_persist_tasks:
-            return
-        tasks = list(self._active_persist_tasks)
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
-            log.warning(
-                "drain_outbox_persist_tasks_timeout",
-                remaining=len(self._active_persist_tasks),
-            )
+        """Lifecycle hook retained for callers; all persistence is awaited inline."""
+        del timeout_seconds
 
     async def restore(self, account_label: str | None = None) -> None:
         """Restores in-flight outbox commands, deduplication, and reservations."""
+        self._persistence_failed = True
         if self._command_repo is not None:
             loader = getattr(self._command_repo, "load_active_execution_commands", None)
             if callable(loader):
@@ -360,104 +358,226 @@ class ExecutionBook:
                     else:
                         active_cmds = await _maybe_await(loader())
                     for cmd_data in active_cmds:
-                        cid = cmd_data["command_id"]
-                        status_str = cmd_data.get("status", "prepared")
-                        dtls = cmd_data.get("details", {})
-                        scope_data = dtls.get("scope", {})
-                        acc = scope_data.get("account_label", "primary")
+                        if not isinstance(cmd_data, Mapping):
+                            raise TypeError("execution command row must be a mapping")
+                        cid = _required_text(cmd_data, "command_id")
+                        client_order_id = _required_text(cmd_data, "client_order_id")
+                        if cid != client_order_id:
+                            raise ValueError(
+                                "execution command_id must match client_order_id"
+                            )
+                        status_str = _required_text(cmd_data, "status")
+                        disp_state = DispatchState(status_str)
+                        dtls = cmd_data.get("details")
+                        if not isinstance(dtls, Mapping):
+                            raise TypeError(
+                                "execution command details must be a mapping"
+                            )
+                        scope_data = dtls.get("scope")
+                        if not isinstance(scope_data, Mapping):
+                            raise TypeError("execution command scope must be a mapping")
+                        environment = _required_text(scope_data, "environment")
+                        acc = _required_text(scope_data, "account_label")
+                        symbol = _required_text(scope_data, "symbol")
+                        position_side = FuturesPositionSide(
+                            _required_text(scope_data, "position_side")
+                        )
                         if account_label is not None and acc != account_label:
                             continue
                         scope = ExecutionScope(
-                            environment=scope_data.get("environment", "live"),
+                            environment=environment,
                             account_label=acc,
-                            symbol=scope_data.get("symbol", "BTCUSDT"),
-                            position_side=FuturesPositionSide(
-                                scope_data.get("position_side", "BOTH")
-                            ),
+                            symbol=symbol,
+                            position_side=position_side,
                         )
-                        side_val = dtls.get("side")
-                        if side_val:
-                            try:
-                                side = StrategySide(side_val)
-                            except ValueError:
-                                side = StrategySide.LONG
-                        else:
-                            side = StrategySide.LONG
-
-                        order_type_val = dtls.get("order_type")
-                        if order_type_val:
-                            try:
-                                order_type = EntryType(order_type_val.lower())
-                            except ValueError:
-                                order_type = EntryType.MARKET
-                        else:
-                            order_type = EntryType.MARKET
-
+                        side = StrategySide(_required_text(dtls, "side"))
+                        order_type = EntryType(
+                            _required_text(dtls, "order_type").lower()
+                        )
+                        command_type = TradeCommandType(
+                            _required_text(cmd_data, "command").lower()
+                        )
+                        quantity = Decimal(_required_text(dtls, "quantity"))
+                        if not quantity.is_finite() or quantity <= Decimal("0"):
+                            raise ValueError(
+                                "execution command quantity must be positive"
+                            )
+                        if "reduce_only" not in dtls or not isinstance(
+                            dtls["reduce_only"], bool
+                        ):
+                            raise ValueError(
+                                "execution command reduce_only must be persisted "
+                                "as bool"
+                            )
+                        raw_res_ids = dtls.get("reservations")
+                        if not isinstance(raw_res_ids, (list, tuple)) or any(
+                            not isinstance(res_id, str) or not res_id
+                            for res_id in raw_res_ids
+                        ):
+                            raise ValueError(
+                                "execution command reservation links are missing "
+                                "or invalid"
+                            )
+                        request_id = _required_text(dtls, "request_id")
+                        requested_at = cmd_data.get("requested_at")
+                        if (
+                            not isinstance(requested_at, datetime)
+                            or requested_at.tzinfo is None
+                        ):
+                            raise ValueError(
+                                "execution command requested_at must be timezone-aware"
+                            )
+                        attempt_count = dtls.get("attempt_count")
+                        if not isinstance(attempt_count, int) or attempt_count < 0:
+                            raise ValueError(
+                                "execution command attempt_count is missing or invalid"
+                            )
                         limit_price_val = dtls.get("limit_price")
                         limit_price = (
                             Decimal(str(limit_price_val))
                             if limit_price_val is not None
                             else None
                         )
-                        reduce_only = bool(dtls.get("reduce_only", False))
-                        expected_ver = dtls.get("expected_projection_version")
 
                         cmd = TradeCommand(
                             command_id=cid,
                             position_key=scope.to_position_key(),
-                            command_type=(
-                                TradeCommandType(
-                                    cmd_data.get("command", "ENTRY").lower()
-                                )
-                                if cmd_data.get("command")
-                                else TradeCommandType.ENTRY
-                            ),
+                            command_type=command_type,
                             side=side,
                             order_type=order_type,
-                            requested_quantity=Decimal(str(dtls.get("quantity", "1"))),
+                            requested_quantity=quantity,
                             limit_price=limit_price,
-                            reduce_only=reduce_only,
-                            expected_projection_version=expected_ver,
-                            created_at=cmd_data.get("requested_at", datetime.now(UTC)),
+                            reduce_only=dtls["reduce_only"],
+                            expected_projection_version=dtls.get(
+                                "expected_projection_version"
+                            ),
+                            created_at=requested_at,
                         )
-                        try:
-                            disp_state = DispatchState(status_str)
-                        except ValueError:
-                            disp_state = DispatchState.UNKNOWN
                         entry = OutboxEntry(
                             command_id=cid,
-                            request_id=dtls.get("request_id", cid),
+                            request_id=request_id,
                             scope=scope,
                             command=cmd,
                             state=disp_state,
-                            attempt_count=dtls.get("attempt_count", 0),
+                            attempt_count=attempt_count,
                             external_order_id=dtls.get("external_order_id"),
                             last_error=dtls.get("last_error"),
-                            created_at=cmd_data.get("requested_at", datetime.now(UTC)),
-                            updated_at=datetime.now(UTC),
+                            created_at=requested_at,
+                            updated_at=requested_at,
                         )
                         self._outbox_by_command_id[cid] = entry
-                        res_ids = dtls.get("reservations", [])
-                        if res_ids:
-                            self._command_reservations[cid] = res_ids
+                        self._command_reservations[cid] = list(raw_res_ids)
+                        if disp_state == DispatchState.UNKNOWN:
+                            self._dispatch_reconciliation_required_commands.add(cid)
+                        elif disp_state == DispatchState.DISPATCHING:
+                            # A process may have stopped after the network write
+                            # but before recording its response. Never redispatch.
+                            unknown = replace(
+                                entry,
+                                state=DispatchState.UNKNOWN,
+                                last_error="restored dispatch requires reconciliation",
+                                updated_at=datetime.now(UTC),
+                            )
+                            self._outbox_by_command_id[cid] = unknown
+                            self._dispatch_reconciliation_required_commands.add(cid)
+                            await self._persist_outbox_state(unknown)
                 except Exception as err:
-                    log.warning("restore_active_commands_failed", error=str(err))
+                    log.error("restore_active_commands_failed", error=str(err))
+                    raise RuntimeError(
+                        "Failed to restore active execution commands"
+                    ) from err
+            else:
+                raise RuntimeError(
+                    "command repository does not implement active command restore"
+                )
 
             ev_loader = getattr(self._command_repo, "load_seen_event_ids", None)
             if callable(ev_loader):
                 try:
                     seen_events = await _maybe_await(ev_loader())
                     self._seen_evidence_ids.update(seen_events)
-                except Exception:
-                    pass
+                except Exception as err:
+                    raise RuntimeError(
+                        "Failed to restore execution event identities"
+                    ) from err
+            else:
+                raise RuntimeError(
+                    "command repository does not implement event identity restore"
+                )
 
             fill_loader = getattr(self._command_repo, "load_seen_fill_trade_ids", None)
             if callable(fill_loader):
                 try:
                     seen_trades = await _maybe_await(fill_loader())
                     self._seen_trade_ids.update(seen_trades)
-                except Exception:
-                    pass
+                except Exception as err:
+                    raise RuntimeError("Failed to restore fill identities") from err
+            else:
+                raise RuntimeError(
+                    "command repository does not implement fill identity restore"
+                )
+
+            watermark_loader = getattr(
+                self._command_repo, "load_execution_order_watermarks", None
+            )
+            if not callable(watermark_loader):
+                raise RuntimeError(
+                    "command repository does not implement cumulative fill "
+                    "watermark restore"
+                )
+            try:
+                import inspect
+
+                sig = inspect.signature(watermark_loader)
+                if "account_label" in sig.parameters:
+                    watermark_rows = await _maybe_await(
+                        watermark_loader(account_label=account_label)
+                    )
+                else:
+                    watermark_rows = await _maybe_await(watermark_loader())
+                for row in watermark_rows:
+                    scope_data = row["scope"]
+                    scope = ExecutionScope(
+                        environment=scope_data["environment"],
+                        account_label=scope_data["account_label"],
+                        symbol=scope_data["symbol"],
+                        position_side=FuturesPositionSide(scope_data["position_side"]),
+                    )
+                    if (
+                        account_label is not None
+                        and scope.account_label != account_label
+                    ):
+                        continue
+                    order_id = _required_text(row, "client_order_id")
+                    quantity = Decimal(str(row["cumulative_filled_quantity"]))
+                    if not quantity.is_finite() or quantity < Decimal("0"):
+                        raise ValueError("cumulative fill watermark cannot be negative")
+                    quote = Decimal(str(row["cumulative_filled_quote"]))
+                    if not quote.is_finite() or quote < Decimal("0"):
+                        raise ValueError(
+                            "cumulative quote watermark cannot be negative"
+                        )
+                    if quantity == Decimal("0") and quote != Decimal("0"):
+                        raise ValueError(
+                            "zero-quantity order cannot have cumulative quote"
+                        )
+                    if quantity > Decimal("0") and quote <= Decimal("0"):
+                        raise ValueError(
+                            "positive cumulative quantity requires positive quote"
+                        )
+                    key = self._order_watermark_key(scope.to_position_key(), order_id)
+                    self._order_cumulative_fills[key] = max(
+                        self._order_cumulative_fills.get(key, Decimal("0")),
+                        quantity,
+                    )
+                    self._order_cumulative_quotes[key] = max(
+                        self._order_cumulative_quotes.get(key, Decimal("0")),
+                        quote,
+                    )
+            except Exception as err:
+                raise RuntimeError(
+                    "Failed to restore cumulative fill watermarks"
+                ) from err
 
         if self._reservation_repo is not None:
             res_loader = getattr(
@@ -467,9 +587,19 @@ class ExecutionBook:
                 try:
                     active_res = await _maybe_await(res_loader())
                     for r in active_res:
+                        if (
+                            account_label is not None
+                            and r.position_key.account_label != account_label
+                        ):
+                            continue
                         self._coordinator.register_reservation(r)
-                except Exception:
-                    pass
+                except Exception as err:
+                    raise RuntimeError("Failed to restore active reservations") from err
+            else:
+                raise RuntimeError(
+                    "reservation repository does not implement active restore"
+                )
+        self._persistence_failed = False
 
     def _ensure_book(self, key: PositionKey) -> PositionBook:
         canon = key.canonical_id
@@ -484,6 +614,10 @@ class ExecutionBook:
         if canon not in self._journals:
             self._journals[canon] = AccountJournal(key)
         return self._journals[canon]
+
+    @staticmethod
+    def _order_watermark_key(key: PositionKey, order_id: str) -> str:
+        return f"{key.canonical_id}\x1f{order_id}"
 
     def _find_active_reservations_for_command(
         self, command_id: str
@@ -528,6 +662,24 @@ class ExecutionBook:
         request: ExecutionRequest,
     ) -> ExecutionActResult:
         """Accepts a trade request, enforcing CAS view token, capacity, and outbox."""
+        if self._persistence_failed:
+            return Blocked(
+                reason=(
+                    "Execution persistence failed; restore is required before trading"
+                )
+            )
+        if self._recovery_required_commands:
+            return Blocked(
+                reason="Execution reservation settlement requires recovery",
+                diagnostics=tuple(sorted(self._recovery_required_commands)),
+            )
+        if self._dispatch_reconciliation_required_commands:
+            return Blocked(
+                reason="Execution command reconciliation is required",
+                diagnostics=tuple(
+                    sorted(self._dispatch_reconciliation_required_commands)
+                ),
+            )
         key = request.scope.to_position_key()
         book = self._ensure_book(key)
         view = book.get_view()
@@ -541,6 +693,12 @@ class ExecutionBook:
             return CommandConflict(
                 request_id=request.request_id,
                 reason="Conflicting payload for identical request_id",
+            )
+        restored_entry = self._outbox_by_command_id.get(request.request_id)
+        if restored_entry is not None:
+            return Blocked(
+                reason="Execution command already exists and requires reconciliation",
+                diagnostics=(restored_entry.state.value,),
             )
 
         # 2. View token CAS validation
@@ -788,12 +946,47 @@ class ExecutionBook:
             created_at=committed_at,
             updated_at=committed_at,
         )
-        self._outbox_by_command_id[command.command_id] = outbox
-        await self._persist_outbox_state(outbox)
         if reservations:
             self._command_reservations[command.command_id] = [
                 r.reservation_id for r in reservations
             ]
+        self._outbox_by_command_id[command.command_id] = outbox
+        try:
+            await self._persist_outbox_state(outbox)
+        except Exception as persist_err:
+            self._outbox_by_command_id.pop(command.command_id, None)
+            self._command_reservations.pop(command.command_id, None)
+            rollback_errors: list[str] = []
+            for reservation in reservations:
+                current = self._coordinator.get_reservation(reservation.reservation_id)
+                if current is None or current.active_quantity <= Decimal("0"):
+                    continue
+                try:
+                    released = self._coordinator.release_reservation(
+                        current.reservation_id, current.active_quantity
+                    )
+                    if self._reservation_repo is not None:
+                        updater = getattr(
+                            self._reservation_repo, "update_reservation", None
+                        )
+                        if callable(updater):
+                            await _maybe_await(
+                                updater(
+                                    released,
+                                    release_reason="outbox_acceptance_failed",
+                                )
+                            )
+                except Exception as rollback_err:
+                    rollback_errors.append(str(rollback_err))
+            diagnostics = [f"outbox persistence failed: {persist_err}"]
+            if rollback_errors:
+                diagnostics.append(
+                    "reservation rollback failed: " + "; ".join(rollback_errors)
+                )
+            return Blocked(
+                reason="Execution command was not durably accepted",
+                diagnostics=tuple(diagnostics),
+            )
 
         receipt = ExecutionReceipt(
             request_id=request.request_id,
@@ -851,14 +1044,14 @@ class ExecutionBook:
             entries = [e for e in entries if e.state == state]
         return tuple(entries)
 
-    def mark_dispatching(
+    async def mark_dispatching(
         self, command_id: str, dispatched_at: datetime | None = None
     ) -> OutboxEntry:
-        """Transitions outbox from PREPARED/UNKNOWN to DISPATCHING."""
+        """Transition PREPARED to DISPATCHING; UNKNOWN requires reconciliation."""
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
-        if entry.state not in (DispatchState.PREPARED, DispatchState.UNKNOWN):
+        if entry.state != DispatchState.PREPARED:
             raise ValueError(
                 f"Cannot dispatch outbox entry in state {entry.state.value}"
             )
@@ -869,11 +1062,10 @@ class ExecutionBook:
             attempt_count=entry.attempt_count + 1,
             updated_at=now,
         )
-        self._outbox_by_command_id[command_id] = updated
-        self._trigger_persist_outbox(updated)
-        return updated
+        await self._persist_transition(entry, updated)
+        return self._outbox_by_command_id[command_id]
 
-    def mark_acknowledged(
+    async def mark_acknowledged(
         self,
         command_id: str,
         external_order_id: str,
@@ -890,11 +1082,10 @@ class ExecutionBook:
             external_order_id=external_order_id,
             updated_at=now,
         )
-        self._outbox_by_command_id[command_id] = updated
-        self._trigger_persist_outbox(updated)
-        return updated
+        await self._persist_transition(entry, updated)
+        return self._outbox_by_command_id[command_id]
 
-    def mark_unknown(
+    async def mark_unknown(
         self,
         command_id: str,
         reason: str,
@@ -904,6 +1095,8 @@ class ExecutionBook:
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
+        if entry.state in (DispatchState.TERMINAL, DispatchState.REJECTED):
+            return entry
         now = unknown_at or datetime.now(UTC)
         updated = replace(
             entry,
@@ -911,11 +1104,18 @@ class ExecutionBook:
             last_error=reason,
             updated_at=now,
         )
-        self._outbox_by_command_id[command_id] = updated
-        self._trigger_persist_outbox(updated)
-        return updated
+        self._dispatch_reconciliation_required_commands.add(command_id)
+        try:
+            await self._persist_transition(entry, updated)
+        except Exception:
+            # Once a submit may have reached the exchange, a failed durable
+            # UNKNOWN write must still seal this process against resubmission.
+            self._outbox_by_command_id[command_id] = updated
+            self._persistence_failed = True
+            raise
+        return self._outbox_by_command_id[command_id]
 
-    def mark_rejected(
+    async def mark_rejected(
         self,
         command_id: str,
         reason: str,
@@ -926,21 +1126,17 @@ class ExecutionBook:
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
         now = rejected_at or datetime.now(UTC)
-        active_res = self._find_active_reservations_for_command(command_id)
-        for res in active_res:
-            self._coordinator.release_reservation(res.reservation_id)
-
         updated = replace(
             entry,
             state=DispatchState.REJECTED,
             last_error=reason,
             updated_at=now,
         )
-        self._outbox_by_command_id[command_id] = updated
-        self._trigger_persist_outbox(updated)
-        return updated
+        await self._persist_transition(entry, updated)
+        await self._release_command_reservations(command_id, reason="command_rejected")
+        return self._outbox_by_command_id[command_id]
 
-    def mark_terminal(
+    async def mark_terminal(
         self,
         command_id: str,
         reason: str = "",
@@ -951,19 +1147,64 @@ class ExecutionBook:
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
         now = terminal_at or datetime.now(UTC)
-        active_res = self._find_active_reservations_for_command(command_id)
-        for res in active_res:
-            self._coordinator.release_reservation(res.reservation_id)
-
         updated = replace(
             entry,
             state=DispatchState.TERMINAL,
             last_error=reason if reason else entry.last_error,
             updated_at=now,
         )
-        self._outbox_by_command_id[command_id] = updated
-        self._trigger_persist_outbox(updated)
-        return updated
+        await self._persist_transition(entry, updated)
+        await self._release_command_reservations(
+            command_id, reason=reason or "command_terminal"
+        )
+        return self._outbox_by_command_id[command_id]
+
+    async def _persist_transition(
+        self,
+        previous: OutboxEntry,
+        updated: OutboxEntry,
+    ) -> None:
+        await self._persist_outbox_state(updated)
+        self._outbox_by_command_id[updated.command_id] = updated
+
+    async def _release_command_reservations(
+        self,
+        command_id: str,
+        *,
+        reason: str,
+    ) -> Decimal:
+        released_total = Decimal("0")
+        for reservation in self._find_active_reservations_for_command(command_id):
+            released = reservation.release(reservation.active_quantity)
+            await self._persist_reservation_update(released, release_reason=reason)
+            released_total += released.released_quantity - reservation.released_quantity
+        return released_total
+
+    async def _persist_reservation_update(
+        self,
+        reservation: PositionReservation,
+        *,
+        release_reason: str | None = None,
+    ) -> None:
+        if self._reservation_repo is not None:
+            updater = getattr(self._reservation_repo, "update_reservation", None)
+            if not callable(updater):
+                self._persistence_failed = True
+                raise RuntimeError(
+                    "reservation repository does not implement update_reservation"
+                )
+            try:
+                if release_reason is None:
+                    await _maybe_await(updater(reservation))
+                else:
+                    await _maybe_await(
+                        updater(reservation, release_reason=release_reason)
+                    )
+            except Exception:
+                self._persistence_failed = True
+                self._recovery_required_commands.add(reservation.command_id)
+                raise
+        self._coordinator.update_reservation(reservation)
 
     async def observe(
         self,
@@ -984,103 +1225,200 @@ class ExecutionBook:
 
         consumed_qty = Decimal("0")
         released_qty = Decimal("0")
+        settlement_recovery_required = False
+        diagnostics: tuple[str, ...] = ()
+        pending_watermark: tuple[str, Decimal, Decimal] | None = None
+        dispatch_reconciled_command_id: str | None = None
 
         # 1. Process Fill
         if evidence.fill is not None:
-            trade_id = evidence.fill.trade_id
-            order_id = evidence.fill.order_id
-            is_new_trade = trade_id not in self._seen_trade_ids
+            fill = evidence.fill
+            trade_id = fill.trade_id
+            order_id = fill.order_id
+            raw_payload = fill.raw_payload if isinstance(fill.raw_payload, dict) else {}
+            is_cumulative = bool(
+                raw_payload.get("is_cumulative") or "cum_qty" in raw_payload
+            )
+            delta_qty = fill.quantity
+            applied_fill = fill
+            if is_cumulative:
+                cumulative_qty = Decimal(str(raw_payload.get("cum_qty", fill.quantity)))
+                cumulative_quote = Decimal(
+                    str(raw_payload.get("cum_quote", cumulative_qty * fill.price))
+                )
+                if (
+                    not cumulative_qty.is_finite()
+                    or not cumulative_quote.is_finite()
+                    or cumulative_qty < Decimal("0")
+                    or cumulative_quote < Decimal("0")
+                ):
+                    return EvidenceConflict(
+                        evidence_id=evidence.evidence_id,
+                        reason="Cumulative fill quantity or quote is invalid",
+                    )
+                watermark_key = self._order_watermark_key(key, order_id)
+                previous_cumulative = self._order_cumulative_fills.get(
+                    watermark_key, Decimal("0")
+                )
+                previous_quote = self._order_cumulative_quotes.get(
+                    watermark_key, Decimal("0")
+                )
+                delta_qty = cumulative_qty - previous_cumulative
+                if delta_qty < Decimal("0"):
+                    # An older exchange report is harmless: it must not rewind
+                    # the high-water mark or change the current position view.
+                    delta_qty = Decimal("0")
+                elif delta_qty == Decimal("0"):
+                    if cumulative_quote != previous_quote:
+                        return EvidenceConflict(
+                            evidence_id=evidence.evidence_id,
+                            reason=(
+                                "Cumulative quote changed without a quantity change"
+                            ),
+                        )
+                else:
+                    delta_quote = cumulative_quote - previous_quote
+                    if delta_quote <= Decimal("0"):
+                        return EvidenceConflict(
+                            evidence_id=evidence.evidence_id,
+                            reason=(
+                                "Cumulative quote did not increase with cumulative "
+                                "quantity"
+                            ),
+                        )
+                    if trade_id in self._seen_trade_ids:
+                        return EvidenceConflict(
+                            evidence_id=evidence.evidence_id,
+                            reason=(
+                                f"Cumulative fill identity {trade_id} was reused with "
+                                "a higher cumulative quantity"
+                            ),
+                        )
+                    applied_fill = replace(
+                        fill,
+                        quantity=delta_qty,
+                        price=delta_quote / delta_qty,
+                    )
+                    pending_watermark = (
+                        watermark_key,
+                        cumulative_qty,
+                        cumulative_quote,
+                    )
 
-            if is_new_trade:
-                accepted = journal.append_fill(evidence.fill)
-                if not accepted and journal.has_conflicts:
+            existing_trade = next(
+                (
+                    prior
+                    for prior in journal.read_cut().fills
+                    if prior.trade_id == trade_id
+                ),
+                None,
+            )
+            if not is_cumulative and existing_trade is not None:
+                if (
+                    existing_trade.quantity != fill.quantity
+                    or existing_trade.price != fill.price
+                    or existing_trade.side.upper() != fill.side.upper()
+                    or existing_trade.symbol != fill.symbol
+                ):
                     return EvidenceConflict(
                         evidence_id=evidence.evidence_id,
                         reason=(
-                            f"Fill {evidence.fill.trade_id} conflicted with "
-                            "existing journal records"
+                            f"Fill {trade_id} conflicts with existing journal records"
                         ),
                     )
-                self._seen_trade_ids.add(trade_id)
+                # A repeated exchange trade can arrive with a new transport
+                # evidence ID. The trade ID, rather than the evidence ID, owns
+                # fill quantity and reservation settlement.
+                delta_qty = Decimal("0")
+            elif not is_cumulative and trade_id in self._seen_trade_ids:
+                # Restore currently reloads trade identities without replaying
+                # all historical fills into the journal. In that case we know
+                # this ID was consumed but cannot prove the payload matches.
+                return EvidenceConflict(
+                    evidence_id=evidence.evidence_id,
+                    reason=(
+                        f"Fill {trade_id} was already seen but its journal facts "
+                        "are unavailable; recovery is required"
+                    ),
+                )
 
-                # Deduplicate cumulative vs incremental fill quantity
-                # Invariant: 3 -> 3 -> 5 only consumes 5 total
-                fill_qty = evidence.fill.quantity
-                if isinstance(evidence.fill.raw_payload, dict) and (
-                    evidence.fill.raw_payload.get("is_cumulative")
-                    or "cum_qty" in evidence.fill.raw_payload
-                ):
-                    cum_val = Decimal(
-                        str(evidence.fill.raw_payload.get("cum_qty", fill_qty))
+            is_new_trade = trade_id not in self._seen_trade_ids
+            if is_new_trade:
+                if delta_qty > Decimal("0"):
+                    accepted = journal.append_fill(applied_fill)
+                    if not accepted and journal.has_conflicts:
+                        return EvidenceConflict(
+                            evidence_id=evidence.evidence_id,
+                            reason=(
+                                f"Fill {fill.trade_id} conflicted with "
+                                "existing journal records"
+                            ),
+                        )
+                    self._seen_trade_ids.add(trade_id)
+                elif not is_cumulative:
+                    self._seen_trade_ids.add(trade_id)
+
+            active_episode = book.get_view().active_episode
+            is_exit_fill = (
+                (
+                    fill.side.upper() == "SELL"
+                    and key.position_side == FuturesPositionSide.LONG
+                )
+                or (
+                    fill.side.upper() == "BUY"
+                    and key.position_side == FuturesPositionSide.SHORT
+                )
+                or bool(self._find_active_reservations_for_command(order_id))
+                or bool(raw_payload.get("reduce_only"))
+                or (
+                    evidence.order_event is not None
+                    and bool((evidence.order_event.details or {}).get("is_reduce_only"))
+                )
+                or (
+                    active_episode is not None
+                    and (
+                        (
+                            active_episode.side == StrategySide.LONG
+                            and fill.side.upper() == "SELL"
+                        )
+                        or (
+                            active_episode.side == StrategySide.SHORT
+                            and fill.side.upper() == "BUY"
+                        )
                     )
-                    prev_cum = self._order_cumulative_fills.get(order_id, Decimal("0"))
-                    delta_qty = max(Decimal("0"), cum_val - prev_cum)
-                    self._order_cumulative_fills[order_id] = cum_val
+                )
+            )
+            if is_exit_fill and delta_qty > Decimal("0"):
+                linked_reservations = self._find_active_reservations_for_command(
+                    order_id
+                )
+                if not linked_reservations:
+                    self._recovery_required_commands.add(order_id)
+                    diagnostics = (
+                        f"No active reservation is linked to filled command {order_id}",
+                    )
+                    settlement_recovery_required = True
                 else:
-                    delta_qty = fill_qty
-
-                # Reconcile active reservations if this is an exit / reduction fill
-                is_exit_fill = (
-                    (
-                        evidence.fill.side.upper() == "SELL"
-                        and key.position_side == FuturesPositionSide.LONG
-                    )
-                    or (
-                        evidence.fill.side.upper() == "BUY"
-                        and key.position_side == FuturesPositionSide.SHORT
-                    )
-                    or bool(self._find_active_reservations_for_command(order_id))
-                    or (
-                        evidence.order_event is not None
-                        and bool(
-                            (evidence.order_event.details or {}).get("is_reduce_only")
-                        )
-                    )
-                    or (
-                        isinstance(evidence.fill.raw_payload, dict)
-                        and bool(evidence.fill.raw_payload.get("reduce_only"))
-                    )
-                    or (
-                        book.get_view().active_episode is not None
-                        and (
-                            (
-                                book.get_view().active_episode.side == StrategySide.LONG
-                                and evidence.fill.side.upper() == "SELL"
-                            )
-                            or (
-                                book.get_view().active_episode.side == StrategySide.SHORT
-                                and evidence.fill.side.upper() == "BUY"
-                            )
-                        )
-                    )
-                )
-
-                already_reconciled = (
-                    isinstance(evidence.fill.raw_payload, dict)
-                    and bool(evidence.fill.raw_payload.get("reservation_reconciled"))
-                )
-                if is_exit_fill and delta_qty > Decimal("0") and not already_reconciled:
-                    cand_res = self._find_active_reservations_for_command(order_id)
-                    if not cand_res:
-                        cand_res = list(self._coordinator.get_active_reservations(key))
-
                     remaining = delta_qty
-                    for res in cand_res:
+                    for reservation in linked_reservations:
                         if remaining <= Decimal("0"):
                             break
-                        consume_amt = min(remaining, res.active_quantity)
+                        consume_amt = min(remaining, reservation.active_quantity)
                         if consume_amt > Decimal("0"):
-                            updated_res = self._coordinator.reconcile_fill(
-                                res.reservation_id, consume_amt
-                            )
-                            if self._reservation_repo is not None:
-                                updater = getattr(
-                                    self._reservation_repo, "update_reservation", None
-                                )
-                                if callable(updater):
-                                    await _maybe_await(updater(updated_res))
+                            updated_res = reservation.consume(consume_amt)
+                            await self._persist_reservation_update(updated_res)
                             consumed_qty += consume_amt
                             remaining -= consume_amt
+                    if remaining > Decimal("0"):
+                        self._recovery_required_commands.add(order_id)
+                        reported_quantity = (
+                            cumulative_qty if is_cumulative else delta_qty
+                        )
+                        diagnostics = (
+                            f"Cumulative fill {reported_quantity} exceeds linked "
+                            f"active reservations by {remaining}",
+                        )
+                        settlement_recovery_required = True
 
         # 2. Process Snapshot
         if evidence.snapshot is not None:
@@ -1099,109 +1437,93 @@ class ExecutionBook:
             ev_state = evidence.order_event.state
             cmd_id = evidence.order_event.client_order_id
             outbox = self._outbox_by_command_id.get(cmd_id)
+            already_terminal = outbox is not None and outbox.state in (
+                DispatchState.TERMINAL,
+                DispatchState.REJECTED,
+            )
 
-            if ev_state in (
-                ExchangeOrderState.ACKNOWLEDGED,
-                ExchangeOrderState.SUBMITTED,
-            ):
-                if outbox is not None and outbox.state in (
+            if outbox is not None and not already_terminal:
+                if ev_state in (
+                    ExchangeOrderState.ACKNOWLEDGED,
+                    ExchangeOrderState.SUBMITTED,
+                ) and outbox.state in (
                     DispatchState.PREPARED,
                     DispatchState.DISPATCHING,
                     DispatchState.UNKNOWN,
                 ):
-                    self._outbox_by_command_id[cmd_id] = replace(
+                    await self._persist_transition(
                         outbox,
-                        state=DispatchState.ACKNOWLEDGED,
-                        updated_at=evidence.observed_at,
+                        replace(
+                            outbox,
+                            state=DispatchState.ACKNOWLEDGED,
+                            updated_at=evidence.observed_at,
+                        ),
                     )
-                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
-            elif ev_state in (
-                ExchangeOrderState.CANCELED,
-                ExchangeOrderState.EXPIRED,
-                ExchangeOrderState.REJECTED,
-                ExchangeOrderState.ABSENT_RECONCILED,
-            ):
-                # Terminal non-filled state: release remaining active reservations
-                active_res = self._find_active_reservations_for_command(cmd_id)
-                for res in active_res:
-                    to_release = res.active_quantity
-                    released_res = self._coordinator.release_reservation(
-                        res.reservation_id, to_release
-                    )
-                    if self._reservation_repo is not None:
-                        updater = getattr(
-                            self._reservation_repo, "update_reservation", None
-                        )
-                        if callable(updater):
-                            await _maybe_await(
-                                updater(
-                                    released_res,
-                                    release_reason=f"order_finished_residual_release_{ev_state.value}",
-                                )
-                            )
-                    released_qty += to_release
-
-                if outbox is not None:
+                elif ev_state in (
+                    ExchangeOrderState.CANCELED,
+                    ExchangeOrderState.EXPIRED,
+                    ExchangeOrderState.REJECTED,
+                    ExchangeOrderState.ABSENT_RECONCILED,
+                    ExchangeOrderState.FILLED,
+                ):
                     target_state = (
                         DispatchState.REJECTED
                         if ev_state == ExchangeOrderState.REJECTED
                         else DispatchState.TERMINAL
                     )
-                    self._outbox_by_command_id[cmd_id] = replace(
+                    updated = replace(
                         outbox,
                         state=target_state,
-                        last_error=f"Order {ev_state.value}",
+                        last_error=(
+                            f"Order {ev_state.value}"
+                            if ev_state != ExchangeOrderState.FILLED
+                            else outbox.last_error
+                        ),
                         updated_at=evidence.observed_at,
                     )
-                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
-            elif ev_state == ExchangeOrderState.FILLED:
-                active_res = self._find_active_reservations_for_command(cmd_id)
-                for res in active_res:
-                    if self._reservation_repo is not None:
-                        loader = getattr(
-                            self._reservation_repo, "load_reservation", None
-                        )
-                        if callable(loader):
-                            try:
-                                loaded = await _maybe_await(loader(res.reservation_id))
-                                if loaded is not None:
-                                    res = loaded
-                            except Exception:
-                                pass
-                    if res.active_quantity > Decimal("0"):
-                        to_release = res.active_quantity
-                        released_res = self._coordinator.release_reservation(
-                            res.reservation_id, to_release
-                        )
-                        if self._reservation_repo is not None:
-                            updater = getattr(
-                                self._reservation_repo, "update_reservation", None
-                            )
-                            if callable(updater):
-                                await _maybe_await(
-                                    updater(
-                                        released_res,
-                                        release_reason="order_finished_residual_release_filled",
-                                    )
-                                )
-                        released_qty += to_release
+                    await self._persist_transition(outbox, updated)
+                    released_qty += await self._release_command_reservations(
+                        cmd_id,
+                        reason=f"order_finished_{ev_state.value.lower()}",
+                    )
+                    dispatch_reconciled_command_id = cmd_id
+                elif ev_state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                    self._dispatch_reconciliation_required_commands.add(cmd_id)
+                    await self._persist_transition(
+                        outbox,
+                        replace(
+                            outbox,
+                            state=DispatchState.UNKNOWN,
+                            last_error="Pending reconciliation",
+                            updated_at=evidence.observed_at,
+                        ),
+                    )
 
-                if outbox is not None:
-                    self._outbox_by_command_id[cmd_id] = replace(
-                        outbox,
-                        state=DispatchState.TERMINAL,
-                        updated_at=evidence.observed_at,
-                    )
-                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
-            elif ev_state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                if outbox is not None:
-                    self._outbox_by_command_id[cmd_id] = replace(
-                        outbox,
-                        state=DispatchState.UNKNOWN,
-                        last_error="Pending reconciliation",
-                        updated_at=evidence.observed_at,
-                    )
-                    await self._persist_outbox_state(self._outbox_by_command_id[cmd_id])
+        if pending_watermark is not None:
+            watermark_key, cumulative_qty, cumulative_quote = pending_watermark
+            self._order_cumulative_fills[watermark_key] = cumulative_qty
+            self._order_cumulative_quotes[watermark_key] = cumulative_quote
+            cmd_id = (
+                evidence.order_event.client_order_id
+                if evidence.order_event is not None
+                else evidence.fill.order_id
+                if evidence.fill is not None
+                else ""
+            )
+            current_entry = self._outbox_by_command_id.get(cmd_id)
+            if current_entry is not None:
+                await self._persist_outbox_state(current_entry)
+            else:
+                self._recovery_required_commands.add(cmd_id)
+                settlement_recovery_required = True
+                diagnostics = (
+                    f"No outbox command exists for cumulative fill {cmd_id}",
+                )
+
+        if dispatch_reconciled_command_id is not None:
+            self._dispatch_reconciliation_required_commands.discard(
+                dispatch_reconciled_command_id
+            )
 
         self._seen_evidence_ids.add(evidence.evidence_id)
         updated_view = book.get_view(now=evidence.observed_at)
@@ -1211,6 +1533,8 @@ class ExecutionBook:
             updated_view_token=updated_view.projection_version,
             consumed_quantity=consumed_qty,
             released_quantity=released_qty,
+            recovery_required=settlement_recovery_required,
+            diagnostics=diagnostics,
         )
 
 

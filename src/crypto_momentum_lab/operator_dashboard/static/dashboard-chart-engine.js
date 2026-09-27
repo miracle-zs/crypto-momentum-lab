@@ -417,3 +417,18 @@ export function wireEcharts(root = document) {
   const view = doc?.defaultView;
   view?.addEventListener("resize", lifecycle.resize, { passive: true });
 }
+
+export function refreshEcharts(root = document) {
+  if (!root) return;
+  const doc = documentFor(root);
+  chartShells(root).forEach((shell) => {
+    const payload = getChartPayload(shell.dataset.echartId);
+    if (!payload) return;
+    const chart = CHART_INSTANCES.get(shell);
+    if (chart) {
+      chart.setOption(buildChartOption(payload), { notMerge: true, lazyUpdate: false });
+    } else {
+      mountChart(shell, doc);
+    }
+  });
+}

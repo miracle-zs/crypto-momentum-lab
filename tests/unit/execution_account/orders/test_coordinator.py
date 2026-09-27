@@ -24,6 +24,45 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 
+def _register_execution_command_with_reservations(
+    coordinator: OrderExecutionCoordinator,
+    plan: OrderExecutionPlan,
+    reservations: tuple[Any, ...] | list[Any],
+) -> None:
+    """Build the same explicit command-to-allocation link used by live flow."""
+    from crypto_momentum_lab.domain.execution import ExecutionScope, TradeCommandType
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol=plan.symbol,
+        position_side=FuturesPositionSide(plan.position_side),
+    )
+    is_long = (plan.side.upper() == "BUY") != plan.reduce_only
+    command = TradeCommand(
+        command_id=plan.client_order_id,
+        position_key=scope.to_position_key(),
+        command_type=(
+            TradeCommandType.EXIT if plan.reduce_only else TradeCommandType.ENTRY
+        ),
+        side=StrategySide.LONG if is_long else StrategySide.SHORT,
+        order_type=EntryType(plan.order_type.lower()),
+        requested_quantity=plan.quantity,
+        limit_price=plan.price,
+        reduce_only=plan.reduce_only,
+        created_at=plan.created_at,
+    )
+    for reservation in reservations:
+        coordinator.execution_book.coordinator.register_reservation(reservation)
+    coordinator.execution_book.register_prepared_command(
+        command,
+        scope,
+        [reservation.reservation_id for reservation in reservations],
+    )
+
+
 class BlockingBackend:
     def __init__(self) -> None:
         self.query_started = asyncio.Event()
@@ -529,6 +568,7 @@ async def test_cancel_order_releases_reservation_after_backend_success() -> None
         created_at=NOW,
         quantized=True,
     )
+    _register_execution_command_with_reservations(coordinator, plan, [res])
 
     cancel_res = await coordinator.cancel_order(plan)
     assert cancel_res.state is ExchangeOrderState.CANCELED
@@ -657,7 +697,9 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     await coordinator.aclose()
 
 
-async def test_multi_batch_reservation_release_all_on_failure() -> None:
+async def test_multi_batch_reservations_stay_active_on_ambiguous_backend_failure() -> (
+    None
+):
     backend = BlockingBackend()
 
     class InMemoryReservationRepo:
@@ -717,11 +759,16 @@ async def test_multi_batch_reservation_release_all_on_failure() -> None:
     with pytest.raises(RuntimeError, match="Exchange API rejected order"):
         await coordinator.submit(plan)
 
-    # Both batch_1 and batch_2 reservations must be released (active_quantity == 0)
+    # A generic transport exception does not prove the exchange rejected the
+    # order; both allocations stay reserved while the outbox is UNKNOWN.
     assert len(repo.reservations) == 2
     for r in repo.reservations.values():
-        assert r.active_quantity == Decimal("0")
-        assert r.released_quantity > Decimal("0")
+        assert r.active_quantity == r.reserved_quantity
+        assert r.released_quantity == Decimal("0")
+    assert (
+        coordinator.execution_book.get_outbox(plan.client_order_id).state.value
+        == "unknown"
+    )
 
     await coordinator.aclose()
 
@@ -1094,6 +1141,9 @@ async def test_reconcile_order_consumes_filled_reservation() -> None:
         quantized=True,
         batch_id="batch_1",
     )
+    _register_execution_command_with_reservations(
+        coordinator, plan, [repo.reservations[res_id]]
+    )
 
     result = await coordinator.reconcile_order(plan)
     assert result.state == ExchangeOrderState.FILLED
@@ -1182,6 +1232,9 @@ async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
         executed_quantity=Decimal("3.0"),
         average_price=Decimal("100.0"),
         observed_at=NOW,
+    )
+    _register_execution_command_with_reservations(
+        coordinator, plan, [repo.reservations[res_id]]
     )
 
     result = await coordinator.apply_observed_snapshot(plan, snapshot)
@@ -1275,6 +1328,7 @@ async def test_cancel_order_releases_all_allocations_for_command() -> None:
         quantized=True,
         allocations=allocs,
     )
+    _register_execution_command_with_reservations(coordinator, plan, [r0, r1])
 
     result = await coordinator.cancel_order(plan)
     assert result.state == ExchangeOrderState.CANCELED
@@ -1348,9 +1402,7 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
     res = repo.reservations["res_order-reject"]
     assert res.active_quantity == Decimal("0")
     assert res.released_quantity == Decimal("5.0")
-    assert "order_finished_residual_release_rejected" in repo.release_reasons.get(
-        res.reservation_id, ""
-    )
+    assert repo.release_reasons.get(res.reservation_id) == "order_finished_rejected"
     await coordinator.aclose()
 
 
@@ -1556,14 +1608,207 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
     book = coord_4.execution_book
     outbox = book.get_outbox(plan.client_order_id)
     assert outbox is not None
-    assert outbox.state == DispatchState.REJECTED
+    assert outbox.state == DispatchState.UNKNOWN
     assert "Exchange API timeout" in (outbox.last_error or "")
 
-    # Active reservation released
+    # A transport failure does not prove the exchange rejected the order.
     res = repo._reservations[f"res_{plan.client_order_id}"]
-    assert res.active_quantity == Decimal("0")
+    assert res.active_quantity == Decimal("1.0")
 
     await coord_4.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
+    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution import ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    class DispatchFailingRepository:
+        async def upsert_execution_command(self, **kwargs: Any) -> None:
+            if kwargs["status"] == "dispatching":
+                raise RuntimeError("dispatch write failed")
+
+    backend = BlockingBackend()
+    book = ExecutionBook(command_repository=DispatchFailingRepository())
+    reservation_repo = InMemoryPositionReservationRepository()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=reservation_repo,
+        execution_book=book,
+    )
+    plan = _plan("BTCUSDT", reduce_only=False)
+    plan = OrderExecutionPlan(
+        intent_id=plan.intent_id,
+        run_id=plan.run_id,
+        client_order_id=plan.client_order_id,
+        symbol=plan.symbol,
+        side=plan.side,
+        order_type=plan.order_type,
+        quantity=plan.quantity,
+        price=plan.price,
+        reduce_only=False,
+        position_side=plan.position_side,
+        created_at=plan.created_at,
+        quantized=True,
+    )
+    await coordinator.observe_account_snapshot(
+        AccountPositionSnapshot(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            position_side="BOTH",
+            position_amt=Decimal("0"),
+            entry_price=Decimal("0"),
+            mark_price=Decimal("50000"),
+            unrealized_pnl=Decimal("0"),
+            notional=Decimal("0"),
+            leverage=None,
+            margin_type=None,
+            observed_at=NOW,
+            raw_payload={},
+        )
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="dispatch write failed"):
+            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+
+        assert backend.calls == []
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_observation_failure_after_post_keeps_unknown_reservation() -> None:
+    from crypto_momentum_lab.domain.execution import DispatchState, ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    class FailAcknowledgementOnce:
+        def __init__(self) -> None:
+            self.failed = False
+
+        async def upsert_execution_command(self, **kwargs: Any) -> None:
+            if kwargs["status"] == "acknowledged" and not self.failed:
+                self.failed = True
+                raise RuntimeError("acknowledgement write failed")
+
+    class AcceptedBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, **kwargs: Any
+        ):
+            self.calls.append(f"submit:{plan.symbol}:exit")
+            return _result(plan, ExchangeOrderState.ACKNOWLEDGED)
+
+    repo = InMemoryPositionReservationRepository()
+    book = ExecutionBook(
+        command_repository=FailAcknowledgementOnce(),
+        reservation_repository=repo,
+    )
+    backend = AcceptedBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+        execution_book=book,
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-observe-persist-fail",
+        run_id="run-1",
+        client_order_id="order-observe-persist-fail",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch-explicit",
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="acknowledgement write failed"):
+            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+
+        assert backend.calls == ["submit:BTCUSDT:exit"]
+        assert book.get_outbox(plan.client_order_id).state is DispatchState.UNKNOWN
+        reservation = repo._reservations[f"res_{plan.client_order_id}"]
+        assert reservation.active_quantity == Decimal("1.0")
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
+    from crypto_momentum_lab.domain.execution import DispatchState, ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    class FailAcknowledgementAndUnknown:
+        async def upsert_execution_command(self, **kwargs: Any) -> None:
+            if kwargs["status"] in ("acknowledged", "unknown"):
+                raise RuntimeError(f"{kwargs['status']} write failed")
+
+    class AcceptedBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, **kwargs: Any
+        ):
+            self.calls.append(f"submit:{plan.symbol}:exit")
+            return _result(plan, ExchangeOrderState.ACKNOWLEDGED)
+
+    reservation_repo = InMemoryPositionReservationRepository()
+    book = ExecutionBook(
+        command_repository=FailAcknowledgementAndUnknown(),
+        reservation_repository=reservation_repo,
+    )
+    backend = AcceptedBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=reservation_repo,
+        execution_book=book,
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-unknown-write-fail",
+        run_id="run-1",
+        client_order_id="order-unknown-write-fail",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch-unknown-write-fail",
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="unknown write failed"):
+            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+
+        outbox = book.get_outbox(plan.client_order_id)
+        assert outbox is not None
+        assert outbox.state is DispatchState.UNKNOWN
+        assert book._persistence_failed is True
+        assert plan.client_order_id in (book._dispatch_reconciliation_required_commands)
+        reservation = reservation_repo._reservations[f"res_{plan.client_order_id}"]
+        assert reservation.active_quantity == Decimal("1.0")
+
+        with pytest.raises(OrderPreSubmissionError):
+            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        assert backend.calls == ["submit:BTCUSDT:exit"]
+    finally:
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -1683,6 +1928,7 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
         position_side=FuturesPositionSide.BOTH,
         created_at=NOW,
     )
+    _register_execution_command_with_reservations(coord, plan, [res])
 
     # 1st report: partial fill cum_qty = 3
     result_1 = OrderExecutionResult(
@@ -1803,14 +2049,135 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_ingestion_requires_typed_facts_without_inferred_flat() -> None:
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
+    book = ExecutionBook()
+    coord = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        execution_book=book,
+    )
+    flat = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=None,
+        margin_type=None,
+        observed_at=NOW,
+        raw_payload={},
+    )
+
+    await coord.observe_account_snapshot(flat, symbols=("ETHUSDT",))
+
+    btc_view = await book.read(
+        ExecutionScope(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.BOTH,
+        )
+    )
+    eth_view = await book.read(
+        ExecutionScope(
+            environment="live",
+            account_label="primary",
+            symbol="ETHUSDT",
+            position_side=FuturesPositionSide.BOTH,
+        )
+    )
+    assert btc_view.zero_position_snapshot_confirmed is True
+    assert btc_view.is_ready_for_trade is True
+    assert eth_view.zero_position_snapshot_confirmed is False
+    assert eth_view.is_ready_for_trade is False
+
+    with pytest.raises(ValueError, match="account_label"):
+        await coord.observe_account_snapshot(
+            AccountPositionSnapshot(
+                environment="live",
+                account_label="another-account",
+                symbol="BTCUSDT",
+                position_side="BOTH",
+                position_amt=Decimal("0"),
+                entry_price=Decimal("0"),
+                mark_price=Decimal("65000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("0"),
+                leverage=None,
+                margin_type=None,
+                observed_at=NOW,
+                raw_payload={},
+            )
+        )
+    with pytest.raises(TypeError, match="AccountPositionSnapshot"):
+        await coord.observe_account_snapshot(object())
+
+    await coord.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_evidence_identity_keeps_position_sides_distinct() -> None:
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
+    book = ExecutionBook()
+    coord = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        execution_book=book,
+    )
+    for side in ("LONG", "SHORT"):
+        await coord.observe_account_snapshot(
+            AccountPositionSnapshot(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side=side,
+                position_amt=Decimal("0"),
+                entry_price=Decimal("0"),
+                mark_price=Decimal("65000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("0"),
+                leverage=None,
+                margin_type=None,
+                observed_at=NOW,
+                raw_payload={},
+            )
+        )
+
+    for side in (FuturesPositionSide.LONG, FuturesPositionSide.SHORT):
+        view = await book.read(
+            ExecutionScope(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side=side,
+            )
+        )
+        assert view.zero_position_snapshot_confirmed is True
+        assert view.is_ready_for_trade is True
+
+    await coord.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
-    """Verifies F6: 3 partial -> 5 partial -> 10 filled produces exact cumulative tracking."""
+    """Verify 3 -> 5 -> 10 cumulative reports settle only their deltas."""
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
     res = PositionReservation(
         reservation_id="res-cum-1",
-        command_id="cmd-cum-1",
+        command_id="order-exit-cum",
         batch_id="batch-1",
         position_key=PositionKey(
             environment="live",
@@ -1860,14 +2227,14 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
         created_at=NOW,
         batch_id="batch-1",
     )
-    await coord._ensure_reservation(plan)
+    _register_execution_command_with_reservations(coord, plan, [res])
 
     # 1. First report: 3 partial
     res1 = OrderExecutionResult(
         client_order_id=plan.client_order_id,
         state=ExchangeOrderState.PARTIALLY_FILLED,
         executed_quantity=Decimal("3.0"),
-        average_price=Decimal("65000"),
+        average_price=Decimal("100"),
         exchange_order_id="ex-cum-1",
     )
     await coord._consume_reservation_if_filled(plan, res1)
@@ -1879,7 +2246,7 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
         client_order_id=plan.client_order_id,
         state=ExchangeOrderState.PARTIALLY_FILLED,
         executed_quantity=Decimal("5.0"),
-        average_price=Decimal("65000"),
+        average_price=Decimal("140"),
         exchange_order_id="ex-cum-1",
     )
     await coord._consume_reservation_if_filled(plan, res2)
@@ -1891,11 +2258,174 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
         client_order_id=plan.client_order_id,
         state=ExchangeOrderState.FILLED,
         executed_quantity=Decimal("10.0"),
-        average_price=Decimal("65000"),
+        average_price=Decimal("130"),
         exchange_order_id="ex-cum-1",
     )
     await coord._consume_reservation_if_filled(plan, res3)
     assert repo.res.consumed_quantity == Decimal("10.0")
     assert repo.res.active_quantity == Decimal("0.0")
+
+    order_fills = [
+        fill
+        for fill in coord._execution_book._ensure_journal(
+            PositionKey(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side=FuturesPositionSide.BOTH,
+            )
+        )
+        .read_cut()
+        .fills
+        if fill.order_id == plan.client_order_id
+    ]
+    assert [fill.quantity for fill in order_fills] == [
+        Decimal("3.0"),
+        Decimal("2.0"),
+        Decimal("5.0"),
+    ]
+    assert [fill.price for fill in order_fills] == [
+        Decimal("100"),
+        Decimal("200"),
+        Decimal("120"),
+    ]
+
+    await coord.aclose()
+
+
+@pytest.mark.asyncio
+async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None:
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillEvent,
+        AccountPositionSnapshot,
+    )
+    from crypto_momentum_lab.domain.execution import (
+        ExecutionBook,
+        ExecutionEvidence,
+        ExecutionRequest,
+        ExecutionScope,
+        FactCoverageInterval,
+        FactCoverageStatus,
+        TradeCommandType,
+    )
+
+    book = ExecutionBook()
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    seed_fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="seed-long-position",
+        order_id="seed-entry-order",
+        side="BUY",
+        price=Decimal("65000"),
+        quantity=Decimal("10"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={"positionSide": "LONG"},
+    )
+    snapshot = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("10"),
+        entry_price=Decimal("65000"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("650000"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=NOW,
+        raw_payload={},
+    )
+    journal = book._ensure_journal(scope.to_position_key())
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=NOW,
+            end_at=NOW,
+            status=FactCoverageStatus.CONFIRMED,
+        )
+    )
+    await book.observe(
+        ExecutionEvidence(
+            evidence_id="seed-execution-book-position",
+            scope=scope,
+            observed_at=NOW,
+            fill=seed_fill,
+            snapshot=snapshot,
+        )
+    )
+    view = await book.read(scope)
+    exit_request = ExecutionRequest(
+        request_id="order-cumulative-10",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-cum",
+        decision_ref="decision-cum",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.EXIT,
+        requested_quantity=Decimal("10"),
+    )
+    assert await book.act(exit_request)
+    plan = OrderExecutionPlan(
+        intent_id="intent-cum",
+        run_id="run-cum",
+        client_order_id=exit_request.request_id,
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("10"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=NOW,
+    )
+    coord = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        execution_book=book,
+    )
+
+    async def observe(state: ExchangeOrderState, cumulative: str) -> None:
+        await coord._observe_order_result_in_execution_book(
+            plan,
+            OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=state,
+                executed_quantity=Decimal(cumulative),
+                average_price=Decimal("65000"),
+                exchange_order_id="exchange-cum-10",
+            ),
+        )
+
+    await observe(ExchangeOrderState.PARTIALLY_FILLED, "3")
+    await observe(ExchangeOrderState.PARTIALLY_FILLED, "3")
+    await observe(ExchangeOrderState.PARTIALLY_FILLED, "5")
+    await observe(ExchangeOrderState.FILLED, "10")
+    await observe(ExchangeOrderState.PARTIALLY_FILLED, "7")
+
+    facts = journal.read_cut()
+    order_fills = [
+        fill for fill in facts.fills if fill.order_id == plan.client_order_id
+    ]
+    assert [fill.quantity for fill in order_fills] == [
+        Decimal("3"),
+        Decimal("2"),
+        Decimal("5"),
+    ]
+    assert sum((fill.quantity for fill in order_fills), start=Decimal("0")) == Decimal(
+        "10"
+    )
+    reservations = book.get_active_reservations(scope.to_position_key())
+    assert reservations == ()
 
     await coord.aclose()

@@ -1,6 +1,8 @@
 import {
+  patchChildrenFromHtml,
   replaceChildrenFromHtml,
 } from "../dashboard-dom.js";
+import { refreshEcharts } from "../dashboard-chart-engine.js";
 import {
   COMPARISON_ANCHOR_HOUR,
   DEFAULT_EQUITY_BUCKET_SECONDS,
@@ -145,7 +147,7 @@ export function renderLiveAccountMetrics(data) {
 
   return `<div class="block live-account-metrics-block" data-live-account-metrics-selected="${selectedRange.key}">
     ${blockTitle("四账户资金与风险时序", `DAILY ${anchorLabel} · ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
-    <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span></div>
+    <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span><small class="muted" data-refresh-state hidden></small></div>
     <div class="live-metrics-note">每日 ${esc(anchorLabel)} 起算 · 首点归零 (0 USDT / 0%) · 交易所初始保证金 · 相对窗口峰值回撤</div>
     ${perfSection}
     <div class="live-metrics-grid">${charts}</div>
@@ -263,12 +265,21 @@ function equityRangeControls(selectedRange) {
 
 export function wireAccountEquityRanges(root, onSelect) {
   root.querySelectorAll("[data-account-equity-range]").forEach((button) => {
+    if (button.dataset.accountEquityRangeWired === "true") return;
+    button.dataset.accountEquityRangeWired = "true";
     button.addEventListener("click", async () => {
       if (button.getAttribute("aria-pressed") === "true") return;
       const range = button.dataset.accountEquityRange;
       if (!range) return;
+      const slot = root.matches?.("[data-live-account-detail]")
+        ? root
+        : root.closest?.("[data-live-account-detail]");
+      if (slot) slot.dataset.requestedRange = range;
       const controls = root.querySelectorAll("[data-account-equity-range]");
-      controls.forEach((control) => { control.disabled = true; });
+      controls.forEach((control) => {
+        control.disabled = true;
+        control.setAttribute("aria-pressed", String(control === button));
+      });
       root.querySelector(".account-equity-block")?.classList.add("is-range-loading");
       try {
         await onSelect(range);
@@ -280,6 +291,41 @@ export function wireAccountEquityRanges(root, onSelect) {
       }
     });
   });
+}
+
+function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessage = "") {
+  const label = slot.querySelector("[data-selected-account-label]");
+  if (label) label.textContent = accountLabel || "交易所账户";
+  const status = slot.querySelector(".live-account-detail-status");
+  if (status && (data.status || data.observed_at)) {
+    status.innerHTML = `${pill(data.status || "UNKNOWN")}<span>${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small class="muted" data-account-load-state${loadingMessage ? "" : " hidden"}>${esc(loadingMessage)}</small>`;
+  } else {
+    const loadState = slot.querySelector("[data-account-load-state]");
+    if (loadState) {
+      loadState.textContent = loadingMessage;
+      loadState.hidden = !loadingMessage;
+    }
+  }
+}
+
+function markRefreshStale(root, message) {
+  const state = root.querySelector("[data-refresh-state]");
+  if (!state) return;
+  state.hidden = false;
+  state.textContent = message;
+  state.title = message;
+  root.dataset.refreshState = "stale";
+}
+
+function detailContentSlot(slot) {
+  return slot.querySelector("[data-live-account-detail-content]") || slot;
+}
+
+function selectedAccountDetailRange(slot) {
+  return slot?.dataset.requestedRange
+    || slot?.querySelector("[data-account-equity-range][aria-pressed='true']")?.dataset.accountEquityRange
+    || slot?.dataset.renderedRange
+    || "24h";
 }
 
 function renderAccountHero(data, syncStatus, freshnessSeconds) {
@@ -373,7 +419,7 @@ function renderBalancesTable(usdtBalances) {
     { label: "钱包余额", value: (row) => num(row.wallet_balance, 4), align: "right" },
     { label: "可用余额", value: (row) => num(row.available_balance, 4), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
-  ], usdtBalances, { emptyText: "尚无 USDT 余额快照", tall: true });
+  ], usdtBalances, { emptyText: "尚无 USDT 余额快照", tall: true, rowKey: (row) => row.asset });
 }
 
 function renderPositionsTable(positions, strategy) {
@@ -392,7 +438,11 @@ function renderPositionsTable(positions, strategy) {
     { label: "名义价值", value: (row) => money(row.notional), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
     { label: "ROI", value: (row) => signedPercent(row.roi), align: "right", cls: (row) => pnlClass(row.roi) },
-  ], positionRows, { emptyText: "交易所无持仓", tall: true });
+  ], positionRows, {
+    emptyText: "交易所无持仓",
+    tall: true,
+    rowKey: (row) => `${row.symbol || ""}:${row.position_side || "BOTH"}`,
+  });
 }
 
 function renderOrdersTable(openOrders, strategy) {
@@ -405,7 +455,12 @@ function renderOrdersTable(openOrders, strategy) {
     { label: "状态", value: (row) => pill(row.status), html: true },
     { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
     { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
-  ], openOrders, { emptyText: "无挂单", tall: true });
+  ], openOrders, {
+    emptyText: "无挂单",
+    tall: true,
+    rowKey: (row) => row.order_id || row.exchange_order_id || row.client_order_id
+      || `${row.symbol || ""}:${row.side || ""}:${row.order_type || ""}:${row.price || ""}`,
+  });
 }
 
 function renderFillsTable(fills, strategy) {
@@ -421,7 +476,12 @@ function renderFillsTable(fills, strategy) {
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
     { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
-  ], fills, { emptyText: "尚无成交记录", tall: true });
+  ], fills, {
+    emptyText: "尚无成交记录",
+    tall: true,
+    rowKey: (row) => row.trade_id || row.fill_id || row.id
+      || `${row.order_id || ""}:${row.trade_at || row.observed_at || ""}`,
+  });
 }
 
 function renderLiveSignalsContent(liveSignals) {
@@ -521,7 +581,7 @@ export function renderAccount(data) {
     || hasUncertainStatus(normalized(reconciliation.status))
     || !data.observed_at;
 
-  const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
+  const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span><small class="muted" data-refresh-state hidden></small></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
       `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}
@@ -535,6 +595,7 @@ export function renderAccount(data) {
 
 let selectedLiveAccount = "primary";
 let liveAccountDetailRequest = 0;
+const liveAccountDetailRanges = new Map();
 let selectedLiveAccountMetricsRange = "24h";
 let liveAccountMetricsRequest = 0;
 
@@ -682,16 +743,20 @@ export function renderLiveAccounts(data) {
   const reviewCount = accounts.length - readyCount - haltedCount;
   const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
   const hasFullSnapshot = Boolean(selectedAccount.summary || selectedAccount.balances);
+  const selectedEquityRange = liveAccountDetailRanges.get(selectedAccount.account_label)
+    || ACCOUNT_EQUITY_RANGES.find((option) => option.key === selectedAccount.equity_range)?.key
+    || "24h";
   const selectedDetail = hasFullSnapshot
-    ? renderAccount(selectedAccount)[1]
+    ? renderAccount({ ...selectedAccount, equity_range: selectedEquityRange })[1]
     : `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(selectedAccount.account_label || "交易所账户")} · 正在读取余额、持仓、挂单和权益。</small></div>`;
   const cards = `<div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${accounts.map((account, index) => liveAccountCard(account, index, selectedLiveAccount)).join("")}</div>`;
-  const detail = `<div id="live-account-detail" class="live-account-detail" data-live-account-detail role="tabpanel" aria-labelledby="live-account-tab-${accounts.indexOf(selectedAccount)}" data-account-label="${esc(selectedAccount.account_label || "")}">
+  const renderedAccount = hasFullSnapshot ? ` data-rendered-account="${esc(selectedAccount.account_label || "")}" data-rendered-range="${selectedEquityRange}" data-requested-range="${selectedEquityRange}"` : "";
+  const detail = `<div id="live-account-detail" class="live-account-detail" data-live-account-detail role="tabpanel" aria-labelledby="live-account-tab-${accounts.indexOf(selectedAccount)}" data-account-label="${esc(selectedAccount.account_label || "")}"${renderedAccount}>
     <div class="live-account-detail-head">
-      <div><span class="section-kicker">SELECTED ACCOUNT</span><h3>${esc(selectedAccount.account_label || "交易所账户")}</h3><small class="muted">切换卡片查看快照与权益曲线</small></div>
-      <div class="live-account-detail-status">${pill(selectedAccount.status)}<span>${esc(dayTime(selectedAccount.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span></div>
+      <div><span class="section-kicker">SELECTED ACCOUNT</span><h3 data-selected-account-label>${esc(selectedAccount.account_label || "交易所账户")}</h3><small class="muted">切换卡片查看快照与权益曲线</small></div>
+      <div class="live-account-detail-status">${pill(selectedAccount.status)}<span>${esc(dayTime(selectedAccount.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small class="muted" data-account-load-state hidden></small></div>
     </div>
-    ${selectedDetail}
+    <div data-live-account-detail-content>${selectedDetail}</div>
   </div>`;
   const metrics = `<div data-live-account-metrics aria-live="polite">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`;
   return [overallStatus, `<div class="live-account-fleet" data-live-account-directory>${liveAccountSummary(accounts, overallStatus)}${cards}${metrics}${detail}</div>`];
@@ -707,9 +772,16 @@ function setLiveAccountTabState(root, accountLabel) {
   });
 }
 
-async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRange = "24h") {
+async function loadLiveAccountDetail(
+  root,
+  accountLabel,
+  requestJson,
+  equityRange = "24h",
+  { forceFetch = false } = {},
+) {
   const slot = root.querySelector("[data-live-account-detail]");
   if (!slot) return;
+  const contentSlot = detailContentSlot(slot);
   const selectedCard = [...root.querySelectorAll("[data-live-account-label]")]
     .find((button) => button.dataset.liveAccountLabel === accountLabel);
   const accountData = selectedCard ? (root.__liveAccountData || []).find(
@@ -717,24 +789,41 @@ async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRang
   ) : null;
   const requestId = ++liveAccountDetailRequest;
   selectedLiveAccount = accountLabel;
+  liveAccountDetailRanges.set(accountLabel, equityRange);
   setLiveAccountTabState(root, accountLabel);
   slot.dataset.accountLabel = accountLabel;
-  const isSameAccount = slot.dataset.renderedAccount === accountLabel;
-  if (accountData?.summary || accountData?.balances) {
+  slot.dataset.requestedRange = equityRange;
+  const renderedAccount = slot.dataset.renderedAccount;
+  const isSameAccount = renderedAccount === accountLabel;
+  const hasLastGood = Boolean(renderedAccount && contentSlot.children.length);
+  setLiveAccountDetailHeader(
+    slot,
+    accountLabel,
+    accountData || {},
+    !isSameAccount && hasLastGood ? `正在读取 ${accountLabel} 快照；保留上次内容` : "",
+  );
+
+  if (!forceFetch && (accountData?.summary || accountData?.balances)) {
     const [status, html] = renderAccount({ ...accountData, equity_range: equityRange });
-    replaceChildrenFromHtml(slot, html);
+    if (isSameAccount) patchChildrenFromHtml(contentSlot, html);
+    else replaceChildrenFromHtml(contentSlot, html);
     slot.dataset.accountStatus = status;
     slot.dataset.renderedAccount = accountLabel;
-    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+    slot.dataset.renderedRange = equityRange;
+    slot.dataset.requestedRange = equityRange;
+    setLiveAccountDetailHeader(slot, accountLabel, accountData);
+    wireAccountEquityRanges(contentSlot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+    refreshEcharts(contentSlot);
     slot.removeAttribute("aria-busy");
     return;
   }
-  if (!isSameAccount || !slot.children.length) {
+  if (!hasLastGood && !contentSlot.children.length) {
     replaceChildrenFromHtml(
-      slot,
+      contentSlot,
       `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
     );
   }
+  slot.setAttribute("aria-busy", "true");
   try {
     const query = new URLSearchParams({
       account_label: accountLabel,
@@ -743,15 +832,32 @@ async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRang
     const detail = await requestJson(`api/account?${query.toString()}`);
     if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
     const [status, html] = renderAccount(detail);
-    replaceChildrenFromHtml(slot, html);
+    if (slot.dataset.renderedAccount === accountLabel) patchChildrenFromHtml(contentSlot, html);
+    else replaceChildrenFromHtml(contentSlot, html);
     slot.dataset.accountStatus = status;
     slot.dataset.renderedAccount = accountLabel;
-    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+    slot.dataset.renderedRange = equityRange;
+    slot.dataset.requestedRange = equityRange;
+    setLiveAccountDetailHeader(slot, accountLabel, detail);
+    wireAccountEquityRanges(contentSlot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+    refreshEcharts(contentSlot);
   } catch (error) {
     if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
-    replaceChildrenFromHtml(slot, emptyBox("账户详情加载失败", `${accountLabel} · ${error.message}`));
+    if (hasLastGood) {
+      markRefreshStale(contentSlot, `${accountLabel} 刷新失败，保留上次成功详情：${error.message}`);
+      setLiveAccountDetailHeader(
+        slot,
+        accountLabel,
+        accountData || {},
+        isSameAccount ? "刷新失败，仍显示上次成功详情" : `${accountLabel} 加载失败，仍显示上一账户详情`,
+      );
+    } else {
+      replaceChildrenFromHtml(contentSlot, emptyBox("账户详情加载失败", `${accountLabel} · ${error.message}`));
+    }
   } finally {
-    slot.removeAttribute("aria-busy");
+    if (requestId === liveAccountDetailRequest && slot.isConnected) {
+      slot.removeAttribute("aria-busy");
+    }
   }
 }
 
@@ -764,7 +870,10 @@ function wireLiveAccountMetricsRanges(root, onSelect) {
       const range = button.dataset.liveAccountMetricsRange;
       if (!range) return;
       const controls = root.querySelectorAll("[data-live-account-metrics-range]");
-      controls.forEach((control) => { control.disabled = true; });
+      controls.forEach((control) => {
+        control.disabled = true;
+        control.setAttribute("aria-pressed", String(control === button));
+      });
       root.querySelector(".live-account-metrics-block")?.classList.add("is-range-loading");
       try {
         selectedLiveAccountMetricsRange = range;
@@ -784,26 +893,33 @@ async function loadLiveAccountMetrics(root, requestJson, equityRange) {
   if (!slot) return;
   const requestId = ++liveAccountMetricsRequest;
   selectedLiveAccountMetricsRange = equityRange;
-  const isSameRange = slot.dataset.renderedRange === equityRange;
-  if (!isSameRange || !slot.children.length) {
+  slot.dataset.requestedRange = equityRange;
+  const hasLastGood = Boolean(slot.dataset.renderedRange && slot.children.length);
+  if (!hasLastGood && !slot.children.length) {
     replaceChildrenFromHtml(
       slot,
       `<div class="live-account-metrics-loading">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`,
     );
   }
+  slot.setAttribute("aria-busy", "true");
   try {
     const query = new URLSearchParams({ equity_range: equityRange });
     const data = await requestJson(`api/live-account-metrics?${query.toString()}`);
     if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;
-    replaceChildrenFromHtml(slot, renderLiveAccountMetrics(data));
+    const html = renderLiveAccountMetrics(data);
+    if (hasLastGood) patchChildrenFromHtml(slot, html);
+    else replaceChildrenFromHtml(slot, html);
     slot.dataset.renderedRange = equityRange;
+    slot.dataset.requestedRange = equityRange;
     wireLiveAccountMetricsRanges(slot, (nextRange) => loadLiveAccountMetrics(root, requestJson, nextRange));
+    refreshEcharts(slot);
   } catch (error) {
     if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;
-    replaceChildrenFromHtml(
-      slot,
-      emptyBox("账户时序加载失败", `${equityRange} · ${error.message}`),
-    );
+    if (hasLastGood) {
+      markRefreshStale(slot, `${equityRange} 时序刷新失败，保留上次成功图表：${error.message}`);
+    } else {
+      replaceChildrenFromHtml(slot, emptyBox("账户时序加载失败", `${equityRange} · ${error.message}`));
+    }
   } finally {
     if (requestId === liveAccountMetricsRequest && slot.isConnected) {
       slot.removeAttribute("aria-busy");
@@ -820,7 +936,14 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
     button.dataset.liveAccountWired = "true";
     button.addEventListener("click", () => {
       const accountLabel = button.dataset.liveAccountLabel;
-      if (accountLabel) void loadLiveAccountDetail(root, accountLabel, requestJson);
+      if (accountLabel) {
+        void loadLiveAccountDetail(
+          root,
+          accountLabel,
+          requestJson,
+          liveAccountDetailRanges.get(accountLabel) || "24h",
+        );
+      }
     });
     button.addEventListener("keydown", (event) => {
       const buttons = [...root.querySelectorAll("[data-live-account-label]")];
@@ -841,7 +964,12 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
     (account) => account.account_label === selectedLiveAccount,
   ) || accounts[0];
   if (selected && !(selected.summary || selected.balances)) {
-    void loadLiveAccountDetail(root, selected.account_label, requestJson);
+    void loadLiveAccountDetail(
+      root,
+      selected.account_label,
+      requestJson,
+      liveAccountDetailRanges.get(selected.account_label) || "24h",
+    );
   } else if (selected) {
     const slot = root.querySelector("[data-live-account-detail]");
     if (slot) wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, selected.account_label, requestJson, nextRange));
@@ -945,16 +1073,26 @@ export function updateLiveAccountsDynamic(root, data) {
     fleetKpisEl.innerHTML = tiles.join("");
   }
 
-  // Update detail slot if rendered account snapshot updated
+  // The lightweight /api/live-accounts payload intentionally has no balances,
+  // positions, orders, or timeseries. Refresh the selected detail and fleet
+  // metrics on every successful poll, even when the outer section key is stable.
   const slot = root.querySelector("[data-live-account-detail]");
-  if (slot) {
-    const currentDetailLabel = slot.dataset.accountLabel || slot.dataset.renderedAccount;
-    const targetAccount = accounts.find((a) => a.account_label === currentDetailLabel);
-    if (targetAccount && (targetAccount.summary || targetAccount.balances) && slot.dataset.renderedAccount === currentDetailLabel) {
-      const [status, html] = renderAccount(targetAccount);
-      replaceChildrenFromHtml(slot, html);
-      slot.dataset.accountStatus = status;
-      wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, currentDetailLabel, root.__requestJson || defaultAccountRequestJson, nextRange));
-    }
-  }
+  const requestJson = root.__requestJson || defaultAccountRequestJson;
+  const currentDetailLabel = slot?.dataset.accountLabel
+    || slot?.dataset.renderedAccount
+    || selectedLiveAccount;
+  const selectedAccount = accounts.find((account) => account.account_label === currentDetailLabel);
+  const detailRefresh = selectedAccount
+    ? loadLiveAccountDetail(
+      root,
+      currentDetailLabel,
+      requestJson,
+      selectedAccountDetailRange(slot),
+      { forceFetch: true },
+    )
+    : Promise.resolve();
+  return Promise.all([
+    detailRefresh,
+    loadLiveAccountMetrics(root, requestJson, selectedLiveAccountMetricsRange),
+  ]);
 }

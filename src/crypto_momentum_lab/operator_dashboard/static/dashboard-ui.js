@@ -72,14 +72,20 @@ export function dataTable(columns, rows, options = {}) {
   if (!rows?.length) return emptyBox(options.emptyText || "暂无数据");
   const head = columns.map((column) =>
     `<th class="${column.align === "right" ? "ta-r" : ""}">${esc(column.label)}</th>`).join("");
-  const body = rows.map((row) => `<tr>${columns.map((column) => {
+  const body = rows.map((row) => {
+    const rowKeyValue = typeof options.rowKey === "function"
+      ? options.rowKey(row)
+      : null;
+    const rowKey = rowKeyValue == null ? "" : ` data-row-key="${esc(rowKeyValue)}"`;
+    return `<tr${rowKey}>${columns.map((column) => {
     const raw = column.value ? column.value(row) : row[column.key];
     const classes = [
       column.align === "right" ? "ta-r num" : "",
       typeof column.cls === "function" ? column.cls(row) : column.cls || "",
     ].filter(Boolean).join(" ");
     return `<td class="${classes}">${column.html ? raw : esc(raw)}</td>`;
-  }).join("")}</tr>`).join("");
+    }).join("")}</tr>`;
+  }).join("");
   const stateKey = options.stateKey ? ` data-state-key="${esc(options.stateKey)}"` : "";
   return `<div class="table-scroll${options.tall ? " tall" : ""}"${stateKey}><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }

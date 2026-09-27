@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
@@ -113,6 +113,182 @@ def _same_active_reduce_only_intent(
         and existing_order.side == expected_values["side"]
         and existing_order.position_side == expected_values["position_side"]
         and existing_order.state not in terminal_states
+    )
+
+
+def _has_execution_watermark_identity(
+    row: ExecutionCommandRow,
+    details: Mapping[str, Any],
+) -> bool:
+    scope = details.get("scope")
+    return (
+        isinstance(scope, Mapping)
+        and all(
+            isinstance(scope.get(field_name), str) and scope[field_name].strip()
+            for field_name in (
+                "environment",
+                "account_label",
+                "symbol",
+                "position_side",
+            )
+        )
+        and details.get("cumulative_filled_quantity") is not None
+        and details.get("cumulative_filled_quote") is not None
+        and isinstance(row.client_order_id, str)
+        and bool(row.client_order_id.strip())
+    )
+
+
+def _execution_decimal(
+    value: object,
+    *,
+    command_id: str,
+    field_name: str,
+) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as err:
+        raise ValueError(
+            f"execution command {command_id} has invalid {field_name}; "
+            "migration/recovery required"
+        ) from err
+    if not result.is_finite() or result < Decimal("0"):
+        raise ValueError(
+            f"execution command {command_id} has invalid {field_name}; "
+            "migration/recovery required"
+        )
+    return result
+
+
+def _recover_execution_watermark(
+    command_id: str,
+    events: list[ExchangeOrderEventRow],
+    fills: list[ExchangeFillRow],
+) -> tuple[Decimal, Decimal]:
+    event_pairs: list[tuple[Decimal, Decimal]] = []
+    for event in events:
+        details = event.details if isinstance(event.details, Mapping) else {}
+        raw_quantity = details.get(
+            "executed_quantity", details.get("cumulative_filled_quantity")
+        )
+        if raw_quantity is None:
+            continue
+        quantity = _execution_decimal(
+            raw_quantity,
+            command_id=command_id,
+            field_name="persisted event executed_quantity",
+        )
+        raw_quote = details.get(
+            "cumulative_quote_quantity", details.get("cumulative_filled_quote")
+        )
+        if raw_quote is None:
+            raw_average_price = details.get("average_price")
+            if quantity == Decimal("0"):
+                quote = Decimal("0")
+            elif raw_average_price is not None:
+                average_price = _execution_decimal(
+                    raw_average_price,
+                    command_id=command_id,
+                    field_name="persisted event average_price",
+                )
+                if average_price == Decimal("0"):
+                    raise ValueError(
+                        f"execution command {command_id} has positive quantity with "
+                        "zero persisted average price; migration/recovery required"
+                    )
+                quote = quantity * average_price
+            else:
+                continue
+        else:
+            quote = _execution_decimal(
+                raw_quote,
+                command_id=command_id,
+                field_name="persisted event cumulative quote",
+            )
+        if quantity == Decimal("0") and quote != Decimal("0"):
+            raise ValueError(
+                f"execution command {command_id} has persisted event quote without "
+                "quantity; migration/recovery required"
+            )
+        if quantity > Decimal("0") and quote == Decimal("0"):
+            raise ValueError(
+                f"execution command {command_id} has zero persisted event quote "
+                "with positive quantity; migration/recovery required"
+            )
+        event_pairs.append((quantity, quote))
+
+    event_watermark: tuple[Decimal, Decimal] | None = None
+    if event_pairs:
+        event_pairs.sort(key=lambda pair: pair[0])
+        event_watermark = event_pairs[0]
+        for pair in event_pairs[1:]:
+            previous_quantity, previous_quote = event_watermark
+            quantity, quote = pair
+            if quantity == previous_quantity:
+                if quote != previous_quote:
+                    raise ValueError(
+                        f"execution command {command_id} has conflicting persisted "
+                        "order event watermarks; migration/recovery required"
+                    )
+            elif quote < previous_quote:
+                raise ValueError(
+                    f"execution command {command_id} has nonmonotonic persisted "
+                    "order event watermarks; migration/recovery required"
+                )
+            else:
+                event_watermark = pair
+
+    fill_watermark: tuple[Decimal, Decimal] | None = None
+    if fills:
+        fill_quantity = Decimal("0")
+        fill_quote = Decimal("0")
+        for fill in fills:
+            quantity = _execution_decimal(
+                fill.quantity,
+                command_id=command_id,
+                field_name="persisted fill quantity",
+            )
+            price = _execution_decimal(
+                fill.price,
+                command_id=command_id,
+                field_name="persisted fill price",
+            )
+            if quantity == Decimal("0") or price == Decimal("0"):
+                raise ValueError(
+                    f"execution command {command_id} has a zero persisted fill; "
+                    "migration/recovery required"
+                )
+            fill_quantity += quantity
+            fill_quote += quantity * price
+        fill_watermark = (fill_quantity, fill_quote)
+
+    if event_watermark is None and fill_watermark is None:
+        raise ValueError(
+            f"execution command {command_id} has no persisted cumulative order "
+            "event or fill facts; migration/recovery required"
+        )
+    if event_watermark is None:
+        assert fill_watermark is not None
+        return fill_watermark
+    if fill_watermark is None:
+        return event_watermark
+
+    event_quantity, event_quote = event_watermark
+    fill_quantity, fill_quote = fill_watermark
+    if event_quantity == fill_quantity:
+        if event_quote != fill_quote:
+            raise ValueError(
+                f"execution command {command_id} has conflicting persisted fill "
+                "and event quotes; migration/recovery required"
+            )
+        return event_watermark
+    if event_quantity > fill_quantity and event_quote >= fill_quote:
+        return event_watermark
+    if fill_quantity > event_quantity and fill_quote >= event_quote:
+        return fill_watermark
+    raise ValueError(
+        f"execution command {command_id} has conflicting persisted fill and event "
+        "watermarks; migration/recovery required"
     )
 
 
@@ -996,7 +1172,14 @@ class PostgresOrderRepository:
                 dtls = dict(r.details) if isinstance(r.details, dict) else {}
                 if account_label is not None:
                     scope = dtls.get("scope", {})
-                    if scope.get("account_label") != account_label:
+                    if not isinstance(scope, dict) or not isinstance(
+                        scope.get("account_label"), str
+                    ):
+                        raise ValueError(
+                            f"active execution command {r.command_id} has no "
+                            "account scope"
+                        )
+                    if scope["account_label"] != account_label:
                         continue
                 result.append(
                     {
@@ -1009,6 +1192,218 @@ class PostgresOrderRepository:
                     }
                 )
             return tuple(result)
+
+    async def load_execution_order_watermarks(
+        self,
+        account_label: str | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Load cumulative quantity/quote cuts for every persisted command.
+
+        Terminal commands are included because a later order response can be
+        stale or duplicated after the active outbox row has closed.
+
+        Legacy terminal rows without a watermark are reconstructed only from
+        persisted order events or fills. If their identity or cumulative cut
+        cannot be recovered, fail closed so a later cumulative report cannot
+        be applied again from an invented zero baseline.
+        """
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(ExecutionCommandRow).order_by(
+                        ExecutionCommandRow.requested_at
+                    )
+                )
+            ).all()
+
+            candidate_client_ids: set[str] = set()
+            for row in rows:
+                details = dict(row.details) if isinstance(row.details, dict) else {}
+                scope = details.get("scope")
+                if (
+                    account_label is not None
+                    and isinstance(scope, Mapping)
+                    and isinstance(scope.get("account_label"), str)
+                    and scope["account_label"].strip()
+                    and scope["account_label"] != account_label
+                ):
+                    continue
+                if _has_execution_watermark_identity(row, details):
+                    continue
+                client_order_id = row.client_order_id
+                if isinstance(client_order_id, str) and client_order_id.strip():
+                    candidate_client_ids.add(client_order_id)
+
+            events_by_client: dict[str, list[ExchangeOrderEventRow]] = {}
+            fills_by_client: dict[str, list[ExchangeFillRow]] = {}
+            if candidate_client_ids:
+                event_rows = (
+                    await session.scalars(
+                        select(ExchangeOrderEventRow)
+                        .where(
+                            ExchangeOrderEventRow.client_order_id.in_(
+                                candidate_client_ids
+                            )
+                        )
+                        .order_by(ExchangeOrderEventRow.occurred_at)
+                    )
+                ).all()
+                for event in event_rows:
+                    events_by_client.setdefault(event.client_order_id, []).append(event)
+
+                fill_rows = (
+                    await session.scalars(
+                        select(ExchangeFillRow).where(
+                            ExchangeFillRow.client_order_id.in_(candidate_client_ids)
+                        )
+                    )
+                ).all()
+                for fill in fill_rows:
+                    fills_by_client.setdefault(fill.client_order_id, []).append(fill)
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            details = dict(row.details) if isinstance(row.details, dict) else {}
+            raw_scope = details.get("scope")
+            scope = dict(raw_scope) if isinstance(raw_scope, Mapping) else {}
+            status = str(row.status)
+            quantity = details.get("cumulative_filled_quantity")
+            quote = details.get("cumulative_filled_quote")
+            if (
+                account_label is not None
+                and isinstance(scope.get("account_label"), str)
+                and scope["account_label"] != account_label
+            ):
+                continue
+
+            client_order_id = row.client_order_id
+            if not isinstance(client_order_id, str) or not client_order_id.strip():
+                raise ValueError(
+                    f"execution command {row.command_id} has no client order ID; "
+                    "migration/recovery required"
+                )
+
+            order_events = events_by_client.get(client_order_id, [])
+            for event in order_events:
+                event_details = (
+                    event.details if isinstance(event.details, Mapping) else {}
+                )
+                for field_name in (
+                    "environment",
+                    "account_label",
+                    "symbol",
+                    "position_side",
+                ):
+                    event_value = event_details.get(field_name)
+                    scope_value = scope.get(field_name)
+                    if not isinstance(event_value, str) or not event_value.strip():
+                        continue
+                    if (
+                        isinstance(scope_value, str)
+                        and scope_value.strip()
+                        and scope_value != event_value
+                    ):
+                        raise ValueError(
+                            f"execution command {row.command_id} conflicts with "
+                            f"persisted order event {field_name}; "
+                            "migration/recovery required"
+                        )
+                    if not isinstance(scope_value, str) or not scope_value.strip():
+                        scope[field_name] = event_value
+
+            if (
+                account_label is not None
+                and isinstance(scope.get("account_label"), str)
+                and scope["account_label"].strip()
+                and scope["account_label"] != account_label
+            ):
+                continue
+
+            missing_scope = tuple(
+                field_name
+                for field_name in (
+                    "environment",
+                    "account_label",
+                    "symbol",
+                    "position_side",
+                )
+                if not isinstance(scope.get(field_name), str)
+                or not scope[field_name].strip()
+            )
+            if missing_scope:
+                raise ValueError(
+                    f"execution command {row.command_id} has incomplete scope "
+                    f"({', '.join(missing_scope)}); migration/recovery required"
+                )
+
+            if quantity is None or quote is None:
+                recovered = _recover_execution_watermark(
+                    row.command_id,
+                    order_events,
+                    fills_by_client.get(client_order_id, []),
+                )
+                recovered_quantity, recovered_quote = recovered
+                if (
+                    quantity is not None
+                    and _execution_decimal(
+                        quantity,
+                        command_id=row.command_id,
+                        field_name="cumulative_filled_quantity",
+                    )
+                    != recovered_quantity
+                ):
+                    raise ValueError(
+                        f"execution command {row.command_id} has a partial quantity "
+                        "watermark that conflicts with persisted recovery facts; "
+                        "migration/recovery required"
+                    )
+                if (
+                    quote is not None
+                    and _execution_decimal(
+                        quote,
+                        command_id=row.command_id,
+                        field_name="cumulative_filled_quote",
+                    )
+                    != recovered_quote
+                ):
+                    raise ValueError(
+                        f"execution command {row.command_id} has a partial quote "
+                        "watermark that conflicts with persisted recovery facts; "
+                        "migration/recovery required"
+                    )
+                quantity, quote = recovered
+
+            cumulative_quantity = _execution_decimal(
+                quantity,
+                command_id=row.command_id,
+                field_name="cumulative_filled_quantity",
+            )
+            cumulative_quote = _execution_decimal(
+                quote,
+                command_id=row.command_id,
+                field_name="cumulative_filled_quote",
+            )
+            if cumulative_quantity == Decimal("0") and cumulative_quote != Decimal("0"):
+                raise ValueError(
+                    f"execution command {row.command_id} has quote without quantity; "
+                    "migration/recovery required"
+                )
+            if cumulative_quantity > Decimal("0") and cumulative_quote == Decimal("0"):
+                raise ValueError(
+                    f"execution command {row.command_id} has zero quote with positive "
+                    "quantity; migration/recovery required"
+                )
+
+            result.append(
+                {
+                    "scope": scope,
+                    "client_order_id": client_order_id,
+                    "cumulative_filled_quantity": quantity,
+                    "cumulative_filled_quote": quote,
+                    "status": status,
+                }
+            )
+        return tuple(result)
 
     async def load_seen_event_ids(
         self,

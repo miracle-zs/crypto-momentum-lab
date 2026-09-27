@@ -252,7 +252,6 @@ services:
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-policy-enforce
-      - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}
       - --margin-type
@@ -384,7 +383,6 @@ services:
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-policy-enforce
-      - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}
       - --margin-type
@@ -516,7 +514,6 @@ services:
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-policy-enforce
-      - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}
       - --margin-type

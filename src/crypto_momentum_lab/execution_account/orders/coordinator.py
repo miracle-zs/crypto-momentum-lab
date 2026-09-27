@@ -9,6 +9,7 @@ an unknown REST read cannot hold an order command for another symbol hostage.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -20,13 +21,13 @@ from typing import Any, Protocol, cast
 import structlog
 
 from crypto_momentum_lab.domain.account import (
+    AccountConfigSnapshot,
     AccountFillEvent,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
-    ExchangeOrderState,
     ExecutionEvidence,
     ExecutionScope,
     FuturesPositionSide,
@@ -50,10 +51,12 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeOrderRejectedError,
     OrderExecutionResult,
     OrderPreSubmissionError,
     PreparedOrderSubmission,
 )
+from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 
 log = structlog.get_logger()
 
@@ -361,8 +364,6 @@ class OrderExecutionCoordinator:
         )
         if self._domain_coordinator is None and self._execution_book is not None:
             self._domain_coordinator = self._execution_book.coordinator
-        self._settled_cumulative_quantities: dict[str, Decimal] = {}
-        self._observed_cumulative_quantities: dict[str, Decimal] = {}
         if initial_reservations:
             for r in initial_reservations:
                 if self._domain_coordinator is not None:
@@ -417,75 +418,76 @@ class OrderExecutionCoordinator:
 
     async def observe_account_snapshot(
         self,
-        snapshot: Any,
+        snapshot: AccountPositionSnapshot | AccountSnapshot,
         symbols: tuple[str, ...] | frozenset[str] = (),
     ) -> None:
         """Feed authoritative exchange account snapshot into ExecutionBook."""
-        if self._execution_book is None or snapshot is None:
+        if self._execution_book is None:
             return
-        observed_at = getattr(snapshot, "observed_at", None) or getattr(
-            getattr(snapshot, "config", None), "observed_at", None
-        ) or datetime.now(UTC)
-        seen_symbols: set[str] = set()
-        positions = getattr(snapshot, "positions", None)
-        if positions is None:
-            if hasattr(snapshot, "symbol") and hasattr(snapshot, "position_amt"):
-                positions = (snapshot,)
-            else:
-                positions = ()
+        if isinstance(snapshot, AccountPositionSnapshot):
+            positions = (snapshot,)
+        elif isinstance(snapshot, AccountSnapshot):
+            if not isinstance(snapshot.config, AccountConfigSnapshot):
+                raise TypeError("AccountSnapshot.config must be AccountConfigSnapshot")
+            if (
+                snapshot.config.environment != "live"
+                or snapshot.config.account_label != self._account_label
+            ):
+                raise ValueError(
+                    "AccountSnapshot config scope does not match coordinator"
+                )
+            positions = snapshot.positions
+        else:
+            raise TypeError(
+                "snapshot must be AccountPositionSnapshot or AccountSnapshot"
+            )
+
+        # `symbols` describes event context, not proof that an omitted position
+        # is flat. Only explicit exchange position rows are ingested here.
         for pos in positions:
-            seen_symbols.add(pos.symbol)
-            side_raw = getattr(pos, "position_side", "BOTH")
-            side_str = (
-                side_raw.value
-                if hasattr(side_raw, "value")
-                else str(side_raw)
-            ).upper()
+            if not isinstance(pos, AccountPositionSnapshot):
+                raise TypeError(
+                    "AccountSnapshot.positions must contain AccountPositionSnapshot"
+                )
+            if pos.environment != "live":
+                raise ValueError("AccountPositionSnapshot environment must be live")
+            if pos.account_label != self._account_label:
+                raise ValueError(
+                    "AccountPositionSnapshot account_label does not match coordinator"
+                )
+            side_str = pos.position_side.upper()
             scope = ExecutionScope(
                 environment="live",
                 account_label=self._account_label,
                 symbol=pos.symbol,
                 position_side=FuturesPositionSide(side_str),
             )
+            identity = "\x1f".join(
+                (
+                    pos.environment,
+                    pos.account_label,
+                    pos.symbol,
+                    side_str,
+                    pos.observed_at.isoformat(timespec="microseconds"),
+                    str(pos.position_amt),
+                    str(pos.entry_price),
+                    str(pos.mark_price),
+                    str(pos.unrealized_pnl),
+                    str(pos.notional),
+                    str(pos.leverage),
+                    str(pos.margin_type),
+                )
+            )
+            evidence_id = (
+                "snapshot_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            )
             ev = ExecutionEvidence(
-                evidence_id=f"snap_{self._account_label}_{pos.symbol}_{int(observed_at.timestamp())}",
+                evidence_id=evidence_id,
                 scope=scope,
-                observed_at=observed_at,
+                observed_at=pos.observed_at,
                 snapshot=pos,
             )
             await self._execution_book.observe(ev)
-
-        # For known flat symbols, emit zero snapshots
-        for sym in symbols:
-            if sym not in seen_symbols:
-                scope = ExecutionScope(
-                    environment="live",
-                    account_label=self._account_label,
-                    symbol=sym,
-                    position_side=FuturesPositionSide.BOTH,
-                )
-                zero_pos = AccountPositionSnapshot(
-                    environment="live",
-                    account_label=self._account_label,
-                    symbol=sym,
-                    position_side="BOTH",
-                    position_amt=Decimal("0"),
-                    entry_price=Decimal("0"),
-                    mark_price=Decimal("0"),
-                    unrealized_pnl=Decimal("0"),
-                    notional=Decimal("0"),
-                    leverage=None,
-                    margin_type=None,
-                    observed_at=observed_at,
-                    raw_payload={},
-                )
-                ev = ExecutionEvidence(
-                    evidence_id=f"snap_{self._account_label}_{sym}_{int(observed_at.timestamp())}",
-                    scope=scope,
-                    observed_at=observed_at,
-                    snapshot=zero_pos,
-                )
-                await self._execution_book.observe(ev)
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if self._reservation_repository is None or self._execution_book is None:
@@ -542,8 +544,7 @@ class OrderExecutionCoordinator:
                     error=str(err),
                 )
                 raise OrderPreSubmissionError(
-                    f"Failed to create position entry for "
-                    f"{plan.client_order_id}: {err}"
+                    f"Failed to create position entry for {plan.client_order_id}: {err}"
                 ) from err
 
             if isinstance(act_res, Blocked):
@@ -663,158 +664,13 @@ class OrderExecutionCoordinator:
                 f"{plan.client_order_id}: {act_res.reason}"
             )
 
-    async def _release_reservation_if_present(
-        self,
-        plan: OrderExecutionPlan,
-        reason: str = "preparation_or_execution_failed",
-    ) -> None:
-        if not plan.reduce_only:
-            return
-        try:
-            key = PositionKey(
-                environment="live",
-                account_label=self._account_label,
-                symbol=plan.symbol,
-                position_side=plan.position_side,
-            )
-            active_res = list(self.get_active_reservations(key))
-            if self._reservation_repository is not None:
-                try:
-                    repo_res = await _maybe_await(
-                        self._reservation_repository.load_active_reservations(key)
-                    )
-                    existing_ids = {r.reservation_id for r in active_res}
-                    for r in repo_res:
-                        if r.reservation_id not in existing_ids:
-                            active_res.append(r)
-                            if self._domain_coordinator is not None:
-                                try:
-                                    self._domain_coordinator.register_reservation(r)
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-            for r in active_res:
-                if r.command_id == plan.client_order_id and r.active_quantity > Decimal(
-                    "0"
-                ):
-                    if self._domain_coordinator is not None:
-                        released = self._domain_coordinator.release_reservation(
-                            r.reservation_id, r.active_quantity
-                        )
-                    else:
-                        released = r.release(r.active_quantity)
-                    if self._reservation_repository is not None:
-                        await _maybe_await(
-                            self._reservation_repository.update_reservation(
-                                released, release_reason=reason
-                            )
-                        )
-        except Exception as rel_err:
-            log.warning(
-                "order_reservation_rollback_failed",
-                client_order_id=plan.client_order_id,
-                error=str(rel_err),
-            )
-
     async def _consume_reservation_if_filled(
         self,
         plan: OrderExecutionPlan,
         res: OrderExecutionResult,
     ) -> None:
-        if not plan.reduce_only or res is None:
-            return
-        is_terminal = res.state in {
-            ExchangeOrderState.FILLED,
-            ExchangeOrderState.CANCELED,
-            ExchangeOrderState.EXPIRED,
-            ExchangeOrderState.REJECTED,
-            ExchangeOrderState.ABSENT_RECONCILED,
-        }
-        if res.executed_quantity <= 0 and not is_terminal:
-            return
-        try:
-            key = PositionKey(
-                environment="live",
-                account_label=self._account_label,
-                symbol=plan.symbol,
-                position_side=plan.position_side,
-            )
-            active_res = list(self.get_active_reservations(key))
-            if self._reservation_repository is not None:
-                try:
-                    repo_res = await _maybe_await(
-                        self._reservation_repository.load_active_reservations(key)
-                    )
-                    existing_ids = {r.reservation_id for r in active_res}
-                    for r in repo_res:
-                        if r.reservation_id not in existing_ids:
-                            active_res.append(r)
-                            if self._domain_coordinator is not None:
-                                try:
-                                    self._domain_coordinator.register_reservation(r)
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-            order_key = plan.client_order_id or str(res.exchange_order_id or "")
-            cum_executed = Decimal(str(res.executed_quantity))
-            prev_settled = self._settled_cumulative_quantities.get(
-                order_key, Decimal("0")
-            )
-
-            delta_to_consume = max(Decimal("0"), cum_executed - prev_settled)
-            if delta_to_consume > Decimal("0"):
-                remaining = delta_to_consume
-                for r in active_res:
-                    if (
-                        r.command_id == plan.client_order_id
-                        and r.active_quantity > Decimal("0")
-                        and remaining > Decimal("0")
-                    ):
-                        qty = min(remaining, r.active_quantity)
-                        if self._domain_coordinator is not None:
-                            updated = self._domain_coordinator.reconcile_fill(
-                                r.reservation_id, qty
-                            )
-                        else:
-                            updated = r.consume(qty)
-                        if self._reservation_repository is not None:
-                            await _maybe_await(
-                                self._reservation_repository.update_reservation(updated)
-                            )
-                        remaining -= qty
-                settled_now = delta_to_consume - remaining
-                self._settled_cumulative_quantities[order_key] = (
-                    prev_settled + settled_now
-                )
-
-            if is_terminal:
-                for r in self.get_active_reservations(key):
-                    if (
-                        r.command_id == plan.client_order_id
-                        and r.active_quantity > Decimal("0")
-                    ):
-                        if self._domain_coordinator is not None:
-                            released = self._domain_coordinator.release_reservation(
-                                r.reservation_id, r.active_quantity
-                            )
-                        else:
-                            released = r.release(r.active_quantity)
-                        if self._reservation_repository is not None:
-                            await _maybe_await(
-                                self._reservation_repository.update_reservation(
-                                    released,
-                                    release_reason=f"order_finished_residual_release_{res.state.value}",
-                                )
-                            )
-                self._settled_cumulative_quantities.pop(order_key, None)
-        except Exception as consume_err:
-            log.warning(
-                "order_reservation_consume_failed",
-                client_order_id=plan.client_order_id,
-                error=str(consume_err),
-            )
+        """Compatibility wrapper; ExecutionBook.observe owns fill settlement."""
+        await self._observe_order_result_in_execution_book(plan, res)
 
     async def _observe_order_result_in_execution_book(
         self,
@@ -823,77 +679,96 @@ class OrderExecutionCoordinator:
     ) -> None:
         if not self.is_execution_book_enabled or res is None:
             return
-        try:
-            scope = ExecutionScope(
+        scope = ExecutionScope(
+            environment="live",
+            account_label=self._account_label,
+            symbol=plan.symbol,
+            position_side=plan.position_side,
+        )
+        now_dt = datetime.now(UTC)
+        cumulative_quantity = Decimal(str(res.executed_quantity))
+        if cumulative_quantity < Decimal("0"):
+            raise ValueError("exchange cumulative executed quantity cannot be negative")
+        average_price = (
+            Decimal(str(res.average_price)) if res.average_price is not None else None
+        )
+        if cumulative_quantity > Decimal("0") and (
+            average_price is None or average_price <= Decimal("0")
+        ):
+            raise RuntimeError(
+                "positive cumulative fill has no positive cumulative average price; "
+                "execution facts require recovery"
+            )
+        cumulative_quote = (
+            cumulative_quantity * average_price
+            if average_price is not None
+            else Decimal("0")
+        )
+        position_side = (
+            plan.position_side.value
+            if hasattr(plan.position_side, "value")
+            else str(plan.position_side)
+        )
+        identity = "\x1f".join(
+            (
+                self._account_label,
+                plan.symbol,
+                position_side,
+                res.client_order_id,
+                str(res.exchange_order_id or ""),
+                res.state.value,
+                str(cumulative_quantity),
+                str(cumulative_quote),
+            )
+        )
+        identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        order_ev = ExchangeOrderEvent(
+            event_id=f"order_{identity_hash}",
+            client_order_id=res.client_order_id,
+            state=res.state,
+            occurred_at=now_dt,
+            exchange_order_id=res.exchange_order_id,
+            details={
+                "account_label": self._account_label,
+                "symbol": plan.symbol,
+                "executed_quantity": str(cumulative_quantity),
+                "cumulative_quote_quantity": str(cumulative_quote),
+                "average_price": str(average_price)
+                if average_price is not None
+                else None,
+                "limit_price": str(plan.price) if plan.price is not None else None,
+                "is_reduce_only": plan.reduce_only,
+                "position_side": position_side,
+            },
+        )
+        fill_ev = None
+        if cumulative_quantity > Decimal("0"):
+            fill_ev = AccountFillEvent(
                 environment="live",
                 account_label=self._account_label,
                 symbol=plan.symbol,
-                position_side=plan.position_side,
-            )
-            now_dt = datetime.now(UTC)
-            order_ev = ExchangeOrderEvent(
-                event_id=f"ev_{res.client_order_id}_{res.state.value}",
-                client_order_id=res.client_order_id,
-                state=res.state,
-                occurred_at=now_dt,
-                exchange_order_id=res.exchange_order_id,
-                details={
-                    "account_label": self._account_label,
-                    "symbol": plan.symbol,
-                    "executed_quantity": str(res.executed_quantity),
-                    "cumulative_quote_quantity": "0",
-                    "average_price": (
-                        str(res.average_price)
-                        if res.average_price is not None
-                        else None
-                    ),
-                    "limit_price": str(plan.price) if plan.price is not None else None,
-                    "is_reduce_only": plan.reduce_only,
-                    "position_side": (
-                        plan.position_side.value
-                        if hasattr(plan.position_side, "value")
-                        else str(plan.position_side)
-                    ),
+                trade_id=(
+                    f"cumulative:{scope.to_position_key().canonical_id}:"
+                    f"{res.client_order_id}:{cumulative_quantity}"
+                ),
+                order_id=res.client_order_id,
+                side=plan.side,
+                price=average_price if average_price is not None else Decimal("0"),
+                quantity=cumulative_quantity,
+                realized_pnl=Decimal("0"),
+                fee=Decimal("0"),
+                fee_asset="USDT",
+                trade_at=now_dt,
+                raw_payload={
+                    "is_cumulative": True,
+                    "cum_qty": str(cumulative_quantity),
+                    "cum_quote": str(cumulative_quote),
+                    "reduce_only": plan.reduce_only,
+                    "client_order_id": plan.client_order_id,
                 },
             )
-            order_key = plan.client_order_id or str(res.exchange_order_id or "")
-            cum_executed = Decimal(str(res.executed_quantity))
-            prev_observed = self._observed_cumulative_quantities.get(
-                order_key, Decimal("0")
-            )
-            delta_qty = max(Decimal("0"), cum_executed - prev_observed)
-            fill_ev = None
-            if delta_qty > Decimal("0"):
-                self._observed_cumulative_quantities[order_key] = cum_executed
-                fill_ev = AccountFillEvent(
-                    environment="live",
-                    account_label=self._account_label,
-                    symbol=plan.symbol,
-                    trade_id=f"fill_{res.client_order_id}_{cum_executed}",
-                    order_id=res.client_order_id,
-                    side=plan.side,
-                    price=Decimal(str(res.average_price or (plan.price or "0"))),
-                    quantity=delta_qty,
-                    realized_pnl=Decimal("0"),
-                    fee=Decimal("0"),
-                    fee_asset="USDT",
-                    trade_at=now_dt,
-                    raw_payload={
-                        "is_cumulative": True,
-                        "cum_qty": str(cum_executed),
-                        "reduce_only": plan.reduce_only,
-                        "reservation_reconciled": True,
-                    },
-                )
-            if res.state in (
-                ExchangeOrderState.FILLED,
-                ExchangeOrderState.CANCELED,
-                ExchangeOrderState.EXPIRED,
-                ExchangeOrderState.REJECTED,
-                ExchangeOrderState.ABSENT_RECONCILED,
-            ):
-                self._observed_cumulative_quantities.pop(order_key, None)
-            await self._execution_book.observe(
+        try:
+            result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=order_ev.event_id,
                     scope=scope,
@@ -902,8 +777,69 @@ class OrderExecutionCoordinator:
                     fill=fill_ev,
                 )
             )
-        except Exception as obs_err:
-            log.warning("execution_book_observe_order_event_failed", error=str(obs_err))
+        except Exception as observe_err:
+            try:
+                await self._execution_book.mark_unknown(
+                    res.client_order_id,
+                    reason=f"exchange result could not be persisted: {observe_err}",
+                )
+            except Exception as transition_err:
+                raise RuntimeError(
+                    "exchange returned a result, fact persistence failed, and the "
+                    f"UNKNOWN outbox transition also failed: {transition_err}"
+                ) from transition_err
+            raise
+        if getattr(result, "recovery_required", False):
+            raise RuntimeError(
+                "ExecutionBook applied order facts but reservation settlement "
+                f"requires recovery: {result.diagnostics}"
+            )
+
+    async def _record_submission_failure(
+        self,
+        plan: OrderExecutionPlan,
+        error: Exception,
+        *,
+        before_exchange_post: bool,
+    ) -> None:
+        if not self.is_execution_book_enabled:
+            return
+        if before_exchange_post or isinstance(
+            error, (OrderPreSubmissionError, ExchangeOrderRejectedError)
+        ):
+            await self._execution_book.mark_rejected(
+                plan.client_order_id,
+                reason=str(error),
+            )
+            return
+        await self._execution_book.mark_unknown(
+            plan.client_order_id,
+            reason=str(error) or "submission outcome unknown",
+        )
+
+    async def _mark_dispatching_if_accepted(self, plan: OrderExecutionPlan) -> None:
+        if not self.is_execution_book_enabled:
+            return
+        entry = self._execution_book.get_outbox(plan.client_order_id)
+        if entry is None:
+            if (
+                self._execution_book.has_command_repository
+                or self._reservation_repository
+            ):
+                raise OrderPreSubmissionError(
+                    f"execution command {plan.client_order_id} has no accepted outbox"
+                )
+            # In-memory coordinators are used by isolated scheduler tests and
+            # shadow adapters. Durable live wiring must supply both repositories.
+            return
+        await self._execution_book.mark_dispatching(plan.client_order_id)
+
+    async def _observe_returned_order_result(
+        self,
+        plan: OrderExecutionPlan,
+        result: OrderExecutionResult,
+    ) -> None:
+        await self._observe_order_result_in_execution_book(plan, result)
 
     async def submit(
         self,
@@ -916,11 +852,7 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
                 await self._ensure_reservation(plan)
-                if self.is_execution_book_enabled:
-                    try:
-                        self._execution_book.mark_dispatching(plan.client_order_id)
-                    except Exception:
-                        pass
+                await self._mark_dispatching_if_accepted(plan)
                 try:
                     res = (
                         await self._backend.execute_approved_intent(
@@ -930,19 +862,18 @@ class OrderExecutionCoordinator:
                         if prepared_submission is not None
                         else await self._backend.execute_approved_intent(plan)
                     )
-                    await self._consume_reservation_if_filled(plan, res)
-                    await self._observe_order_result_in_execution_book(plan, res)
-                    return res
                 except Exception as sub_err:
-                    if self.is_execution_book_enabled:
-                        try:
-                            self._execution_book.mark_rejected(
-                                plan.client_order_id, reason=str(sub_err)
-                            )
-                        except Exception:
-                            pass
-                    await self._release_reservation_if_present(plan)
+                    await self._record_submission_failure(
+                        plan,
+                        sub_err,
+                        before_exchange_post=isinstance(
+                            sub_err,
+                            (OrderPreSubmissionError, ExchangeOrderRejectedError),
+                        ),
+                    )
                     raise
+                await self._observe_returned_order_result(plan, res)
+                return res
 
             return cast(
                 OrderExecutionResult,
@@ -974,43 +905,39 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
                 await self._ensure_reservation(plan)
-                if self.is_execution_book_enabled:
-                    try:
-                        self._execution_book.mark_dispatching(plan.client_order_id)
-                    except Exception:
-                        pass
+                await self._mark_dispatching_if_accepted(plan)
                 try:
                     prepared = await prepare_submission()
-                    if prepared is None:
-                        if self.is_execution_book_enabled:
-                            try:
-                                self._execution_book.mark_rejected(
-                                    plan.client_order_id,
-                                    reason="prepare_submission_returned_none",
-                                )
-                            except Exception:
-                                pass
-                        await self._release_reservation_if_present(
-                            plan, reason="prepare_submission_returned_none"
-                        )
-                        return None
+                except Exception as prepare_err:
+                    await self._record_submission_failure(
+                        plan,
+                        prepare_err,
+                        before_exchange_post=True,
+                    )
+                    raise
+                if prepared is None:
+                    await self._execution_book.mark_rejected(
+                        plan.client_order_id,
+                        reason="prepare_submission_returned_none",
+                    )
+                    return None
+                try:
                     res = await self._backend.execute_approved_intent(
                         plan,
                         prepared_submission=prepared,
                     )
-                    await self._consume_reservation_if_filled(plan, res)
-                    await self._observe_order_result_in_execution_book(plan, res)
-                    return res
                 except Exception as sub_err:
-                    if self.is_execution_book_enabled:
-                        try:
-                            self._execution_book.mark_rejected(
-                                plan.client_order_id, reason=str(sub_err)
-                            )
-                        except Exception:
-                            pass
-                    await self._release_reservation_if_present(plan)
+                    await self._record_submission_failure(
+                        plan,
+                        sub_err,
+                        before_exchange_post=isinstance(
+                            sub_err,
+                            (OrderPreSubmissionError, ExchangeOrderRejectedError),
+                        ),
+                    )
                     raise
+                await self._observe_returned_order_result(plan, res)
+                return res
 
             return cast(
                 OrderExecutionResult | None,
@@ -1041,13 +968,7 @@ class OrderExecutionCoordinator:
                 operation=lambda: self._backend.cancel_order(plan),
             ),
         )
-        if plan.reduce_only and result.state in (
-            ExchangeOrderState.CANCELED,
-            ExchangeOrderState.ABSENT_RECONCILED,
-        ):
-            await self._release_reservation_if_present(plan, reason="order_cancelled")
-
-        await self._observe_order_result_in_execution_book(plan, result)
+        await self._observe_returned_order_result(plan, result)
         return result
 
     async def reconcile_order(
@@ -1056,8 +977,7 @@ class OrderExecutionCoordinator:
     ) -> OrderExecutionResult:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.reconcile_order(plan)
-            await self._consume_reservation_if_filled(plan, res)
-            await self._observe_order_result_in_execution_book(plan, res)
+            await self._observe_returned_order_result(plan, res)
             return res
 
         return cast(
@@ -1076,8 +996,7 @@ class OrderExecutionCoordinator:
     ) -> OrderExecutionResult:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.apply_observed_snapshot(plan, snapshot)
-            await self._consume_reservation_if_filled(plan, res)
-            await self._observe_order_result_in_execution_book(plan, res)
+            await self._observe_returned_order_result(plan, res)
             return res
 
         return cast(
@@ -1101,8 +1020,7 @@ class OrderExecutionCoordinator:
     ) -> OrderExecutionResult:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.mark_absent_reconciled(plan, details=details)
-            await self._consume_reservation_if_filled(plan, res)
-            await self._observe_order_result_in_execution_book(plan, res)
+            await self._observe_returned_order_result(plan, res)
             return res
 
         return cast(

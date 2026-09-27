@@ -164,6 +164,51 @@ async def test_submission_prepares_with_fencing_before_coordinator_exchange() ->
     assert call["required_session_id"] == "run-1"
 
 
+async def test_submission_preserves_policy_quantized_quantity() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+    )
+    context = _runtime_context()
+    rules = dict(context.trading_rules)
+    rules["ETHUSDT"] = SymbolTradingRules(
+        symbol="ETHUSDT",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.01"),
+        min_quantity=Decimal("0.01"),
+        max_quantity=Decimal("100"),
+        min_notional=Decimal("5"),
+    )
+    context = replace(context, trading_rules=rules)
+    candidate = replace(
+        _intent(),
+        symbol="ETHUSDT",
+        desired_notional=Decimal("20"),
+        features={"position_side": "BOTH", "quantized_quantity": "0.02"},
+    )
+    reference_price = Decimal("1111.11")
+    state = replace(
+        _state(),
+        symbol="ETHUSDT",
+        mark_price=reference_price,
+        close_price=reference_price,
+    )
+
+    result = await submission.execute(
+        candidate,
+        requested_quantity=None,
+        state=state,
+        context=context,
+        reference_price=reference_price,
+    )
+
+    assert result is not None
+    assert result.plan.quantity == Decimal("0.02")
+    assert result.plan.quantity * reference_price == Decimal("22.2222")
+
+
 async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
     class LegacyRepository:
         def __init__(self) -> None:

@@ -1720,3 +1720,54 @@ def _order_plan() -> OrderExecutionPlan:
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         quantized=True,
     )
+
+
+async def test_flat_bootstrap_reads_explicit_zero_position_rows_from_v2() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        rows = (
+            []
+            if request.url.path.endswith("v3/positionRisk")
+            else [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "LONG",
+                    "positionAmt": "0",
+                    "entryPrice": "0",
+                    "markPrice": "30000",
+                    "notional": "0",
+                },
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "SHORT",
+                    "positionAmt": "0",
+                    "entryPrice": "0",
+                    "markPrice": "30000",
+                    "notional": "0",
+                },
+            ]
+        )
+        return httpx.Response(200, json=rows)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://fapi.binance.com"
+    ) as http:
+        client = BinanceUsdMPrivateReadClient(
+            api_key="key",
+            api_secret="secret",
+            environment="live",
+            account_label="primary",
+            http_client=http,
+        )
+        try:
+            assert await client.fetch_positions() == ()
+            positions = await client.fetch_positions(include_flat=True)
+            assert [(p.symbol, p.position_side, p.position_amt) for p in positions] == [
+                ("BTCUSDT", "LONG", Decimal("0")),
+                ("BTCUSDT", "SHORT", Decimal("0")),
+            ]
+            assert paths == ["/fapi/v3/positionRisk", "/fapi/v2/positionRisk"]
+        finally:
+            await client.aclose()

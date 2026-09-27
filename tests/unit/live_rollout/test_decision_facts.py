@@ -262,3 +262,22 @@ def test_fact_source_on_decision_result_updates_policy_state() -> None:
     )
     src.on_decision_result(res)
     assert src._policy_state.policy_version == 7
+
+
+def test_decision_callback_does_not_overwrite_engine_trace(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.domain.decision.decision_engine import PolicyState
+    from crypto_momentum_lab.live_rollout import decision_facts
+
+    writes = []
+    monkeypatch.setattr(
+        decision_facts,
+        "build_decision_trace",
+        lambda *args, **kwargs: writes.append(kwargs),
+        raising=False,
+    )
+    source = LiveDecisionFactSource("primary", trace_repository=object())
+    result = SimpleNamespace(next_policy_state=PolicyState(), exit_command=None)
+    source.on_decision_result(result, object())
+    assert writes == []

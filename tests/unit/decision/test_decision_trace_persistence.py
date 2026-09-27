@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -204,7 +205,7 @@ async def test_postgres_decision_trace_repository_saves_with_non_durable_commit(
     # 1. Non-durable commit policy executed
     assert session.statements[0].text == "SET LOCAL synchronous_commit = OFF"
 
-    # 2. Both market_revision_refs and decision_traces upserted with DO NOTHING immutability
+    # Both reference and trace rows use immutable conflict handling.
     sql_texts = [
         str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
         for stmt in session.statements[1:]
@@ -322,15 +323,59 @@ async def test_live_decision_fact_source_records_trace_on_decision() -> None:
     )
 
     traces_received: list[DecisionTrace] = []
+
+    def record_trace(trace: DecisionTrace) -> None:
+        traces_received.append(trace)
+        fact_source.record_trace(trace)
+
     filt = create_authoritative_decision_filter(
         "orderflow_impulse",
         target_notional=Decimal("500"),
         fact_provider=lambda s: frozen,
         on_decision_result=fact_source.on_decision_result,
-        trace_recorder=traces_received.append,
+        trace_recorder=record_trace,
     )
 
-    dec = StrategyDecision(signals=(), candidates=(), rejections=())
+    from crypto_momentum_lab.domain.strategy.models import (
+        EntryType,
+        OrderIntentCandidate,
+        StrategySide,
+        StrategySignal,
+    )
+
+    signal = StrategySignal(
+        signal_id="sig_trace_1",
+        run_id="run_trace_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_trace_1",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        detected_at=state.bucket_end,
+        source_state_at=state.bucket_end,
+        reason="trace_test",
+        features={},
+        reference_prices={},
+    )
+    candidate = OrderIntentCandidate(
+        candidate_id="cand_trace_1",
+        signal_id="sig_trace_1",
+        run_id="run_trace_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_trace_1",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=Decimal("102"),
+        desired_notional=Decimal("500"),
+        reduce_only=False,
+        expires_at=state.bucket_end + timedelta(minutes=1),
+        created_at=state.bucket_end,
+        reason="trace_test",
+        features={},
+    )
+    dec = StrategyDecision(signals=(signal,), candidates=(candidate,), rejections=())
     filt(dec, state)
 
     assert len(traces_received) == 1
@@ -338,6 +383,9 @@ async def test_live_decision_fact_source_records_trace_on_decision() -> None:
     assert trace.account_label == "primary"
     assert trace.strategy_name == "orderflow_impulse"
     assert "market_state" in trace.trace_payload
+    assert "policy_parameters" in trace.trace_payload
+    assert "prior_policy_state" in trace.trace_payload
+    assert "output_exit_command" in trace.trace_payload
 
     # Background async task execution
     await asyncio.sleep(0.01)
@@ -359,12 +407,18 @@ async def test_audit_decision_trace_reproducibility(
         decide,
         decision_trace_from_result,
     )
+    from crypto_momentum_lab.domain.decision.decision_frame import DecisionFrame
+    from crypto_momentum_lab.domain.decision.policy_transition import (
+        compute_policy_parameters_digest,
+        compute_policy_state_digest,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         PositionHealthStatus,
         PositionKey,
         PositionView,
     )
     from tests.unit.decision.test_decision_engine import _make_market_envelope
+
     ref, env = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
     pos_view = PositionView(
         key=PositionKey("live", "primary", "BTCUSDT"),
@@ -397,18 +451,45 @@ async def test_audit_decision_trace_reproducibility(
         entry_threshold=Decimal("65000.00"),
         target_notional=Decimal("1000.00"),
     )
-    res = decide(inp, PolicyState(policy_version=1), policy)
-    real_trace = decision_trace_from_result(res, inp, "orderflow_impulse", "primary")
+    prior_state = PolicyState(policy_version=1)
+    ref2 = replace(ref, revision_id=f"{ref.revision_id}:derived")
+    inp = replace(
+        inp,
+        frame=DecisionFrame(
+            scope="live",
+            symbol="BTCUSDT",
+            market_refs=(ref, ref2),
+            position_view_token=pos_view.projection_version,
+            clock_event=inp.clock_event,
+            universe_version=inp.universe_version,
+            risk_config_version=inp.risk_config_version,
+            policy_code_digest=f"policy_{policy.strategy_name}_{prior_state.policy_version}",
+            policy_parameters_digest=compute_policy_parameters_digest(policy),
+            policy_state_digest=compute_policy_state_digest(prior_state),
+            risk_plan_digest=inp.risk_config_version,
+            cash_balance=inp.cash_balance,
+        ),
+    )
+    res = decide(inp, prior_state, policy)
+    real_trace = decision_trace_from_result(
+        res,
+        inp,
+        "orderflow_impulse",
+        "primary",
+        prior_policy_state=prior_state,
+        policy=policy,
+    )
 
+    trace_id = real_trace.decision_id
     trace_row = DecisionTraceRow(
-        decision_id="trace_audit_001",
+        decision_id=trace_id,
         strategy_name=real_trace.strategy_name,
         account_label=real_trace.account_label,
         decision_time=t0,
         intent_produced=real_trace.intent_produced,
         intent_id=real_trace.intent_id,
         rejection_reason=real_trace.rejection_reason,
-        evaluated_revision_ids=[ref.revision_id],
+        evaluated_revision_ids=[ref.revision_id, ref2.revision_id],
         trace_payload=real_trace.trace_payload,
         created_at=t0,
     )
@@ -420,15 +501,30 @@ async def test_audit_decision_trace_reproducibility(
         bucket_start=t0,
         bucket_end=t0 + timedelta(seconds=15),
         content_hash=ref.content_hash,
-        published_at=t0,
+        published_at=ref.published_at,
         source_epoch="ep_live",
         visibility_mode="decision_visible",
         is_canonical=False,
         payload={},
         lineage={},
     )
-    session.trace_rows["trace_audit_001"] = trace_row
+    session.trace_rows[trace_id] = trace_row
     session.rev_rows[ref.revision_id] = rev_row
+    session.rev_rows[ref2.revision_id] = MarketRevisionRefRow(
+        revision_id=ref2.revision_id,
+        scope=ref2.scope,
+        symbol=ref2.symbol,
+        interval=ref2.interval,
+        bucket_start=ref2.bucket_start,
+        bucket_end=ref2.bucket_end,
+        content_hash=ref2.content_hash,
+        published_at=ref2.published_at,
+        source_epoch=ref2.source_epoch,
+        visibility_mode=ref2.visibility_mode.value,
+        is_canonical=False,
+        payload={},
+        lineage={},
+    )
 
     from crypto_momentum_lab.tools import reproduce_decision
 
@@ -448,23 +544,58 @@ async def test_audit_decision_trace_reproducibility(
     )
 
     audit_res = await audit_decision_trace(
-        "trace_audit_001", database_url="postgresql+asyncpg://cml:pwd@localhost/cml"
+        trace_id, database_url="postgresql+asyncpg://cml:pwd@localhost/cml"
     )
-    assert audit_res["status"] == "VERIFIED_REPRODUCIBLE"
+    assert audit_res["status"] == "VERIFIED_REPRODUCIBLE", audit_res
     assert audit_res["reproduced"] is True
-    assert audit_res["decision_id"] == "trace_audit_001"
+    assert audit_res["decision_id"] == trace_id
     assert audit_res["strategy_name"] == "orderflow_impulse"
-    assert audit_res["evaluated_revisions_count"] == 1
-    assert (
-        audit_res["evaluated_revisions"][0]["revision_id"]
-        == ref.revision_id
+    assert audit_res["evaluated_revisions_count"] == 2
+    assert audit_res["evaluated_revisions"][0]["revision_id"] == ref.revision_id
+    assert audit_res["evaluated_revisions"][1]["revision_id"] == ref2.revision_id
+
+    # Reconstructed policy/state must match the digests frozen in the frame.
+    tampered_policy_payload = dict(real_trace.trace_payload)
+    tampered_policy_payload["policy_parameters"] = dict(
+        tampered_policy_payload["policy_parameters"]
+    )
+    tampered_policy_payload["policy_parameters"]["target_notional"] = "999"
+    tampered_policy = replace(real_trace, trace_payload=tampered_policy_payload)
+    policy_audit = await audit_decision_trace(trace_id, trace_override=tampered_policy)
+    assert policy_audit["status"] == "UNREPRODUCIBLE"
+    assert policy_audit["error"] == (
+        "Reconstructed policy parameters differ from the DecisionFrame digest"
+    )
+
+    tampered_state_payload = dict(real_trace.trace_payload)
+    tampered_state_payload["prior_policy_state"] = dict(
+        tampered_state_payload["prior_policy_state"]
+    )
+    tampered_state_payload["prior_policy_state"]["warmup_status"] = {"BTCUSDT": True}
+    tampered_state = replace(real_trace, trace_payload=tampered_state_payload)
+    state_audit = await audit_decision_trace(trace_id, trace_override=tampered_state)
+    assert state_audit["status"] == "UNREPRODUCIBLE"
+    assert state_audit["error"] == (
+        "Reconstructed prior policy state differs from the DecisionFrame digest"
+    )
+
+    tampered_refs_payload = dict(real_trace.trace_payload)
+    tampered_refs_payload["decision_frame"] = dict(
+        tampered_refs_payload["decision_frame"]
+    )
+    tampered_refs_payload["decision_frame"]["market_revision_ids"] = [ref.revision_id]
+    tampered_refs = replace(real_trace, trace_payload=tampered_refs_payload)
+    refs_audit = await audit_decision_trace(trace_id, trace_override=tampered_refs)
+    assert refs_audit["status"] == "UNREPRODUCIBLE"
+    assert refs_audit["error"] == (
+        "DecisionFrame market revisions differ from the trace revisions"
     )
     assert audit_res["next_policy_state_version"] == 2
 
 
 @pytest.mark.asyncio
 async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
-    """Verifies Sol's F4: PostgresDecisionTraceRepository rejects attempts to overwrite an existing trace with conflicting content."""
+    """Reject attempts to overwrite a trace with conflicting content."""
     session = _FakeAsyncSession()
     repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
 
@@ -519,7 +650,7 @@ async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
     # 1. Saving the exact same trace again is idempotent and succeeds
     await repo.save_decision_traces([trace_1])
 
-    # 2. Saving a conflicting trace with the SAME decision_id but different input_hash / intent raises ValueError
+    # Reject a conflicting input hash or intent under the same ID.
     conflicting_trace = DecisionTrace(
         decision_id="dec_btc_001",
         strategy_name="orderflow_impulse",

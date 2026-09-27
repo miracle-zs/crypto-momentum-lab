@@ -1,8 +1,9 @@
 """Runtime policy for account-event fan-out in live execution."""
 
 import asyncio
+import inspect
 from collections import deque
-from collections.abc import AsyncIterable, Callable
+from collections.abc import AsyncIterable, Awaitable, Callable
 
 import structlog
 
@@ -50,7 +51,8 @@ class LiveAccountEventRuntime:
         is_transient_error: Callable[[Exception], bool],
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
-        on_account_snapshot: Callable[[AccountEvent], None] | None = None,
+        on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None]
+        | None = None,
         on_account_snapshot_recovery: Callable[[str], None] | None = None,
         pending_position_retry_delays: tuple[float, ...] = (
             DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
@@ -87,6 +89,7 @@ class LiveAccountEventRuntime:
 
     async def _process_event(self, event: AccountEvent) -> None:
         reconciliation_run_id = self._reconciliation_run_id
+        applying_snapshot = False
         try:
             if (
                 self._telemetry is not None
@@ -112,7 +115,11 @@ class LiveAccountEventRuntime:
             # context cannot observe a newly opened position before its
             # matching entry fill/order state is durable.
             if self._on_account_snapshot is not None:
-                self._on_account_snapshot(event)
+                applying_snapshot = True
+                result = self._on_account_snapshot(event)
+                if inspect.isawaitable(result):
+                    await result
+                applying_snapshot = False
             for state in self._latest_market_states.for_symbols(event.symbols):
                 quote = next(
                     iter(self._latest_market_quotes.for_symbols((state.symbol,))),
@@ -169,7 +176,7 @@ class LiveAccountEventRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if not self._is_transient_error(error):
+            if applying_snapshot or not self._is_transient_error(error):
                 self._request_account_snapshot_recovery(
                     f"account_event_processing_failed:{type(error).__name__}"
                 )

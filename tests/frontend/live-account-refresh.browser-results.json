@@ -1,0 +1,37 @@
+{
+  "browser": "Google Chrome",
+  "checked_at_utc": "2026-09-27T12:29:25Z",
+  "url": "http://127.0.0.1:18765/tests/frontend/live-account-refresh.browser.html",
+  "test_data": "synthetic local fixtures only",
+  "complete": true,
+  "checks": [
+    {
+      "result": "PASS",
+      "name": "same-structure account/metrics poll updates balances, positions, orders, fills, and chart"
+    },
+    {
+      "result": "PASS",
+      "name": "keyed rows, disclosure state, chart shell, and ECharts instance survive morph"
+    },
+    {
+      "result": "PASS",
+      "name": "account and metrics range listeners issue one request and preserve 7d"
+    },
+    {
+      "result": "PASS",
+      "name": "offline refresh retains last-good balances, rows, charts, and recovers stale state"
+    },
+    {
+      "result": "PASS",
+      "name": "same-root rapid render keeps the last version and releases min-height"
+    },
+    {
+      "result": "PASS",
+      "name": "same-frame height changes in two roots keep the reading anchor stable"
+    },
+    {
+      "result": "PASS",
+      "name": "newer user focus wins over a queued same-root restore"
+    }
+  ]
+}

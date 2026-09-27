@@ -404,7 +404,9 @@ def test_dashboard_polling_preserves_scroll_positions() -> None:
     for marker in (
         "captureViewState",
         "restoreViewState",
-        "view.scrollTo(state.pageX, state.pageY)",
+        "view.scrollTo({ left: state.pageX, top: targetY",
+        "let targetY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY",
+        "currentY + (Math.abs(diff) > 2 ? diff : 0)",
         'querySelectorAll(".table-scroll")',
     ):
         assert marker in text
@@ -447,8 +449,15 @@ def test_scroll_state_restores_layout_before_page_position() -> None:
 
     disclosures = restore_code.index('querySelectorAll("details")')
     containers = restore_code.index('querySelectorAll(".table-scroll")')
-    page = restore_code.index("view.scrollTo(state.pageX, state.pageY)")
+    page = restore_code.index("view.scrollTo({ left: state.pageX, top: targetY")
     assert disclosures < containers < page
+    assert (
+        "let targetY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY"
+        in restore_code
+    )
+    assert "currentY + (Math.abs(diff) > 2 ? diff : 0)" in restore_code
+    assert "const remainingDelta = ownHeightDelta - nativeScrollDelta" in restore_code
+    assert "rootAboveAnchorPoint: beforeReleaseRect.bottom <= 100" in text
 
 
 def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:

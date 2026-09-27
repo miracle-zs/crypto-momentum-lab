@@ -213,3 +213,61 @@ async def test_runtime_deduplicates_fill_telemetry_after_account_stream_replay()
     await runtime.run(Source())  # type: ignore[arg-type]
 
     assert fill_events == [event]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fail_snapshot,transient", [(False, False), (True, False), (True, True)]
+)
+async def test_async_snapshot_is_applied_before_account_decision(
+    fail_snapshot: bool,
+    transient: bool,
+) -> None:
+    ordering: list[str] = []
+    recoveries: list[str] = []
+    event = SimpleNamespace(
+        event_type="ACCOUNT_UPDATE",
+        client_order_id=None,
+        has_fill=False,
+        symbols=("BTCUSDT",),
+    )
+    state = SimpleNamespace(symbol="BTCUSDT")
+
+    class Cache:
+        def for_symbols(self, symbols):
+            return (state,) if symbols else ()
+
+    class Quotes:
+        def for_symbols(self, symbols):
+            return ()
+
+    class Daemon:
+        async def process_account_event(self, state, *, quote):
+            ordering.append("decision")
+            return None
+
+    async def snapshot(event):
+        await asyncio.sleep(0)
+        ordering.append("snapshot")
+        if fail_snapshot:
+            raise ValueError("snapshot invalid")
+
+    runtime = LiveAccountEventRuntime(
+        daemon=Daemon(),
+        latest_market_states=Cache(),
+        latest_market_quotes=Quotes(),
+        is_transient_error=lambda error: transient,
+        on_account_snapshot=snapshot,
+        on_account_snapshot_recovery=recoveries.append,
+    )
+    if fail_snapshot:
+        if transient:
+            await runtime._process_event(event)
+        else:
+            with pytest.raises(ValueError, match="snapshot invalid"):
+                await runtime._process_event(event)
+        assert ordering == ["snapshot"]
+        assert recoveries == ["account_event_processing_failed:ValueError"]
+    else:
+        await runtime._process_event(event)
+        assert ordering == ["snapshot", "decision"]

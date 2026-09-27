@@ -10,6 +10,7 @@ Tests:
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,15 +39,15 @@ from crypto_momentum_lab.domain.market.market_book import (
     compute_market_state_hash,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy.sizing import (
-    FixedNotionalSizingModel,
-    SymbolLotRules,
-    default_symbol_lot_rules,
-)
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
     MarketRevisionRef,
     MarketVisibilityMode,
+)
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
+from crypto_momentum_lab.domain.strategy.sizing import (
+    FixedNotionalSizingModel,
+    default_symbol_lot_rules,
 )
 
 
@@ -441,10 +442,9 @@ def test_decision_input_hash_sensitivity() -> None:
         sizing_model=FixedNotionalSizingModel(target_notional=Decimal("1000.00")),
     )
     assert compute_decision_input_hash(inp, pol_sizing1, state) != base_hash
-    assert (
-        compute_decision_input_hash(inp, pol_sizing1, state)
-        != compute_decision_input_hash(inp, pol_sizing2, state)
-    )
+    assert compute_decision_input_hash(
+        inp, pol_sizing1, state
+    ) != compute_decision_input_hash(inp, pol_sizing2, state)
 
     # 8. Changing policy symbol_lot_rules alters hash
     base_rules = default_symbol_lot_rules("BTCUSDT")
@@ -457,10 +457,98 @@ def test_decision_input_hash_sensitivity() -> None:
         symbol_lot_rules=replace(base_rules, step_size=Decimal("0.01")),
     )
     assert compute_decision_input_hash(inp, pol_lot1, state) != base_hash
-    assert (
-        compute_decision_input_hash(inp, pol_lot1, state)
-        != compute_decision_input_hash(inp, pol_lot2, state)
+    assert compute_decision_input_hash(
+        inp, pol_lot1, state
+    ) != compute_decision_input_hash(inp, pol_lot2, state)
+
+    # 9. The exit policy affects decisions even though EffectivePolicy uses slots.
+    policy_exit = replace(
+        policy,
+        exit_policy=PositionExitPolicy(max_holding_seconds=600),
     )
+    assert compute_decision_input_hash(inp, policy_exit, state) != base_hash
+
+    # 10. All mutable prior state participates in the hash, not only the
+    # legacy cooldown/anchor fields.
+    state_signal = replace(state, signal_memory={"BTCUSDT": {"last": "breakout"}})
+    state_custom = replace(state, custom_state={"BTCUSDT": {"regime": "trend"}})
+    state_sizing = replace(
+        state, sizing_state_by_symbol={"BTCUSDT": {"quantized_quantity": "0.01"}}
+    )
+    assert compute_decision_input_hash(inp, policy, state_signal) != base_hash
+    assert compute_decision_input_hash(inp, policy, state_custom) != base_hash
+    assert compute_decision_input_hash(inp, policy, state_sizing) != base_hash
+
+
+def test_decision_input_hash_preserves_zero_remaining_batch_quantity() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    flat = _make_flat_position_view("BTCUSDT")
+    policy = EffectivePolicy(policy_id="pol", strategy_name="strategy")
+    state = PolicyState()
+    batch_zero = SimpleNamespace(
+        batch_id="batch-zero",
+        episode_id="ep-zero",
+        quantity=Decimal("0.5"),
+        original_quantity=Decimal("1.0"),
+        remaining_quantity=Decimal("0"),
+        entry_price=Decimal("65000"),
+        opened_at=t0,
+    )
+    batch_open = SimpleNamespace(
+        batch_id="batch-zero",
+        episode_id="ep-zero",
+        quantity=Decimal("0.5"),
+        original_quantity=Decimal("1.0"),
+        remaining_quantity=Decimal("0.5"),
+        entry_price=Decimal("65000"),
+        opened_at=t0,
+    )
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=mref,
+        market_envelope=menv,
+        position_view=flat,
+        universe_version="u1",
+        clock_event=ClockEvent(sequence=1, timestamp=t0 + timedelta(seconds=15)),
+        cash_balance=Decimal("10000"),
+        risk_config_version="risk_v1",
+    )
+    hash_zero = compute_decision_input_hash(
+        replace(inp, position_view=replace(flat, batches=(batch_zero,))), policy, state
+    )
+    hash_open = compute_decision_input_hash(
+        replace(inp, position_view=replace(flat, batches=(batch_open,))), policy, state
+    )
+    assert hash_zero != hash_open
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_policy_and_prior_state_evidence() -> None:
+    from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
+
+    now = datetime(2026, 9, 27, 5, 0, 0, tzinfo=UTC)
+    ref, env = _make_market_envelope("BTCUSDT", now, Decimal("65500.00"))
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=ref,
+        market_envelope=env,
+        position_view=_make_flat_position_view("BTCUSDT"),
+        universe_version="u1",
+        clock_event=ClockEvent(sequence=1, timestamp=now),
+        cash_balance=Decimal("10000"),
+        risk_config_version="risk_v1",
+    )
+    state = PolicyState()
+    policy = EffectivePolicy(policy_id="pol", strategy_name="orderflow_impulse")
+    result = decide(inp, state, policy)
+    incomplete = decision_trace_from_result(result, inp, "orderflow_impulse", "primary")
+
+    audit = await audit_decision_trace(
+        incomplete.decision_id, trace_override=incomplete
+    )
+    assert audit["status"] == "EVIDENCE_INSUFFICIENT"
+    assert audit["reproduced"] is False
 
 
 def test_decision_trace_from_result_and_replay() -> None:
@@ -501,7 +589,7 @@ def test_decision_trace_from_result_and_replay() -> None:
     assert trace.input_hash == result.input_hash
     assert trace.intent_produced is True
     assert trace.trace_payload is not None
-    assert trace.trace_payload["output_intent"]["desired_notional"] == "500.00"
+    assert trace.trace_payload["output_intent"]["desired_notional"] == "500"
 
     repo = InMemoryMarketBookRepository()
     book = MarketBook(repo)
@@ -543,7 +631,7 @@ def test_decision_trace_from_result_and_replay() -> None:
 
 
 def test_decision_parameters_digest_divergence() -> None:
-    """Verifies Sol's F2: Different policy parameters produce distinct input_hash and decision_id even with same policy_version."""
+    """Different policy parameters change input_hash and decision_id."""
     now = datetime(2026, 9, 27, 5, 0, 0, tzinfo=UTC)
     ref, env = _make_market_envelope("BTCUSDT", now, Decimal("65500.00"))
     pos_view = _make_flat_position_view("BTCUSDT")
@@ -591,7 +679,7 @@ def test_decision_parameters_digest_divergence() -> None:
 
 @pytest.mark.asyncio
 async def test_reproduce_decision_rejects_tampered_or_empty_trace() -> None:
-    """Verifies Sol's F3: reproduce_decision audit fails on empty refs, wrong input_hash, or missing market_state."""
+    """Replay audit fails on empty refs, wrong hashes, and missing market state."""
     from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
 
     now = datetime(2026, 9, 27, 5, 0, 0, tzinfo=UTC)
@@ -616,7 +704,14 @@ async def test_reproduce_decision_rejects_tampered_or_empty_trace() -> None:
         target_notional=Decimal("1000.00"),
     )
     res = decide(inp, state, policy)
-    trace = decision_trace_from_result(res, inp, "orderflow_impulse", "primary")
+    trace = decision_trace_from_result(
+        res,
+        inp,
+        "orderflow_impulse",
+        "primary",
+        prior_policy_state=state,
+        policy=policy,
+    )
 
     # 1. Authentic trace with preserved market_state passes audit
     audit_ok = await audit_decision_trace(trace.decision_id, trace_override=trace)
@@ -707,13 +802,30 @@ async def test_reproduce_decision_with_batches_and_sizing() -> None:
     )
     res = decide(inp, state, policy)
     trace = decision_trace_from_result(
-        res, inp, "orderflow_impulse", "primary", prior_policy_state=state, policy=policy
+        res,
+        inp,
+        "orderflow_impulse",
+        "primary",
+        prior_policy_state=state,
+        policy=policy,
     )
 
     # Must verify reproducibility without NameError on datetime or missing fields
     audit_res = await audit_decision_trace(trace.decision_id, trace_override=trace)
     assert audit_res["status"] == "VERIFIED_REPRODUCIBLE"
     assert audit_res["reproduced"] is True
+
+    # Any semantic mutation to next state invalidates the replay certificate.
+    tampered_state_payload = dict(trace.trace_payload)
+    tampered_state = dict(tampered_state_payload["next_policy_state"])
+    tampered_state["policy_version"] = int(tampered_state["policy_version"]) + 100
+    tampered_state_payload["next_policy_state"] = tampered_state
+    tampered_state_trace = replace(trace, trace_payload=tampered_state_payload)
+    audit_tampered_state = await audit_decision_trace(
+        trace.decision_id, trace_override=tampered_state_trace
+    )
+    assert audit_tampered_state["status"] == "UNREPRODUCIBLE"
+    assert audit_tampered_state["reproduced"] is False
 
     # Tampered desired_notional should fail reproducibility
     tampered_payload = dict(trace.trace_payload)

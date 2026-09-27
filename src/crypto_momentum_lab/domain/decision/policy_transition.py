@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+import math
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Any, Protocol
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
@@ -116,81 +118,159 @@ class StrategyPolicy(Protocol):
     ) -> PolicyTransition: ...
 
 
+POLICY_SERIALIZATION_VERSION = 1
+POLICY_STATE_SERIALIZATION_VERSION = 1
+
+
+def _decimal_text(value: Decimal) -> str:
+    if not value.is_finite():
+        raise ValueError("policy decimals must be finite")
+    if value.is_zero():
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _timedelta_seconds(value: timedelta) -> int | str:
+    total_microseconds = (
+        value.days * 86_400 + value.seconds
+    ) * 1_000_000 + value.microseconds
+    seconds = Decimal(total_microseconds) / Decimal(1_000_000)
+    if seconds == seconds.to_integral_value():
+        return int(seconds)
+    return _decimal_text(seconds)
+
+
+def canonicalize_policy_value(value: Any) -> Any:
+    """Convert supported policy values to deterministic JSON values.
+
+    Dataclass and slots-backed objects retain their class name and every public
+    field. Unsupported values fail closed instead of falling back to an
+    implementation-dependent ``str(value)`` representation.
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, Decimal):
+        return _decimal_text(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("policy floats must be finite")
+        return format(value, ".17g")
+    if isinstance(value, Enum):
+        return canonicalize_policy_value(value.value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("policy datetimes must be timezone-aware")
+        return value.astimezone(UTC).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return {"seconds": _timedelta_seconds(value)}
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("policy mapping keys must be strings")
+        return {key: canonicalize_policy_value(value[key]) for key in sorted(value)}
+    if isinstance(value, (tuple, list)):
+        return [canonicalize_policy_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [canonicalize_policy_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+
+    if is_dataclass(value) and not isinstance(value, type):
+        object_fields = {
+            item.name: getattr(value, item.name)
+            for item in fields(value)
+            if not item.name.startswith("_")
+        }
+    else:
+        object_fields: dict[str, Any] = {}
+        instance_dict = getattr(value, "__dict__", None)
+        if isinstance(instance_dict, dict):
+            object_fields = {
+                key: item
+                for key, item in instance_dict.items()
+                if not key.startswith("_")
+            }
+        else:
+            slots = getattr(type(value), "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for name in slots:
+                if (
+                    isinstance(name, str)
+                    and not name.startswith("_")
+                    and hasattr(value, name)
+                ):
+                    object_fields[name] = getattr(value, name)
+        if not object_fields:
+            value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+            raise TypeError(f"unsupported policy value type: {value_type}")
+
+    normalized_fields = {
+        key: canonicalize_policy_value(item)
+        for key, item in sorted(object_fields.items())
+        if not callable(item)
+    }
+    if not normalized_fields and callable(value):
+        raise TypeError("callables are not serializable policy parameters")
+    return {
+        "class": type(value).__name__,
+        "module": type(value).__module__,
+        **normalized_fields,
+    }
+
+
+def _policy_object_fields(policy: Any) -> dict[str, Any]:
+    if isinstance(policy, Mapping):
+        if not all(isinstance(key, str) for key in policy):
+            raise TypeError("policy parameter keys must be strings")
+        return dict(policy)
+    if is_dataclass(policy) and not isinstance(policy, type):
+        return {
+            item.name: getattr(policy, item.name)
+            for item in fields(policy)
+            if not item.name.startswith("_")
+        }
+    instance_dict = getattr(policy, "__dict__", None)
+    if isinstance(instance_dict, dict):
+        return {
+            key: value
+            for key, value in instance_dict.items()
+            if not key.startswith("_")
+        }
+    slots = getattr(type(policy), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    return {
+        name: getattr(policy, name)
+        for name in slots
+        if isinstance(name, str) and not name.startswith("_") and hasattr(policy, name)
+    }
+
+
 def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
-    """Extracts a canonical sorted dictionary of all policy parameters."""
+    """Return versioned canonical parameters for every decision-relevant field."""
     if policy is None:
-        return {}
-    if isinstance(policy, dict):
-        return {k: str(v) for k, v in sorted(policy.items())}
-    fields = [
-        "policy_id",
-        "strategy_name",
-        "policy_version",
-        "entry_threshold",
-        "short_entry_threshold",
-        "order_type",
-        "target_notional",
-        "max_open_positions",
-        "cooldown_duration",
-        "position_mode",
-        "grace_period",
-        "parameters",
-        "config",
-    ]
-    res: dict[str, Any] = {}
-    for f in fields:
-        if hasattr(policy, f):
-            val = getattr(policy, f)
-            if hasattr(val, "total_seconds"):
-                res[f] = int(val.total_seconds())
-                res[f"{f}_seconds"] = int(val.total_seconds())
-            elif hasattr(val, "value"):
-                res[f] = val.value
-            elif isinstance(val, (int, float, bool, str)) or val is None:
-                res[f] = val
-            elif isinstance(val, Decimal):
-                res[f] = str(val)
-            else:
-                res[f] = str(val)
-
-    sizing_model = getattr(policy, "sizing_model", None)
-    if sizing_model is not None:
-        model_name = sizing_model.__class__.__name__
-        model_dict: dict[str, Any] = {"class": model_name}
-        if hasattr(sizing_model, "__dataclass_fields__"):
-            for f in sorted(sizing_model.__dataclass_fields__):
-                v = getattr(sizing_model, f)
-                model_dict[f] = str(v) if isinstance(v, Decimal) else v
-        elif hasattr(sizing_model, "__dict__"):
-            for k, v in sorted(sizing_model.__dict__.items()):
-                if not k.startswith("_"):
-                    model_dict[k] = str(v) if isinstance(v, Decimal) else v
-        res["sizing_model"] = model_dict
-
-    lot_rules = getattr(policy, "symbol_lot_rules", None)
-    if lot_rules is not None:
-        rules_dict: dict[str, Any] = {}
-        if hasattr(lot_rules, "__dataclass_fields__"):
-            for f in sorted(lot_rules.__dataclass_fields__):
-                v = getattr(lot_rules, f)
-                rules_dict[f] = str(v) if isinstance(v, Decimal) else v
-        elif hasattr(lot_rules, "__dict__"):
-            for k, v in sorted(lot_rules.__dict__.items()):
-                if not k.startswith("_"):
-                    rules_dict[k] = str(v) if isinstance(v, Decimal) else v
-        res["symbol_lot_rules"] = rules_dict
-
-    if hasattr(policy, "__dict__"):
-        for k, v in sorted(policy.__dict__.items()):
-            if not k.startswith("_") and k not in res:
-                if hasattr(v, "total_seconds"):
-                    res[k] = int(v.total_seconds())
-                elif hasattr(v, "value"):
-                    res[k] = v.value
-                elif isinstance(v, (int, float, bool, str)) or v is None:
-                    res[k] = v
-                else:
-                    res[k] = str(v)
+        return {"serialization_version": POLICY_SERIALIZATION_VERSION}
+    raw_fields = _policy_object_fields(policy)
+    res: dict[str, Any] = {"serialization_version": POLICY_SERIALIZATION_VERSION}
+    for name, value in sorted(raw_fields.items()):
+        # The filter injects an executable candidate callback. Its frozen input
+        # candidate is recorded separately in DecisionTrace; serializing the
+        # closure itself would not be reproducible.
+        if name == "candidate_generator":
+            continue
+        if isinstance(value, timedelta):
+            seconds = _timedelta_seconds(value)
+            res[name] = seconds
+            res[f"{name}_seconds"] = seconds
+        else:
+            res[name] = canonicalize_policy_value(value)
     return res
 
 
@@ -201,28 +281,26 @@ def compute_policy_parameters_digest(policy: Any) -> str:
 
 
 def serialize_policy_state(state: Any) -> dict[str, Any]:
-    if state is None:
-        return {}
-    if isinstance(state, dict):
-        return {k: str(v) for k, v in sorted(state.items())}
     res: dict[str, Any] = {
-        "policy_version": getattr(state, "policy_version", 1),
+        "serialization_version": POLICY_STATE_SERIALIZATION_VERSION,
     }
-    if hasattr(state, "cooldown_until_by_symbol"):
-        res["cooldown_until_by_symbol"] = {
-            k: v.isoformat() if hasattr(v, "isoformat") else str(v)
-            for k, v in sorted(state.cooldown_until_by_symbol.items())
-        }
-    if hasattr(state, "anchor_prices_by_symbol"):
-        res["anchor_prices_by_symbol"] = {
-            k: str(v) for k, v in sorted(state.anchor_prices_by_symbol.items())
-        }
-    if hasattr(state, "active_intent_ids_by_symbol"):
-        res["active_intent_ids_by_symbol"] = dict(
-            sorted(state.active_intent_ids_by_symbol.items())
-        )
-    if hasattr(state, "warmup_status"):
-        res["warmup_status"] = dict(sorted(state.warmup_status.items()))
+    if state is None:
+        return res
+    if isinstance(state, Mapping):
+        res["custom_state"] = canonicalize_policy_value(state)
+        return res
+
+    aliases = {
+        "cooldown_until_by_symbol": "cooldown_until",
+        "anchor_prices_by_symbol": "anchor_prices",
+        "active_intent_ids_by_symbol": "active_intent_ids",
+        "grace_until_by_symbol": "grace_until",
+        "holding_deadline_by_symbol": "holding_deadline",
+        "sizing_state_by_symbol": "sizing_state",
+    }
+    raw_fields = _policy_object_fields(state)
+    for name, value in sorted(raw_fields.items()):
+        res[aliases.get(name, name)] = canonicalize_policy_value(value)
     return res
 
 

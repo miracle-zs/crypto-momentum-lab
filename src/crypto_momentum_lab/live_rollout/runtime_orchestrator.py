@@ -278,7 +278,6 @@ from crypto_momentum_lab.strategy_runner.candle_source import (
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     PositionExitMode,
-    PositionExitPolicy,
 )
 from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
 
@@ -339,9 +338,6 @@ async def run_live_daemon(
     entry_long_only = config.execution.entry_long_only
     entry_leverage = config.execution.entry_leverage
     margin_type = config.execution.margin_type
-    candle_grace_bars = config.execution.candle_grace_bars
-    candle_grace_decision_profit_pct = config.execution.candle_grace_decision_profit_pct
-    candle_grace_profit_pct = config.execution.candle_grace_profit_pct
     max_concurrency_per_symbol = config.execution.max_concurrency_per_symbol
 
     max_runtime_seconds = config.lifecycle.max_runtime_seconds
@@ -781,10 +777,8 @@ async def run_live_daemon(
             reservation_repository=reservation_repository,
             command_repository=order_repository,
         )
-        try:
-            await execution_book.restore(account_label=account_label)
-        except Exception as eb_rest_err:
-            log.warning("execution_book_restore_failed", error=str(eb_rest_err))
+        # An incomplete recovery must fail startup before order submission.
+        await execution_book.restore(account_label=account_label)
 
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
@@ -797,6 +791,7 @@ async def run_live_daemon(
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
+        await _bootstrap_execution_position_facts(client, execution_coordinator)
 
         async def _handle_decision_exit(cmd: TradeCommand) -> None:
             allocs = ()
@@ -1412,19 +1407,16 @@ async def run_live_daemon(
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
-        def _on_account_snapshot_combined(event: AccountEvent) -> None:
-            control_plane_runtime.on_account_snapshot(event)
+
+        async def _on_account_snapshot_combined(event: AccountEvent) -> None:
+            # The account channel owns and awaits fact ingestion. Publish the
+            # ready context only after the execution projection has accepted it.
             if event.account_snapshot is not None and execution_coordinator is not None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        execution_coordinator.observe_account_snapshot(
-                            event.account_snapshot,
-                            symbols=event.symbols,
-                        )
-                    )
-                except Exception:
-                    pass
+                await execution_coordinator.observe_account_snapshot(
+                    event.account_snapshot,
+                    symbols=event.symbols,
+                )
+            control_plane_runtime.on_account_snapshot(event)
 
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,
@@ -1728,6 +1720,17 @@ async def _run_risk_control_channel(
         await on_event(event)
 
 
+async def _bootstrap_execution_position_facts(
+    client: BinanceUsdMTradeClient,
+    coordinator: OrderExecutionCoordinator,
+) -> None:
+    """Seed only exchange-returned facts before allowing entry submission."""
+    async with asyncio.timeout(15):
+        positions = await client.fetch_positions(include_flat=True)
+        for position in positions:
+            await coordinator.observe_account_snapshot(position)
+
+
 async def _run_account_event_channel(
     *,
     source: WebSocketAccountEventSource,
@@ -1740,7 +1743,7 @@ async def _run_account_event_channel(
     run_id: str | None = None,
     telemetry: LiveTelemetrySink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
-    on_account_snapshot: Callable[[AccountEvent], None] | None = None,
+    on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None] | None = None,
     on_account_snapshot_recovery: Callable[[str], None] | None = None,
 ) -> None:
     if (

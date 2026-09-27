@@ -148,3 +148,69 @@ test("updateLiveAccountsDynamic updates card status, KPIs, footer, and fleet sum
   assert.match(fleetElements.kpis.innerHTML, /USDT 钱包合计/);
 });
 
+test("same-structure live-account polls refresh selected details and fleet metrics without dropping last-good DOM", async () => {
+  const requestedUrls = [];
+  const makeSlot = (dataset) => ({
+    dataset,
+    children: [{}],
+    isConnected: true,
+    style: { minHeight: "" },
+    offsetHeight: 200,
+    replacements: 0,
+    ownerDocument: {
+      scrollingElement: { scrollLeft: 0, scrollTop: 0 },
+      documentElement: { style: {} },
+      body: { scrollLeft: 0, scrollTop: 0 },
+      querySelectorAll: () => [],
+    },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    replaceChildren() { this.replacements += 1; },
+    setAttribute() {},
+    removeAttribute() {},
+  });
+  const detailSlot = makeSlot({ accountLabel: "primary", renderedAccount: "primary" });
+  const metricsSlot = makeSlot({ renderedRange: "24h" });
+  const card = {
+    dataset: { liveAccountLabel: "primary" },
+    classList: { toggle() {} },
+    querySelector: () => null,
+    setAttribute() {},
+  };
+  const fleetStatus = { innerHTML: "" };
+  const fleetKpis = { innerHTML: "" };
+  const mockRoot = {
+    querySelector(selector) {
+      if (selector === '[data-live-account-label="primary"]') return card;
+      if (selector === ".live-account-fleet-status") return fleetStatus;
+      if (selector === ".live-account-fleet-kpis") return fleetKpis;
+      if (selector === "[data-live-account-detail]") return detailSlot;
+      if (selector === "[data-live-account-metrics]") return metricsSlot;
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-live-account-label]" ? [card] : [];
+    },
+    __requestJson: async (url) => {
+      requestedUrls.push(url);
+      throw new Error("offline during refresh");
+    },
+  };
+
+  await updateLiveAccountsDynamic(mockRoot, {
+    status: "READY",
+    accounts: [{
+      account_label: "primary",
+      status: "READY",
+      readiness: "ready_readonly",
+      observed_at: "2026-09-27T10:00:00Z",
+    }],
+  });
+
+  assert.deepEqual(requestedUrls, [
+    "api/account?account_label=primary&equity_range=24h",
+    "api/live-account-metrics?equity_range=24h",
+  ]);
+  assert.equal(detailSlot.replacements, 0, "a transient detail error must retain the last successful detail DOM");
+  assert.equal(metricsSlot.replacements, 0, "a transient metrics error must retain the last successful charts");
+});

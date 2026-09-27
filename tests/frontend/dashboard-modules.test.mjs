@@ -977,7 +977,7 @@ test("account equity and pnl ticks do not change structural render key", () => {
   assert.equal(sectionRenderKey("account", first), sectionRenderKey("account", second));
 });
 
-test("captureViewState and restoreViewState handle mock document gracefully", () => {
+test("restoreViewState keeps the current mock scroll when no semantic anchor survives", () => {
   const mockDoc = {
     scrollingElement: { scrollLeft: 0, scrollTop: 250, scrollHeight: 2000 },
     documentElement: { style: {} },
@@ -1003,10 +1003,11 @@ test("captureViewState and restoreViewState handle mock document gracefully", ()
   assert.equal(state.pageY, 250);
   assert.ok(state.capturedAt > 0);
 
-  // Simulate restore
-  mockDoc.scrollingElement.scrollTop = 0;
+  // Without a semantic anchor, restoration must not replay a stale scrollY.
+  mockDoc.scrollingElement.scrollTop = 123;
+  mockDoc.defaultView.scrollY = 123;
   restoreViewState(root, state);
-  assert.equal(mockDoc.scrollingElement.scrollTop, 250);
+  assert.equal(mockDoc.scrollingElement.scrollTop, 123);
 });
 
 test("replaceChildrenFromHtml restores minHeight on independent roots across rAF", () => {
@@ -1067,5 +1068,4 @@ test("replaceChildrenFromHtml restores minHeight on independent roots across rAF
   assert.equal(rootA.style.minHeight, "10px");
   assert.equal(rootB.style.minHeight, "20px");
 });
-
 

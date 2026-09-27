@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Live account refresh browser regression</title>
+    <link rel="stylesheet" href="../../src/crypto_momentum_lab/operator_dashboard/static/dashboard.css">
+    <style>
+      body { margin: 0; padding: 24px; }
+      #browser-results { position: fixed; right: 12px; bottom: 12px; z-index: 20; max-height: 180px; overflow: auto; padding: 12px; background: #111827; }
+      #browser-results li.pass { color: #86efac; }
+      #browser-results li.fail { color: #fca5a5; }
+      #scenario-spacer { height: 900px; }
+      #scenario { min-height: 900px; }
+      #race-a, #race-b { border: 1px solid #64748b; margin: 24px 0; }
+      #race-anchor { min-height: 160px; border: 1px solid #22d3ee; }
+      #plain-reading-marker { min-height: 100px; border: 1px solid #94a3b8; }
+      #race-user-focus { margin-top: 800px; }
+      #race-tail { height: 1200px; }
+      #scenario .table-scroll { max-height: 220px; overflow: auto; }
+    </style>
+    <script src="../../src/crypto_momentum_lab/operator_dashboard/static/vendor/echarts.min.js"></script>
+  </head>
+  <body>
+    <ol id="browser-results"><li>Running local DOM and chart checks…</li></ol>
+    <div id="scenario-spacer">Browser test fixture spacer</div>
+    <main id="scenario"></main>
+    <div id="race-a"></div>
+    <div id="race-b"></div>
+    <div id="plain-reading-marker">Plain reading position without a keyed anchor</div>
+    <h2 id="race-anchor" data-state-key="race-reading-anchor">Stable reading anchor</h2>
+    <button id="race-user-focus" type="button">User-selected focus target</button>
+    <div id="race-tail"></div>
+    <script type="module" src="./live-account-refresh.browser.mjs"></script>
+  </body>
+</html>
