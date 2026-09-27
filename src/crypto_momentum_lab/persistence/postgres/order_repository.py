@@ -1162,24 +1162,30 @@ class PostgresOrderRepository:
     ) -> tuple[dict[str, Any], ...]:
         async with self._session_factory() as session:
             query = select(ExecutionCommandRow).where(
-                ExecutionCommandRow.status.not_in(["terminal", "rejected"])
+                ExecutionCommandRow.status.in_(
+                    ["prepared", "dispatching", "acknowledged", "unknown"]
+                )
             )
             rows = (
                 await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
             ).all()
             result = []
             for r in rows:
+                if getattr(r, "command", None) in (
+                    "resolve_unknown_order",
+                    "manual_reduce_only_recovery",
+                    "manual_recovery_result",
+                ):
+                    continue
                 dtls = dict(r.details) if isinstance(r.details, dict) else {}
+                scope = dtls.get("scope")
+                acc = (
+                    scope.get("account_label")
+                    if isinstance(scope, dict)
+                    else dtls.get("account_label")
+                )
                 if account_label is not None:
-                    scope = dtls.get("scope", {})
-                    if not isinstance(scope, dict) or not isinstance(
-                        scope.get("account_label"), str
-                    ):
-                        raise ValueError(
-                            f"active execution command {r.command_id} has no "
-                            "account scope"
-                        )
-                    if scope["account_label"] != account_label:
+                    if acc != account_label:
                         continue
                 result.append(
                     {
@@ -1218,6 +1224,12 @@ class PostgresOrderRepository:
 
             candidate_client_ids: set[str] = set()
             for row in rows:
+                if getattr(row, "command", None) in (
+                    "resolve_unknown_order",
+                    "manual_reduce_only_recovery",
+                    "manual_recovery_result",
+                ):
+                    continue
                 details = dict(row.details) if isinstance(row.details, dict) else {}
                 scope = details.get("scope")
                 if (
@@ -1263,6 +1275,12 @@ class PostgresOrderRepository:
 
         result: list[dict[str, Any]] = []
         for row in rows:
+            if getattr(row, "command", None) in (
+                "resolve_unknown_order",
+                "manual_reduce_only_recovery",
+                "manual_recovery_result",
+            ):
+                continue
             details = dict(row.details) if isinstance(row.details, dict) else {}
             raw_scope = details.get("scope")
             scope = dict(raw_scope) if isinstance(raw_scope, Mapping) else {}
