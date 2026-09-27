@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
@@ -738,22 +739,14 @@ class ExecutionAccountSyncService:
                 for position in positions:
                     symbol = position.symbol.strip().upper()
                     side = position.position_side.strip().upper()
-                    source_anchor = self._config.fill_source_anchors.get(
-                        (symbol, side)
-                    )
+                    source_anchor = self._config.fill_source_anchors.get((symbol, side))
                     if source_anchor is not None:
                         source_anchor_id = source_anchor.checkpoint_id
                         source_anchor_cut = source_anchor.event_cut
                         source_anchor_kind = "recovery_checkpoint"
                         source_stream_id = source_anchor.stream_id
                         source_stream_epoch = source_anchor.stream_epoch
-                        if source_anchor_cut >= position.observed_at:
-                            continue
                     elif position.position_amt == Decimal("0"):
-                        from crypto_momentum_lab.domain.execution.recovery_codec import (
-                            PositionRecoveryCodec,
-                        )
-
                         source_anchor_id = (
                             PositionRecoveryCodec.stable_snapshot_anchor_id(position)
                         )
@@ -764,6 +757,13 @@ class ExecutionAccountSyncService:
                     else:
                         # A non-flat snapshot alone cannot invent the missing
                         # cost basis, batch identities, or fill history.
+                        continue
+                    # A zero snapshot is its own recovery cut. Scanning fills
+                    # from that timestamp through the same timestamp has no
+                    # interval to reconcile, so treat the anchor as complete
+                    # locally instead of issuing one private REST request per
+                    # flat position row (Binance V2 returns hundreds of them).
+                    if source_anchor_cut >= position.observed_at:
                         continue
                     origin_ms = int(source_anchor_cut.timestamp() * 1000)
                     if origin_ms > int(position.observed_at.timestamp() * 1000):
@@ -1339,9 +1339,9 @@ async def _fetch_positions_for_reconciliation(
 ) -> tuple[AccountPositionSnapshot, ...]:
     fetch_positions = client.fetch_positions
     try:
-        supports_explicit_flat_rows = "include_flat" in signature(
-            fetch_positions
-        ).parameters
+        supports_explicit_flat_rows = (
+            "include_flat" in signature(fetch_positions).parameters
+        )
     except (TypeError, ValueError):
         supports_explicit_flat_rows = False
     if supports_explicit_flat_rows:

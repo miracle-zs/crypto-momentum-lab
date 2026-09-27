@@ -490,6 +490,41 @@ async def test_sync_always_includes_active_symbols_with_historical_batching() ->
     assert client.calls[1][0] == ("ETHUSDT", "SOLUSDT")
 
 
+async def test_sync_skips_zero_snapshot_fill_scan_with_empty_time_range() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    flat_position = replace(_position(), position_amt=Decimal("0"))
+
+    class ZeroSnapshotClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.provenance_calls = []
+
+        async def fetch_positions(self):
+            return (flat_position,)
+
+        async def fetch_fills_with_provenance(
+            self,
+            symbol,
+            *,
+            start_time_ms,
+            checked_through,
+        ):
+            self.provenance_calls.append((symbol, start_time_ms, checked_through))
+            raise AssertionError("a zero-width fill scan must not call Binance")
+
+    client = ZeroSnapshotClient()
+    result = await ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=replace(_config(), observed_at=observed_at),
+    ).sync_once()
+
+    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.fills_catching_up is False
+    assert result.fill_load_scans == ()
+    assert client.provenance_calls == []
+
+
 async def test_sync_bounds_uncursored_historical_symbols_with_start_time() -> None:
     """A tracked symbol with no cursor must never be pulled unbounded."""
     observed_at = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
@@ -702,9 +737,7 @@ def _fill(symbol: str, trade_id: str) -> AccountFillEvent:
     )
 
 
-async def test_persist_reconciliation_result_stale_snapshot_persists_cursors() -> (
-    None
-):
+async def test_persist_reconciliation_result_stale_snapshot_persists_cursors() -> None:
     repository = FakeRepository()
     service = ExecutionAccountSyncService(
         client=FakeClient(),
