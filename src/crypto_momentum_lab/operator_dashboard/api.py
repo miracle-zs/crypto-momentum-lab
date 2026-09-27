@@ -769,12 +769,13 @@ def create_dashboard_app(
         environment: str = "live",
         asset: str = "USDT",
         end_time: datetime | None = None,
+        is_empty_proven: bool = False,
     ) -> dict[str, object]:
         try:
             end_key = end_time.isoformat() if end_time else "now"
             cache_key = (
                 f"account-performance:{environment}:{account_label}:"
-                f"{asset}:{window_hours}:{end_key}"
+                f"{asset}:{window_hours}:{end_key}:{is_empty_proven}"
             )
             return await response_cache.get(
                 cache_key,
@@ -784,6 +785,7 @@ def create_dashboard_app(
                     environment=environment,
                     asset=asset,
                     end_time=end_time,
+                    is_empty_proven=is_empty_proven,
                 ),
                 ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
                 stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,

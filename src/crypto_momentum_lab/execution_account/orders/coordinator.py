@@ -380,9 +380,12 @@ class OrderExecutionCoordinator:
 
     @property
     def is_execution_book_enabled(self) -> bool:
-        gray_accounts = os.environ.get(
+        raw = os.environ.get(
             "CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4"
-        ).split(",")
+        ).strip()
+        if raw.lower() in ("all", "*", "true", "1"):
+            return True
+        gray_accounts = raw.split(",")
         return self._account_label in {a.strip() for a in gray_accounts if a.strip()}
 
     def get_active_reservations(

@@ -1379,11 +1379,24 @@ async def test_account_4_gray_cutover_activation(
         account_label="account-2",
     )
     assert coord_custom.is_execution_book_enabled
-    assert not coord_4.is_execution_book_enabled
+    # All accounts wildcard activation
+    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "all")
+    coord_all_primary = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    coord_all_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+    )
+    assert coord_all_primary.is_execution_book_enabled
+    assert coord_all_4.is_execution_book_enabled
 
     await coord_primary.aclose()
     await coord_4.aclose()
     await coord_custom.aclose()
+    await coord_all_primary.aclose()
+    await coord_all_4.aclose()
 
 
 @pytest.mark.asyncio

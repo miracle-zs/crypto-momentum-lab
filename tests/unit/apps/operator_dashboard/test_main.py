@@ -306,8 +306,10 @@ class FakeQueries:
         environment: str = "live",
         asset: str = "USDT",
         end_time: datetime | None = None,
+        is_empty_proven: bool = False,
+        **kwargs: Any,
     ) -> dict[str, object]:
-        del end_time
+        del end_time, is_empty_proven, kwargs
         return {
             "account_label": account_label,
             "window_hours": window_hours,

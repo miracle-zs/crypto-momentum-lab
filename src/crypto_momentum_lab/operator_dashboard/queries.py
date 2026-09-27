@@ -491,6 +491,7 @@ class DashboardQueries:
         environment: str = "live",
         asset: str = "USDT",
         end_time: datetime | None = None,
+        is_empty_proven: bool = False,
     ) -> dict[str, object]:
         """Compute authoritative account performance metrics using
         AccountPerformanceCalculator.
@@ -498,21 +499,41 @@ class DashboardQueries:
         now = self._clock() if end_time is None else end_time
         start_time = now - timedelta(hours=window_hours)
         async with self._session_factory() as session:
-            snaps = (
-                await session.scalars(
-                    select(AccountBalanceSnapshotRow)
-                    .where(
-                        AccountBalanceSnapshotRow.account_label == account_label,
-                        AccountBalanceSnapshotRow.environment == environment,
-                        AccountBalanceSnapshotRow.asset == asset,
-                        AccountBalanceSnapshotRow.observed_at >= start_time,
-                        AccountBalanceSnapshotRow.observed_at <= now,
+            snaps_list = list(
+                (
+                    await session.scalars(
+                        select(AccountBalanceSnapshotRow)
+                        .where(
+                            AccountBalanceSnapshotRow.account_label == account_label,
+                            AccountBalanceSnapshotRow.environment == environment,
+                            AccountBalanceSnapshotRow.asset == asset,
+                            AccountBalanceSnapshotRow.observed_at >= start_time,
+                            AccountBalanceSnapshotRow.observed_at <= now,
+                        )
+                        .order_by(AccountBalanceSnapshotRow.observed_at)
                     )
-                    .order_by(AccountBalanceSnapshotRow.observed_at)
-                )
-            ).all()
-            if not snaps:
+                ).all()
+            )
+            if not snaps_list:
                 return {"status": "no_data", "account_label": account_label}
+
+            # If earliest snapshot does not bracket start_time, fetch the closest preceding snapshot
+            if snaps_list[0].observed_at > start_time:
+                prev_snap = (
+                    await session.scalars(
+                        select(AccountBalanceSnapshotRow)
+                        .where(
+                            AccountBalanceSnapshotRow.account_label == account_label,
+                            AccountBalanceSnapshotRow.environment == environment,
+                            AccountBalanceSnapshotRow.asset == asset,
+                            AccountBalanceSnapshotRow.observed_at < start_time,
+                        )
+                        .order_by(AccountBalanceSnapshotRow.observed_at.desc())
+                        .limit(1)
+                    )
+                ).first()
+                if prev_snap is not None:
+                    snaps_list.insert(0, prev_snap)
 
             cf_rows = (
                 await session.scalars(
@@ -526,13 +547,17 @@ class DashboardQueries:
                 )
             ).all()
 
+            effective_start = min(start_time, snaps_list[0].observed_at)
+            effective_end = max(now, snaps_list[-1].observed_at)
+
             return build_performance_summary_dict(
                 account_label=account_label,
-                equity_rows=snaps,
+                equity_rows=snaps_list,
                 cf_rows=cf_rows,
-                start_time=start_time,
-                end_time=now,
+                start_time=effective_start,
+                end_time=effective_end,
                 max_equity_gap=None,
                 environment=environment,
                 asset=asset,
+                is_empty_proven=is_empty_proven,
             )
