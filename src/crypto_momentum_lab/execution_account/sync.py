@@ -734,11 +734,14 @@ class ExecutionAccountSyncService:
                         account_label=config.account_label,
                         symbol=symbol,
                         from_id=cursor.from_id,
-                        start_time_ms=cursor.start_time_ms,
+                        start_time_ms=(
+                            None if cursor.from_id is not None else cursor.start_time_ms
+                        ),
                         last_checked_at=config.observed_at,
                     )
                     for symbol in tracked_fill_symbols
                     if (cursor := next_fill_cursors.get(symbol)) is not None
+                    and (cursor.from_id is not None or cursor.start_time_ms is not None)
                 )
                 if include_fills
                 else ()
@@ -895,21 +898,27 @@ class ExecutionAccountSyncService:
         for cursor in cursors:
             sym = cursor.symbol.strip().upper()
             current = self._fill_cursors.get(sym)
-            new_from_id = cursor.from_id
-            new_start_time_ms = cursor.start_time_ms
-            if current is not None:
-                if current.from_id is not None:
-                    new_from_id = (
-                        max(current.from_id, new_from_id)
-                        if new_from_id is not None
-                        else current.from_id
-                    )
-                if current.start_time_ms is not None:
+            if cursor.from_id is not None:
+                new_from_id = (
+                    max(current.from_id, cursor.from_id)
+                    if current is not None and current.from_id is not None
+                    else cursor.from_id
+                )
+                new_start_time_ms = None
+            elif cursor.start_time_ms is not None:
+                if current is not None and current.from_id is not None:
+                    new_from_id = current.from_id
+                    new_start_time_ms = None
+                else:
+                    new_from_id = None
                     new_start_time_ms = (
-                        max(current.start_time_ms, new_start_time_ms)
-                        if new_start_time_ms is not None
-                        else current.start_time_ms
+                        max(current.start_time_ms, cursor.start_time_ms)
+                        if current is not None and current.start_time_ms is not None
+                        else cursor.start_time_ms
                     )
+            else:
+                continue
+
             self._fill_cursors[sym] = _FillCursor(
                 from_id=new_from_id,
                 start_time_ms=new_start_time_ms,

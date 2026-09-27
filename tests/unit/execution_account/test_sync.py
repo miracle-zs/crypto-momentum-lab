@@ -553,6 +553,40 @@ async def test_sync_keeps_from_id_cursors_out_of_start_time_window() -> None:
     assert "BTCUSDT" not in start_times
 
 
+def test_update_fill_cursors_monotonically_preserves_mutual_exclusivity() -> None:
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=FakeRepository(),
+        config=_config(),
+    )
+    now = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    # 1. Seed with from_id
+    cursor_id = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="COWUSDT",
+        from_id=100,
+        start_time_ms=None,
+        last_checked_at=now,
+    )
+    service._update_fill_cursors_monotonically([cursor_id])
+    assert service._fill_cursors["COWUSDT"].from_id == 100
+    assert service._fill_cursors["COWUSDT"].start_time_ms is None
+
+    # 2. Update with start_time_ms: must NOT create dual fields
+    cursor_time = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="COWUSDT",
+        from_id=None,
+        start_time_ms=1700000000000,
+        last_checked_at=now + timedelta(seconds=1),
+    )
+    service._update_fill_cursors_monotonically([cursor_time])
+    assert service._fill_cursors["COWUSDT"].from_id == 100
+    assert service._fill_cursors["COWUSDT"].start_time_ms is None
+
+
 async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:
     repository = FakeRepository()
     service = ExecutionAccountSyncService(
@@ -668,7 +702,7 @@ def _fill(symbol: str, trade_id: str) -> AccountFillEvent:
     )
 
 
-async def test_persist_reconciliation_result_stale_snapshot_still_persists_fills_and_cursors() -> (
+async def test_persist_reconciliation_result_stale_snapshot_persists_cursors() -> (
     None
 ):
     repository = FakeRepository()
@@ -900,7 +934,8 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
-    # Heartbeat during incomplete sync must preserve SYNCING and NOT overwrite with READY_READONLY
+    # Heartbeat during incomplete sync must preserve SYNCING and NOT
+    # overwrite with READY_READONLY
     heartbeat_time = datetime(2026, 7, 4, 12, 1, tzinfo=UTC)
     await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
