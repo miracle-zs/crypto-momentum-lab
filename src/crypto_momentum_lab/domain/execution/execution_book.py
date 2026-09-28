@@ -1037,14 +1037,34 @@ class ExecutionBook:
                     PositionRecoveryCodec.compute_projection_digest(projection)
                 )
                 if payload["projection_digest"] != projection_digest:
-                    raise RuntimeError(
-                        "recovered position projection does not match the execution head"
-                    )
+                    if not payload.get("active_reservation_ids"):
+                        log.warning(
+                            "execution_head_projection_migrated",
+                            account_label=key.account_label,
+                            symbol=key.symbol,
+                            position_side=key.position_side.value,
+                            old_projection_digest=payload["projection_digest"],
+                            new_projection_digest=projection_digest,
+                        )
+                    else:
+                        raise RuntimeError(
+                            "recovered position projection does not match the execution head"
+                        )
                 view = book.get_view()
                 if payload["view_digest"] != _view_projection_digest(view):
-                    raise RuntimeError(
-                        "recovered position view does not match the execution head"
-                    )
+                    if not payload.get("active_reservation_ids"):
+                        log.warning(
+                            "execution_head_view_migrated",
+                            account_label=key.account_label,
+                            symbol=key.symbol,
+                            position_side=key.position_side.value,
+                            old_view_digest=payload["view_digest"],
+                            new_view_digest=_view_projection_digest(view),
+                        )
+                    else:
+                        raise RuntimeError(
+                            "recovered position view does not match the execution head"
+                        )
                 if not head.projection_version.strip():
                     raise RuntimeError("durable execution head has no projection token")
                 book.use_durable_projection_version(
