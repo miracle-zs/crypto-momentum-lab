@@ -12,6 +12,7 @@ import inspect
 import os
 from collections.abc import (
     AsyncIterable,
+    AsyncIterator,
     Awaitable,
     Callable,
     Mapping,
@@ -41,6 +42,7 @@ from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.context_prefetch import (
     LiveContextPrefetcher,
+    PrefetchedContext,
 )
 from crypto_momentum_lab.live_rollout.entry_lane import EntryExecutionLane
 from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
@@ -215,13 +217,27 @@ class LiveMarketLoop:
         self,
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
+        prefetched_states = self._context_prefetcher.stream(states)
+        try:
+            return await self._run_prefetched(prefetched_states)
+        finally:
+            # async for does not close an async generator when this method
+            # returns or raises from inside the loop.  Close it explicitly so
+            # its producer and any lookahead context/database tasks are
+            # cancelled and awaited on every exit path.
+            await prefetched_states.aclose()
+
+    async def _run_prefetched(
+        self,
+        prefetched_states: AsyncIterator[PrefetchedContext],
+    ) -> LiveDaemonResult:
         self._entry_lane.reset()
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
         last_reconciled_bucket: datetime | None = None
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
         state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
-        async for prefetched in self._context_prefetcher.stream(states):
+        async for prefetched in prefetched_states:
             state = prefetched.state
             self._active_state_at = state.bucket_start
             if state.is_backfill:

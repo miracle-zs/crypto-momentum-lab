@@ -9,7 +9,7 @@ never mistaken for an authorization for a later decision.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -56,7 +56,7 @@ class LiveContextPrefetcher:
     async def stream(
         self,
         states: AsyncIterable[MarketState15s],
-    ) -> AsyncIterator[PrefetchedContext]:
+    ) -> AsyncGenerator[PrefetchedContext, None, None]:
         """Yield states in source order with their prefetched context.
 
         Provider failures are carried with the corresponding state so the

@@ -741,7 +741,20 @@ class PostgresLiveContextProvider(LiveContextReader):
         ]
         if account_state_task is not None:
             context_tasks.append(account_state_task)
-        await asyncio.gather(*context_tasks)
+        try:
+            await asyncio.gather(*context_tasks)
+        except BaseException:
+            # gather propagates the first child failure without cancelling
+            # its siblings.  These reads each own a database session, so let
+            # them continue in the background and they can pile up across
+            # market states when one query repeatedly times out.  Cancel and
+            # await the whole batch so each session context manager can close
+            # before the next context load starts.
+            for task in context_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*context_tasks, return_exceptions=True)
+            raise
         approval = approval_task.result()
         risk_config = risk_config_task.result()
         lease = lease_task.result()
