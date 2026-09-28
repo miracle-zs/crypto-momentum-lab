@@ -7,8 +7,6 @@ supplies only cash, risk, and operational posture; it never reconstructs lots.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -33,6 +31,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionView,
 )
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
 from crypto_momentum_lab.domain.operational.retention_models import (
@@ -47,7 +46,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     DecisionCommit,
     DecisionCommitReceipt,
 )
-from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 
 log = structlog.get_logger(__name__)
 
@@ -156,6 +154,7 @@ class LiveDecisionFactSource:
         self._stream_id: str | None = None
         self._stream_epoch: str | None = None
         self._stream_sequence: int | None = None
+        self._reported_stream_mismatches: set[tuple[str, str, str]] = set()
         self._exit_handler: Any | None = None
         self._commit_lock = asyncio.Lock()
 
@@ -280,12 +279,28 @@ class LiveDecisionFactSource:
             symbol=state.symbol,
             position_side=position_side,
         )
-        view = await book.read(
-            scope,
-            event_cut=state.bucket_end,
-            stream_id=self._stream_id,
-            stream_epoch=self._stream_epoch,
-        )
+        try:
+            view = await book.read(
+                scope,
+                event_cut=state.bucket_end,
+                stream_id=self._stream_id,
+                stream_epoch=self._stream_epoch,
+            )
+        except ValueError as error:
+            if str(error) != (
+                "requested account stream does not match the restored position"
+            ):
+                raise
+            mismatch = (state.symbol, self._stream_id, self._stream_epoch)
+            if mismatch not in self._reported_stream_mismatches:
+                self._reported_stream_mismatches.add(mismatch)
+                log.warning(
+                    "live_decision_position_stream_mismatch",
+                    account_label=self._account_label,
+                    symbol=state.symbol,
+                    stream_epoch=self._stream_epoch,
+                )
+            return None
         expected_stream = AccountFactStreamScope.for_position_key(
             scope.to_position_key(),
             stream_id=self._stream_id,
@@ -344,7 +359,8 @@ class LiveDecisionFactSource:
                     receipt.next_state_digest != self._policy_digest
                 ):
                     raise RuntimeError(
-                        "replayed decision receipt disagrees with the durable policy head"
+                        "replayed decision receipt disagrees with the durable "
+                        "policy head"
                     )
                 return receipt
             if receipt.policy_revision <= self._policy_revision:

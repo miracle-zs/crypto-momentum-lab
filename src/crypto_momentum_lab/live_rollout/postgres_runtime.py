@@ -590,6 +590,11 @@ class PostgresLiveContextProvider(LiveContextReader):
         book = getattr(self, "_execution_book", None)
         if book is None:
             return context
+        if context.open_position_symbols == frozenset():
+            # A confirmed flat account has no lots to allocate or exit. Reading
+            # every historical Book scope at each market cut can replay hundreds
+            # of journals even though none can represent current exposure.
+            return replace(context, managed_positions=())
         cached_bucket_end = getattr(self, "_cached_book_bucket_end", None)
         cached_unresolved = getattr(self, "_cached_book_unresolved", None)
         cached_result = getattr(self, "_cached_book_result", None)

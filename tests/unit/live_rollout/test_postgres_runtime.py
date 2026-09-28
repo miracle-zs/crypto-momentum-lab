@@ -1064,7 +1064,10 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
     monkeypatch,
 ) -> None:
     class Book:
+        calls = 0
+
         async def list_position_views(self, **_kwargs):
+            self.calls += 1
             return (
                 SimpleNamespace(
                     key=SimpleNamespace(symbol="BTCUSDT"),
@@ -1085,7 +1088,8 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
     for account_snapshot in (SimpleNamespace(positions=()), None):
         provider = object.__new__(PostgresLiveContextProvider)
         provider._account_label = "primary"
-        provider._execution_book = Book()
+        book = Book()
+        provider._execution_book = book
         context = replace(
             _runtime_context(),
             account_snapshot=account_snapshot,
@@ -1099,6 +1103,7 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
         assert result.managed_positions == ()
         assert result.unmanaged_position_symbols == frozenset()
         assert result.open_position_symbols == frozenset()
+        assert book.calls == 0
 
     provider = object.__new__(PostgresLiveContextProvider)
     provider._account_label = "primary"
@@ -1141,7 +1146,9 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
     provider = object.__new__(PostgresLiveContextProvider)
     provider._account_label = "primary"
     provider._execution_book = Book()
-    context = _runtime_context()
+    context = replace(
+        _runtime_context(), open_position_symbols=frozenset({"ETHUSDT"})
+    )
 
     await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
     await provider._with_execution_book(
