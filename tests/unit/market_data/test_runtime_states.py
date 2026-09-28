@@ -590,3 +590,49 @@ def fixture_book_ticker(bucket_index: int, *, sequence: int) -> RawEnvelope:
             "A": "1",
         },
     )
+
+
+async def test_through_bucket_gating_and_invalidation() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+    publisher.set_expected_symbols(["BTCUSDT", "ETHUSDT"])
+    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
+
+    # Observe initial events for BTCUSDT to establish baseline
+    await publisher.observe(fixture_trade(0, price="100", sequence=1, symbol="BTCUSDT"))
+    await publisher.observe(fixture_trade(1, price="101", sequence=2, symbol="BTCUSDT"))
+    assert publisher._last_materialized_empty_buckets_through is not None
+
+    # Save through-bucket and verify gate skips re-scan
+    through = publisher._last_materialized_empty_buckets_through
+    scan_count = 0
+    original_materialize = publisher._materialize_buckets_until
+
+    def count_materialize(*args, **kwargs):
+        nonlocal scan_count
+        scan_count += 1
+        return original_materialize(*args, **kwargs)
+
+    publisher._materialize_buckets_until = count_materialize
+
+    # Call with same watermark -> gate prevents scanning
+    publisher._materialize_empty_buckets_through(base + timedelta(seconds=1))
+    assert scan_count == 0
+
+    # Invalidate by changing expected_symbols
+    publisher.set_expected_symbols(["BTCUSDT", "SOLUSDT"])
+    assert publisher._last_materialized_empty_buckets_through is None
+
+    # Call with watermark -> gate allows scanning because it was invalidated
+    publisher._materialize_empty_buckets_through(base + timedelta(seconds=15))
+    assert scan_count > 0
+    assert publisher._last_materialized_empty_buckets_through is not None
+
+    # Invalidate by observing a newly seen symbol
+    publisher._last_materialized_empty_buckets_through = base + timedelta(seconds=15)
+    await publisher.observe(fixture_trade(2, price="200", sequence=3, symbol="SOLUSDT"))
+    assert publisher._last_materialized_empty_buckets_through is None
+
