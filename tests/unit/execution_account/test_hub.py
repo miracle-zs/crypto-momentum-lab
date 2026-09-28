@@ -1183,3 +1183,39 @@ def test_account_event_hub_bootstrap_message_caching() -> None:
     assert msg3 != msg1
     # Subsequent call reuses the new cached message
     assert hub._bootstrap_message(scope_primary) is msg3
+
+
+def test_account_event_with_fills_roundtrip() -> None:
+    from crypto_momentum_lab.execution_account.hub import (
+        decode_account_event,
+        encode_account_event,
+    )
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="12345",
+        order_id="67890",
+        side="BUY",
+        price=Decimal("50000.0"),
+        quantity=Decimal("0.1"),
+        realized_pnl=Decimal("0.0"),
+        fee=Decimal("0.05"),
+        fee_asset="USDT",
+        trade_at=datetime.now(UTC),
+        raw_payload={"source": "user_data_stream", "row": {"ps": "LONG"}},
+    )
+    event = replace(_event(), fills=(fill,))
+    encoded = encode_account_event(event, sequence=1)
+    decoded = decode_account_event(
+        encoded,
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert len(decoded.fills) == 1
+    assert decoded.fills[0].trade_id == "12345"
+    assert decoded.fills[0].quantity == Decimal("0.1")
+    assert decoded.fills[0].price == Decimal("50000.0")
+    assert decoded.fills[0].raw_payload == {"source": "user_data_stream", "row": {"ps": "LONG"}}
