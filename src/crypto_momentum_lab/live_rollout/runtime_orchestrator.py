@@ -96,7 +96,12 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitConfig,
+    LiveExitManager,
+)
 from crypto_momentum_lab.live_rollout.gates import (
     LiveGateContext,
     evaluate_live_gate,
@@ -364,6 +369,9 @@ async def run_live_daemon(
     entry_long_only = config.execution.entry_long_only
     entry_leverage = config.execution.entry_leverage
     margin_type = config.execution.margin_type
+    candle_grace_bars = config.execution.candle_grace_bars
+    candle_grace_decision_profit_pct = config.execution.candle_grace_decision_profit_pct
+    candle_grace_profit_pct = config.execution.candle_grace_profit_pct
     max_concurrency_per_symbol = config.execution.max_concurrency_per_symbol
 
     max_runtime_seconds = config.lifecycle.max_runtime_seconds
@@ -423,7 +431,11 @@ async def run_live_daemon(
     market_engine = create_market_database_engine(market_database_url)
     ownership_registry.register("market_engine", market_engine.dispose)
     observability_engine = create_observability_database_engine(
-        observability_database_url
+        observability_database_url,
+        pool_size=4,
+        max_overflow=2,
+        pool_timeout_seconds=5.0,
+        command_timeout_seconds=5.0,
     )
     ownership_registry.register("observability_engine", observability_engine.dispose)
     checkpoint_engine = create_checkpoint_database_engine(observability_database_url)
@@ -1247,7 +1259,23 @@ async def run_live_daemon(
                     else ExecutionReadiness.INDEPENDENT_EXECUTABLE
                 ),
             ),
-            exit_manager=None,
+            exit_manager=LiveExitManager(
+                config=LiveExitConfig(
+                    run_id=session_id,
+                    strategy_name=strategy_name,
+                    strategy_version="v0",
+                    strategy_config_hash=strategy_config_hash,
+                    policy=PositionExitPolicy(
+                        max_holding_seconds=None,
+                        mode=exit_mode,
+                    ),
+                    account_label=account_label,
+                    candle_grace_bars=candle_grace_bars,
+                    candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
+                    candle_grace_profit_pct=candle_grace_profit_pct,
+                ),
+                candle_loader=None,
+            ),
             exit_recovery_client=client,
             cancel_unfilled_entry_orders=entry_order_canceller.cancel,
             fetch_exchange_positions=client.fetch_positions,
