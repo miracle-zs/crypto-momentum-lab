@@ -220,8 +220,11 @@ class AccountEvent:
             if delta_scope is not None and delta_scope != event_scope:
                 raise ValueError("account delta scope does not match account event")
         if any(
-            fill.environment != self.environment
-            or fill.account_label != self.account_label
+            fill is not None
+            and (
+                fill.environment != self.environment
+                or fill.account_label != self.account_label
+            )
             for fill in self.fills
         ):
             raise ValueError("account-event fills do not match account scope")
@@ -1555,6 +1558,24 @@ def _decode_account_fill(
         expected_environment=expected_environment,
         expected_account_label=expected_account_label,
     )
+    raw_payload = payload.get("raw_payload", {})
+    if not isinstance(raw_payload, dict):
+        raise AccountEventHubProtocolError("fill raw_payload must be an object")
+    return AccountFillEvent(
+        environment=expected_environment,
+        account_label=expected_account_label,
+        symbol=_require_string(payload, "symbol"),
+        trade_id=_require_string(payload, "trade_id"),
+        order_id=_require_string(payload, "order_id"),
+        side=_require_string(payload, "side"),
+        price=_required_decimal(payload, "price"),
+        quantity=_required_decimal(payload, "quantity"),
+        realized_pnl=_required_decimal(payload, "realized_pnl"),
+        fee=_required_decimal(payload, "fee"),
+        fee_asset=_require_string(payload, "fee_asset"),
+        trade_at=_parse_datetime(payload, "trade_at"),
+        raw_payload={str(key): item for key, item in raw_payload.items()},
+    )
 
 
 def _encode_account_fill_load_scan(
@@ -1629,24 +1650,6 @@ def _decode_account_fill_load_scan(
         source_anchor_kind=_require_string(payload, "source_anchor_kind"),
         source_stream_id=_optional_string(payload, "source_stream_id"),
         source_stream_epoch=_optional_string(payload, "source_stream_epoch"),
-    )
-    raw_payload = payload.get("raw_payload", {})
-    if not isinstance(raw_payload, dict):
-        raise AccountEventHubProtocolError("fill raw_payload must be an object")
-    return AccountFillEvent(
-        environment=expected_environment,
-        account_label=expected_account_label,
-        symbol=_require_string(payload, "symbol"),
-        trade_id=_require_string(payload, "trade_id"),
-        order_id=_require_string(payload, "order_id"),
-        side=_require_string(payload, "side"),
-        price=_required_decimal(payload, "price"),
-        quantity=_required_decimal(payload, "quantity"),
-        realized_pnl=_required_decimal(payload, "realized_pnl"),
-        fee=_required_decimal(payload, "fee"),
-        fee_asset=_require_string(payload, "fee_asset"),
-        trade_at=_parse_datetime(payload, "trade_at"),
-        raw_payload={str(key): item for key, item in raw_payload.items()},
     )
 
 
