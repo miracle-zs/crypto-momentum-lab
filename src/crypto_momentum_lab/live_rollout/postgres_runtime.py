@@ -648,13 +648,15 @@ class PostgresLiveContextProvider(LiveContextReader):
             )
         )
         stale_book_symbols = book_position_symbols - context.open_position_symbols
-        if stale_book_symbols:
-            log.warning(
-                "live_book_positions_absent_from_account_view",
-                account_label=self._account_label,
-                count=len(stale_book_symbols),
-                sample=sorted(stale_book_symbols)[:5],
-            )
+        if stale_book_symbols != getattr(self, "_reported_stale_book_symbols", None):
+            self._reported_stale_book_symbols = stale_book_symbols
+            if stale_book_symbols:
+                log.warning(
+                    "live_book_positions_absent_from_account_view",
+                    account_label=self._account_label,
+                    count=len(stale_book_symbols),
+                    sample=sorted(stale_book_symbols)[:5],
+                )
         # The account view determines current exposure. Book-only residuals
         # are durable accounting drift, not live positions to exit or subscribe
         # to. A real account position without a matching Book lot remains

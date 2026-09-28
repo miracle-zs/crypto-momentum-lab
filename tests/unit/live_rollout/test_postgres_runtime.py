@@ -1115,6 +1115,44 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
     assert result.unmanaged_position_symbols == frozenset({"ETHUSDT"})
 
 
+async def test_execution_book_reports_stale_positions_only_when_set_changes(
+    monkeypatch,
+) -> None:
+    class Book:
+        async def list_position_views(self, **_kwargs):
+            return (
+                SimpleNamespace(
+                    key=SimpleNamespace(symbol="BTCUSDT"),
+                    total_quantity=Decimal("0.5"),
+                    unallocated_quantity=Decimal("0"),
+                    reconciliation_gap=None,
+                ),
+            )
+
+    warnings = []
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime.managed_live_positions_from_views",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime.log.warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._execution_book = Book()
+    context = _runtime_context()
+
+    await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
+    await provider._with_execution_book(
+        context,
+        SimpleNamespace(bucket_end=NOW + timedelta(seconds=15)),
+    )
+
+    assert len(warnings) == 1
+    assert warnings[0][1]["count"] == 1
+
+
 def test_context_invalidation_preserves_symbol_rules() -> None:
     provider = object.__new__(PostgresLiveContextProvider)
     expected = _runtime_context().trading_rules["BTCUSDT"]
