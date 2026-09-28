@@ -200,31 +200,21 @@ class PostgresDecisionTraceRepository:
                 )
             )
         ).scalars().all()
-        revision_values = (
+        ref_identity_values = (
             "scope",
             "symbol",
             "interval",
             "bucket_start",
             "bucket_end",
             "content_hash",
-            "published_at",
-            "source_epoch",
-            "visibility_mode",
-            "is_canonical",
-            "payload",
-            "lineage",
         )
         existing_revision_ids: set[str] = set()
-        ref_identity_values = revision_values[:10]
         for existing in existing_revisions:
             incoming = incoming_revisions[existing.revision_id]
             existing_revision_ids.add(existing.revision_id)
-            compare_payload = existing.revision_id in embedded_revision_ids
             if any(
                 getattr(existing, name) != incoming[name]
-                for name in (
-                    revision_values if compare_payload else ref_identity_values
-                )
+                for name in ref_identity_values
             ):
                 raise ValueError(
                     "Immutable audit conflict: MarketRevisionRef "
@@ -302,11 +292,7 @@ class PostgresDecisionTraceRepository:
                 incoming = incoming_revisions[existing.revision_id]
                 if any(
                     getattr(existing, name) != incoming[name]
-                    for name in (
-                        revision_values
-                        if existing.revision_id in embedded_revision_ids
-                        else ref_identity_values
-                    )
+                    for name in ref_identity_values
                 ):
                     raise ValueError(
                         "Immutable audit conflict: MarketRevisionRef "

@@ -254,8 +254,10 @@ export function restoreViewState(root, state) {
   // their height locks in the same frame without replaying one stale scrollY.
   const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
   const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
-  const baseScrollY = (currentY === 0 && state.pageY > 0) ? state.pageY : currentY;
-  let targetY = baseScrollY;
+  let targetY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY;
+  if (targetY === 0 && state.pageY > 0) {
+    targetY = state.pageY;
+  }
   let resolvedAnchor = false;
 
   if (state.anchor) {

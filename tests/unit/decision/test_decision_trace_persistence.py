@@ -725,3 +725,105 @@ async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
     )
     with pytest.raises(ValueError, match="Immutable audit conflict"):
         await repo.save_decision_traces([conflicting_trace])
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_accepts_existing_market_revision_with_canonical_and_authoritative_payload() -> None:
+    """Decision traces must not conflict with market revisions previously persisted by the market feed.
+    
+    The market feed saves authoritative MarketRevisionRefRows with is_canonical=True,
+    detailed exchange payload, and source watermark lineage. When a strategy executes
+    and persists its DecisionTrace referencing that market revision, it must accept
+    the existing row as long as the core identity (scope, symbol, interval, bucket,
+    content_hash) matches.
+    """
+    session = _FakeAsyncSession()
+    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
+
+    t0 = datetime(2026, 9, 27, 5, 0, tzinfo=UTC)
+    rev_id = "research:XPINUSDT:15s:1790604135:f2b278dd33"
+    content_hash = "f2b278dd3384162deaf57f0a529148985f132587e5a20bd61b6f713a5c382232"
+
+    # 1. Seed existing MarketRevisionRefRow as saved by MarketBookRepository
+    session.rev_rows[rev_id] = MarketRevisionRefRow(
+        revision_id=rev_id,
+        scope="research",
+        symbol="XPINUSDT",
+        interval="15s",
+        bucket_start=t0,
+        bucket_end=t0 + timedelta(seconds=15),
+        content_hash=content_hash,
+        published_at=t0,
+        source_epoch="seq_5284",
+        visibility_mode="decision_visible",
+        is_canonical=True,  # Promoted by canonical promoter
+        payload={"spread": "0.0000010", "symbol": "XPINUSDT", "exchange": "binance-usdm"},
+        lineage={"source_watermark_at": "2026-09-28T14:02:30.006000+00:00"},
+    )
+
+    # 2. Strategy produces a DecisionTrace referencing this market revision
+    ref = MarketRevisionRef(
+        scope="research",
+        symbol="XPINUSDT",
+        interval="15s",
+        bucket_start=t0,
+        bucket_end=t0 + timedelta(seconds=15),
+        revision_id=rev_id,
+        content_hash=content_hash,
+        published_at=t0,
+        source_epoch="seq_5284",
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    trace = DecisionTrace(
+        decision_id="dec_xpin_entry_001",
+        strategy_name="orderflow_impulse",
+        account_label="account-4",
+        decision_time=t0,
+        evaluated_market_refs=(ref,),
+        intent_produced=True,
+        intent_id="entry-xpin-1",
+        rejection_reason=None,
+        input_hash="hash_xpin_entry_1",
+        frame_digest="frame_xpin_entry_1",
+        trace_payload={
+            "market_state": {"symbol": "XPINUSDT", "close_price": "0.0008975"},
+            "intent": "buy",
+        },
+    )
+
+    # 3. Saving the trace must succeed without raising Immutable audit conflict
+    await repo.save_decision_traces([trace])
+    assert "dec_xpin_entry_001" in session.trace_rows
+    # Existing authoritative market book payload and is_canonical flag must remain unchanged
+    assert session.rev_rows[rev_id].is_canonical is True
+    assert session.rev_rows[rev_id].payload["exchange"] == "binance-usdm"
+
+    # 4. A genuine market revision conflict (e.g. mismatched content hash) must still be rejected
+    conflicting_ref = MarketRevisionRef(
+        scope="research",
+        symbol="XPINUSDT",
+        interval="15s",
+        bucket_start=t0,
+        bucket_end=t0 + timedelta(seconds=15),
+        revision_id=rev_id,
+        content_hash="mismatched_content_hash_xxxx",
+        published_at=t0,
+        source_epoch="seq_5284",
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    conflicting_trace = DecisionTrace(
+        decision_id="dec_xpin_entry_002",
+        strategy_name="orderflow_impulse",
+        account_label="account-4",
+        decision_time=t0,
+        evaluated_market_refs=(conflicting_ref,),
+        intent_produced=True,
+        intent_id="entry-xpin-2",
+        rejection_reason=None,
+        input_hash="hash_xpin_entry_2",
+        frame_digest="frame_xpin_entry_2",
+        trace_payload={"intent": "buy"},
+    )
+    with pytest.raises(ValueError, match="Immutable audit conflict: MarketRevisionRef"):
+        await repo.save_decision_traces([conflicting_trace])
+
