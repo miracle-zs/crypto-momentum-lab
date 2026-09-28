@@ -661,8 +661,10 @@ class AsyncPostgresExecutionUnitOfWork:
                         None,
                     )
                     if scope is None:
-                        raise DecisionCommitConflict(
-                            f"execution head {key.canonical_id} has no matching journal stream"
+                        scope = AccountFactStreamScope.for_position_key(
+                            key,
+                            stream_id=head.stream_id,
+                            stream_epoch=head.stream_epoch,
                         )
                 elif len(scoped_rows) == 1:
                     scope = scoped_rows[0]
