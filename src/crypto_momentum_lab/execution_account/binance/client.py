@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import fcntl
 import hashlib
 import heapq
@@ -1076,10 +1077,77 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "Binance order submit returned an unknown server outcome"
                 ) from exc
             raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
-        return self._order_snapshot(
+        snapshot = self._order_snapshot(
             _require_mapping(payload),
             entry_leverage=entry_leverage,
         )
+        if snapshot.executed_quantity > Decimal("0") and (
+            snapshot.average_price is None or snapshot.average_price <= Decimal("0")
+        ):
+            snapshot = await self._resolve_filled_order_snapshot_with_retry(
+                plan=plan,
+                initial_snapshot=snapshot,
+                entry_leverage=entry_leverage,
+            )
+        return snapshot
+
+    async def _resolve_filled_order_snapshot_with_retry(
+        self,
+        plan: OrderExecutionPlan,
+        initial_snapshot: ExchangeOrderSnapshot,
+        *,
+        entry_leverage: int | None = None,
+        delays: tuple[float, ...] = (0.05, 0.1, 0.2),
+    ) -> ExchangeOrderSnapshot:
+        """Resolve authoritative average_price when Binance POST returns 0 on immediate fills."""
+        log.info(
+            "binance_submit_order_resolving_fill_price",
+            symbol=plan.symbol,
+            client_order_id=plan.client_order_id,
+            executed_quantity=str(initial_snapshot.executed_quantity),
+        )
+        for attempt, delay in enumerate(delays, start=1):
+            await asyncio.sleep(delay)
+            try:
+                queried = await self.query_order_by_client_id(
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                )
+                if (
+                    queried is not None
+                    and queried.average_price is not None
+                    and queried.average_price > Decimal("0")
+                ):
+                    log.info(
+                        "binance_submit_order_fill_price_resolved",
+                        symbol=plan.symbol,
+                        client_order_id=plan.client_order_id,
+                        attempt=attempt,
+                        average_price=str(queried.average_price),
+                    )
+                    return replace(
+                        queried,
+                        entry_leverage=entry_leverage
+                        if queried.entry_leverage is None
+                        else queried.entry_leverage,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "binance_submit_avg_price_query_retry_failed",
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+        if plan.price is not None and plan.price > Decimal("0"):
+            log.warning(
+                "binance_submit_avg_price_fallback_to_plan_price",
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                plan_price=str(plan.price),
+            )
+            return replace(initial_snapshot, average_price=plan.price)
+        return initial_snapshot
 
     async def inspect_exit_order(
         self,
@@ -1396,13 +1464,19 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         *,
         entry_leverage: int | None = None,
     ) -> ExchangeOrderSnapshot:
+        executed_quantity = _decimal(data.get("executedQty", "0"))
+        average_price = _decimal(data.get("avgPrice", "0"))
+        if executed_quantity > Decimal("0") and average_price <= Decimal("0"):
+            cum_quote = _decimal(data.get("cumQuote", "0"))
+            if cum_quote > Decimal("0"):
+                average_price = cum_quote / executed_quantity
         return ExchangeOrderSnapshot(
             client_order_id=str(data.get("clientOrderId", "")),
             exchange_order_id=str(data.get("orderId", "")),
             state=_exchange_order_state(str(data.get("status", ""))),
             observed_at=self._now(),
-            executed_quantity=_decimal(data.get("executedQty", "0")),
-            average_price=_decimal(data.get("avgPrice", "0")),
+            executed_quantity=executed_quantity,
+            average_price=average_price,
             entry_leverage=entry_leverage,
         )
 
