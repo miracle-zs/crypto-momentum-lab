@@ -142,6 +142,67 @@ async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> No
 
 
 @pytest.mark.asyncio
+async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is_flat(
+) -> None:
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.execution_book import Applied
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class NoTransaction:
+        def transaction(self, key):
+            raise AssertionError("legacy snapshot stream adoption opened a transaction")
+
+    book = ExecutionBook(execution_unit_of_work=NoTransaction())
+    book._persistence_failed = False
+    key = _scope().to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="legacy-postgres-account", stream_epoch="unversioned"
+    )
+
+    flat_snap = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=None,
+        margin_type=None,
+        observed_at=_dt(10, 0),
+        raw_payload={},
+    )
+    result = await book.observe(
+        ExecutionEvidence(
+            evidence_id="new-epoch-flat-from-legacy",
+            scope=_scope(),
+            observed_at=_dt(10, 0),
+            stream_id="account_event_hub",
+            stream_epoch="active-epoch",
+            sequence=1,
+            snapshot=flat_snap,
+        )
+    )
+    assert isinstance(result, Applied)
+    assert book._stream_scopes[key.canonical_id].stream_id == "account_event_hub"
+    assert book._stream_scopes[key.canonical_id].stream_epoch == "active-epoch"
+
+    # Reading with active stream must succeed
+    view = await book.read(
+        _scope(),
+        stream_id="account_event_hub",
+        stream_epoch="active-epoch",
+    )
+    assert view.total_quantity == Decimal("0")
+    assert view.stream_scope.stream_epoch == "active-epoch"
+
+
+
+@pytest.mark.asyncio
 async def test_flat_position_act_when_head_is_none() -> None:
     from contextlib import asynccontextmanager
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
@@ -1897,3 +1958,32 @@ def test_position_book_get_view_caches_advancing_future_cuts():
     view3 = book.get_view(cut3)
     assert len(book._view_cache) == 1
     assert view3.projection_version == view1.projection_version
+
+
+def test_account_journal_appends_fill_with_nested_position_side():
+    from crypto_momentum_lab.domain.account.models import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+
+    key = PositionKey("live", "primary", "牛来USDT", FuturesPositionSide.LONG)
+    journal = AccountJournal(key)
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="牛来USDT",
+        trade_id="trade-nested-1",
+        order_id="order-1",
+        side="SELL",
+        price=Decimal("0.12"),
+        quantity=Decimal("100"),
+        realized_pnl=Decimal("1"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC),
+        raw_payload={"row": {"ps": "LONG"}},
+    )
+    rev = journal.append_fill(fill)
+    assert rev == 1
+    assert len(journal.read_cut().fills) == 1
+

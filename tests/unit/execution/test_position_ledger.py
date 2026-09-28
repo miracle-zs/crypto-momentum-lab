@@ -414,3 +414,49 @@ def test_position_ledger_external_reduction_does_not_fabricate_exit_boundary() -
     assert batch.quantity == Decimal("10")
     assert batch.exit_order_submitted_at is None
     assert proj.total_active_quantity == Decimal("10")
+
+
+def test_position_ledger_nested_raw_payload_position_side_matches_and_closes() -> None:
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="牛来USDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    t0 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    f1 = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="牛来USDT",
+        trade_id="t1",
+        order_id="o1",
+        side="BUY",
+        price=Decimal("0.11"),
+        quantity=Decimal("100"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t0,
+        raw_payload={"positionSide": "LONG"},
+    )
+    f2 = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="牛来USDT",
+        trade_id="t2",
+        order_id="o2",
+        side="SELL",
+        price=Decimal("0.12"),
+        quantity=Decimal("100"),
+        realized_pnl=Decimal("1"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=t0 + timedelta(minutes=1),
+        raw_payload={"row": {"ps": "LONG"}},
+    )
+    facts = AccountFacts(position_key=key, fills=(f1, f2))
+    proj = PositionLedger(key).project(facts)
+    assert proj.total_active_quantity == Decimal("0")
+    assert len(proj.active_batches) == 0
+    assert not proj.diagnostics
+

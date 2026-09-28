@@ -317,6 +317,7 @@ class ClosedMarketStatePublisher:
         self._observed_symbol_keys: set[tuple[str, str]] = set()
         self._exchange_by_symbol_key: dict[tuple[str, str], str] = {}
         self._last_materialized_bucket_by_symbol: dict[tuple[str, str], datetime] = {}
+        self._last_materialized_empty_buckets_through: datetime | None = None
         self._last_state_by_symbol: dict[tuple[str, str], MarketState15s] = {}
         self._durable_queue: asyncio.Queue[_DurableCommand | None] | None = None
         self._durable_task: asyncio.Task[None] | None = None
@@ -354,6 +355,7 @@ class ClosedMarketStatePublisher:
                 if symbol_key[1] in removed_symbols:
                     self._last_state_by_symbol.pop(symbol_key, None)
         self._expected_symbols = expected_symbols
+        self._last_materialized_empty_buckets_through = None
 
     def consume_pending_entry_symbols(self) -> frozenset[str]:
         """Return, and clear, the symbols that newly entered the dense set."""
@@ -618,7 +620,9 @@ class ClosedMarketStatePublisher:
             return
 
         symbol_key = (event.environment, event.symbol)
-        self._observed_symbol_keys.add(symbol_key)
+        if symbol_key not in self._observed_symbol_keys:
+            self._observed_symbol_keys.add(symbol_key)
+            self._last_materialized_empty_buckets_through = None
         self._exchange_by_symbol_key.setdefault(symbol_key, event.exchange)
         self._materialize_empty_buckets_before_event(
             symbol_key=symbol_key,
@@ -732,11 +736,17 @@ class ClosedMarketStatePublisher:
         through_bucket = bucket_start_15s(
             watermark - timedelta(seconds=_BUCKET_SECONDS)
         )
+        if (
+            self._last_materialized_empty_buckets_through is not None
+            and through_bucket <= self._last_materialized_empty_buckets_through
+        ):
+            return
         for symbol_key in sorted(self._observed_symbol_keys):
             self._materialize_buckets_until(
                 symbol_key=symbol_key,
                 through_bucket=through_bucket,
             )
+        self._last_materialized_empty_buckets_through = through_bucket
 
     def _materialize_empty_buckets_before_event(
         self,

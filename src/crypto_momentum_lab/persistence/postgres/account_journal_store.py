@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,
+    extract_fill_position_side,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
@@ -1003,18 +1004,7 @@ def _max_fact_time(facts: AccountFacts) -> datetime | None:
     return None
 
 
-def _raw_position_side(raw_payload: dict[str, object] | None) -> str | None:
-    if not raw_payload or not isinstance(raw_payload, dict):
-        return None
-    value = raw_payload.get("positionSide", raw_payload.get("position_side"))
-    if value is None and "row" in raw_payload and isinstance(raw_payload["row"], dict):
-        row = raw_payload["row"]
-        value = row.get("ps", row.get("positionSide", row.get("position_side")))
-    if value is None and "event" in raw_payload and isinstance(raw_payload["event"], dict):
-        event_dict = raw_payload["event"]
-        o = event_dict.get("o") if isinstance(event_dict.get("o"), dict) else event_dict
-        value = o.get("ps", o.get("positionSide", o.get("position_side")))
-    return str(value).upper() if value is not None else None
+_raw_position_side = extract_fill_position_side
 
 
 def _fill_from_row(row: AccountFillEventRow) -> AccountFillEvent:

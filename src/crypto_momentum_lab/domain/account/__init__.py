@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountReconciliationRun,
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
+    extract_fill_position_side,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "AccountReconciliationRun",
     "ExecutionAccountProcessState",
     "ExecutionAccountStatus",
+    "extract_fill_position_side",
 ]
