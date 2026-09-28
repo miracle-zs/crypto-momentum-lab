@@ -13,6 +13,8 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
+)
+from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionKey,
     _KeyCommandScheduler,
 )
@@ -2186,6 +2188,85 @@ async def test_snapshot_ingestion_requires_typed_facts_without_inferred_flat() -
         await coord.observe_account_snapshot(object())
 
     await coord.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillEvent,
+        AccountPositionSnapshot,
+    )
+
+    class Book:
+        has_execution_unit_of_work = True
+
+        def __init__(self) -> None:
+            self.evidence = []
+
+        async def observe(self, evidence):
+            self.evidence.append(evidence)
+            return object()
+
+    book = Book()
+    coord = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        domain_coordinator=object(),
+        execution_book=book,
+    )
+    flat = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=None,
+        margin_type=None,
+        observed_at=NOW,
+        raw_payload={},
+    )
+
+    async def observe(snapshot, *, epoch="epoch-1", sequence=1, fills=()):
+        await coord.observe_account_snapshot(
+            snapshot,
+            fills=fills,
+            stream_id="account-stream",
+            stream_epoch=epoch,
+            sequence=sequence,
+        )
+
+    await observe(flat)
+    await observe(replace(flat, observed_at=NOW + timedelta(minutes=1)), sequence=2)
+    assert len(book.evidence) == 1
+
+    await observe(flat, epoch="epoch-2", sequence=1)
+    assert len(book.evidence) == 2
+
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="new-fill",
+        order_id="new-order",
+        side="BUY",
+        price=Decimal("65000"),
+        quantity=Decimal("1"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=NOW + timedelta(minutes=2),
+        raw_payload={"positionSide": "LONG"},
+    )
+    await observe(flat, epoch="epoch-2", sequence=2, fills=(fill,))
+    await observe(flat, epoch="epoch-2", sequence=3)
+    assert len(book.evidence) == 4
 
 
 @pytest.mark.asyncio
