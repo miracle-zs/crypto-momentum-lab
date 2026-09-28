@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import inspect
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -525,6 +526,7 @@ class OrderExecutionCoordinator:
             )
             fills_by_key.setdefault(key, []).append(fill)
 
+        conflict_reasons: Counter[str] = Counter()
         for key in sorted(
             positions_by_key.keys() | fills_by_key.keys(),
             key=lambda item: item.canonical_id,
@@ -581,6 +583,8 @@ class OrderExecutionCoordinator:
                     sequence=sequence,
                 )
             )
+            if isinstance(result, EvidenceConflict):
+                conflict_reasons[result.reason] += 1
             if (
                 not isinstance(result, EvidenceConflict)
                 and pos is not None
@@ -590,6 +594,17 @@ class OrderExecutionCoordinator:
                 and stream_epoch is not None
             ):
                 self._confirmed_flat_streams[key] = (stream_id, stream_epoch)
+        if conflict_reasons:
+            log.warning(
+                "account_snapshot_execution_book_conflicts",
+                account_label=self._account_label,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+                sequence=sequence,
+                position_count=len(positions_by_key),
+                fill_count=len(fills),
+                reasons=dict(conflict_reasons),
+            )
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if self._reservation_repository is None or self._execution_book is None:
