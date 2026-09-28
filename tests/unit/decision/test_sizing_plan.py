@@ -604,3 +604,183 @@ def test_execute_policy_transition_fail_closed_when_missing_lot_rules() -> None:
     assert transition.entry_candidate is None
     assert transition.rejection_reason == "sizing_missing_realtime_lot_rules"
 
+
+def test_execute_policy_transition_with_mapping_lot_rules() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000.00"))
+    pview = _make_position_view("BTCUSDT")
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+        policy_code_digest="code_01",
+        policy_parameters_digest="params_01",
+        policy_state_digest="state_01",
+        cash_balance=Decimal("5000.00"),
+    )
+    state = PolicyState()
+    sizing_model = FixedNotionalSizingModel(
+        target_notional=Decimal("660.00"),
+        max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
+    )
+    rules_map = {"BTCUSDT": default_symbol_lot_rules("BTCUSDT")}
+    policy = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000.00"),
+        position_mode=StrategyPositionMode.LONG_ONLY,
+        sizing_model=sizing_model,
+        symbol_lot_rules=rules_map,
+    )
+
+    transition = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+    )
+
+    assert transition.rejection_reason is None
+    assert transition.entry_candidate is not None
+    assert transition.entry_candidate.desired_notional == Decimal("660.00")
+
+
+def test_execute_policy_transition_with_callable_lot_rules() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("ETHUSDT", t0, Decimal("3000.00"))
+    pview = _make_position_view("ETHUSDT")
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="ETHUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+        policy_code_digest="code_01",
+        policy_parameters_digest="params_01",
+        policy_state_digest="state_01",
+        cash_balance=Decimal("5000.00"),
+    )
+    state = PolicyState()
+    sizing_model = FixedNotionalSizingModel(
+        target_notional=Decimal("300.00"),
+        max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
+    )
+
+    def lot_provider(sym: str) -> SymbolLotRules | None:
+        if sym == "ETHUSDT":
+            return default_symbol_lot_rules("ETHUSDT")
+        return None
+
+    policy = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        entry_threshold=Decimal("2500.00"),
+        position_mode=StrategyPositionMode.LONG_ONLY,
+        sizing_model=sizing_model,
+        symbol_lot_rules=lot_provider,
+    )
+
+    transition = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+    )
+
+    assert transition.rejection_reason is None
+    assert transition.entry_candidate is not None
+    assert transition.entry_candidate.desired_notional == Decimal("300.00")
+
+
+def test_execute_policy_transition_callable_lot_rules_miss_fail_closed() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("SOLUSDT", t0, Decimal("150.00"))
+    pview = _make_position_view("SOLUSDT")
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="SOLUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+        policy_code_digest="code_01",
+        policy_parameters_digest="params_01",
+        policy_state_digest="state_01",
+        cash_balance=Decimal("5000.00"),
+    )
+    state = PolicyState()
+    sizing_model = FixedNotionalSizingModel(
+        target_notional=Decimal("300.00"),
+        max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
+    )
+    policy = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        entry_threshold=Decimal("100.00"),
+        position_mode=StrategyPositionMode.LONG_ONLY,
+        sizing_model=sizing_model,
+        symbol_lot_rules=lambda _sym: None,
+    )
+
+    transition = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+    )
+
+    assert transition.entry_candidate is None
+    assert transition.rejection_reason == "sizing_missing_realtime_lot_rules"
+
+
+def test_serialize_policy_parameters_supports_dynamic_symbol_lot_rules() -> None:
+    from crypto_momentum_lab.domain.decision.policy_transition import (
+        serialize_policy_parameters,
+    )
+
+    sizing_model = FixedNotionalSizingModel(
+        target_notional=Decimal("660.00"),
+        max_leverage=Decimal("5.0"),
+        max_slippage_budget_bps=Decimal("10.0"),
+        resize_tolerance=Decimal("0.05"),
+    )
+    policy_callable = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        sizing_model=sizing_model,
+        symbol_lot_rules=lambda sym: None,
+    )
+    params_c = serialize_policy_parameters(policy_callable)
+    assert "symbol_lot_rules" not in params_c
+
+    policy_map = EffectivePolicy(
+        policy_id="breakout_v1",
+        strategy_name="breakout",
+        sizing_model=sizing_model,
+        symbol_lot_rules={"BTCUSDT": default_symbol_lot_rules("BTCUSDT")},
+    )
+    params_m = serialize_policy_parameters(policy_map)
+    assert "symbol_lot_rules" not in params_m
+

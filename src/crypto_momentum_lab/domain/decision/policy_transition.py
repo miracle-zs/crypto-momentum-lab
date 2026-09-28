@@ -264,6 +264,8 @@ def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
         # closure itself would not be reproducible.
         if name == "candidate_generator":
             continue
+        if name == "symbol_lot_rules" and (callable(value) or isinstance(value, Mapping)):
+            continue
         if isinstance(value, timedelta):
             seconds = _timedelta_seconds(value)
             res[name] = seconds
@@ -357,9 +359,45 @@ def _evaluate_sizing(
     if sizing_model is None:
         return cand, None, None
 
-    lot_rules: SymbolLotRules | None = getattr(
+    raw_lot_rules: Any | None = getattr(
         policy_artifact, "symbol_lot_rules", None
     )
+    if raw_lot_rules is None:
+        return None, None, "sizing_missing_realtime_lot_rules"
+
+    resolved_rules: Any | None = None
+    if callable(raw_lot_rules):
+        resolved_rules = raw_lot_rules(symbol)
+    elif isinstance(raw_lot_rules, Mapping):
+        resolved_rules = raw_lot_rules.get(symbol)
+    else:
+        resolved_rules = raw_lot_rules
+
+    if resolved_rules is None:
+        return None, None, "sizing_missing_realtime_lot_rules"
+
+    lot_rules: SymbolLotRules | None = None
+    if isinstance(resolved_rules, SymbolLotRules):
+        lot_rules = resolved_rules
+    elif (
+        hasattr(resolved_rules, "step_size")
+        and hasattr(resolved_rules, "tick_size")
+        and hasattr(resolved_rules, "min_quantity")
+        and hasattr(resolved_rules, "max_quantity")
+        and hasattr(resolved_rules, "min_notional")
+    ):
+        try:
+            lot_rules = SymbolLotRules(
+                symbol=getattr(resolved_rules, "symbol", symbol),
+                tick_size=getattr(resolved_rules, "tick_size"),
+                step_size=getattr(resolved_rules, "step_size"),
+                min_quantity=getattr(resolved_rules, "min_quantity"),
+                max_quantity=getattr(resolved_rules, "max_quantity"),
+                min_notional=getattr(resolved_rules, "min_notional"),
+            )
+        except Exception:
+            lot_rules = None
+
     if lot_rules is None:
         return None, None, "sizing_missing_realtime_lot_rules"
 
