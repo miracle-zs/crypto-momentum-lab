@@ -744,6 +744,22 @@ def test_live_enabled_uses_runtime_checkpoint() -> None:
     assert heartbeat_source == "runtime_checkpoint"
 
 
+def test_live_enabled_rejects_stale_checkpoint_from_previous_session() -> None:
+    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
+    # Checkpoint from 6 minutes ago left over from a previous run
+    stale_checkpoint_at = transition_at - timedelta(minutes=6)
+
+    observed_at, heartbeat_source = _live_observation(
+        state="live_enabled",
+        runtime_checkpoint_at=stale_checkpoint_at,
+        transition_at=transition_at,
+    )
+
+    # Must choose current transition_at instead of stale checkpoint
+    assert observed_at == transition_at
+    assert heartbeat_source == "state_transition"
+
+
 def test_dashboard_separates_confirmed_open_orders_from_uncertain_orders() -> None:
     rows = [
         SimpleNamespace(state="acknowledged"),

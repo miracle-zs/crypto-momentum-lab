@@ -103,13 +103,6 @@ class RiskGateway:
                 RiskDecision.REJECTED,
                 "stale_market_state",
             )
-        if context.account_state is not ExecutionAccountStatus.READY_READONLY:
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "account_not_ready",
-            )
         if context.strategy_state is StrategyLiveState.HALTED:
             return _evaluation(
                 intent,
@@ -117,17 +110,45 @@ class RiskGateway:
                 RiskDecision.HALTED,
                 "strategy_halted",
             )
-        if context.strategy_state is StrategyLiveState.DRAINING:
-            if (
-                intent.reduce_only
-                and context.risk_config.allow_reduce_only_while_draining
+        if intent.reduce_only:
+            if context.strategy_state is StrategyLiveState.DRAINING:
+                if context.risk_config.allow_reduce_only_while_draining:
+                    return _evaluation(
+                        intent,
+                        context,
+                        RiskDecision.APPROVED,
+                        "reduce_only_draining",
+                    )
+                return _evaluation(
+                    intent,
+                    context,
+                    RiskDecision.REJECTED,
+                    "strategy_draining",
+                )
+            if context.account_state in (
+                ExecutionAccountStatus.HALTED_READONLY,
+                ExecutionAccountStatus.STOPPED,
             ):
                 return _evaluation(
                     intent,
                     context,
-                    RiskDecision.APPROVED,
-                    "reduce_only_draining",
+                    RiskDecision.REJECTED,
+                    "account_stopped",
                 )
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.APPROVED,
+                "reduce_only",
+            )
+        if context.account_state is not ExecutionAccountStatus.READY_READONLY:
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "account_not_ready",
+            )
+        if context.strategy_state is StrategyLiveState.DRAINING:
             return _evaluation(
                 intent,
                 context,
@@ -148,13 +169,6 @@ class RiskGateway:
                 context,
                 RiskDecision.REJECTED,
                 "invalid_desired_notional",
-            )
-        if intent.reduce_only:
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.APPROVED,
-                "reduce_only",
             )
         if (
             context.risk_config.max_order_notional is None

@@ -474,6 +474,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_state: ExecutionAccountStatus | None = None
         self._realtime_account_sequence = 0
         self._execution_book: Any | None = None
+        self._cached_book_bucket_end: datetime | None = None
+        self._cached_book_result: tuple[frozenset[str], tuple[Any, ...], frozenset[str]] | None = None
+        self._cached_book_unresolved: tuple[Any, ...] | None = None
         self._rules_load_tasks: dict[
             str,
             asyncio.Task[SymbolTradingRules],
@@ -585,6 +588,21 @@ class PostgresLiveContextProvider(LiveContextReader):
         book = getattr(self, "_execution_book", None)
         if book is None:
             return context
+        cached_bucket_end = getattr(self, "_cached_book_bucket_end", None)
+        cached_unresolved = getattr(self, "_cached_book_unresolved", None)
+        cached_result = getattr(self, "_cached_book_result", None)
+        if (
+            cached_result is not None
+            and cached_bucket_end == state.bucket_end
+            and cached_unresolved == context.unresolved_orders
+        ):
+            book_position_symbols, managed, unmanaged = cached_result
+            return replace(
+                context,
+                open_position_symbols=book_position_symbols,
+                managed_positions=managed,
+                unmanaged_position_symbols=unmanaged,
+            )
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
@@ -612,6 +630,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             active_symbols | book_position_symbols
         )
         unmanaged |= book_position_symbols - active_symbols
+        self._cached_book_bucket_end = state.bucket_end
+        self._cached_book_unresolved = context.unresolved_orders
+        self._cached_book_result = (book_position_symbols, managed, unmanaged)
         return replace(
             context,
             open_position_symbols=book_position_symbols,
@@ -948,6 +969,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_bucket_start = None
         self._cached_context = None
         self._cached_loaded_at = None
+        self._cached_book_bucket_end = None
+        self._cached_book_result = None
+        self._cached_book_unresolved = None
         if event is not None:
             log.info(
                 "live_context_cache_invalidated",

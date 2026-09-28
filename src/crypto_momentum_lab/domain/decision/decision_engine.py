@@ -329,7 +329,7 @@ class EffectivePolicy:
     short_entry_threshold: Decimal | None = None
     order_type: EntryType = EntryType.MARKET
     target_notional: Decimal = Decimal("100.00")
-    max_open_positions: int = 4
+    max_open_positions: int | None = None
     exit_policy: PositionExitPolicy = field(default_factory=PositionExitPolicy)
     cooldown_duration: timedelta = timedelta(minutes=15)
     position_mode: StrategyPositionMode = StrategyPositionMode.LONG_ONLY

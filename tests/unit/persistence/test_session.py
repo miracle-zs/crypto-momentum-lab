@@ -78,10 +78,10 @@ def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
 
     assert result is not None
     assert captured["database_url"] == "postgresql+asyncpg://observability"
-    assert captured["pool_size"] == 1
-    assert captured["max_overflow"] == 0
-    assert captured["pool_timeout"] == 1
-    assert captured["connect_args"] == {"command_timeout": 1}
+    assert captured["pool_size"] == 2
+    assert captured["max_overflow"] == 2
+    assert captured["pool_timeout"] == 5.0
+    assert captured["connect_args"] == {"command_timeout": 10.0}
 
 
 def test_checkpoint_engine_isolated_from_best_effort_telemetry(monkeypatch) -> None:

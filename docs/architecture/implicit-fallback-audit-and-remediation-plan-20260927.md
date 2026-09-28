@@ -46,7 +46,7 @@ flowchart TD
     end
 
     subgraph S6["6. 运行时计划编译器全套伪造 (Compiler Fallbacks)"]
-        C1["runtime_plan.py:148-229<br/>entry_thresh=65000, target_notional=100<br/>max_open_positions=4, max_account_drawdown=0.10"]
+        C1["runtime_plan.py:148-250<br/>target_notional=100, max_account_drawdown=0.10 are relaxed-mode defaults<br/>max_open_positions is no longer fabricated as 4"]
     end
 
     subgraph S7["7. 时效与风控网关架空 (Risk Gateway)"]
@@ -290,7 +290,8 @@ flowchart TD
    - Sizing 计算必须依赖当前 session 中最新从币安同步的 `SymbolLotRules` 快照；未抓取到规则时直接触发 `SizingRejection("missing_realtime_lot_rules")`。
 
 5. **编译层与数据库层完全真实化（Strict Plan Compiler & DDL Hygiene）**
-   - 移除 `RuntimePlanCompiler.compile` 中的静默补全逻辑（去除 `Decimal("65000.00")`, `Decimal("100.00")`, `max_open_positions: 4` 等）。
+   - 已移除 `max_open_positions: 4` 与据此推导出的 gross-notional 默认值；未配置时计划记录为未配置，Live 严格编译仍要求风险配置显式提供限额，且 EffectivePolicy 展示持久化风险配置的实际持仓限额。
+   - 后续继续移除 `RuntimePlanCompiler.compile` 中其他静默补全逻辑（包括 `Decimal("100.00")`、`max_account_drawdown=0.10` 等）；entry threshold 缺失时保持 `None`，不再伪造 `65000.00`。
    - 编译所需的参数必须 100% 由 `deploy/live-runtime.yaml` 提供，缺少任何一项均判定编译失败。
    - 清理数据库 ORM 模型上的假默认值（移除 `hedge_mode default=False`、`data_complete default=True`、`DatasetManifestRow.coverage_ratio default=1.0` 等掩盖缺陷的假数据）。
 

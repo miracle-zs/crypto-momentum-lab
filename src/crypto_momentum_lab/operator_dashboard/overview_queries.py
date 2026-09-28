@@ -8,7 +8,7 @@ but do not need to know how the append-only process and lease rows are joined.
 
 import asyncio
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -608,7 +608,11 @@ class OverviewQueries:
                     .order_by(TradingLeaseRow.expires_at.desc())
                 )
             ).all()
-            lease = leases[0] if leases else None
+            primary_lease = next(
+                (item for item in leases if item.account_label == "primary"),
+                None,
+            )
+            lease = primary_lease or (leases[0] if leases else None)
             live = await session.scalar(
                 select(LiveSessionTransitionRow)
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
@@ -803,9 +807,15 @@ def live_observation(
     state: str,
     runtime_checkpoint_at: datetime | None,
     transition_at: datetime,
+    max_checkpoint_lead_seconds: float = 30.0,
 ) -> tuple[datetime, str]:
     """Choose a heartbeat that belongs to the live session's current state."""
-    if state == "live_enabled" and runtime_checkpoint_at is not None:
+    if (
+        state == "live_enabled"
+        and runtime_checkpoint_at is not None
+        and runtime_checkpoint_at
+        >= transition_at - timedelta(seconds=max_checkpoint_lead_seconds)
+    ):
         return runtime_checkpoint_at, "runtime_checkpoint"
     return transition_at, "state_transition"
 

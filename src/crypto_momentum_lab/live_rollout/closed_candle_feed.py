@@ -82,7 +82,7 @@ class ClosedCandle15mFeedConfig:
     ping_timeout_seconds: float = 20.0
     control_ack_timeout_seconds: float = 10.0
     ingress_queue_max_events: int = 4096
-    final_event_queue_size: int = 256
+    final_event_queue_size: int = 2048
     connection_recovery_cooldown_seconds: float = 30.0
 
     def __post_init__(self) -> None:

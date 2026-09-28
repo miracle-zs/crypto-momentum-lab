@@ -57,6 +57,9 @@ def test_runtime_plan_compilation_deterministic_hashes() -> None:
     assert plan1.effective_policy.order_type == EntryType.LIMIT
     assert plan1.effective_policy.entry_threshold == Decimal("64000.00")
     assert plan1.effective_policy.target_notional == Decimal("1000.00")
+    assert plan1.effective_policy.max_open_positions is None
+    assert plan1.options_source_chain["max_open_positions"] == "not_configured"
+    assert plan1.options_source_chain["max_gross_notional"] == "not_configured"
     assert plan1.fencing_epoch == 1
     assert plan1.runtime_generation.startswith("gen_binance_primary_")
     assert plan1.declared_schema_compatibility == "20260925_0042"
@@ -130,6 +133,25 @@ def test_runtime_plan_source_chain_tracking() -> None:
     assert plan.options_source_chain["entry_threshold"] == "override"
     assert plan.options_source_chain["target_notional"] == "default"
     assert plan.options_source_chain["order_type"] == "default"
+
+
+def test_runtime_plan_uses_configured_position_limit() -> None:
+    plan = RuntimePlanCompiler.compile(
+        environment="live",
+        account_label="binance_primary",
+        overrides={
+            "target_notional": Decimal("100.00"),
+            "max_open_positions": 500,
+            "max_account_drawdown": "0.10",
+            "max_gross_notional": Decimal("5000000.00"),
+            "max_order_notional": Decimal("10000.00"),
+            "max_holding_seconds": 1200,
+        },
+        strict=True,
+    )
+
+    assert plan.effective_policy.max_open_positions == 500
+    assert plan.options_source_chain["max_open_positions"] == "override"
 
 
 def test_runtime_plan_invalid_post_init() -> None:

@@ -509,7 +509,11 @@ async def audit_decision_trace(
             ),
             order_type=order_type,
             target_notional=Decimal(str(pol_params["target_notional"])),
-            max_open_positions=int(pol_params["max_open_positions"]),
+            max_open_positions=(
+                int(pol_params["max_open_positions"])
+                if pol_params["max_open_positions"] is not None
+                else None
+            ),
             exit_policy=exit_policy,
             cooldown_duration=_duration(pol_params["cooldown_duration_seconds"]),
             position_mode=position_mode,

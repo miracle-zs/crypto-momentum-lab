@@ -223,8 +223,8 @@ class RuntimePlanCompiler:
         elif strict:
             raise ValueError("max_open_positions must be explicitly specified in strict mode")
         else:
-            max_open_positions = 4
-            sources["max_open_positions"] = "default"
+            max_open_positions = None
+            sources["max_open_positions"] = "not_configured"
 
         max_account_drawdown_raw = user_overrides.get("max_account_drawdown")
         if max_account_drawdown_raw is not None:
@@ -243,13 +243,15 @@ class RuntimePlanCompiler:
         elif strict:
             raise ValueError("max_gross_notional must be explicitly specified in strict mode")
         else:
-            max_gross_notional = target_notional * Decimal(str(max_open_positions))
-            sources["max_gross_notional"] = "default"
+            max_gross_notional = None
+            sources["max_gross_notional"] = "not_configured"
 
         risk_payload = {
             "max_open_positions": max_open_positions,
             "max_account_drawdown": max_account_drawdown,
-            "max_gross_notional": str(max_gross_notional),
+            "max_gross_notional": (
+                None if max_gross_notional is None else str(max_gross_notional)
+            ),
             "max_order_notional": str(max_order_notional),
         }
         risk_hash = hashlib.sha256(
@@ -301,6 +303,7 @@ class RuntimePlanCompiler:
             entry_threshold=entry_thresh,
             order_type=order_type,
             target_notional=Decimal(str(target_notional)),
+            max_open_positions=max_open_positions,
             sizing_model=sizing_model,
             exit_policy=exit_policy,
         )

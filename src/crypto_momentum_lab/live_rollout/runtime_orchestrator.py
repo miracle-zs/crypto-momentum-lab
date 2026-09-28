@@ -671,15 +671,11 @@ async def run_live_daemon(
             "order_type": "market"
             if getattr(config.strategy, "market_orders", False)
             else "limit",
-            "max_open_positions": getattr(risk_config, "max_open_positions", 4),
+            "max_open_positions": risk_config.max_open_positions,
             "max_account_drawdown": getattr(
                 risk_config, "max_account_drawdown", "0.10"
             ),
-            "max_gross_notional": getattr(
-                risk_config,
-                "max_gross_notional",
-                target_notional * getattr(risk_config, "max_open_positions", 4),
-            ),
+            "max_gross_notional": risk_config.max_gross_notional,
             "max_order_notional": getattr(
                 risk_config, "max_order_notional", target_notional
             ),

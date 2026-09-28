@@ -111,6 +111,26 @@ def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
     assert evaluation.reason == "reduce_only"
 
 
+def test_gateway_allows_reduce_only_when_account_syncing() -> None:
+    evaluation = RiskGateway().evaluate(
+        _intent(reduce_only=True),
+        _context(account_state=ExecutionAccountStatus.SYNCING),
+    )
+
+    assert evaluation.decision is RiskDecision.APPROVED
+    assert evaluation.reason == "reduce_only"
+
+
+def test_gateway_rejects_reduce_only_when_account_stopped() -> None:
+    evaluation = RiskGateway().evaluate(
+        _intent(reduce_only=True),
+        _context(account_state=ExecutionAccountStatus.STOPPED),
+    )
+
+    assert evaluation.decision is RiskDecision.REJECTED
+    assert evaluation.reason == "account_stopped"
+
+
 def test_gateway_blocks_entries_when_strategy_is_halted() -> None:
     evaluation = RiskGateway().evaluate(
         _intent(),
