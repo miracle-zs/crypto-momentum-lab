@@ -409,6 +409,7 @@ class ExecutionTransaction:
         state_payload: dict[str, object],
         updated_at: datetime,
         stream_adoption_checkpoint_id: str | None = None,
+        is_flat_adoption: bool = False,
     ) -> int:
         _execution_identity_values(key, stream_id, stream_epoch)
         identity = _execution_position_values(key)
@@ -448,11 +449,11 @@ class ExecutionTransaction:
         if row is not None and (
             row.stream_id != stream_id or row.stream_epoch != stream_epoch
         ):
-            if not stream_adoption_checkpoint_id:
+            if not stream_adoption_checkpoint_id and not is_flat_adoption:
                 raise DecisionCommitConflict(
                     "execution stream changed without a validated recovery checkpoint"
                 )
-            if stream_adoption_checkpoint_id is None:
+            if not is_flat_adoption and stream_adoption_checkpoint_id is None:
                 raise DecisionCommitConflict(
                     "execution stream adoption checkpoint could not be verified"
                 )
