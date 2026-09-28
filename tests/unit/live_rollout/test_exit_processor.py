@@ -23,12 +23,29 @@ from crypto_momentum_lab.live_rollout.context import (
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
     LiveExitProcessor,
+    _is_order_identity_conflict,
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitOrderRequest
 from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
 from tests.unit.shadow_operation.test_service import _intent, _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("client order ID is already bound to a different order", True),
+        ("order already exists in terminal status", True),
+        ("active lease disappeared", False),
+        ("exit order was allocated from stale position", False),
+    ],
+)
+def test_only_durable_order_identity_errors_are_classified_as_conflicts(
+    message: str,
+    expected: bool,
+) -> None:
+    assert _is_order_identity_conflict(RuntimeError(message)) is expected
 
 
 class RecordingSubmission:

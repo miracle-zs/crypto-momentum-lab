@@ -956,14 +956,19 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
         def __init__(self) -> None:
             self.scalar_calls = 0
             self.scalars_calls = 0
+            self.closed = False
 
         async def scalar(self, _statement):
+            assert not self.closed
             self.scalar_calls += 1
             if self.scalar_calls == 1:
                 return NOW
-            return SimpleNamespace(position_count=0)
+            return SimpleNamespace(position_count=0, status="ready")
 
         async def scalars(self, _statement):
+            assert not self.closed, (
+                "query used an AsyncSession after its context exited"
+            )
             self.scalars_calls += 1
             return SimpleNamespace(all=lambda: ())
 
@@ -972,9 +977,11 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
             self.session = session
 
         async def __aenter__(self) -> Session:
+            self.session.closed = False
             return self.session
 
         async def __aexit__(self, *_args) -> None:
+            self.session.closed = True
             return None
 
     class SessionFactory:
@@ -996,7 +1003,7 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
     assert result[4] == ()
     assert result[5] == frozenset()
     assert result[6] == frozenset()
-    assert session.scalars_calls == 0
+    assert session.scalars_calls == 1
 
 
 async def test_position_view_uses_hub_snapshot_without_account_queries() -> None:

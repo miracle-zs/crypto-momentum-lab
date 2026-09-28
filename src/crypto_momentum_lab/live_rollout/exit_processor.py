@@ -246,17 +246,8 @@ class LiveExitProcessor:
                     context=context,
                 )
             except Exception as error:
-                if self._exit_manager is not None and (
-                    (
-                        isinstance(error, ValueError)
-                        and str(error)
-                        == "client order ID is already bound to a different order"
-                    )
-                    or "already exists in terminal status" in str(error)
-                    or "already exists" in str(error)
-                    or "already bound to a different order" in str(error)
-                    or "ReservationConflictError" in type(error).__name__
-                    or "OrderPreSubmissionError" in type(error).__name__
+                if self._exit_manager is not None and _is_order_identity_conflict(
+                    error
                 ):
                     self._exit_manager.note_order_identity_conflict(state.symbol)
                 raise
@@ -641,13 +632,17 @@ class LiveExitProcessor:
                     reference_price=reference_price,
                 )
             except Exception as error:
-                if self._exit_manager is not None and (
-                    "already exists in terminal status" in str(error)
-                    or "already exists" in str(error)
-                    or "already bound to a different order" in str(error)
-                    or "ReservationConflictError" in type(error).__name__
-                    or "OrderPreSubmissionError" in type(error).__name__
+                if self._exit_manager is not None and _is_order_identity_conflict(
+                    error
                 ):
+                    log.error(
+                        "live_exit_order_identity_conflict",
+                        run_id=self._config.run_id,
+                        symbol=request.candidate.symbol,
+                        candidate_id=request.candidate.candidate_id,
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
                     self._exit_manager.note_order_identity_conflict(
                         request.candidate.symbol
                     )
@@ -827,13 +822,17 @@ class LiveExitProcessor:
                         reference_price=reference_price,
                     )
                 except Exception as error:
-                    if self._exit_manager is not None and (
-                        "already exists in terminal status" in str(error)
-                        or "already exists" in str(error)
-                        or "already bound to a different order" in str(error)
-                        or "ReservationConflictError" in type(error).__name__
-                        or "OrderPreSubmissionError" in type(error).__name__
+                    if self._exit_manager is not None and _is_order_identity_conflict(
+                        error
                     ):
+                        log.error(
+                            "live_exit_order_identity_conflict",
+                            run_id=self._config.run_id,
+                            symbol=fallback_candidate.symbol,
+                            candidate_id=fallback_candidate.candidate_id,
+                            error_type=type(error).__name__,
+                            error=str(error),
+                        )
                         self._exit_manager.note_order_identity_conflict(
                             fallback_candidate.symbol
                         )
@@ -1056,6 +1055,17 @@ def _resize_reduce_only_candidate(
         desired_notional=desired_notional,
         features=features,
     )
+
+
+def _is_order_identity_conflict(error: Exception) -> bool:
+    message = str(error)
+    if (
+        "already exists in terminal status" in message
+        or "already bound to a different order" in message
+    ):
+        return True
+    cause = error.__cause__
+    return isinstance(cause, Exception) and _is_order_identity_conflict(cause)
 
 
 def _exit_strategy_side(plan: OrderExecutionPlan) -> StrategySide:

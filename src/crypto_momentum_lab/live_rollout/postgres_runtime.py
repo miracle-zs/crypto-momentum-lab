@@ -1232,15 +1232,16 @@ class PostgresLiveContextProvider(LiveContextReader):
             reconciliation is not None
             and getattr(reconciliation, "status", None) == "ready"
         ):
-            fill_cursors = (
-                await session.scalars(
-                    select(AccountFillReconciliationCursorRow).where(
-                        AccountFillReconciliationCursorRow.environment == "live",
-                        AccountFillReconciliationCursorRow.account_label
-                        == self._account_label,
+            async with self._sessions() as cursor_session:
+                fill_cursors = (
+                    await cursor_session.scalars(
+                        select(AccountFillReconciliationCursorRow).where(
+                            AccountFillReconciliationCursorRow.environment == "live",
+                            AccountFillReconciliationCursorRow.account_label
+                            == self._account_label,
+                        )
                     )
-                )
-            ).all()
+                ).all()
             coverage_by_symbol = {
                 cursor.symbol: _coverage_evidence_from_sources(
                     fill_cursor=cursor,

@@ -464,7 +464,15 @@ class OverviewQueries:
             mode = "EXIT_ONLY"
             entry_gate_open = False
             if not streams_all_ready:
-                entry_gate_reason = "market_data_not_ready"
+                unready_stream = next(
+                    (name for name, state in streams_dict.items() if state != "READY"),
+                    None,
+                )
+                entry_gate_reason = (
+                    f"{unready_stream.replace('-', '_')}_not_ready"
+                    if unready_stream is not None
+                    else "streams_not_ready"
+                )
             elif any(
                 a.lease_expires_at is None or a.lease_expires_at <= now
                 for a in accounts_resp.accounts
