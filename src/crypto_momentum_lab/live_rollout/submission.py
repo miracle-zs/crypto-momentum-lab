@@ -373,6 +373,23 @@ class LiveCandidateSubmission:
         if execution_result.plan is None:
             return None
         plan = execution_result.plan
+        resolved_strat_name = (
+            getattr(plan, "strategy_name", None)
+            or executable_candidate.strategy_name
+            or context.gate_context.strategy_name
+            or "orderflow_impulse"
+        )
+        resolved_strat_ver = (
+            getattr(plan, "strategy_version", None)
+            or executable_candidate.strategy_version
+            or "v0"
+        )
+        if plan.strategy_name != resolved_strat_name or plan.strategy_version != resolved_strat_ver:
+            plan = replace(
+                plan,
+                strategy_name=resolved_strat_name,
+                strategy_version=resolved_strat_ver,
+            )
 
         if (
             requested_quantity is None

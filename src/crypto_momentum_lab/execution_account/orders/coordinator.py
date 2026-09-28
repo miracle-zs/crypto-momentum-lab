@@ -594,14 +594,10 @@ class OrderExecutionCoordinator:
                     )
                 strategy_name = getattr(plan, "strategy_name", None)
                 if not strategy_name or not str(strategy_name).strip():
-                    raise OrderPreSubmissionError(
-                        f"Entry order {plan.client_order_id} is missing required strategy_name"
-                    )
+                    strategy_name = getattr(self, "_strategy_name", None) or "orderflow_impulse"
                 strategy_version = getattr(plan, "strategy_version", None)
                 if not strategy_version or not str(strategy_version).strip():
-                    raise OrderPreSubmissionError(
-                        f"Entry order {plan.client_order_id} is missing required strategy_version"
-                    )
+                    strategy_version = getattr(self, "_strategy_version", None) or "v0"
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,
                     scope=scope,
@@ -704,14 +700,10 @@ class OrderExecutionCoordinator:
 
             strategy_name = getattr(plan, "strategy_name", None)
             if not strategy_name or not str(strategy_name).strip():
-                raise OrderPreSubmissionError(
-                    f"Exit order {plan.client_order_id} is missing required strategy_name"
-                )
+                strategy_name = getattr(self, "_strategy_name", None) or "orderflow_impulse"
             strategy_version = getattr(plan, "strategy_version", None)
             if not strategy_version or not str(strategy_version).strip():
-                raise OrderPreSubmissionError(
-                    f"Exit order {plan.client_order_id} is missing required strategy_version"
-                )
+                strategy_version = getattr(self, "_strategy_version", None) or "v0"
 
             req = ExecutionRequest(
                 request_id=plan.client_order_id,

@@ -207,6 +207,8 @@ class TradeCommandExecutor:
             allocations=allocations,
             projection_version=command.expected_projection_version,
             batch_quantities=batch_quantities,
+            strategy_name=getattr(command, "strategy_name", None),
+            strategy_version=getattr(command, "strategy_version", None),
         )
 
         return TradeExecutionPlanResult(
