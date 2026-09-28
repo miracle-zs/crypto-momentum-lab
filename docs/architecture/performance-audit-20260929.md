@@ -42,7 +42,19 @@ flowchart LR
 | B：Journal 输出新增事实 delta | **已实现**（append-only 类别）。重试/迟到事实/epoch 切换/coverage 与事实提交仍在同一事务内 |
 | C：验证检查点 + 后缀事实 | 未实现；缩小恢复与投影规模，仍需支持历史 cut、迟到事实和保留水位 |
 
-**仍然存在的 O(H) 成本**：每次观察都要 `read_cut()` 生成完整 facts（投影需要）并调用 `compute_facts_hash()` 作为 `facts_state` 的 event_id，冲突/issue 行也仍是全量。delta 消除的是历史事件的行构造、编码与 SQL 传输，不是完整 facts 摘要本身。若以后用持久化树/分块摘要实现结构共享和增量校验，必须明确摘要协议版本与迁移；Merkle 根不能直接替换当前序列化内容的 hash 而仍声称版本身份相同。生产 PostgreSQL 的端到端耗时、WAL 与磁盘负载仍未测量。
+**仍然存在的 O(H) 成本，不能读成“只剩小尾巴”**：每次观察都要 `read_cut()` 重建完整 facts（投影需要）、调用 `compute_facts_hash()` 作为 `facts_state` 的 event_id，并且 [_max_fact_time](../../src/crypto_momentum_lab/persistence/postgres/account_journal_store.py#L1007) 每次都会再遍历一遍全部 fills/snapshots/boundaries；冲突/issue 行也仍是全量。delta 消除的是历史事件的行构造、编码与 SQL 传输，不是完整 facts 摘要本身。
+
+本机 `readcut_probe.py`（合成 fills，每轮让 `_cached_facts_none` 失效以模拟新事实到达，7 次取中位数）：
+
+| fills | `read_cut()`+`compute_facts_hash()` | 修复前单仓 deepcopy | 当前容器拷贝 |
+|---:|---:|---:|---:|
+| 100 | 1.29 ms | 1.12 ms | 0.003 ms |
+| 1,000 | 13.46 ms | 11.67 ms | 0.005 ms |
+| 10,000 | 134.79 ms | 120.7 ms | 0.028 ms |
+
+deepcopy 与摘要两组数字口径不同（前者来自 `benchmark_execution.py` 的合成 snapshots，后者是合成 fills 的 `read_cut` 重建加摘要），但同机、同量级可比：10,000 条事实时一次观察约从 **252 ms 降到 135 ms**，**剩余的摘要成本与被消除的 deepcopy 同量级**。因此本节的收益是“把每次观察中约一半的同步 CPU（历史行构造、编码、SQL 传输）移出”，不是消除了历史规模开销。容器拷贝一列波动较大（100 条处多次运行在 0.003–0.019 ms 之间），但始终比另两列小几个数量级。
+
+若以后用持久化树/分块摘要实现结构共享和增量校验，必须明确摘要协议版本与迁移；Merkle 根不能直接替换当前序列化内容的 hash 而仍声称版本身份相同。生产 PostgreSQL 的端到端耗时、WAL 与磁盘负载仍未测量。
 
 最小横向实验调用真实 store，使用 recording session 代替 PostgreSQL，构造 N 条 fills + 1 条 facts_state，并模拟所有行已经存在：
 
@@ -73,6 +85,8 @@ flowchart LR
 | 10,000 | 120.7213 ms | 0.0180 ms |
 
 这不是服务器 P99。消除的是每次 mutation 在事件循环线程上同步执行的 O(历史) 拷贝；这一机制见 [Python asyncio 官方说明](https://docs.python.org/3/library/asyncio-dev.html#running-blocking-code)。
+
+容器重构本身仍是 O(历史)：只复制容器指针、不深拷贝事实对象。同一探针测得容器复制仍随历史增长（同机 1,000→10,000 条事实：约 0.005→0.028 ms，`readcut_probe.py`），常数极小但在长历史下仍会增长。全局 mutation lock 也仍然存在，未改动。
 
 **共享所有权约束（目前是约定 + 测试，不是类型强制）**：事实对象（fill、snapshot、boundary、coverage、checkpoint）均为 frozen dataclass，记录之后仓库内没有就地写入路径（已核对 `raw_payload` / `details` 上不存在 `[key] =`、`update`、`setdefault` 等写法）。`raw_payload` 本身仍是可变 `dict`，所以这条约束由回归测试锁定：`test_staged_copy_shares_frozen_facts_without_leaking_candidate_writes` 断言候选写入不会改变已发布的 facts、facts hash、revision 与视图；`benchmark_execution.py` 同时断言容器不共享、事实内容相等且共享是有意的。任何将来对事实对象的就地修改都会破坏事务隔离。
 
@@ -112,6 +126,8 @@ flowchart LR
 
 [`_with_execution_book`](../../src/crypto_momentum_lab/live_rollout/postgres_runtime.py#L585) 空仓会直接返回，且同 bucket 有缓存；非空时不再读取该账户的全部已建立 Book，而是把账户当前持仓 symbol 集合传给 [`list_position_views`](../../src/crypto_momentum_lab/domain/execution/execution_book.py#L1689) 的 `symbols` 过滤器，只投影仍可能代表当前敞口的 scope，随后才按真实账户持仓过滤。账户快照缺失时过滤器被丢弃（`symbols=None`），仍读取全部 scope，保留不确定账户视图下的失败关闭行为。
 
+**减少的是投影，不是遍历**：`list_position_views` 仍然遍历该实例全部已加载的 `_books`，只是对不匹配的 symbol 直接 `continue`（不做投影、不做 historical cut 读取）。命中 scope 的读取也是**串行** `await read(...)`（原实现同样串行，本次未改），因此持仓 symbol 数一多，串行投影仍是下一个瓶颈。除每次 bucket 的定点读取之外，Book-only 漂移扫描按 300 秒一次做完整读取，属于刻意保留的诊断路径。
+
 注意：多数最新视图有内存缓存，因此**不能把它直接称作每次 N 条 SQL**。当指定 event_cut 早于当前视图时，[read](../../src/crypto_momentum_lab/domain/execution/execution_book.py#L1585) 才会进入 durable historical cut 读取，并新建历史 PositionBook；定点读取把这一步从“每个历史 scope”限制到“每个持仓 symbol”。
 
 本地 warm cache、无 DB、一个目标 scope，7 次中位数：
@@ -137,6 +153,8 @@ Book-only drift 诊断没有删除，而是移到独立周期：[`_observe_book_
 `persist_facts_sql_count.py` 与同名 `.json` 为持久化对照实验；它比较当前真实 store、修复前单行方案和等价批写原型，并额外记录“后续观察只传 delta”的 execute 次数与行数。两份脚本均可在仓库根目录使用 `rtk proxy env PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/<脚本名>` 复现；execution 脚本输出到 stdout，SQL 脚本同时重写自己的 JSON 结果文件。
 
 `dense_fill_bench.py` 与同名 `.csv` 为修复前全量扫描和当前 watermark 门禁的对照；同样用 `PYTHONPATH=src` 运行。CSV 另有 2,000/5,000 标的压力规模，仅作复杂度验证，不代表生产标的数。
+
+`readcut_probe.py` 量化 delta 之后仍留在每次观察上的 O(历史) 成本：`read_cut()` 重建、`compute_facts_hash()` 与 `copy_for_transaction()` 容器拷贝（见第 1 节表格）。它同样只用合成数据、不连数据库，运行方式为 `PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/readcut_probe.py`。
 
 本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。前端改动无法用 node 验证（本机无 node），只做了 JavaScriptCore 探针执行与逐行核对；没有运行 PostgreSQL 集成测试，因此数据库端事务、冲突处理和端到端收益仍待验证。
 
