@@ -31,7 +31,7 @@ _MAX_SIGNAL_BATCH = 128
 # the records are dropped.  The previous 0.25s budget was tight enough that a
 # transient disk stall dropped whole batches, which then surfaced in the ops
 # monitor as a phantom "signal divergence" between comparable accounts.
-_PERSIST_BATCH_TIMEOUT_SECONDS = 2.0
+_PERSIST_BATCH_TIMEOUT_SECONDS = 10.0
 _PERSIST_BATCH_ATTEMPTS = 3
 _PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 

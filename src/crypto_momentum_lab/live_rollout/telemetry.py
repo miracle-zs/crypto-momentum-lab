@@ -110,7 +110,7 @@ _MAX_EVENT_BATCH = 128
 # the events are dropped.  The previous 0.25s budget was tight enough that a
 # transient disk stall (large query temp spill, checkpoint writeback) dropped
 # whole batches, which then surfaced as phantom staleness in the ops monitor.
-_PERSIST_BATCH_TIMEOUT_SECONDS = 2.0
+_PERSIST_BATCH_TIMEOUT_SECONDS = 10.0
 _PERSIST_BATCH_ATTEMPTS = 3
 _PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 _MAX_PENDING_EXCHANGE_REQUESTS = 32
