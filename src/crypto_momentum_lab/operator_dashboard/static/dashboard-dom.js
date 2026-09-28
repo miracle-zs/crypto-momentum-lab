@@ -366,14 +366,20 @@ function updateChildrenFromHtml(root, html, patch) {
   const generation = ((root.__renderGeneration || 0) + 1);
   root.__renderGeneration = generation;
   const state = captureViewState(root);
+  const content = fragmentFromHtml(root.ownerDocument, html);
+
+  if (patch) {
+    reconcileChildren(root, content);
+    restoreViewState(root, state);
+    return;
+  }
+
   const previousMinHeight = root.__previousMinHeight !== undefined ? root.__previousMinHeight : root.style.minHeight;
   root.__previousMinHeight = previousMinHeight;
   if (root.offsetHeight > 0) {
     root.style.minHeight = `${root.offsetHeight}px`;
   }
-  const content = fragmentFromHtml(root.ownerDocument, html);
-  if (patch) reconcileChildren(root, content);
-  else root.replaceChildren(content);
+  root.replaceChildren(content);
   void root.offsetHeight;
   restoreViewState(root, state);
   const view = root.ownerDocument?.defaultView;
