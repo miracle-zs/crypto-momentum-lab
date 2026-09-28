@@ -1500,7 +1500,48 @@ class ExecutionBook:
             or source_scope.stream_id != stream_id
             or source_scope.stream_epoch != stream_epoch
         ):
-            raise ValueError("requested account stream does not match the restored position")
+            current_book = self._books.get(canon)
+            is_flat = (
+                current_book is None
+                or (
+                    current_book.get_view().total_quantity == Decimal("0")
+                    and not current_book.get_view().batches
+                    and not current_book.get_view().unallocated_quantity
+                )
+            )
+            has_no_reservations = not bool(self.get_active_reservations(key))
+            has_no_commands = not any(
+                getattr(cmd, "key", None) == key
+                for cmd in self._outbox_by_command_id.values()
+            )
+            is_known_active_stream = any(
+                s.account_label == scope.account_label
+                and s.environment == scope.environment
+                and s.stream_id == stream_id
+                and s.stream_epoch == stream_epoch
+                for s in self._stream_scopes.values()
+            )
+            if (
+                is_flat
+                and has_no_reservations
+                and has_no_commands
+                and is_known_active_stream
+            ):
+                target_scope = AccountFactStreamScope.for_position_key(
+                    key, stream_id=stream_id, stream_epoch=stream_epoch
+                )
+                self._stream_scopes[canon] = target_scope
+                if (
+                    canon not in self._journals
+                    or self._journals[canon].stream_scope != target_scope
+                ):
+                    self._journals[canon] = AccountJournal(key, stream_scope=target_scope)
+                    self._books[canon] = PositionBook(self._journals[canon])
+                    self._journal_revisions[canon] = 0
+                    self._last_sequences.pop(canon, None)
+                source_scope = target_scope
+            else:
+                raise ValueError("requested account stream does not match the restored position")
         book = self._books.get(canon)
         if book is None:
             # An unknown position is incomplete; reading it must not create a
@@ -2540,6 +2581,8 @@ class ExecutionBook:
                 and is_evidence_flat
                 and has_no_reservations
                 and has_no_commands
+                and evidence.coverage_evidence is None
+                and evidence.stream_checkpoint_adoption is None
             )
             if is_truly_flat:
                 if (

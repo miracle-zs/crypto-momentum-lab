@@ -300,8 +300,16 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
         checkpoint = facts.recovery_checkpoint
         return bool(
             checkpoint is not None
-            and checkpoint.projection.total_active_quantity == Decimal("0")
-            and checkpoint.coverage == coverage
+            and (
+                checkpoint.coverage == coverage
+                or (
+                    checkpoint.coverage is not None
+                    and checkpoint.coverage.covers_range(
+                        provenance.source_anchor_event_cut,
+                        provenance.checked_through,
+                    )
+                )
+            )
             and checkpoint.event_cut >= provenance.source_anchor_event_cut
         )
     if provenance.source_anchor_kind == "recovery_checkpoint":
