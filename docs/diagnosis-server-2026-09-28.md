@@ -139,3 +139,15 @@ docker logs --since 5m crypto-momentum-lab-live-strategy-1 2>&1 | grep -E 'non-c
 预取任务取消时，满队列中的生产者可能卡在写入结束标记，导致上下文数据库任务没有被取消、等待并归还连接；此路径已修复。看板把非行情服务未就绪统一报为 `market_data_not_ready` 的标签错误也已修复。账本缺失持久化仓位事实改为受控降级，不再作为未处理异常使策略进程重启。相关 live_rollout 测试 435 项通过。
 
 服务器最终策略镜像及 `.env.server` 的 `CML_CODE_COMMIT` 为 `9d7c0c2e9861d6d0a4e70b601929066c3ddfe7d8`（服务器从本地补丁 `git am`，故提交哈希与本地不同）；看板仍运行已验证的 `b655aa4` 镜像。四账户分别更新批准、租约代际并逐个重建，最终严格预检均为 `preflight_ok=true`、错误列表为空。至 06:44 UTC，四个策略容器均为 Docker healthy、重启次数 0，均已记录 `FULLY_TRADEABLE` 和继续推进的 `live_checkpoint_persisted`；过去十分钟策略日志未见 `live_runtime_failed`、`unmanaged_live_positions`、`non-checked-in connection`、`market_data_not_ready`、`position_facts_not_restored` 或 `session_shutdown_completed`。Book-only 差异数量分别为主账户 196、账户 2 为 81、账户 3 为 58、账户 4 为 71，每个容器仅告警一次。这些历史账本差异尚未做持久化清理，不能把“当前交易恢复”误称为“账本历史已修复”；后续应单独核对零仓快照与各 stream 的账本投影，再设计可审计的修复事务。
+
+### 07:00–08:43 UTC CPU 满载续查与修复
+
+上节 06:44 的健康结论只覆盖就绪和错误日志，未覆盖 CPU。随后四个策略并行时 2 vCPU 主机接近 0% idle。按用户要求停掉四个策略后，主机负载降至约 0.5，行情容器单独约 18% CPU，确认主要负载来自策略。逐步只启动主账户，用 `pidstat` 和 `py-spy` 定位每分钟账户快照处理峰值：约 80% 单核、两分钟平均 26.9% 单核；热点在 `OrderExecutionCoordinator.observe_account_snapshot` → `ExecutionBook.observe`。
+
+诊断版按快照聚合记录 `EvidenceConflict.reason`，查明每次账户快照含 1,824 个显式仓位行，其中 1,814 个旧代际历史零仓行被 ExecutionBook 以 `stream epoch changed without a complete source-anchored fill scan` 拒绝。原实现在确认旧代际冲突前逐个复制账本并开启数据库事务，因此同一批不可能通过的零仓证据每分钟重复付出高昂成本。修复保持原拒绝规则，在恢复状态校验和每个仓位的互斥锁内，先按内存中的源流身份识别该冲突，再返回相同的 `EvidenceConflict`，避免复制和事务。回归测试证明旧代际快照不会触发复制或事务。
+
+另一热路径是 hedge 模式的方向识别：每处理一个交易对市场状态，原代码调用 `list_position_views()` 遍历约 1,824 个历史账本仓位，再从中筛当前交易对。修复为只读取当前交易对的 LONG 与 SHORT 两侧，维持原有的“恰有一个活跃方向才继续”语义。live_rollout 单测 438 项通过。
+
+服务器当前策略提交和镜像为 `bb7d5635ca71d1244980e60334969a1ac7b33ba3`（对应本地代码提交 `18adfee`，包含前述修复）；四账户依次更新同风险配置的批准和租约并启动，严格预检均 `preflight_ok=true`、错误列表为空，容器均 healthy，均记录 `FULLY_TRADEABLE` 且检查点推进。主账户单独运行时，修复前后的完整两分钟平均 CPU 从 26.9% 降到 4.54%；四账户并行两分钟平均分别为 5.47%、4.67%、4.74%、7.18%。整机 30 秒采样平均 idle 为 67.71%。最后五分钟四策略日志未见 `live_runtime_failed` 或 `non-checked-in connection`。
+
+旧代际历史零仓的持久化账本仍保留；每轮快照仍会得到聚合冲突日志，表明这些旧记录尚未被完整成交扫描证明并迁移到新代际。当前修复消除了无效证据重试的主要计算成本，没有把旧代际数据伪装成当前事实，也没有放宽非零仓或成交证据的校验。历史账本清理仍需另行设计有来源证明、可审计的迁移。
