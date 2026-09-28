@@ -1505,7 +1505,11 @@ class ExecutionBook:
         if book is None:
             # An unknown position is incomplete; reading it must not create a
             # journal or silently establish an account stream for future writes.
-            book = PositionBook(AccountJournal(key, stream_scope=source_scope))
+            journal = self._journals.get(canon)
+            if journal is not None:
+                book = PositionBook(journal)
+            else:
+                book = PositionBook(AccountJournal(key, stream_scope=source_scope))
         if event_cut is None:
             return book.get_view(requirement=requirement, now=now)
         current_view = book.get_view(requirement=requirement, now=now)
@@ -1634,33 +1638,49 @@ class ExecutionBook:
                 async with self._execution_unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)
                     adopting_epoch = False
-                    if head is None:
-                        return Blocked(
-                            reason="Position facts are not durably restored"
-                        )
-                    expected_revision = self._head_revisions.get(canon)
-                    if expected_revision != head.revision:
-                        return Blocked(
-                            reason="Position projection is stale; reload durable facts"
-                        )
-                    if (
-                        head.stream_id != stream_scope.stream_id
-                        or head.stream_epoch != stream_scope.stream_epoch
-                    ):
-                        return Blocked(
-                            reason=(
-                                "Position source stream changed without a validated "
-                                "recovery checkpoint"
-                            )
-                        )
                     current_view = candidate._ensure_book(key).get_view()
-                    if current_view.projection_version != head.projection_version:
-                        return Blocked(
-                            reason=(
-                                "Position projection differs from its durable head; "
-                                "reload before trading"
+                    is_candidate_flat = (
+                        current_view.total_quantity == Decimal("0")
+                        and not current_view.batches
+                    )
+                    if head is None:
+                        if is_candidate_flat:
+                            expected_revision = 0
+                        else:
+                            return Blocked(
+                                reason="Position facts are not durably restored"
                             )
-                        )
+                    else:
+                        expected_revision = head.revision
+                        if (
+                            head.stream_id != stream_scope.stream_id
+                            or head.stream_epoch != stream_scope.stream_epoch
+                        ):
+                            is_head_flat = (
+                                not head.state_payload.get("active_reservation_ids")
+                                and is_candidate_flat
+                            )
+                            if is_head_flat:
+                                adopting_epoch = True
+                            else:
+                                return Blocked(
+                                    reason=(
+                                        "Position source stream changed without a validated "
+                                        "recovery checkpoint"
+                                    )
+                                )
+                        else:
+                            if self._head_revisions.get(canon) != head.revision:
+                                return Blocked(
+                                    reason="Position projection is stale; reload durable facts"
+                                )
+                            if current_view.projection_version != head.projection_version:
+                                return Blocked(
+                                    reason=(
+                                        "Position projection differs from its durable head; "
+                                        "reload before trading"
+                                    )
+                                )
                     candidate._active_transaction = tx
                     result = await candidate._act_mutating(request)
                     if not isinstance(result, Accepted):
@@ -1684,12 +1704,13 @@ class ExecutionBook:
                         key=key,
                         stream_id=stream_scope.stream_id,
                         stream_epoch=stream_scope.stream_epoch,
-                        expected_revision=head.revision,
+                        expected_revision=expected_revision,
                         projection_version=candidate._ensure_book(key)
                         .get_view()
                         .projection_version,
                         state_payload=head_payload,
                         updated_at=request.created_at,
+                        is_flat_adoption=adopting_epoch,
                     )
                     candidate._head_revisions[canon] = next_revision
                     candidate._head_projection_digests[canon] = str(
@@ -2490,10 +2511,55 @@ class ExecutionBook:
                 raise RuntimeError(
                     "Execution persistence failed; restore is required before ingest"
                 )
-            # A restored position from an earlier stream cannot be adopted by
+            # A truly flat position on exchange with no active local exposure,
+            # reservations, or pending commands can adopt or confirm the stream
+            # epoch in memory without cloning the book or opening a database
+            # transaction. This eliminates thousands of redundant staged copies
+            # and transactions on every snapshot cycle.
+            current_book = self._books.get(canon)
+            is_local_flat = (
+                current_book is None
+                or (
+                    current_book.get_view().total_quantity == Decimal("0")
+                    and not current_book.get_view().batches
+                    and not current_book.get_view().unallocated_quantity
+                )
+            )
+            is_evidence_flat = (
+                evidence.snapshot is not None
+                and evidence.snapshot.position_amt == Decimal("0")
+                and not (evidence.fills or evidence.fill)
+            )
+            has_no_reservations = not bool(self.get_active_reservations(key))
+            has_no_commands = not any(
+                getattr(cmd, "key", None) == key
+                for cmd in self._outbox_by_command_id.values()
+            )
+            is_truly_flat = (
+                is_local_flat
+                and is_evidence_flat
+                and has_no_reservations
+                and has_no_commands
+            )
+            if is_truly_flat:
+                if (
+                    canon not in self._journals
+                    or self._stream_scopes.get(canon) != scope
+                ):
+                    self._journals[canon] = AccountJournal(key, stream_scope=scope)
+                    self._books[canon] = PositionBook(self._journals[canon])
+                    self._journal_revisions[canon] = 0
+                    self._last_sequences.pop(canon, None)
+                self._stream_scopes[canon] = scope
+                return Applied(
+                    evidence_id=evidence.evidence_id,
+                    updated_view_token=self._books[canon].get_view().projection_version,
+                )
+
+            # A restored non-flat position from an earlier stream cannot be adopted by
             # an ordinary snapshot. Reject it before cloning its journal or
             # opening a transaction; account snapshots may contain thousands
-            # of historical flat symbols on every refresh.
+            # of historical symbols on every refresh.
             current_scope = self._stream_scopes.get(canon)
             if (
                 current_scope is not None

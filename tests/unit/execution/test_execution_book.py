@@ -80,6 +80,294 @@ async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> Non
 
 
 @pytest.mark.asyncio
+async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> None:
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.execution_book import Applied
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class NoTransaction:
+        def transaction(self, key):
+            raise AssertionError("flat snapshot stream adoption opened a transaction")
+
+    book = ExecutionBook(execution_unit_of_work=NoTransaction())
+    book._persistence_failed = False
+    key = _scope().to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old-epoch"
+    )
+
+    def reject_copy(*, key):
+        raise AssertionError("flat snapshot stream adoption cloned the execution book")
+
+    book._staged_copy = reject_copy
+    flat_snap = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=None,
+        margin_type=None,
+        observed_at=_dt(10, 0),
+        raw_payload={},
+    )
+    result = await book.observe(
+        ExecutionEvidence(
+            evidence_id="new-epoch-flat-snapshot",
+            scope=_scope(),
+            observed_at=_dt(10, 0),
+            stream_id="account_event_hub",
+            stream_epoch="new-epoch",
+            sequence=1,
+            snapshot=flat_snap,
+        )
+    )
+    assert isinstance(result, Applied)
+    assert book._stream_scopes[key.canonical_id].stream_epoch == "new-epoch"
+
+    # Reading with the new stream epoch must succeed cleanly without stream mismatch
+    view = await book.read(
+        _scope(),
+        stream_id="account_event_hub",
+        stream_epoch="new-epoch",
+    )
+    assert view.total_quantity == Decimal("0")
+    assert view.stream_scope.stream_epoch == "new-epoch"
+
+
+@pytest.mark.asyncio
+async def test_flat_position_act_when_head_is_none() -> None:
+    from contextlib import asynccontextmanager
+    from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class FakeTx:
+        def __init__(self):
+            self.persisted_head = None
+            self.saved_reservations = None
+
+        async def load_head(self, key):
+            return None
+
+        async def save_reservations(self, reservations, **kwargs):
+            self.saved_reservations = reservations
+
+        async def persist_head(self, **kwargs):
+            self.persisted_head = kwargs
+            return 1
+
+        async def upsert_outbox(self, **kwargs):
+            pass
+
+    class FakeUow:
+        def __init__(self):
+            self.tx = FakeTx()
+
+        @asynccontextmanager
+        async def transaction(self, key):
+            yield self.tx
+
+    uow = FakeUow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    scope = ExecutionScope(
+        environment="paper",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    key = scope.to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="current-epoch"
+    )
+
+    # Set up ready coverage so it can trade
+    timestamp = _dt(10, 0)
+    journal = book._ensure_journal(key)
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=timestamp,
+            end_at=timestamp,
+            status=FactCoverageStatus.CONFIRMED,
+            stream_scope=book._stream_scopes[key.canonical_id],
+            evidence_observed_at=timestamp,
+        )
+    )
+    view = await book.read(scope)
+
+    req = ExecutionRequest(
+        request_id="entry-1",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-1",
+        decision_ref="dec-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1.0"),
+    )
+    result = await book.act(req)
+    assert isinstance(result, Accepted)
+    assert uow.tx.persisted_head is not None
+    assert uow.tx.persisted_head["expected_revision"] == 0
+    assert uow.tx.persisted_head["is_flat_adoption"] is False
+    assert book._head_revisions[key.canonical_id] == 1
+
+
+@pytest.mark.asyncio
+async def test_flat_position_act_can_adopt_older_flat_head() -> None:
+    from contextlib import asynccontextmanager
+    from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        ExecutionHeadSnapshot,
+    )
+
+    class FakeTx:
+        def __init__(self):
+            self.persisted_head = None
+            self.saved_reservations = None
+
+        async def load_head(self, key):
+            return ExecutionHeadSnapshot(
+                revision=1,
+                stream_id="account_event_hub",
+                stream_epoch="older-epoch",
+                projection_version="old_pv",
+                state_payload={"active_reservation_ids": []},
+            )
+
+        async def save_reservations(self, reservations, **kwargs):
+            self.saved_reservations = reservations
+
+        async def persist_head(self, **kwargs):
+            self.persisted_head = kwargs
+            return 2
+
+        async def upsert_outbox(self, **kwargs):
+            pass
+
+    class FakeUow:
+        def __init__(self):
+            self.tx = FakeTx()
+
+        @asynccontextmanager
+        async def transaction(self, key):
+            yield self.tx
+
+    uow = FakeUow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    scope = ExecutionScope(
+        environment="paper",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    key = scope.to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="current-epoch"
+    )
+    book._head_revisions[key.canonical_id] = 1
+
+    # Set up ready coverage so it can trade
+    timestamp = _dt(10, 0)
+    journal = book._ensure_journal(key)
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=timestamp,
+            end_at=timestamp,
+            status=FactCoverageStatus.CONFIRMED,
+            stream_scope=book._stream_scopes[key.canonical_id],
+            evidence_observed_at=timestamp,
+        )
+    )
+    view = await book.read(scope)
+
+    req = ExecutionRequest(
+        request_id="entry-2",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-1",
+        decision_ref="dec-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1.0"),
+    )
+    result = await book.act(req)
+    assert isinstance(result, Accepted)
+    assert uow.tx.persisted_head is not None
+    assert uow.tx.persisted_head["expected_revision"] == 1
+    assert uow.tx.persisted_head["is_flat_adoption"] is True
+    assert book._head_revisions[key.canonical_id] == 2
+
+
+@pytest.mark.asyncio
+async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
+    from contextlib import asynccontextmanager
+    from crypto_momentum_lab.domain.execution.execution_book import Blocked
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        ExecutionHeadSnapshot,
+    )
+
+    class FakeTx:
+        async def load_head(self, key):
+            return ExecutionHeadSnapshot(
+                revision=1,
+                stream_id="account_event_hub",
+                stream_epoch="older-epoch",
+                projection_version="old_pv",
+                # Active reservations present => NOT flat!
+                state_payload={"active_reservation_ids": ["res-1"]},
+            )
+
+    class FakeUow:
+        @asynccontextmanager
+        async def transaction(self, key):
+            yield FakeTx()
+
+    uow = FakeUow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    scope = _scope()
+    key = scope.to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="current-epoch"
+    )
+    book._head_revisions[key.canonical_id] = 1
+
+    view = await book.read(scope)
+    req = ExecutionRequest(
+        request_id="entry-3",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-1",
+        decision_ref="dec-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1.0"),
+    )
+    result = await book.act(req)
+    assert isinstance(result, Blocked)
+    assert "stream changed without a validated recovery checkpoint" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_execution_book_read_deterministic_view() -> None:
     book = ExecutionBook()
     scope = _scope()
