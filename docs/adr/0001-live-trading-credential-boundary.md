@@ -2,7 +2,6 @@
 
 - Status: Proposed
 - Date: 2026-09-04
-- Context: [`project architecture design`](../superpowers/specs/2026-06-14-project-architecture-design.md)
 
 ## Context
 
