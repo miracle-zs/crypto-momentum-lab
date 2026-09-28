@@ -391,7 +391,11 @@ def create_dashboard_app(
                 response.headers["Cache-Control"] = (
                     "public, max-age=31536000, immutable"
                 )
-            elif path_str.endswith((".css", ".js", ".svg", ".png", ".woff2")):
+            elif path_str.endswith((".css", ".js")):
+                response.headers["Cache-Control"] = (
+                    "no-cache, no-store, must-revalidate"
+                )
+            elif path_str.endswith((".svg", ".png", ".woff2")):
                 response.headers["Cache-Control"] = "public, max-age=86400"
             return response
 
