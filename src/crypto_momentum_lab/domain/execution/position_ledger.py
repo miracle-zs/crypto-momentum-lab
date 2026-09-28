@@ -267,9 +267,7 @@ class PositionLedger:
                     "position key"
                 )
                 continue
-            raw_position_side = (fill.raw_payload or {}).get("positionSide") or (
-                fill.raw_payload or {}
-            ).get("position_side")
+            raw_position_side = fill.raw_position_side
             if raw_position_side is not None:
                 if (
                     str(raw_position_side).upper()

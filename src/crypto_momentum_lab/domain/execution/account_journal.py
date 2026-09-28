@@ -128,9 +128,7 @@ class AccountJournal:
             raise ValueError(
                 "Fill account identity does not match journal position key"
             )
-        raw_position_side = (fill.raw_payload or {}).get("positionSide") or (
-            fill.raw_payload or {}
-        ).get("position_side")
+        raw_position_side = fill.raw_position_side
         if (
             raw_position_side is not None
             and str(raw_position_side).upper() != self._position_key.position_side.value

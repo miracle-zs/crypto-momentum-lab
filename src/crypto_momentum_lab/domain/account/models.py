@@ -1,7 +1,9 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -90,6 +92,28 @@ class AccountOpenOrderSnapshot:
         _require_aware(self.observed_at, "observed_at")
 
 
+def extract_fill_position_side(raw_payload: Mapping[str, Any] | None) -> str | None:
+    """Extract normalized position side (LONG, SHORT, BOTH) from Binance payloads."""
+    if not raw_payload or not isinstance(raw_payload, Mapping):
+        return None
+    value = raw_payload.get("positionSide", raw_payload.get("position_side"))
+    if value is None and "row" in raw_payload:
+        row = raw_payload["row"]
+        if isinstance(row, Mapping):
+            value = row.get("ps", row.get("positionSide", row.get("position_side")))
+    if value is None and "event" in raw_payload:
+        event_dict = raw_payload["event"]
+        if isinstance(event_dict, Mapping):
+            o = event_dict.get("o")
+            target = o if isinstance(o, Mapping) else event_dict
+            value = target.get(
+                "ps", target.get("positionSide", target.get("position_side"))
+            )
+    if value is None:
+        value = raw_payload.get("ps")
+    return str(value).strip().upper() if value is not None else None
+
+
 @dataclass(frozen=True, slots=True)
 class AccountFillEvent:
     environment: str
@@ -117,6 +141,10 @@ class AccountFillEvent:
         _require_non_negative(self.quantity, "quantity")
         _require_non_negative(self.fee, "fee")
         _require_aware(self.trade_at, "trade_at")
+
+    @property
+    def raw_position_side(self) -> str | None:
+        return extract_fill_position_side(self.raw_payload)
 
 
 @dataclass(frozen=True, slots=True)

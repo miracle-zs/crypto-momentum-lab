@@ -513,15 +513,7 @@ class OrderExecutionCoordinator:
                 or fill.account_label != self._account_label
             ):
                 raise ValueError("account fill scope does not match coordinator")
-            raw_position_side = (
-                fill.raw_payload.get("positionSide", fill.raw_payload.get("position_side"))
-                if isinstance(fill.raw_payload, dict)
-                else None
-            )
-            if raw_position_side is None and isinstance(fill.raw_payload, dict):
-                row = fill.raw_payload.get("row")
-                if isinstance(row, dict):
-                    raw_position_side = row.get("ps", row.get("positionSide", row.get("position_side")))
+            raw_position_side = fill.raw_position_side
             if raw_position_side is None:
                 if hedge_mode is not False:
                     raise ValueError(

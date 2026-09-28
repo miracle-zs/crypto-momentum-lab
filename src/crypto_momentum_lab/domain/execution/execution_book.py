@@ -1548,8 +1548,12 @@ class ExecutionBook:
                     for s in self._stream_scopes.values()
                 )
             )
+            is_legacy_stream = (
+                source_scope is not None
+                and source_scope.stream_id == "legacy-postgres-account"
+            )
             if (
-                is_flat
+                (is_flat or is_legacy_stream)
                 and has_no_reservations
                 and has_no_commands
                 and is_known_active_stream
@@ -2612,8 +2616,13 @@ class ExecutionBook:
                 getattr(cmd, "key", None) == key
                 for cmd in self._outbox_by_command_id.values()
             )
+            current_scope = self._stream_scopes.get(canon)
+            is_legacy_stream = (
+                current_scope is not None
+                and current_scope.stream_id == "legacy-postgres-account"
+            )
             is_truly_flat = (
-                is_local_flat
+                (is_local_flat or is_legacy_stream)
                 and is_evidence_flat
                 and has_no_reservations
                 and has_no_commands
