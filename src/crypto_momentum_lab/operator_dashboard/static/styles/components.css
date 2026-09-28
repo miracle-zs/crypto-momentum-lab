@@ -415,6 +415,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .side-tag.long { color: var(--up); background: rgba(52, 211, 153, .13); }
 .side-tag.short { color: var(--down); background: rgba(251, 113, 133, .13); }
+.side-tag.unknown { color: var(--faint); background: rgba(148, 163, 184, .13); }
 
 .event-tag {
   display: inline-block;

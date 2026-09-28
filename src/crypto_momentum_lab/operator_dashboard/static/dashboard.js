@@ -49,6 +49,10 @@ if (typeof window !== "undefined") {
 }
 
 const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
+// Safety readings expire: risk/account stop polling outside a LIVE session, so
+// an old halt or reconciliation count must not keep driving the strip (nor read
+// as zero) once it is no longer fresh.
+const SAFETY_READING_TTL_MS = 60 * 1000;
 const sectionInFlight = new Set();
 const lastSectionPollAt = new Map();
 let latestLiveService = null;
@@ -56,6 +60,8 @@ let latestLiveMode = "UNKNOWN";
 let lastRuntimeAnnouncement = "";
 const latestSectionData = new Map();
 const latestSectionError = new Map();
+const latestSectionUpdatedAt = new Map();
+const forcedSectionRefreshes = new Set();
 const sectionRenderKeys = new Map();
 const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
 function sectionRenderKey(id, data) {
@@ -117,10 +123,20 @@ function markSectionError(id, reason) {
 function updateGlobalState(id, data) {
   latestSectionData.set(id, data);
   latestSectionError.delete(id);
+  latestSectionUpdatedAt.set(id, Date.now());
+  forcedSectionRefreshes.delete(id);
   renderGlobalReadiness();
 }
 
 function globalReadinessModel() {
+  const now = Date.now();
+  // A reading only counts while it is fresh; outside a LIVE session risk and
+  // account stop polling, and an expired reading must not keep driving the strip.
+  const readingReliable = (id) => {
+    if (!latestSectionData.has(id)) return false;
+    const updatedAt = latestSectionUpdatedAt.get(id);
+    return updatedAt != null && now - updatedAt <= SAFETY_READING_TTL_MS;
+  };
   const overview = latestSectionData.get("overview");
   const risk = latestSectionData.get("risk");
   const account = latestSectionData.get("account");
@@ -136,7 +152,13 @@ function globalReadinessModel() {
     };
   }
 
-  const services = overview?.services || [];
+  const overviewReliable = readingReliable("overview");
+  const riskReliable = readingReliable("risk");
+  const accountReliable = readingReliable("account");
+  const services = overviewReliable ? overview?.services || [] : [];
+  const expiredSafetySections = [...latestSectionData.keys()].filter(
+    (id) => SAFETY_SECTIONS.has(id) && !readingReliable(id),
+  ).length;
   const staleSafetySections = [...latestSectionError.keys()]
     .filter((id) => SAFETY_SECTIONS.has(id))
     .length;
@@ -144,23 +166,26 @@ function globalReadinessModel() {
   const uncertainSections = [...latestSectionData.entries()]
     .filter(([id, data]) => (
       SAFETY_SECTIONS.has(id)
+      && readingReliable(id)
       && hasUncertainStatus(readinessStatusForSection(id, data))
     ))
     .length;
   const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
   const uncertain = uncertainSections + uncertainServices;
-  const ambiguous = risk?.ambiguous_orders?.length || 0;
-  const accountSnapshots = Array.isArray(account?.accounts)
-    ? account.accounts
-    : account
-      ? [account]
-      : [];
+  const ambiguous = riskReliable ? risk?.ambiguous_orders?.length || 0 : 0;
+  const accountSnapshots = accountReliable
+    ? Array.isArray(account?.accounts)
+      ? account.accounts
+      : account
+        ? [account]
+        : []
+    : [];
   const haltedAccounts = accountSnapshots.filter(
     (snapshot) => normalizedStatus(snapshot.status) === "HALTED",
   ).length;
   const activeHalts = Math.max(
-    asNumber(overview?.active_halt_count) || 0,
-    risk?.active_halts?.length || 0,
+    overviewReliable ? asNumber(overview?.active_halt_count) || 0 : 0,
+    riskReliable ? risk?.active_halts?.length || 0 : 0,
     haltedAccounts,
   );
   const mismatch = accountSnapshots.reduce(
@@ -169,7 +194,7 @@ function globalReadinessModel() {
   );
   const accountStatus = normalizedStatus(account?.status);
   let reconciliation = "—";
-  if (account) {
+  if (accountReliable) {
     reconciliation = hasUncertainStatus(accountStatus)
       ? "UNKNOWN"
       : haltedAccounts > 0
@@ -184,12 +209,16 @@ function globalReadinessModel() {
   const hasRisk = Boolean(risk);
   const hasAccount = Boolean(account);
   const hasOverview = Boolean(overview);
+  const hasLiveReadings = riskReliable && accountReliable;
 
   let status = "READY";
   let detail = "关键读数正常";
   if (!hasOverview) {
     status = "UNKNOWN";
     detail = "等待系统总览数据";
+  } else if (!overviewReliable) {
+    status = "STALE";
+    detail = "系统总览读数已过期 · 尚未确认安全";
   } else if (activeHalts > 0) {
     status = "BLOCKED";
     detail = `存在活跃停机 · 新入场已被阻断${staleNote}`;
@@ -199,16 +228,20 @@ function globalReadinessModel() {
   } else if (mismatch != null && mismatch > 0) {
     status = "REVIEW";
     detail = `账户对账存在差异 · 暂不视为安全${staleNote}`;
-  } else if (latestLiveMode === "LIVE" && (!hasRisk || !hasAccount)) {
+  } else if (latestLiveMode === "LIVE" && !hasLiveReadings) {
     status = "UNKNOWN";
-    detail = !hasRisk && !hasAccount
-      ? "等待风险与账户数据同步"
-      : !hasRisk
-        ? "等待风险数据同步"
-        : "等待账户数据同步";
+    const missing = [
+      !riskReliable ? (hasRisk ? "风险读数已过期" : "风险数据") : null,
+      !accountReliable ? (hasAccount ? "账户读数已过期" : "账户数据") : null,
+    ].filter(Boolean);
+    detail = `实盘会话缺少新鲜读数 · ${missing.join("、")}`;
   } else if (uncertain > 0) {
     status = "UNKNOWN";
     detail = `${uncertain} 个关键读数需要确认`;
+  } else if (expiredSafetySections > 0) {
+    // Ageing out is not the same as being safe: report the gap, never READY.
+    status = "STALE";
+    detail = `${expiredSafetySections} 个关键分区读数已过期 · 尚未确认安全`;
   } else if (staleSafetySections > 0) {
     // Readings that survived a failed refresh cannot be reported as safe:
     // they are the last confirmed values, not a fresh verdict.
@@ -222,13 +255,15 @@ function globalReadinessModel() {
     detail = "无实盘会话 · 只读安全";
   }
 
+  const readingsExpired = expiredSafetySections > 0;
   return {
     status,
     detail,
     uncertain: String(uncertain),
-    halts: String(activeHalts),
-    ambiguous: String(ambiguous),
-    reconciliation,
+    // An unconfirmed zero must not be shown as "no halts / no mismatch".
+    halts: readingsExpired && activeHalts === 0 ? "—" : String(activeHalts),
+    ambiguous: readingsExpired && ambiguous === 0 ? "—" : String(ambiguous),
+    reconciliation: readingsExpired && reconciliation === "READY" ? "—" : reconciliation,
   };
 }
 
@@ -298,6 +333,16 @@ function updateGlobalMode(data) {
           ? "SHADOW"
           : "UNKNOWN";
   latestLiveService = live || null;
+  if (latestLiveMode === "LIVE" && mode !== "LIVE") {
+    // risk/account were polled only because the session was live. Drop their
+    // readings and force one refresh so a stale mismatch can neither keep
+    // driving the strip nor read as zero after the session ends.
+    ["risk", "account"].forEach((id) => {
+      latestSectionUpdatedAt.delete(id);
+      forcedSectionRefreshes.add(id);
+      lastSectionPollAt.delete(id);
+    });
+  }
   latestLiveMode = mode;
   renderLiveRuntime();
   renderGlobalReadiness();
@@ -488,6 +533,9 @@ async function poll() {
     visibleSections.add("risk");
     visibleSections.add("account");
   }
+  // A section whose readings were invalidated (for example when a LIVE session
+  // ended) is polled once more even if it is not currently visible.
+  forcedSectionRefreshes.forEach((id) => visibleSections.add(id));
   const allSectionIds = Array.from(new Set([
     ...SECTIONS,
     ...Object.keys(renderers).filter((id) => document.getElementById(id)?.dataset?.endpoint),

@@ -9,9 +9,13 @@ import {
 
 export const pill = (status) => `<span class="pill ${statusClass(status)}"><i></i>${esc(status || "UNKNOWN")}</span>`;
 
-export const sideTag = (side) => side === "long"
-  ? '<span class="side-tag long">多</span>'
-  : '<span class="side-tag short">空</span>';
+export const sideTag = (side) => {
+  // "LONG" / "Long" / null / undefined must never be rendered as 空.
+  const normalized = String(side ?? "").trim().toLowerCase();
+  if (normalized === "long") return '<span class="side-tag long">多</span>';
+  if (normalized === "short") return '<span class="side-tag short">空</span>';
+  return '<span class="side-tag unknown">—</span>';
+};
 
 export const signalEvidence = (row) => {
   const features = row.features || {};
