@@ -2,7 +2,7 @@
 
 本轮复核结论：四项候选都已实现。账本持久化只发送新增的 append-only 事实（delta），首次全量写入仍按 500 条分块；行情补空桶用 watermark 门禁跳过同桶扫描；事务候选改为容器级拷贝、共享冻结事实；有持仓时只读取当前敞口 scope，Book-only 漂移扫描改为独立周期运行。每项剩余的 O(history) 成本或语义约束见对应章节。
 
-首轮审查基线是 `dfa35e39e2f15da5ab85e82ec60b63b0eecc5ebb`；复核起点 HEAD 为 `91395f54c19fa10564971fca903d03affbcd8a6b`，本轮修复实现基于其后的 `6aac14a`。审查受 Git 管理的行情、执行账本、运行上下文、持久化与前端看板代码；不是全仓库无遗漏证明。未部署、未运行交易；生产侧只做了只读核对（部署版本、容器状态与库统计），未修改任何生产数据。
+首轮审查基线是 `dfa35e39e2f15da5ab85e82ec60b63b0eecc5ebb`；复核起点 HEAD 为 `91395f54c19fa10564971fca903d03affbcd8a6b`，本轮修复实现基于其后的 `6aac14a`。审查受 Git 管理的行情、执行账本、运行上下文、持久化与前端看板代码；不是全仓库无遗漏证明。未部署、未运行交易，未修改任何生产数据。生产侧核对以只读为主（部署版本、容器状态与库统计）；另外在生产主机上用独立的临时 `postgres:16-alpine` 容器和一份跑完即删的代码副本跑过一遍 `tests/integration/persistence`（结果与本地相同），全程未接触生产库。
 
 ## 运行结构与已有保护
 
@@ -160,7 +160,7 @@ Book-only drift 诊断没有删除，而是移到独立周期：[`_observe_book_
 
 `readcut_probe.py` 量化 delta 之后仍留在每次观察上的 O(历史) 成本：`read_cut()` 重建、`compute_facts_hash()` 与 `copy_for_transaction()` 容器拷贝（见第 1 节表格）。它同样只用合成数据、不连数据库，运行方式为 `PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/readcut_probe.py`。
 
-本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
+本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**（生产主机上用独立临时容器与代码副本跑过同一套件，结果相同；临时容器与副本跑完即删，未接触生产库）。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
 
 前端改动无法用 node 验证（本机无 node）：P0 与 P1 均用 JavaScriptCore（`osascript -l JavaScript`）执行从 `dashboard.js` / `dashboard-ui.js` 抽取的真实函数体，并做语法解析检查。
 
