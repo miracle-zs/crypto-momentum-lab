@@ -186,3 +186,22 @@ async def test_flat_position_adopts_active_stream_epoch_on_read():
     with pytest.raises(ValueError, match="stream"):
         await book.read(flat_scope, stream_id="trades", stream_epoch="epoch-unknown")
 
+
+@pytest.mark.asyncio
+async def test_flat_position_adopts_registered_active_stream_without_prior_positions():
+    book = ExecutionBook()
+    # Book has no observe events at all, but active stream was bound from hub
+    book.register_active_stream(
+        environment="live",
+        account_label="reader",
+        stream_id="trades",
+        stream_epoch="epoch-startup",
+    )
+    flat_scope = ExecutionScope(environment="live", account_label="reader", symbol="MONUSDT")
+    view = await book.read(flat_scope, stream_id="trades", stream_epoch="epoch-startup")
+    assert view.is_ready_for_trade
+    assert view.stream_scope is not None
+    assert view.stream_scope.stream_epoch == "epoch-startup"
+    assert view.total_quantity == Decimal("0")
+
+

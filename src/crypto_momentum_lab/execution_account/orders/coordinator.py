@@ -445,6 +445,18 @@ class OrderExecutionCoordinator:
             raise ValueError(
                 "durable account evidence requires source stream, epoch, and sequence"
             )
+        if (
+            stream_id
+            and stream_epoch
+            and self._execution_book is not None
+            and hasattr(self._execution_book, "register_active_stream")
+        ):
+            self._execution_book.register_active_stream(
+                environment=self._environment,
+                account_label=self._account_label,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+            )
         if snapshot is None:
             positions = ()
         elif isinstance(snapshot, AccountPositionSnapshot):

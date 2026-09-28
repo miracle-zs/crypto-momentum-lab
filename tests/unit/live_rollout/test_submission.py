@@ -553,3 +553,31 @@ async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> Non
         reference_price=Decimal("2000"),
     )
     assert res_eth is not None
+
+
+async def test_submission_entry_trade_command_carries_projection_version() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+    )
+    candidate = replace(
+        _intent(),
+        reduce_only=False,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        features={
+            "position_side": "BOTH",
+            "projection_version": "pv_entry_token_123",
+        },
+    )
+    command = submission._build_trade_command(
+        candidate=candidate,
+        reference_price=Decimal("100"),
+        requested_quantity=Decimal("0.001"),
+    )
+    assert command is not None
+    assert command.expected_projection_version == "pv_entry_token_123"
+

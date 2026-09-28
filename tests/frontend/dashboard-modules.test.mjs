@@ -1069,3 +1069,48 @@ test("replaceChildrenFromHtml restores minHeight on independent roots across rAF
   assert.equal(rootB.style.minHeight, "20px");
 });
 
+test("restoreViewState recovers saved pageY when browser collapsed scroll to 0", () => {
+  const mockDoc = {
+    scrollingElement: { scrollLeft: 0, scrollTop: 0, scrollHeight: 2000 },
+    documentElement: { style: {} },
+    body: { scrollLeft: 0, scrollTop: 0 },
+    defaultView: {
+      scrollX: 0,
+      scrollY: 0,
+      innerHeight: 800,
+      scrollTo(opts) {
+        if (typeof opts === "object") {
+          mockDoc.scrollingElement.scrollTop = opts.top;
+        }
+      },
+    },
+    querySelectorAll: () => [],
+  };
+  const root = {
+    ownerDocument: mockDoc,
+    querySelectorAll: () => [],
+  };
+
+  const state = {
+    pageX: 0,
+    pageY: 600,
+    anchor: {
+      selector: "#overview",
+      topOffset: 0,
+    },
+  };
+  mockDoc.querySelector = (sel) => {
+    if (sel === "#overview") {
+      return {
+        offsetParent: mockDoc.body,
+        getBoundingClientRect: () => ({ top: 0, width: 100, height: 100 }),
+      };
+    }
+    return null;
+  };
+
+  restoreViewState(root, state);
+  assert.equal(mockDoc.scrollingElement.scrollTop, 600);
+});
+
+

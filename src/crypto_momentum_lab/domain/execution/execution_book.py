@@ -571,6 +571,7 @@ class ExecutionBook:
         self._execution_unit_of_work = execution_unit_of_work
         self._active_transaction: Any | None = None
         self._stream_scopes: dict[str, AccountFactStreamScope] = {}
+        self._active_streams: set[tuple[str, str, str, str]] = set()
         self._head_revisions: dict[str, int] = {}
         self._head_projection_digests: dict[str, str] = {}
         self._head_expected_reservation_ids: dict[str, set[str]] = {}
@@ -589,6 +590,21 @@ class ExecutionBook:
         self._persistence_failed = execution_unit_of_work is not None
         self._recovery_required_commands: set[str] = set()
         self._dispatch_reconciliation_required_commands: set[str] = set()
+
+    def register_active_stream(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        stream_id: str,
+        stream_epoch: str,
+    ) -> None:
+        """Register an authoritative account fact stream as active for this book."""
+        if not stream_id or not stream_epoch:
+            return
+        self._active_streams.add(
+            (environment, account_label, stream_id, stream_epoch)
+        )
 
     @property
     def coordinator(self) -> ExecutionCoordinator:
@@ -638,6 +654,7 @@ class ExecutionBook:
             self._dispatch_reconciliation_required_commands
         )
         candidate._stream_scopes = dict(self._stream_scopes)
+        candidate._active_streams = set(self._active_streams)
         candidate._head_revisions = dict(self._head_revisions)
         candidate._head_projection_digests = dict(self._head_projection_digests)
         candidate._journal_revisions = dict(self._journal_revisions)
@@ -670,6 +687,7 @@ class ExecutionBook:
             "_recovery_required_commands",
             "_dispatch_reconciliation_required_commands",
             "_stream_scopes",
+            "_active_streams",
             "_head_revisions",
             "_head_projection_digests",
             "_journal_revisions",
@@ -1514,12 +1532,21 @@ class ExecutionBook:
                 getattr(cmd, "key", None) == key
                 for cmd in self._outbox_by_command_id.values()
             )
-            is_known_active_stream = any(
-                s.account_label == scope.account_label
-                and s.environment == scope.environment
-                and s.stream_id == stream_id
-                and s.stream_epoch == stream_epoch
-                for s in self._stream_scopes.values()
+            is_known_active_stream = (
+                (
+                    scope.environment,
+                    scope.account_label,
+                    stream_id,
+                    stream_epoch,
+                )
+                in self._active_streams
+                or any(
+                    s.account_label == scope.account_label
+                    and s.environment == scope.environment
+                    and s.stream_id == stream_id
+                    and s.stream_epoch == stream_epoch
+                    for s in self._stream_scopes.values()
+                )
             )
             if (
                 is_flat
@@ -2546,6 +2573,15 @@ class ExecutionBook:
             ExecutionTradeIdentity,
             ExecutionWatermark,
         )
+        if evidence.stream_id and evidence.stream_epoch:
+            self._active_streams.add(
+                (
+                    evidence.scope.environment,
+                    evidence.scope.account_label,
+                    evidence.stream_id,
+                    evidence.stream_epoch,
+                )
+            )
 
         async with self._mutation_lock(key):
             if self._persistence_failed:
