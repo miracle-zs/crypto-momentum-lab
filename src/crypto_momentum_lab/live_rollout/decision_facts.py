@@ -201,6 +201,15 @@ class LiveDecisionFactSource:
         self._stream_id = stream_id
         self._stream_epoch = stream_epoch
         self._stream_sequence = sequence
+        if self._execution_book is not None and hasattr(
+            self._execution_book, "register_active_stream"
+        ):
+            self._execution_book.register_active_stream(
+                environment="live",
+                account_label=self._account_label,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+            )
 
     async def restore(self) -> None:
         """Restore the newest durable policy head before decision admission."""

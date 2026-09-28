@@ -27,6 +27,17 @@ function ownsFocus(root, doc, activeEl) {
   return typeof root?.contains === "function" && root.contains(activeEl);
 }
 
+function isFixedOrSticky(el, view) {
+  let cur = el;
+  while (cur && cur !== cur.ownerDocument?.body && cur !== cur.ownerDocument?.documentElement) {
+    if (cur.classList?.contains("topbar") || cur.classList?.contains("sidebar")) return true;
+    const style = view?.getComputedStyle?.(cur);
+    if (style && (style.position === "sticky" || style.position === "fixed")) return true;
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
 function elementKey(node) {
   if (node?.nodeType !== 1) return null;
   for (const attribute of [
@@ -149,9 +160,13 @@ export function captureViewState(root) {
   // Track reading anchor if supported
   let anchor = null;
   if (typeof doc?.elementFromPoint === "function" && view?.innerHeight) {
-    const candidate = doc.elementFromPoint(Math.min(200, (view.innerWidth || 400) / 2), 100);
+    const topbar = doc.querySelector?.(".topbar");
+    const topbarBottom = topbar?.getBoundingClientRect?.().bottom || 120;
+    const sampleY = Math.min((view.innerHeight || 800) - 50, Math.max(topbarBottom + 30, 180));
+    const sampleX = Math.min(300, (view.innerWidth || 600) / 2);
+    const candidate = doc.elementFromPoint(sampleX, sampleY);
     const anchorEl = candidate?.closest?.("[data-account-index], [data-live-account-label], tr[data-row-key], [data-state-key], .card, h2, h3");
-    if (anchorEl && typeof anchorEl.getBoundingClientRect === "function") {
+    if (anchorEl && !isFixedOrSticky(anchorEl, view) && typeof anchorEl.getBoundingClientRect === "function") {
       const selector = anchorEl.id ? `#${anchorEl.id}` : null;
       const stateKey = anchorEl.dataset?.stateKey || null;
       const accountIndex = anchorEl.dataset?.accountIndex || null;
@@ -239,7 +254,8 @@ export function restoreViewState(root, state) {
   // their height locks in the same frame without replaying one stale scrollY.
   const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
   const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
-  let targetY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY;
+  const baseScrollY = (currentY === 0 && state.pageY > 0) ? state.pageY : currentY;
+  let targetY = baseScrollY;
   let resolvedAnchor = false;
 
   if (state.anchor) {
@@ -250,13 +266,16 @@ export function restoreViewState(root, state) {
     else if (state.anchor.rowKey) targetAnchor = doc.querySelector?.(`[data-row-key="${state.anchor.rowKey}"]`);
     else if (state.anchor.selector) targetAnchor = doc.querySelector?.(state.anchor.selector);
 
-    if (targetAnchor && typeof targetAnchor.getBoundingClientRect === "function") {
+    if (targetAnchor && !isFixedOrSticky(targetAnchor, view) && typeof targetAnchor.getBoundingClientRect === "function") {
       const currentRect = targetAnchor.getBoundingClientRect();
       const isVisible = (currentRect.width > 0 || currentRect.height > 0) &&
         (targetAnchor.offsetParent !== null || targetAnchor === doc?.body || targetAnchor === doc?.documentElement);
       if (isVisible) {
         const diff = currentRect.top - state.anchor.topOffset;
         targetY = Math.max(0, currentY + (Math.abs(diff) > 2 ? diff : 0));
+        if (targetY <= 2 && state.pageY > 20) {
+          targetY = state.pageY;
+        }
         resolvedAnchor = true;
       }
     }
@@ -284,7 +303,9 @@ export function restoreViewState(root, state) {
 
   if (applyVerticalScroll && scrollingElement) {
     const maxScroll = Math.max(0, (scrollingElement.scrollHeight || 0) - (view?.innerHeight || 0));
-    targetY = Math.min(targetY, maxScroll);
+    if (maxScroll > 0) {
+      targetY = Math.min(targetY, maxScroll);
+    }
   }
 
   if (applyVerticalScroll) {

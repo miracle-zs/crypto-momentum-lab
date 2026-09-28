@@ -14,7 +14,7 @@ import {
   liveHeartbeatAge,
   liveHeartbeatStatus,
 } from "./dashboard-formatters.js";
-import { replaceChildrenFromHtml } from "./dashboard-dom.js";
+import { replaceChildrenFromHtml, patchChildrenFromHtml } from "./dashboard-dom.js";
 import { sectionRenderKey as buildSectionRenderKey } from "./dashboard-rendering.js";
 import { readinessStatusForSection } from "./dashboard-readiness.js";
 import { wireEcharts } from "./dashboard-chart-engine.js";
@@ -395,7 +395,7 @@ async function refreshSection(id) {
       }
       const [status, html] = renderer(data);
       setSectionStatus(id, status, cacheStatus);
-      replaceChildrenFromHtml(body, html);
+      patchChildrenFromHtml(body, html);
       sectionRenderKeys.set(id, renderKey);
       if (id === "universe") wireMarketViews(body, selectedMarketView);
       wireTableFilters(body);
@@ -428,7 +428,7 @@ async function refreshSection(id) {
     if (!hadPriorSuccess) {
       setSectionStatus(id, "UNKNOWN");
       if (sectionRenderKeys.get(id) !== errorKey) {
-        replaceChildrenFromHtml(body, errorHtml);
+        patchChildrenFromHtml(body, errorHtml);
         sectionRenderKeys.set(id, errorKey);
       }
     } else {

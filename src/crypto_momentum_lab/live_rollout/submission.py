@@ -641,13 +641,12 @@ class LiveCandidateSubmission:
         )
 
         allocation_plan: ExitAllocationPlan | None = None
-        expected_projection_version: str | None = None
+        expected_projection_version: str | None = (
+            str(candidate.features["projection_version"]).strip()
+            if candidate.features.get("projection_version")
+            else None
+        )
         if candidate.reduce_only:
-            expected_projection_version = (
-                str(candidate.features["projection_version"]).strip()
-                if candidate.features.get("projection_version")
-                else None
-            )
             raw_batch_id = candidate.features.get("batch_id")
             legacy_batch_id = str(raw_batch_id).strip() if raw_batch_id else None
             legacy_allocs = (
