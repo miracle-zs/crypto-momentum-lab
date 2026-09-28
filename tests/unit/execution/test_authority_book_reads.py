@@ -86,6 +86,34 @@ async def test_reads_obey_cut_account_and_stream_identity():
 
 
 @pytest.mark.asyncio
+async def test_list_position_views_narrows_the_read_to_requested_symbols():
+    book = ExecutionBook()
+    for symbol in ("BTCUSDT", "ETHUSDT"):
+        book._ensure_book(
+            ExecutionScope(
+                environment="live", account_label="reader", symbol=symbol
+            ).to_position_key()
+        )
+
+    all_views = await book.list_position_views(
+        environment="live", account_label="reader"
+    )
+    assert tuple(view.key.symbol for view in all_views) == ("BTCUSDT", "ETHUSDT")
+
+    filtered = await book.list_position_views(
+        environment="live", account_label="reader", symbols=frozenset({"ETHUSDT"})
+    )
+    assert tuple(view.key.symbol for view in filtered) == ("ETHUSDT",)
+
+    assert (
+        await book.list_position_views(
+            environment="live", account_label="reader", symbols=frozenset({"SOLUSDT"})
+        )
+        == ()
+    )
+
+
+@pytest.mark.asyncio
 async def test_flat_position_adopts_active_stream_epoch_on_read():
     book = ExecutionBook()
     active_scope = ExecutionScope(environment="live", account_label="reader", symbol="BTCUSDT")

@@ -600,6 +600,22 @@ class ExitOrderSubmissionFact:
 
 
 @dataclass(frozen=True, slots=True)
+class JournalFactDelta:
+    """Append-only fact events recorded since the last durable persist.
+
+    Only append-only categories live here. Fills, snapshots and exit boundaries
+    cannot change after they are recorded, so re-sending the whole history on
+    every observation was duplicated client work. Coverage, checkpoints,
+    cursor/load provenance, conflicts and integrity issues keep the full history
+    because their rows carry current state.
+    """
+
+    fills: tuple[AccountFillEvent, ...] = ()
+    snapshots: tuple[AccountPositionSnapshot, ...] = ()
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AccountFacts:
     """Normalized immutable account facts for a given position key."""
 

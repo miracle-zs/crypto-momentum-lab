@@ -24,6 +24,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
+    JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import (
@@ -63,7 +64,16 @@ class PostgresAccountJournalStore:
         scope: AccountFactStreamScope,
         facts: AccountFacts,
         revision: int,
+        delta: JournalFactDelta | None = None,
     ) -> JournalPersistResult:
+        """Persist facts for one exact stream inside the caller's transaction.
+
+        ``delta`` narrows the append-only rows (fills, snapshots, exit
+        boundaries) to the events recorded since the last successful persist.
+        State-carrying rows always come from the full ``facts``, so the stored
+        facts_state, coverage, checkpoint and provenance stay complete. Passing
+        ``None`` keeps the historical full-history write.
+        """
         if type(revision) is not int or revision < 0:
             raise ValueError("revision must be a non-negative integer")
         if facts.stream_scope != scope:
@@ -92,7 +102,7 @@ class PostgresAccountJournalStore:
                 provenance=facts.fill_load_provenance,
             )
 
-        specs = _fact_event_specs(facts)
+        specs = _fact_event_specs(facts, delta=delta)
         inserted = 0
         scope_values = _scope_values(scope)
         chunk_size = 500
@@ -582,10 +592,15 @@ class PostgresAccountJournalStore:
 
 def _fact_event_specs(
     facts: AccountFacts,
+    *,
+    delta: JournalFactDelta | None = None,
 ) -> list[tuple[str, str, datetime | None, dict[str, object]]]:
     codec = PositionRecoveryCodec
     specs: list[tuple[str, str, datetime | None, dict[str, object]]] = []
-    for fill in facts.fills:
+    fills = facts.fills if delta is None else delta.fills
+    snapshots = facts.snapshots if delta is None else delta.snapshots
+    boundaries = facts.exit_boundaries if delta is None else delta.exit_boundaries
+    for fill in fills:
         specs.append(("fill", fill.trade_id, fill.trade_at, codec.encode_fill(fill)))
     for fill in facts.conflicting_fills:
         specs.append(
@@ -595,7 +610,7 @@ def _fact_event_specs(
         specs.append(
             ("late_fill", fill.trade_id, fill.trade_at, codec.encode_fill(fill))
         )
-    for snapshot in facts.snapshots:
+    for snapshot in snapshots:
         natural_id = f"{snapshot.position_side}:{snapshot.observed_at.isoformat()}"
         specs.append(
             (
@@ -605,7 +620,7 @@ def _fact_event_specs(
                 codec.encode_snapshot(snapshot),
             )
         )
-    for boundary in facts.exit_boundaries:
+    for boundary in boundaries:
         natural_id = f"{boundary.order_id}:{boundary.submitted_at.isoformat()}"
         specs.append(
             (

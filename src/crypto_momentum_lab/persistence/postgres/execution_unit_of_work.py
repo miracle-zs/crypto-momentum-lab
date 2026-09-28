@@ -188,12 +188,14 @@ class ExecutionTransaction:
         facts: Any,
         revision: int,
         checkpoint: Any | None = None,
+        delta: Any | None = None,
     ) -> Any:
         result = await self._journal_store.persist_facts_in_session(
             self.session,
             scope=scope,
             facts=facts,
             revision=revision,
+            delta=delta,
         )
         fact_checkpoint = getattr(facts, "recovery_checkpoint", None)
         if checkpoint is not None and fact_checkpoint is not None and (

@@ -9,6 +9,8 @@ Obays the RFC 2026-09-25 contracts:
 
 from __future__ import annotations
 
+import copy
+
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -26,6 +28,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFillLoadProvenance,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
+    JournalFactDelta,
     PositionCheckpoint,
     PositionKey,
 )
@@ -81,6 +84,12 @@ class AccountJournal:
         self._revision: int = 0
         self._latest_event_at: datetime | None = None
         self._cached_facts_none: AccountFacts | None = None
+        # Append-only events recorded since the last successful durable persist.
+        # They are re-sent after a failed or lost transaction and dropped once
+        # the commit published this journal.
+        self._pending_fills: list[AccountFillEvent] = []
+        self._pending_snapshots: list[AccountPositionSnapshot] = []
+        self._pending_boundaries: list[ExitOrderSubmissionFact] = []
 
     @property
     def revision(self) -> int:
@@ -182,6 +191,7 @@ class AccountJournal:
             )
 
         self._fills_by_id[fill.trade_id] = fill
+        self._pending_fills.append(fill)
         self._update_latest_event_at(fill.trade_at)
         self._cached_facts_none = None
         self._revision += 1
@@ -203,6 +213,7 @@ class AccountJournal:
                 "Snapshot position side does not match journal position key"
             )
         self._snapshots.append(snapshot)
+        self._pending_snapshots.append(snapshot)
         self._update_latest_event_at(snapshot.observed_at)
         self._cached_facts_none = None
         self._revision += 1
@@ -216,6 +227,7 @@ class AccountJournal:
         if boundary.position_side != self._position_key.position_side:
             raise ValueError("Boundary position side does not match journal key")
         self._boundaries.append(boundary)
+        self._pending_boundaries.append(boundary)
         self._update_latest_event_at(boundary.submitted_at)
         self._cached_facts_none = None
         self._revision += 1
@@ -352,6 +364,51 @@ class AccountJournal:
         self._update_latest_event_at(provenance.observed_at)
         self._cached_facts_none = None
         self._revision += 1
+
+    def copy_for_transaction(self) -> AccountJournal:
+        """Copy the mutable containers, sharing the immutable recorded facts.
+
+        Every fill, snapshot, boundary, coverage interval and checkpoint is a
+        frozen dataclass that is treated as read-only once appended, so a
+        transaction candidate only needs its own containers to stay isolated
+        from the published journal. Rebuilding containers is O(container
+        sizes) pointer work instead of the O(history) deepcopy that used to run
+        on the event loop for every mutation.
+
+        Any mutable container field added to this class must be copied here.
+        """
+        candidate = copy.copy(self)
+        candidate._fills_by_id = dict(self._fills_by_id)
+        candidate._conflicts = list(self._conflicts)
+        candidate._fact_conflicts = list(self._fact_conflicts)
+        candidate._integrity_issues = list(self._integrity_issues)
+        candidate._snapshots = list(self._snapshots)
+        candidate._boundaries = list(self._boundaries)
+        candidate._late_trade_ids = set(self._late_trade_ids)
+        candidate._pending_fills = list(self._pending_fills)
+        candidate._pending_snapshots = list(self._pending_snapshots)
+        candidate._pending_boundaries = list(self._pending_boundaries)
+        return candidate
+
+    def pending_fact_delta(self) -> JournalFactDelta:
+        """Append-only facts recorded since the last successful durable persist."""
+        return JournalFactDelta(
+            fills=tuple(self._pending_fills),
+            snapshots=tuple(self._pending_snapshots),
+            exit_boundaries=tuple(self._pending_boundaries),
+        )
+
+    def mark_facts_persisted(self) -> None:
+        """Drop the pending delta after its transaction committed.
+
+        The durable rows are idempotent (``ON CONFLICT DO NOTHING`` on the
+        derived event identity), so a delta that is never dropped is only ever
+        re-sent, never lost. Callers must invoke this exactly when the
+        candidate that recorded these events is published.
+        """
+        self._pending_fills.clear()
+        self._pending_snapshots.clear()
+        self._pending_boundaries.clear()
 
     @classmethod
     def from_durable_cut(cls, cut: DurableJournalCut) -> AccountJournal:

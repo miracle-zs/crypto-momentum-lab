@@ -55,6 +55,7 @@ let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
 let lastRuntimeAnnouncement = "";
 const latestSectionData = new Map();
+const latestSectionError = new Map();
 const sectionRenderKeys = new Map();
 const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
 function sectionRenderKey(id, data) {
@@ -104,8 +105,18 @@ function renderLiveRuntime() {
   }
 }
 
+function markSectionError(id, reason) {
+  // Keep the last confirmed payload and flag it stale. Replacing it with an
+  // error placeholder would zero active halts, ambiguous orders and
+  // reconciliation mismatches on the global safety strip, hiding known
+  // exposure behind an "unknown" or "ready" reading.
+  latestSectionError.set(id, { reason, at: Date.now() });
+  renderGlobalReadiness();
+}
+
 function updateGlobalState(id, data) {
   latestSectionData.set(id, data);
+  latestSectionError.delete(id);
   renderGlobalReadiness();
 }
 
@@ -126,6 +137,10 @@ function globalReadinessModel() {
   }
 
   const services = overview?.services || [];
+  const staleSafetySections = [...latestSectionError.keys()]
+    .filter((id) => SAFETY_SECTIONS.has(id))
+    .length;
+  const staleNote = staleSafetySections > 0 ? " · 读数可能过期" : "";
   const uncertainSections = [...latestSectionData.entries()]
     .filter(([id, data]) => (
       SAFETY_SECTIONS.has(id)
@@ -177,13 +192,13 @@ function globalReadinessModel() {
     detail = "等待系统总览数据";
   } else if (activeHalts > 0) {
     status = "BLOCKED";
-    detail = "存在活跃停机 · 新入场已被阻断";
+    detail = `存在活跃停机 · 新入场已被阻断${staleNote}`;
   } else if (ambiguous > 0) {
     status = "REVIEW";
-    detail = "存在未决订单 · 需要交易所对账";
+    detail = `存在未决订单 · 需要交易所对账${staleNote}`;
   } else if (mismatch != null && mismatch > 0) {
     status = "REVIEW";
-    detail = "账户对账存在差异 · 暂不视为安全";
+    detail = `账户对账存在差异 · 暂不视为安全${staleNote}`;
   } else if (latestLiveMode === "LIVE" && (!hasRisk || !hasAccount)) {
     status = "UNKNOWN";
     detail = !hasRisk && !hasAccount
@@ -194,6 +209,11 @@ function globalReadinessModel() {
   } else if (uncertain > 0) {
     status = "UNKNOWN";
     detail = `${uncertain} 个关键读数需要确认`;
+  } else if (staleSafetySections > 0) {
+    // Readings that survived a failed refresh cannot be reported as safe:
+    // they are the last confirmed values, not a fresh verdict.
+    status = "STALE";
+    detail = `${staleSafetySections} 个关键分区刷新失败 · 尚未确认安全`;
   } else if (latestLiveMode === "LIVE") {
     detail = "实盘链路运行中 · 关键读数正常";
   } else if (latestLiveMode === "SHADOW") {
@@ -447,7 +467,13 @@ async function refreshSection(id) {
       setSectionStatus(id, "STALE");
     }
     body?.classList.remove("loading");
-    updateGlobalState(id, { status: "UNKNOWN", error: true });
+    if (latestSectionData.has(id)) {
+      // Keep the last confirmed payload and mark it stale instead of
+      // overwriting it with zeros.
+      markSectionError(id, reason);
+    } else {
+      updateGlobalState(id, { status: "UNKNOWN", error: true });
+    }
   } finally {
     sectionInFlight.delete(id);
   }

@@ -610,10 +610,20 @@ class PostgresLiveContextProvider(LiveContextReader):
                 managed_positions=managed,
                 unmanaged_position_symbols=unmanaged,
             )
+        # Only scopes that can still represent current exposure need a read.
+        # Replaying every historical Book scope at each market cut dominated
+        # this path; the drift scan below keeps the Book-only diagnostic. When
+        # the account snapshot is unavailable the filter is dropped, so an
+        # uncertain account view still reads every scope and fails closed.
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
             event_cut=state.bucket_end,
+            symbols=(
+                context.open_position_symbols
+                if context.account_snapshot is not None
+                else None
+            ),
         )
         managed = managed_live_positions_from_views(
             views,
@@ -642,26 +652,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             )
         )
         active_symbols = frozenset(position.symbol for position in managed)
-        book_position_symbols = frozenset(
-            view.key.symbol
-            for view in views
-            if view.total_quantity > 0
-            or view.unallocated_quantity > 0
-            or (
-                view.reconciliation_gap is not None
-                and view.reconciliation_gap != 0
-            )
-        )
-        stale_book_symbols = book_position_symbols - context.open_position_symbols
-        if stale_book_symbols != getattr(self, "_reported_stale_book_symbols", None):
-            self._reported_stale_book_symbols = stale_book_symbols
-            if stale_book_symbols:
-                log.warning(
-                    "live_book_positions_absent_from_account_view",
-                    account_label=self._account_label,
-                    count=len(stale_book_symbols),
-                    sample=sorted(stale_book_symbols)[:5],
-                )
+        await self._observe_book_drift(book=book, context=context, state=state)
         # The account view determines current exposure. Book-only residuals
         # are durable accounting drift, not live positions to exit or subscribe
         # to. A real account position without a matching Book lot remains
@@ -680,6 +671,53 @@ class PostgresLiveContextProvider(LiveContextReader):
             managed_positions=managed,
             unmanaged_position_symbols=unmanaged,
         )
+
+    async def _observe_book_drift(
+        self,
+        *,
+        book: Any,
+        context: LiveDaemonRuntimeContext,
+        state: MarketState15s,
+    ) -> None:
+        """Report Book-only residue that the account view no longer shows.
+
+        This needs a full-account read, so it runs on its own cadence instead
+        of once per market cut; the trade path only reads the scopes that can
+        still represent current exposure.
+        """
+        now = datetime.now(tz=UTC)
+        last_scan = getattr(self, "_last_book_drift_scan_at", None)
+        if (
+            last_scan is not None
+            and (now - last_scan).total_seconds() < _BOOK_DRIFT_SCAN_INTERVAL_SECONDS
+        ):
+            return
+        self._last_book_drift_scan_at = now
+        drift_views = await book.list_position_views(
+            environment="live",
+            account_label=self._account_label,
+            event_cut=state.bucket_end,
+        )
+        book_position_symbols = frozenset(
+            view.key.symbol
+            for view in drift_views
+            if view.total_quantity > 0
+            or view.unallocated_quantity > 0
+            or (
+                view.reconciliation_gap is not None
+                and view.reconciliation_gap != 0
+            )
+        )
+        stale_book_symbols = book_position_symbols - context.open_position_symbols
+        if stale_book_symbols != getattr(self, "_reported_stale_book_symbols", None):
+            self._reported_stale_book_symbols = stale_book_symbols
+            if stale_book_symbols:
+                log.warning(
+                    "live_book_positions_absent_from_account_view",
+                    account_label=self._account_label,
+                    count=len(stale_book_symbols),
+                    sample=sorted(stale_book_symbols)[:5],
+                )
 
     def _context_load_guard(self) -> asyncio.Lock:
         lock = getattr(self, "_context_load_lock", None)
@@ -1694,6 +1732,9 @@ _PENDING_ENTRY_STATES = frozenset(
     }
 )
 _PENDING_POSITION_MAX_AGE_SECONDS = 60
+# A full-account Book read is only needed to find Book-only residue, so it runs
+# on its own cadence instead of once per market cut.
+_BOOK_DRIFT_SCAN_INTERVAL_SECONDS = 300.0
 
 
 def _classify_live_positions(

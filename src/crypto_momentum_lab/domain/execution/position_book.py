@@ -9,6 +9,8 @@ Obays RFC 2026-09-25:
 
 from __future__ import annotations
 
+import copy
+
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -93,6 +95,21 @@ class PositionBook:
         self._durable_projection_facts_hash = (
             self._journal.read_cut().compute_facts_hash()
         )
+
+    def copy_for_transaction(self, journal: AccountJournal | None = None) -> PositionBook:
+        """Copy publication state for a transaction candidate.
+
+        The ledger is stateless and cached projections are immutable, so the
+        candidate only needs its own view-cache mapping, plus the candidate's
+        journal, to stay isolated from the published book. Passing ``journal``
+        keeps ``book._journal`` pointing at the copy instead of the published
+        journal.
+        """
+        candidate = copy.copy(self)
+        if journal is not None:
+            candidate._journal = journal
+        candidate._view_cache = dict(self._view_cache)
+        return candidate
 
     def get_view(
         self,

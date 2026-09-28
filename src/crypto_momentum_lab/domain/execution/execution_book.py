@@ -642,17 +642,27 @@ class ExecutionBook:
         candidate._journals = dict(self._journals)
         if key is not None:
             canon = key.canonical_id
-            if canon in self._journals:
-                copied_book, copied_journal = copy.deepcopy(
-                    (self._books.get(canon), self._journals[canon])
-                )
-                if copied_book is not None:
-                    candidate._books[canon] = copied_book
+            journal = self._journals.get(canon)
+            if journal is not None:
+                copied_journal = journal.copy_for_transaction()
                 candidate._journals[canon] = copied_journal
+                copied_book = self._books.get(canon)
+                if copied_book is not None:
+                    candidate._books[canon] = copied_book.copy_for_transaction(
+                        copied_journal
+                    )
         else:
-            candidate._books, candidate._journals = copy.deepcopy(
-                (self._books, self._journals)
-            )
+            # Container-level copies for every position: recorded facts are
+            # frozen and never mutated in place, so sharing them keeps the
+            # candidate isolated without an O(history) deepcopy.
+            candidate._journals = {
+                canon: journal.copy_for_transaction()
+                for canon, journal in self._journals.items()
+            }
+            candidate._books = {
+                canon: book.copy_for_transaction(candidate._journals.get(canon))
+                for canon, book in self._books.items()
+            }
         candidate._requests_by_id = dict(self._requests_by_id)
         candidate._receipts_by_id = dict(self._receipts_by_id)
         candidate._seen_evidence_ids = set(self._seen_evidence_ids)
@@ -710,6 +720,11 @@ class ExecutionBook:
         self._coordinator._reservations_by_id = (
             candidate._coordinator._reservations_by_id
         )
+        # The candidate's append-only delta is now durable, so it must not be
+        # re-sent by the next observation. A candidate that rolled back is
+        # never published, which keeps its pending events queued for retry.
+        for journal in self._journals.values():
+            journal.mark_facts_persisted()
 
     def _journal_for_scope(
         self,
@@ -1684,8 +1699,15 @@ class ExecutionBook:
         event_cut: datetime | None = None,
         stream_id: str | None = None,
         stream_epoch: str | None = None,
+        symbols: frozenset[str] | None = None,
     ) -> tuple[PositionView, ...]:
-        """List only existing positions belonging to the requested account stream."""
+        """List only existing positions belonging to the requested account stream.
+
+        ``symbols`` narrows the read to the scopes that can still represent
+        current exposure. It is a pure filter over existing books: it never
+        creates a journal, and ``None`` keeps the historical full-account read
+        for callers that must see every scope.
+        """
         if not environment.strip() or not account_label.strip():
             raise ValueError("environment and account_label must not be empty")
         if (stream_id is None) != (stream_epoch is None):
@@ -1702,6 +1724,8 @@ class ExecutionBook:
         for book in tuple(self._books.values()):
             key = book.position_key
             if key.environment != environment or key.account_label != account_label:
+                continue
+            if symbols is not None and key.symbol not in symbols:
                 continue
             source = self._stream_scopes.get(key.canonical_id)
             if stream_id is not None and (
@@ -2555,7 +2579,12 @@ class ExecutionBook:
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
         """Atomically accept source evidence and publish its projection."""
         if self._execution_unit_of_work is None:
-            return await self._observe_grouped(self, evidence)
+            result = await self._observe_grouped(self, evidence)
+            # Without a durable transaction there is nothing to persist, so the
+            # append-only delta must not accumulate in memory.
+            for journal in self._journals.values():
+                journal.mark_facts_persisted()
+            return result
         if evidence.stream_id is None or evidence.stream_epoch is None:
             return EvidenceConflict(
                 evidence_id=evidence.evidence_id,
@@ -2960,16 +2989,16 @@ class ExecutionBook:
                                 ),
                             )
                         )
+                    journal = candidate._ensure_journal(key)
                     if checkpoint is not None:
-                        candidate._ensure_journal(key).set_recovery_checkpoint(
-                            checkpoint
-                        )
-                    facts = candidate._ensure_journal(key).read_cut()
+                        journal.set_recovery_checkpoint(checkpoint)
+                    facts = journal.read_cut()
                     persist_result = await tx.persist_facts(
                         scope=scope,
                         facts=facts,
-                        revision=candidate._ensure_journal(key).revision,
+                        revision=journal.revision,
                         checkpoint=checkpoint,
+                        delta=journal.pending_fact_delta(),
                     )
                     if getattr(persist_result, "has_conflicts", False):
                         raise _AbortObservation(

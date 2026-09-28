@@ -1983,6 +1983,83 @@ async def test_staged_copy_preserves_unrelated_positions_and_copies_target():
     assert candidate._books[key_eth.canonical_id] is book._books[key_eth.canonical_id]
 
 
+@pytest.mark.asyncio
+async def test_staged_copy_shares_frozen_facts_without_leaking_candidate_writes():
+    """Container copies isolate a candidate while recorded facts stay shared."""
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        ExitOrderSubmissionFact,
+    )
+
+    book = ExecutionBook()
+    key = _scope().to_position_key()
+    journal = book._ensure_journal(key)
+    published_snapshot = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("101"),
+        unrealized_pnl=Decimal("1"),
+        notional=Decimal("101"),
+        leverage=1,
+        margin_type="isolated",
+        observed_at=_dt(10, 0),
+        raw_payload={"positionAmt": "1"},
+    )
+    journal.record_snapshot(published_snapshot)
+    journal.record_boundary(
+        ExitOrderSubmissionFact(
+            order_id="exit-1",
+            submitted_at=_dt(10, 1),
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.LONG,
+        )
+    )
+    published_facts = journal.read_cut()
+    published_hash = published_facts.compute_facts_hash()
+    published_revision = journal.revision
+    published_view = book._ensure_book(key).get_view()
+
+    candidate = book._staged_copy(key=key)
+    candidate_journal = candidate._journals[key.canonical_id]
+    assert candidate_journal is not journal
+    assert candidate_journal._snapshots is not journal._snapshots
+    assert candidate_journal._boundaries is not journal._boundaries
+    assert candidate_journal._fills_by_id is not journal._fills_by_id
+    # Facts themselves are shared on purpose: frozen and never mutated in place.
+    assert candidate_journal._snapshots[0] is published_snapshot
+    assert candidate._books[key.canonical_id]._journal is candidate_journal
+    assert candidate._books[key.canonical_id] is not book._books[key.canonical_id]
+
+    candidate_journal.record_snapshot(
+        AccountPositionSnapshot(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            position_side="LONG",
+            position_amt=Decimal("2"),
+            entry_price=Decimal("100"),
+            mark_price=Decimal("102"),
+            unrealized_pnl=Decimal("2"),
+            notional=Decimal("204"),
+            leverage=1,
+            margin_type="isolated",
+            observed_at=_dt(10, 2),
+            raw_payload={"positionAmt": "2"},
+        )
+    )
+    candidate_journal.record_integrity_issue("candidate-only issue")
+
+    assert len(candidate_journal.read_cut().snapshots) == 2
+    assert candidate_journal.read_cut() != published_facts
+    assert journal.read_cut() == published_facts
+    assert journal.read_cut().compute_facts_hash() == published_hash
+    assert journal.revision == published_revision
+    assert book._ensure_book(key).get_view() == published_view
+
+
 def test_position_book_get_view_caches_projection_until_revision_changes():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.position_book import PositionBook

@@ -1160,6 +1160,69 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
     assert warnings[0][1]["count"] == 1
 
 
+async def test_execution_book_reads_only_current_exposure_scopes(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class Book:
+        async def list_position_views(self, **kwargs):
+            calls.append(kwargs)
+            return ()
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime.managed_live_positions_from_views",
+        lambda *_args, **_kwargs: (),
+    )
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._execution_book = Book()
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(_position(),)),
+    )
+
+    await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
+    await provider._with_execution_book(
+        context,
+        SimpleNamespace(bucket_end=NOW + timedelta(seconds=15)),
+    )
+
+    assert len(calls) == 3
+    # Trade path: only the symbols the account still holds.
+    assert calls[0]["symbols"] == frozenset({"BTCUSDT"})
+    # First call still runs one full drift scan; the second call is throttled.
+    assert "symbols" not in calls[1]
+    assert calls[2]["symbols"] == frozenset({"BTCUSDT"})
+
+
+async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+
+    class Book:
+        async def list_position_views(self, **kwargs):
+            calls.append(kwargs)
+            return ()
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime.managed_live_positions_from_views",
+        lambda *_args, **_kwargs: (),
+    )
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._execution_book = Book()
+    context = replace(
+        _runtime_context(), open_position_symbols=frozenset({"BTCUSDT"})
+    )
+    assert context.account_snapshot is None
+
+    await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
+
+    # An uncertain account view keeps the unfiltered, fail-closed read.
+    assert calls[0]["symbols"] is None
+
+
 def test_context_invalidation_preserves_symbol_rules() -> None:
     provider = object.__new__(PostgresLiveContextProvider)
     expected = _runtime_context().trading_rules["BTCUSDT"]
