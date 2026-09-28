@@ -247,15 +247,19 @@ async def repair() -> None:
                     if existing_ev is None:
                         payload = PositionRecoveryCodec.encode_fill(fill)
                         payload_hash = _json_digest(payload)
+                        event_record_id = _json_digest(
+                            [scope.canonical_id, "fill", str(fill.trade_id), payload_hash]
+                        )
                         session.add(
                             PositionFactJournalEventRow(
+                                event_record_id=event_record_id,
                                 environment="live",
                                 account_label=acc,
                                 symbol="NIGHTUSDT",
                                 position_side="LONG",
                                 stream_id="account_event_hub",
                                 stream_epoch=epoch,
-                                event_id=fill.trade_id,
+                                event_id=str(fill.trade_id),
                                 event_kind="fill",
                                 occurred_at=fill.trade_at,
                                 recorded_at=fill.trade_at,
