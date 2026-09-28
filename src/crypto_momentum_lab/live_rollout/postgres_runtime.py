@@ -774,7 +774,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             for task in context_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*context_tasks, return_exceptions=True)
+            await asyncio.shield(
+                asyncio.gather(*context_tasks, return_exceptions=True)
+            )
             raise
         approval = approval_task.result()
         risk_config = risk_config_task.result()

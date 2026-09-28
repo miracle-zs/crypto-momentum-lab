@@ -131,9 +131,13 @@ class LiveContextPrefetcher:
         finally:
             if not producer_task.done():
                 producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
+            await asyncio.shield(
+                asyncio.gather(producer_task, return_exceptions=True)
+            )
             for task in pending_tasks:
                 if not task.done():
                     task.cancel()
             if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                await asyncio.shield(
+                    asyncio.gather(*pending_tasks, return_exceptions=True)
+                )

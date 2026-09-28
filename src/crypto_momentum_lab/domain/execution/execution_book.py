@@ -607,35 +607,46 @@ class ExecutionBook:
         del key
         return self._global_mutation_lock
 
-    def _staged_copy(self) -> ExecutionBook:
-        """Copy all published domain state before entering a durable transaction."""
+    def _staged_copy(self, key: PositionKey | None = None) -> ExecutionBook:
+        """Copy published domain state before entering a durable transaction."""
         candidate = copy.copy(self)
-        candidate._books, candidate._journals = copy.deepcopy(
-            (self._books, self._journals)
+        candidate._books = dict(self._books)
+        candidate._journals = dict(self._journals)
+        if key is not None:
+            canon = key.canonical_id
+            if canon in self._journals:
+                copied_book, copied_journal = copy.deepcopy(
+                    (self._books.get(canon), self._journals[canon])
+                )
+                if copied_book is not None:
+                    candidate._books[canon] = copied_book
+                candidate._journals[canon] = copied_journal
+        else:
+            candidate._books, candidate._journals = copy.deepcopy(
+                (self._books, self._journals)
+            )
+        candidate._requests_by_id = dict(self._requests_by_id)
+        candidate._receipts_by_id = dict(self._receipts_by_id)
+        candidate._seen_evidence_ids = set(self._seen_evidence_ids)
+        candidate._seen_trade_ids = set(self._seen_trade_ids)
+        candidate._outbox_by_command_id = dict(self._outbox_by_command_id)
+        candidate._command_reservations = dict(self._command_reservations)
+        candidate._order_cumulative_fills = dict(self._order_cumulative_fills)
+        candidate._order_cumulative_quotes = dict(self._order_cumulative_quotes)
+        candidate._recovery_required_commands = set(self._recovery_required_commands)
+        candidate._dispatch_reconciliation_required_commands = set(
+            self._dispatch_reconciliation_required_commands
         )
-        for name in (
-            "_requests_by_id",
-            "_receipts_by_id",
-            "_seen_evidence_ids",
-            "_seen_trade_ids",
-            "_outbox_by_command_id",
-            "_command_reservations",
-            "_order_cumulative_fills",
-            "_order_cumulative_quotes",
-            "_recovery_required_commands",
-            "_dispatch_reconciliation_required_commands",
-            "_stream_scopes",
-            "_head_revisions",
-            "_head_projection_digests",
-            "_journal_revisions",
-            "_last_sequences",
-            "_recovery_adoption_scope",
-        ):
-            setattr(candidate, name, copy.deepcopy(getattr(self, name)))
+        candidate._stream_scopes = dict(self._stream_scopes)
+        candidate._head_revisions = dict(self._head_revisions)
+        candidate._head_projection_digests = dict(self._head_projection_digests)
+        candidate._journal_revisions = dict(self._journal_revisions)
+        candidate._last_sequences = dict(self._last_sequences)
+        candidate._recovery_adoption_scope = self._recovery_adoption_scope
         candidate._coordinator = ExecutionCoordinator(
             repository=InMemoryPositionReservationRepository()
         )
-        candidate._coordinator._reservations_by_id = copy.deepcopy(
+        candidate._coordinator._reservations_by_id = dict(
             getattr(self._coordinator, "_reservations_by_id", {})
         )
         candidate._reservation_repo = None
@@ -1495,10 +1506,11 @@ class ExecutionBook:
             # An unknown position is incomplete; reading it must not create a
             # journal or silently establish an account stream for future writes.
             book = PositionBook(AccountJournal(key, stream_scope=source_scope))
+        if event_cut is None:
+            return book.get_view(requirement=requirement, now=now)
         current_view = book.get_view(requirement=requirement, now=now)
         if (
-            event_cut is not None
-            and self._execution_unit_of_work is not None
+            self._execution_unit_of_work is not None
             and source_scope is not None
             and current_view.event_cut is not None
             and event_cut < current_view.event_cut
@@ -1617,7 +1629,7 @@ class ExecutionBook:
                         "execution is fail-closed"
                     )
                 )
-            candidate = self._staged_copy()
+            candidate = self._staged_copy(key=key)
             try:
                 async with self._execution_unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)
@@ -2104,7 +2116,7 @@ class ExecutionBook:
             stream_scope = self._stream_scopes.get(canon)
             if stream_scope is None:
                 raise RuntimeError("Execution command has no durable stream scope")
-            candidate = self._staged_copy()
+            candidate = self._staged_copy(key=key)
             try:
                 async with self._execution_unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)
@@ -2478,7 +2490,7 @@ class ExecutionBook:
                 raise RuntimeError(
                     "Execution persistence failed; restore is required before ingest"
                 )
-            candidate = self._staged_copy()
+            candidate = self._staged_copy(key=key)
             try:
                 async with self._execution_unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)

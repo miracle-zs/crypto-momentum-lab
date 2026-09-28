@@ -1401,3 +1401,75 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
     outbox = book.get_outbox("cmd-exit-partial")
     assert outbox is not None
     assert outbox.state == DispatchState.TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_staged_copy_preserves_unrelated_positions_and_copies_target():
+    book = ExecutionBook()
+    scope_btc = ExecutionScope(environment="live", account_label="p1", symbol="BTCUSDT")
+    scope_eth = ExecutionScope(environment="live", account_label="p1", symbol="ETHUSDT")
+    key_btc = scope_btc.to_position_key()
+    key_eth = scope_eth.to_position_key()
+
+    book._ensure_book(key_btc)
+    book._ensure_book(key_eth)
+
+    candidate = book._staged_copy(key=key_btc)
+
+    assert candidate._journals[key_btc.canonical_id] is not book._journals[key_btc.canonical_id]
+    assert candidate._books[key_btc.canonical_id] is not book._books[key_btc.canonical_id]
+    assert candidate._journals[key_eth.canonical_id] is book._journals[key_eth.canonical_id]
+    assert candidate._books[key_eth.canonical_id] is book._books[key_eth.canonical_id]
+
+
+def test_position_book_get_view_caches_projection_until_revision_changes():
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+
+    key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
+    journal = AccountJournal(key)
+    book = PositionBook(journal)
+
+    view1 = book.get_view()
+    assert len(book._view_cache) == 1
+
+    view2 = book.get_view()
+    assert view2.projection_version == view1.projection_version
+    assert len(book._view_cache) == 1
+
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    snap = AccountPositionSnapshot(
+        environment="live",
+        account_label="acc",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("1.5"),
+        entry_price=Decimal("50000"),
+        mark_price=Decimal("50100"),
+        unrealized_pnl=Decimal("150"),
+        notional=Decimal("75000"),
+        leverage=5,
+        margin_type="CROSSED",
+        observed_at=now,
+        raw_payload={},
+    )
+    journal.record_snapshot(snap)
+    assert journal.revision == 1
+
+    view3 = book.get_view()
+    assert view3.input_revision == 1
+    assert view3.projection_version != view1.projection_version
+
+
+def test_account_facts_compute_facts_hash_caching():
+    from crypto_momentum_lab.domain.execution.position_ledger_models import AccountFacts, PositionKey
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+
+    key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
+    facts = AccountFacts(position_key=key)
+    h1 = facts.compute_facts_hash()
+    assert getattr(facts, "_cached_facts_hash", None) == h1
+    h2 = facts.compute_facts_hash()
+    assert h1 == h2

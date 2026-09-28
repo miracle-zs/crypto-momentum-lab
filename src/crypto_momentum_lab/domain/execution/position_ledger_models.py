@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -620,6 +620,9 @@ class AccountFacts:
     fill_cursor_provenance: AccountFillReconciliationCursor | None = None
     fill_load_provenance: AccountFillLoadProvenance | None = None
     prefix_facts_complete: bool = True
+    _cached_facts_hash: str | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.prefix_facts_complete) is not bool:
@@ -645,6 +648,9 @@ class AccountFacts:
 
     def compute_facts_hash(self) -> str:
         """Hash every input field that can change identity or projection."""
+        cached = getattr(self, "_cached_facts_hash", None)
+        if cached is not None:
+            return cached
 
         def canonical(value: object) -> object:
             if isinstance(value, StrEnum):
@@ -707,7 +713,9 @@ class AccountFacts:
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        return hashlib.sha256(encoded).hexdigest()
+        computed = hashlib.sha256(encoded).hexdigest()
+        object.__setattr__(self, "_cached_facts_hash", computed)
+        return computed
 
 
 @dataclass(frozen=True, slots=True)

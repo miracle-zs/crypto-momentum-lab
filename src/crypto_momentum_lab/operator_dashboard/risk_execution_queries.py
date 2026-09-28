@@ -10,7 +10,7 @@ import os
 import re
 import secrets
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
@@ -225,6 +225,8 @@ class RiskExecutionQueries:
                         error_detail=_sanitize_error_detail(exc),
                     )
 
+            now = datetime.now(UTC)
+            recent_cutoff = now - timedelta(hours=6)
             market_query = (
                 select(
                     RuntimeMarketState15sRow.symbol,
@@ -233,6 +235,7 @@ class RiskExecutionQueries:
                 .where(
                     RuntimeMarketState15sRow.environment == self._market_environment,
                     RuntimeMarketState15sRow.data_complete.is_(True),
+                    RuntimeMarketState15sRow.bucket_start >= recent_cutoff,
                 )
                 .group_by(RuntimeMarketState15sRow.symbol)
             )
@@ -242,7 +245,41 @@ class RiskExecutionQueries:
                 )
 
             try:
-                market_rows = (await session.execute(market_query)).all()
+                market_rows = list((await session.execute(market_query)).all())
+                if required_symbols:
+                    found_symbols = {row[0] for row in market_rows}
+                    missing_from_recent = set(required_symbols) - found_symbols
+                    if missing_from_recent:
+                        fallback_query = (
+                            select(
+                                RuntimeMarketState15sRow.symbol,
+                                func.max(RuntimeMarketState15sRow.bucket_end),
+                            )
+                            .where(
+                                RuntimeMarketState15sRow.environment == self._market_environment,
+                                RuntimeMarketState15sRow.data_complete.is_(True),
+                                RuntimeMarketState15sRow.symbol.in_(missing_from_recent),
+                            )
+                            .group_by(RuntimeMarketState15sRow.symbol)
+                        )
+                        fallback_rows = (await session.execute(fallback_query)).all()
+                        for row in fallback_rows:
+                            if row[0] not in found_symbols:
+                                market_rows.append(row)
+                                found_symbols.add(row[0])
+                elif not market_rows:
+                    fallback_query = (
+                        select(
+                            RuntimeMarketState15sRow.symbol,
+                            func.max(RuntimeMarketState15sRow.bucket_end),
+                        )
+                        .where(
+                            RuntimeMarketState15sRow.environment == self._market_environment,
+                            RuntimeMarketState15sRow.data_complete.is_(True),
+                        )
+                        .group_by(RuntimeMarketState15sRow.symbol)
+                    )
+                    market_rows = list((await session.execute(fallback_query)).all())
             except Exception as exc:
                 coverage_query_error = True
                 if coverage_error is None:
