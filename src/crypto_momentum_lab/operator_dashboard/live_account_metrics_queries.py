@@ -405,13 +405,16 @@ class LiveAccountMetricsQueries:
 
                 perf_summary = None
                 if equity_rows:
+                    effective_start = equity_rows[0].observed_at
+                    effective_end = equity_rows[-1].observed_at
                     perf_summary = build_performance_summary(
                         account_label=account.account_label,
                         equity_rows=equity_rows,
                         cf_rows=cf_rows,
-                        start_time=equity_window_start,
-                        end_time=equity_window_end,
+                        start_time=effective_start,
+                        end_time=effective_end,
                         max_equity_gap=timedelta(seconds=equity_bucket_seconds * 4),
+                        is_empty_proven=len(cf_rows) == 0,
                     )
 
                 metric_accounts.append(
