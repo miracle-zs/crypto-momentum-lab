@@ -475,7 +475,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_sequence = 0
         self._execution_book: Any | None = None
         self._cached_book_bucket_end: datetime | None = None
-        self._cached_book_result: tuple[frozenset[str], tuple[Any, ...], frozenset[str]] | None = None
+        self._cached_book_result: (
+            tuple[frozenset[str], tuple[Any, ...], frozenset[str]] | None
+        ) = None
         self._cached_book_unresolved: tuple[Any, ...] | None = None
         self._rules_load_tasks: dict[
             str,
@@ -596,10 +598,10 @@ class PostgresLiveContextProvider(LiveContextReader):
             and cached_bucket_end == state.bucket_end
             and cached_unresolved == context.unresolved_orders
         ):
-            book_position_symbols, managed, unmanaged = cached_result
+            visible_position_symbols, managed, unmanaged = cached_result
             return replace(
                 context,
-                open_position_symbols=book_position_symbols,
+                open_position_symbols=visible_position_symbols,
                 managed_positions=managed,
                 unmanaged_position_symbols=unmanaged,
             )
@@ -611,6 +613,28 @@ class PostgresLiveContextProvider(LiveContextReader):
         managed = managed_live_positions_from_views(
             views,
             unresolved_orders=context.unresolved_orders,
+        )
+        account_position_keys = (
+            frozenset(
+                (position.symbol, position.position_side.upper())
+                for position in context.account_snapshot.positions
+                if position.position_amt != 0
+            )
+            if context.account_snapshot is not None
+            else None
+        )
+        # The Book supplies lot identities, but account reconciliation is
+        # authoritative for current exposure. Stale Book-only lots must not
+        # generate reduce-only orders against an already-flat account.
+        managed = tuple(
+            position
+            for position in managed
+            if position.symbol in context.open_position_symbols
+            and (
+                account_position_keys is None
+                or (position.symbol, position.position_side.value)
+                in account_position_keys
+            )
         )
         active_symbols = frozenset(position.symbol for position in managed)
         book_position_symbols = frozenset(
@@ -626,16 +650,18 @@ class PostgresLiveContextProvider(LiveContextReader):
         # Old context classification remains useful for pending order and
         # ownership hazards, but a symbol with Book-backed lots is no longer
         # classified from legacy order/fill reconstruction.
-        unmanaged = frozenset(context.unmanaged_position_symbols) - (
-            active_symbols | book_position_symbols
-        )
-        unmanaged |= book_position_symbols - active_symbols
+        unmanaged = (
+            frozenset(context.unmanaged_position_symbols)
+            | book_position_symbols
+            | context.open_position_symbols
+        ) - active_symbols
         self._cached_book_bucket_end = state.bucket_end
         self._cached_book_unresolved = context.unresolved_orders
-        self._cached_book_result = (book_position_symbols, managed, unmanaged)
+        visible_position_symbols = book_position_symbols | context.open_position_symbols
+        self._cached_book_result = (visible_position_symbols, managed, unmanaged)
         return replace(
             context,
-            open_position_symbols=book_position_symbols,
+            open_position_symbols=visible_position_symbols,
             managed_positions=managed,
             unmanaged_position_symbols=unmanaged,
         )

@@ -71,6 +71,7 @@ class LiveContextPrefetcher:
 
         async def producer() -> None:
             nonlocal producer_error
+            cancelled = False
             try:
                 async for state in states:
                     generation = self._context_generation()
@@ -88,11 +89,13 @@ class LiveContextPrefetcher:
                         )
                     )
             except asyncio.CancelledError:
+                cancelled = True
                 raise
             except BaseException as error:
                 producer_error = error
             finally:
-                await queue.put(None)
+                if not cancelled:
+                    await queue.put(None)
 
         producer_task = asyncio.create_task(
             producer(),
@@ -131,13 +134,11 @@ class LiveContextPrefetcher:
         finally:
             if not producer_task.done():
                 producer_task.cancel()
-            await asyncio.shield(
-                asyncio.gather(producer_task, return_exceptions=True)
-            )
             for task in pending_tasks:
                 if not task.done():
                     task.cancel()
-            if pending_tasks:
-                await asyncio.shield(
-                    asyncio.gather(*pending_tasks, return_exceptions=True)
-                )
+            await asyncio.gather(
+                producer_task,
+                *pending_tasks,
+                return_exceptions=True,
+            )

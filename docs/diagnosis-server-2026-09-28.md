@@ -123,3 +123,11 @@ docker logs --since 5m crypto-momentum-lab-live-strategy-1 2>&1 | grep -E 'non-c
 `exit_processor.py` 又发现一个独立误分类：它将任意 `OrderPreSubmissionError` 和 `ReservationConflictError` 当作订单身份冲突，尽管这些异常还可能表示租约失效、风控停止或仓位视图过期。现已在本地收窄为真正的持久化订单身份错误消息，并在该错误发生时记录异常类型、文本与候选 ID。还需上线后获取原始异常，才能确定并修复造成多个账户出场失败的下层原因。
 
 截至 05:10 UTC，行情表最新状态为 05:09:45，四账户 checkpoint 最新状态分别约为 05:09:00、05:09:15、05:08:30、05:06:45。主账户从先前落后 20 分钟缩小到约 3 分钟，但仍有候选过期与连接未归还告警；不能宣称恢复。服务器仍运行 `0926080`，本地修复没有部署。四个策略容器在本次检查时为 Docker healthy，该状态不能替代交易门禁检查。当前本地相关测试 114 项通过。
+
+### 05:21–05:52 UTC 首次实盘切换与新增根因
+
+获授权后，服务器构建了精确提交 `b655aa4`；看板更新成功。主账户和账户 2 分别完成了与原风险参数相同的新提交批准、租约代际更新和预检（`preflight_ok=true`），再依次切换策略镜像。主账户在新镜像中仍出现连接未归还告警，且在出场通道抛出 `OrderPreSubmissionError: Failed to create position reservation ... Position facts are not durably restored`。之前的宽泛异常分类把该错误错误标记为 `order_identity_conflict`；收窄分类后，未处理异常使运行进程重启。退出时还有两个 `PostgresLiveContextProvider.__call__` 预取任务未被取回，随后报连接池超时。
+
+按回滚流程将主账户和账户 2 的租约代际、镜像、最新批准恢复至 `0926080`；账户 3、4 未切换。看板保留新镜像。服务器 `.env.server` 的 `CML_CODE_COMMIT` 和 Git main 回到 `0926080`，`CML_DASHBOARD_IMAGE` 仍显式指向 `b655aa4`。主账户与账户 2 的旧版本预检再次均为 `preflight_ok=true`，但策略进程健康还需持续观察。
+
+后续数据库证据：四账户最新 `ready` 对账的 `position_count` 都是 0。抽查主账户 BOMEUSDT、JOEUSDT、SYNUSDT 的账户成交事件，买卖净数量均为 0；其历史非零仓位快照仍保留，执行账本中也有相关旧事实。`PostgresLiveContextProvider._with_execution_book()` 先从账户获取当前仓位，却用 Book 视图无条件覆盖 `managed_positions` 和 `open_position_symbols`，可把 Book-only 历史仓位重新当作待出场仓位。新本地修复要求出场仓位同时存在于实时账户快照，并保留账本和账户不一致的风险标记；缺失持久化仓位事实会降级出场而非使进程崩溃。另在 `LiveContextPrefetcher` 中复现了消费者取消且队列已满时，生产者卡在写结束标记，未完成上下文任务未被取消和等待的错误；本地已修复并有失败先行测试。完整 live_rollout 单测 434 项通过。新补丁尚未上线。

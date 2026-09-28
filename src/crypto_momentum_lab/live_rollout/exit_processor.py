@@ -632,6 +632,15 @@ class LiveExitProcessor:
                     reference_price=reference_price,
                 )
             except Exception as error:
+                if _is_missing_position_facts(error):
+                    log.error(
+                        "live_exit_position_facts_unavailable",
+                        run_id=self._config.run_id,
+                        symbol=request.candidate.symbol,
+                        candidate_id=request.candidate.candidate_id,
+                        error=str(error),
+                    )
+                    return None, context, "position_facts_not_restored"
                 if self._exit_manager is not None and _is_order_identity_conflict(
                     error
                 ):
@@ -822,6 +831,15 @@ class LiveExitProcessor:
                         reference_price=reference_price,
                     )
                 except Exception as error:
+                    if _is_missing_position_facts(error):
+                        log.error(
+                            "live_exit_position_facts_unavailable",
+                            run_id=self._config.run_id,
+                            symbol=fallback_candidate.symbol,
+                            candidate_id=fallback_candidate.candidate_id,
+                            error=str(error),
+                        )
+                        return approved, submitted, "position_facts_not_restored"
                     if self._exit_manager is not None and _is_order_identity_conflict(
                         error
                     ):
@@ -1066,6 +1084,13 @@ def _is_order_identity_conflict(error: Exception) -> bool:
         return True
     cause = error.__cause__
     return isinstance(cause, Exception) and _is_order_identity_conflict(cause)
+
+
+def _is_missing_position_facts(error: Exception) -> bool:
+    if "Position facts are not durably restored" in str(error):
+        return True
+    cause = error.__cause__
+    return isinstance(cause, Exception) and _is_missing_position_facts(cause)
 
 
 def _exit_strategy_side(plan: OrderExecutionPlan) -> StrategySide:

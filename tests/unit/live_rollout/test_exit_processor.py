@@ -151,9 +151,8 @@ async def test_process_requests_delegates_one_exit_and_reports_submission_counts
 
 
 @pytest.mark.asyncio
-async def test_process_requests_counts_suppressed_exit_without_exchange_submission() -> (
-    None
-):
+async def test_process_requests_counts_suppressed_exit_without_exchange_submission(
+) -> None:
     submission = RecordingSubmission(_acknowledged_result(suppressed=True))
     processor = _processor(submission)
     candidate = replace(_intent(), candidate_id="exit-suppressed", reduce_only=True)
@@ -165,6 +164,27 @@ async def test_process_requests_counts_suppressed_exit_without_exchange_submissi
     )
 
     assert (approved, submitted, failure) == (1, 0, None)
+
+
+@pytest.mark.asyncio
+async def test_missing_durable_position_facts_degrades_exit_without_crashing() -> None:
+    class MissingFactsSubmission:
+        async def execute(self, *_args, **_kwargs):
+            raise RuntimeError(
+                "Failed to create position reservation: "
+                "Position facts are not durably restored"
+            )
+
+    processor = _processor(MissingFactsSubmission())
+    candidate = replace(_intent(), candidate_id="exit-missing-facts", reduce_only=True)
+
+    result = await processor.process_requests(
+        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
+        state=_state(),
+        context=_context(),
+    )
+
+    assert result == (0, 0, "position_facts_not_restored")
 
 
 @pytest.mark.asyncio
