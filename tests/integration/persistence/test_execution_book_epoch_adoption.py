@@ -296,7 +296,18 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
         assert isinstance(result, Applied), result
         adopted = await book.read(ExecutionScope("live", account, "BTCUSDT"))
         assert adopted.total_quantity == Decimal("1.5")
-        assert adopted.active_batches == parent.projection.active_batches
+        # The adopted suffix carries the parent batch identity forward; the SELL
+        # observed together with the adoption moves the quantity, not the identity.
+        assert len(adopted.batches) == 1
+        assert len(parent.projection.active_batches) == 1
+        adopted_batch = adopted.batches[0]
+        parent_batch = parent.projection.active_batches[0]
+        assert adopted_batch.batch_id == parent_batch.batch_id
+        assert adopted_batch.episode_id == parent_batch.episode_id
+        assert adopted_batch.order_id == parent_batch.order_id
+        assert adopted_batch.opened_at == parent_batch.opened_at
+        assert adopted_batch.original_quantity == parent_batch.original_quantity
+        assert adopted_batch.quantity == Decimal("1.5")
 
         restarted = _book(factory)
         await restarted.restore(account_label=account)
@@ -306,9 +317,9 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
         assert target_checkpoint.parent_stream_scope == old_scope
         assert target_checkpoint.parent_checkpoint_id == parent.checkpoint_id
         assert restored.total_quantity == Decimal("1.5")
-        assert restored.active_batches == adopted.active_batches
+        assert restored.batches == adopted.batches
         assert restored.projection_version == adopted.projection_version
-        assert target_checkpoint.projection.active_batches == adopted.active_batches
+        assert target_checkpoint.projection.active_batches == adopted.batches
     finally:
         await engine.dispose()
 

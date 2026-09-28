@@ -128,6 +128,9 @@ class PositionBook:
         effective_cut = None if (cut is not None and (max_ts is None or cut >= max_ts)) else cut
         cache_key = (
             getattr(self._journal, "revision", 0),
+            # Applying a recovery checkpoint changes the facts without moving the
+            # revision, so the generation must be part of the identity.
+            getattr(self._journal, "facts_generation", 0),
             effective_cut,
             self._policy_version,
             self._schema_version,

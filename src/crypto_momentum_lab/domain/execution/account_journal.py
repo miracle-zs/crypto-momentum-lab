@@ -84,6 +84,10 @@ class AccountJournal:
         self._revision: int = 0
         self._latest_event_at: datetime | None = None
         self._cached_facts_none: AccountFacts | None = None
+        # Bumped when the reported facts change without appending an event (for
+        # example when a recovery checkpoint is applied). View caches key off it
+        # in addition to the revision, which only counts appended events.
+        self._facts_generation: int = 0
         # Append-only events recorded since the last successful durable persist.
         # They are re-sent after a failed or lost transaction and dropped once
         # the commit published this journal.
@@ -94,6 +98,11 @@ class AccountJournal:
     @property
     def revision(self) -> int:
         return self._revision
+
+    @property
+    def facts_generation(self) -> int:
+        """Facts changes that are not appends; view caches key off it too."""
+        return self._facts_generation
 
     @property
     def latest_event_at(self) -> datetime | None:
@@ -289,6 +298,12 @@ class AccountJournal:
         )
         self._has_late_events = self._has_late_events or checkpoint.has_late_events
         self._revision = max(self._revision, checkpoint.source_revision)
+        # Applying a checkpoint changes the facts this journal reports (the cached
+        # facts were dropped just above) without appending an event, so the
+        # revision must not move: durable rows and the late-fact checks key off
+        # "revision > checkpoint.source_revision". Bump a separate generation so
+        # view caches still see the change.
+        self._facts_generation += 1
 
     def record_conflict(self, conflict: AccountFactConflict) -> None:
         if conflict.event_at is not None and conflict.event_at.tzinfo is None:
