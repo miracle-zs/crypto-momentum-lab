@@ -1771,3 +1771,133 @@ async def test_flat_bootstrap_reads_explicit_zero_position_rows_from_v2() -> Non
             assert paths == ["/fapi/v3/positionRisk", "/fapi/v2/positionRisk"]
         finally:
             await client.aclose()
+
+
+async def test_submit_order_resolves_zero_avg_price_via_cum_quote() -> None:
+    plan = _order_plan()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 99901,
+                "status": "FILLED",
+                "executedQty": "500",
+                "avgPrice": "0.00000",
+                "cumQuote": "100.00000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(plan)
+        assert snapshot.executed_quantity == Decimal("500")
+        assert snapshot.average_price == Decimal("0.2")
+    finally:
+        await client.aclose()
+
+
+async def test_submit_order_resolves_zero_avg_price_via_query_retry() -> None:
+    plan = _order_plan()
+    query_called = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_called
+        if request.method == "POST" and request.url.path == "/fapi/v1/order":
+            return httpx.Response(
+                200,
+                json={
+                    "clientOrderId": plan.client_order_id,
+                    "orderId": 99902,
+                    "status": "FILLED",
+                    "executedQty": "546",
+                    "avgPrice": "0.00000",
+                    "cumQuote": "0",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/fapi/v1/order":
+            query_called = True
+            return httpx.Response(
+                200,
+                json={
+                    "clientOrderId": plan.client_order_id,
+                    "orderId": 99902,
+                    "status": "FILLED",
+                    "executedQty": "546",
+                    "avgPrice": "0.1829039",
+                    "cumQuote": "99.8655300",
+                },
+            )
+        return httpx.Response(404)
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(plan)
+        assert query_called is True
+        assert snapshot.executed_quantity == Decimal("546")
+        assert snapshot.average_price == Decimal("0.1829039")
+    finally:
+        await client.aclose()
+
+
+async def test_submit_order_falls_back_to_plan_price_when_query_remains_zero() -> None:
+    plan = replace(_order_plan(), order_type="LIMIT", price=Decimal("12.5"), time_in_force="GTC")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 99903,
+                "status": "FILLED",
+                "executedQty": "10",
+                "avgPrice": "0.00000",
+                "cumQuote": "0",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(plan)
+        assert snapshot.executed_quantity == Decimal("10")
+        assert snapshot.average_price == Decimal("12.5")
+    finally:
+        await client.aclose()
+

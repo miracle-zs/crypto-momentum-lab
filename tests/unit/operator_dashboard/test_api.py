@@ -276,7 +276,7 @@ def test_static_assets_cache_headers() -> None:
 
         css_res = client.get("/static/dashboard.css")
         assert css_res.status_code == 200
-        assert "max-age=86400" in css_res.headers.get("Cache-Control", "")
+        assert "no-cache" in css_res.headers.get("Cache-Control", "")
 
         html_res = client.get("/static/index.html")
         assert html_res.status_code == 200

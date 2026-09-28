@@ -381,8 +381,13 @@ function updateChildrenFromHtml(root, html, patch) {
   const content = fragmentFromHtml(root.ownerDocument, html);
 
   if (patch) {
+    const previousMinHeight = root.style.minHeight;
+    if (root.offsetHeight > 0) {
+      root.style.minHeight = `${root.offsetHeight}px`;
+    }
     reconcileChildren(root, content);
     restoreViewState(root, state);
+    root.style.minHeight = previousMinHeight;
     return;
   }
 

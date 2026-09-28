@@ -355,7 +355,13 @@ function refreshStrategy(body, data) {
   if (focusedIndex == null) return;
   const focusedTab = [...body.querySelectorAll("[data-account-index]")]
     .find((tab) => tab.dataset.accountIndex === focusedIndex);
-  focusedTab?.focus({ preventScroll: true });
+  if (focusedTab && typeof focusedTab.getBoundingClientRect === "function") {
+    const rect = focusedTab.getBoundingClientRect();
+    const isVisible = rect.top >= 0 && rect.bottom <= (body.ownerDocument?.defaultView?.innerHeight || 800);
+    if (isVisible) {
+      focusedTab.focus({ preventScroll: true });
+    }
+  }
 }
 
 function setPaperAccountTabState(body, selectedIndex) {

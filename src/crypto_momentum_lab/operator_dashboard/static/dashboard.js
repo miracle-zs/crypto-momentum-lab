@@ -2,7 +2,7 @@ import {
   SECTIONS,
   POLL_MS,
   SECTION_POLL_MS,
-} from "./dashboard-config.js?v=20260918-perf-v3";
+} from "./dashboard-config.js?v=20260929-zerojump-v2";
 import {
   statusClass,
   normalizedStatus,
@@ -13,29 +13,40 @@ import {
   relAge,
   liveHeartbeatAge,
   liveHeartbeatStatus,
-} from "./dashboard-formatters.js";
-import { replaceChildrenFromHtml, patchChildrenFromHtml } from "./dashboard-dom.js";
-import { sectionRenderKey as buildSectionRenderKey } from "./dashboard-rendering.js";
-import { readinessStatusForSection } from "./dashboard-readiness.js";
-import { wireEcharts } from "./dashboard-chart-engine.js";
-import { emptyBox } from "./dashboard-ui.js?v=20260918-perf-v3";
-import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
-import { renderUniverse } from "./sections/universe.js";
-import { renderRisk } from "./sections/risk.js";
-import { renderCollector } from "./sections/collector.js";
+} from "./dashboard-formatters.js?v=20260929-zerojump-v2";
+import { replaceChildrenFromHtml, patchChildrenFromHtml } from "./dashboard-dom.js?v=20260929-zerojump-v2";
+import { sectionRenderKey as buildSectionRenderKey } from "./dashboard-rendering.js?v=20260929-zerojump-v2";
+import { readinessStatusForSection } from "./dashboard-readiness.js?v=20260929-zerojump-v2";
+import { wireEcharts } from "./dashboard-chart-engine.js?v=20260929-zerojump-v2";
+import { emptyBox } from "./dashboard-ui.js?v=20260929-zerojump-v2";
+import { renderOverview, updateOverviewDynamic } from "./sections/overview.js?v=20260929-zerojump-v2";
+import { renderUniverse } from "./sections/universe.js?v=20260929-zerojump-v2";
+import { renderRisk } from "./sections/risk.js?v=20260929-zerojump-v2";
+import { renderCollector } from "./sections/collector.js?v=20260929-zerojump-v2";
 import {
   renderLiveAccounts,
   wireLiveAccounts,
   updateLiveAccountsDynamic,
-} from "./sections/account.js?v=20260927-scroll-fix-v1";
-import { renderReports } from "./sections/reports.js";
-import { renderPerformance } from "./sections/performance.js?v=20260918-perf-v4";
-import { createStrategySection } from "./sections/strategy.js?v=20260918-perf-v3";
+} from "./sections/account.js?v=20260929-zerojump-v2";
+import { renderReports } from "./sections/reports.js?v=20260929-zerojump-v2";
+import { renderPerformance } from "./sections/performance.js?v=20260929-zerojump-v2";
+import { createStrategySection } from "./sections/strategy.js?v=20260929-zerojump-v2";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
 // from "./sections/strategy.js" from "./sections/overview.js" from "./sections/universe.js"
 // from "./sections/risk.js" from "./sections/reports.js" from "./dashboard-config.js?v=20260903-research-collector-v1"
+// from "./dashboard-formatters.js" from "./dashboard-dom.js" from "./dashboard-readiness.js"
+// from "./dashboard-chart-engine.js" from "./sections/collector.js"
 // Legacy detail endpoint marker retained for account range clients: api/account?equity_range=
+
+let lastUserScrollInteractionAt = 0;
+if (typeof window !== "undefined") {
+  ["wheel", "touchmove", "pointerdown", "keydown"].forEach((name) => {
+    window.addEventListener(name, () => {
+      lastUserScrollInteractionAt = Date.now();
+    }, { passive: true });
+  });
+}
 
 const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
 const sectionInFlight = new Set();
@@ -471,8 +482,22 @@ async function poll() {
       pollbar.classList.add("run");
     });
   }
+  const prePollScrollY = typeof window !== "undefined" ? window.scrollY : 0;
+  const prePollScrollX = typeof window !== "undefined" ? window.scrollX : 0;
   await Promise.allSettled(dueSections.map(refreshSection));
   renderPollState();
+  if (typeof window !== "undefined") {
+    const userInteracted = Date.now() - lastUserScrollInteractionAt < 800;
+    if (!userInteracted && prePollScrollY > 20 && window.scrollY <= 20) {
+      window.scrollTo({ left: prePollScrollX, top: prePollScrollY, behavior: "instant" });
+    }
+    requestAnimationFrame(() => {
+      const userInteractedRaf = Date.now() - lastUserScrollInteractionAt < 800;
+      if (!userInteractedRaf && prePollScrollY > 20 && window.scrollY <= 20) {
+        window.scrollTo({ left: prePollScrollX, top: prePollScrollY, behavior: "instant" });
+      }
+    });
+  }
 }
 
 function renderPollState() {
@@ -592,7 +617,7 @@ function setWorkspace(value, { selectDefault = true, updateHistory = true } = {}
   }
 }
 
-function selectView(value, { updateHistory = true } = {}) {
+function selectView(value, { updateHistory = true, userInitiated = false } = {}) {
   const id = normalizedView(value);
   syncWorkspace(workspaceForView.get(id) || "ops");
   viewCards.forEach((card) => {
@@ -615,7 +640,7 @@ function selectView(value, { updateHistory = true } = {}) {
   if (updateHistory && window.location.hash !== `#${id}`) {
     window.history.pushState(null, "", `#${id}`);
   }
-  if (updateHistory && window.scrollY > 0) {
+  if (userInitiated && window.scrollY > 0) {
     window.scrollTo({
       top: 0,
       behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
@@ -645,7 +670,7 @@ navLinks.forEach((link, id) => {
   link.addEventListener("click", (event) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    selectView(id);
+    selectView(id, { userInitiated: true });
   });
 });
 
