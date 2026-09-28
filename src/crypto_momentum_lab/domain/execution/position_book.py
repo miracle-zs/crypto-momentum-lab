@@ -101,23 +101,31 @@ class PositionBook:
         now: datetime | None = None,
     ) -> PositionView:
         """Projects the authoritative PositionView at an explicit event cut."""
+        latest = getattr(self._journal, "latest_event_at", None)
+        cov = getattr(self._journal, "_coverage", None)
+        cov_end = cov.end_at if cov is not None else None
+        max_ts = latest
+        if cov_end is not None:
+            max_ts = max(max_ts, cov_end) if max_ts is not None else cov_end
+
+        effective_cut = None if (cut is not None and (max_ts is None or cut >= max_ts)) else cut
         cache_key = (
             getattr(self._journal, "revision", 0),
-            cut,
+            effective_cut,
             self._policy_version,
             self._schema_version,
             self._durable_projection_version,
         )
         cached = self._view_cache.get(cache_key)
         if cached is None:
-            facts = self._journal.read_cut(cut)
+            facts = self._journal.read_cut(effective_cut)
             projection = self._ledger.project(facts)
 
             facts_hash = facts.compute_facts_hash()
             version_id = f"pv_{facts_hash[:60]}"
-            durable_cut_is_current_or_later = cut is None or (
+            durable_cut_is_current_or_later = effective_cut is None or (
                 self._durable_projection_event_cut is not None
-                and cut >= self._durable_projection_event_cut
+                and effective_cut >= self._durable_projection_event_cut
             )
             if (
                 self._durable_projection_version is not None

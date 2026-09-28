@@ -79,10 +79,21 @@ class AccountJournal:
         self._fill_cursor_provenance: AccountFillReconciliationCursor | None = None
         self._fill_load_provenance: AccountFillLoadProvenance | None = None
         self._revision: int = 0
+        self._latest_event_at: datetime | None = None
+        self._cached_facts_none: AccountFacts | None = None
 
     @property
     def revision(self) -> int:
         return self._revision
+
+    @property
+    def latest_event_at(self) -> datetime | None:
+        return self._latest_event_at
+
+    def _update_latest_event_at(self, dt: datetime | None) -> None:
+        if dt is not None:
+            if self._latest_event_at is None or dt > self._latest_event_at:
+                self._latest_event_at = dt
 
     @property
     def position_key(self) -> PositionKey:
@@ -173,6 +184,8 @@ class AccountJournal:
             )
 
         self._fills_by_id[fill.trade_id] = fill
+        self._update_latest_event_at(fill.trade_at)
+        self._cached_facts_none = None
         self._revision += 1
         return True
 
@@ -192,6 +205,8 @@ class AccountJournal:
                 "Snapshot position side does not match journal position key"
             )
         self._snapshots.append(snapshot)
+        self._update_latest_event_at(snapshot.observed_at)
+        self._cached_facts_none = None
         self._revision += 1
 
     def record_boundary(self, boundary: ExitOrderSubmissionFact) -> None:
@@ -203,6 +218,8 @@ class AccountJournal:
         if boundary.position_side != self._position_key.position_side:
             raise ValueError("Boundary position side does not match journal key")
         self._boundaries.append(boundary)
+        self._update_latest_event_at(boundary.submitted_at)
+        self._cached_facts_none = None
         self._revision += 1
 
     def set_coverage(self, coverage: FactCoverageInterval) -> None:
@@ -218,6 +235,9 @@ class AccountJournal:
             self.record_fill_load_provenance(coverage.load_provenance)
         if self._coverage != coverage:
             self._coverage = coverage
+            if coverage.end_at is not None:
+                self._update_latest_event_at(coverage.end_at)
+            self._cached_facts_none = None
             self._revision += 1
 
     def set_checkpoint(self, checkpoint: PositionCheckpoint) -> None:
@@ -227,6 +247,8 @@ class AccountJournal:
                 f"match {self._position_key.canonical_id}"
             )
         self._checkpoint = checkpoint
+        self._update_latest_event_at(checkpoint.event_cut)
+        self._cached_facts_none = None
         self._revision += 1
 
     def set_recovery_checkpoint(
@@ -243,6 +265,8 @@ class AccountJournal:
         if checkpoint.coverage is not None:
             self.set_coverage(checkpoint.coverage)
         self._recovery_checkpoint = checkpoint
+        self._update_latest_event_at(checkpoint.event_cut)
+        self._cached_facts_none = None
         self._high_watermark_trade_at = max(
             filter(
                 None,
@@ -260,6 +284,9 @@ class AccountJournal:
         if conflict.event_at is not None and conflict.event_at.tzinfo is None:
             raise ValueError("Conflict event time must be timezone-aware")
         self._fact_conflicts.append(conflict)
+        if conflict.event_at is not None:
+            self._update_latest_event_at(conflict.event_at)
+        self._cached_facts_none = None
         self._revision += 1
 
     def record_integrity_issue(self, issue: str) -> None:
@@ -267,6 +294,7 @@ class AccountJournal:
         if not normalized:
             raise ValueError("integrity issue must not be empty")
         self._integrity_issues.append(normalized)
+        self._cached_facts_none = None
         self._revision += 1
 
     def record_fill_cursor(
@@ -286,6 +314,8 @@ class AccountJournal:
             raise ValueError("fill cursor provenance cannot move backwards")
         if cursor != self._fill_cursor_provenance:
             self._fill_cursor_provenance = cursor
+            self._update_latest_event_at(cursor.last_checked_at)
+            self._cached_facts_none = None
             self._revision += 1
 
     def record_fill_load_provenance(
@@ -321,6 +351,8 @@ class AccountJournal:
         elif provenance.request_from_id is not None:
             raise ValueError("new time-origin fill load must start without a cursor")
         self._fill_load_provenance = provenance
+        self._update_latest_event_at(provenance.observed_at)
+        self._cached_facts_none = None
         self._revision += 1
 
     @classmethod
@@ -366,6 +398,19 @@ class AccountJournal:
             cut.revision,
             cut.checkpoint.source_revision if cut.checkpoint is not None else 0,
         )
+        timestamps = [
+            *(fill.trade_at for fill in journal._fills_by_id.values()),
+            *(s.observed_at for s in journal._snapshots),
+            *(b.submitted_at for b in journal._boundaries),
+            *(c.event_at for c in journal._fact_conflicts if c.event_at is not None),
+        ]
+        if journal._recovery_checkpoint is not None:
+            timestamps.append(journal._recovery_checkpoint.event_cut)
+        if journal._checkpoint is not None:
+            timestamps.append(journal._checkpoint.event_cut)
+        if journal._coverage is not None and journal._coverage.end_at is not None:
+            timestamps.append(journal._coverage.end_at)
+        journal._latest_event_at = max(timestamps, default=None)
         return journal
 
     def append(self, envelope: AccountFactEnvelope) -> None:
@@ -419,7 +464,20 @@ class AccountJournal:
         """Reads immutable AccountFacts bounded by cut (all events <= cut)."""
         if cut is not None and (cut.tzinfo is None or cut.utcoffset() is None):
             raise ValueError("cut must be timezone-aware")
+
+        latest = self._latest_event_at
+        cov = self._coverage
+        cov_end = cov.end_at if cov is not None else None
+        max_ts = latest
+        if cov_end is not None:
+            max_ts = max(max_ts, cov_end) if max_ts is not None else cov_end
+
+        if cut is not None and (max_ts is None or cut >= max_ts):
+            cut = None
+
         if cut is None:
+            if self._cached_facts_none is not None:
+                return self._cached_facts_none
             fills = tuple(self._fills_by_id.values())
             snapshots = tuple(self._snapshots)
             boundaries = tuple(self._boundaries)
@@ -515,7 +573,7 @@ class AccountJournal:
             or bool(recovery_checkpoint and recovery_checkpoint.has_synthetic_fills)
         )
 
-        return AccountFacts(
+        facts = AccountFacts(
             position_key=self._position_key,
             fills=fills,
             snapshots=snapshots,
@@ -534,6 +592,9 @@ class AccountJournal:
             fill_cursor_provenance=cursor_provenance,
             fill_load_provenance=fill_load_provenance,
         )
+        if cut is None:
+            self._cached_facts_none = facts
+        return facts
 
 
 def _same_fill(first: AccountFillEvent, second: AccountFillEvent) -> bool:

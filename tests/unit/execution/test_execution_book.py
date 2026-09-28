@@ -1473,3 +1473,30 @@ def test_account_facts_compute_facts_hash_caching():
     assert getattr(facts, "_cached_facts_hash", None) == h1
     h2 = facts.compute_facts_hash()
     assert h1 == h2
+
+
+def test_position_book_get_view_caches_advancing_future_cuts():
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+
+    key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
+    journal = AccountJournal(key)
+    book = PositionBook(journal)
+
+    cut1 = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    cut2 = datetime(2026, 9, 28, 12, 0, 15, tzinfo=UTC)
+    cut3 = datetime(2026, 9, 28, 12, 0, 30, tzinfo=UTC)
+
+    view1 = book.get_view(cut1)
+    assert len(book._view_cache) == 1
+
+    view2 = book.get_view(cut2)
+    assert len(book._view_cache) == 1
+    assert view2.projection_version == view1.projection_version
+
+    view3 = book.get_view(cut3)
+    assert len(book._view_cache) == 1
+    assert view3.projection_version == view1.projection_version
+
