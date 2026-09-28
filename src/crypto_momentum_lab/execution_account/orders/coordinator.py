@@ -958,6 +958,8 @@ class OrderExecutionCoordinator:
     ) -> None:
         if not self.is_execution_book_enabled:
             return
+        if self._execution_book.get_outbox(plan.client_order_id) is None:
+            return
         if before_exchange_post or isinstance(
             error, (OrderPreSubmissionError, ExchangeOrderRejectedError)
         ):
@@ -1063,9 +1065,9 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
-                await self._ensure_reservation(plan)
-                await self._mark_dispatching_if_accepted(plan)
                 try:
+                    await self._ensure_reservation(plan)
+                    await self._mark_dispatching_if_accepted(plan)
                     prepared = await prepare_submission()
                 except Exception as prepare_err:
                     await self._record_submission_failure(

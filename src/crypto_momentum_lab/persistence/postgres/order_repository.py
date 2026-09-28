@@ -1163,7 +1163,6 @@ class PostgresOrderRepository:
         if (
             existing.client_order_id != client_order_id
             or existing.command != command
-            or existing.requested_at != requested_at
         ):
             raise ValueError(
                 f"execution command {command_id} conflicts with its durable identity"

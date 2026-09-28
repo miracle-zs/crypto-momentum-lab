@@ -1935,11 +1935,18 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if (
         "already exists in terminal status" in msg
         or "already bound to a different order" in msg
+        or "is in non-dispatchable state" in msg
+        or "Execution command was not durably accepted" in msg
+        or "conflicts with its durable identity" in msg
     ):
         return True
     if "ReservationConflictError" in type(error).__name__:
         return True
-    if "OrderPreSubmissionError" in type(error).__name__ and "already exists" in msg:
+    if "OrderPreSubmissionError" in type(error).__name__ and (
+        "already exists" in msg
+        or "non-dispatchable" in msg
+        or "durably accepted" in msg
+    ):
         return True
     cause = getattr(error, "__cause__", None)
     if cause is not None and isinstance(cause, Exception):

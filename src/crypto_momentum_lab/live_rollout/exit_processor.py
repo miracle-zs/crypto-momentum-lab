@@ -1080,6 +1080,9 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if (
         "already exists in terminal status" in message
         or "already bound to a different order" in message
+        or "is in non-dispatchable state" in message
+        or "Execution command was not durably accepted" in message
+        or "conflicts with its durable identity" in message
     ):
         return True
     cause = error.__cause__
