@@ -27,6 +27,7 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution import (
+    DispatchState,
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
     ExecutionEvidence,
@@ -985,7 +986,12 @@ class OrderExecutionCoordinator:
             # In-memory coordinators are used by isolated scheduler tests and
             # shadow adapters. Durable live wiring must supply both repositories.
             return
-        await self._execution_book.mark_dispatching(plan.client_order_id)
+        if entry.state == DispatchState.PREPARED:
+            await self._execution_book.mark_dispatching(plan.client_order_id)
+        elif entry.state in (DispatchState.REJECTED, DispatchState.TERMINAL):
+            raise OrderPreSubmissionError(
+                f"execution command {plan.client_order_id} is in non-dispatchable state {entry.state.value}"
+            )
 
     async def _observe_returned_order_result(
         self,
