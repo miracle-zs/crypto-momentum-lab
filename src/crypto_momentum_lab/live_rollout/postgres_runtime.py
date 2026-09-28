@@ -647,17 +647,25 @@ class PostgresLiveContextProvider(LiveContextReader):
                 and view.reconciliation_gap != 0
             )
         )
-        # Old context classification remains useful for pending order and
-        # ownership hazards, but a symbol with Book-backed lots is no longer
-        # classified from legacy order/fill reconstruction.
+        stale_book_symbols = book_position_symbols - context.open_position_symbols
+        if stale_book_symbols:
+            log.warning(
+                "live_book_positions_absent_from_account_view",
+                account_label=self._account_label,
+                count=len(stale_book_symbols),
+                sample=sorted(stale_book_symbols)[:5],
+            )
+        # The account view determines current exposure. Book-only residuals
+        # are durable accounting drift, not live positions to exit or subscribe
+        # to. A real account position without a matching Book lot remains
+        # unmanaged and still triggers the protective halt.
         unmanaged = (
             frozenset(context.unmanaged_position_symbols)
-            | book_position_symbols
             | context.open_position_symbols
         ) - active_symbols
         self._cached_book_bucket_end = state.bucket_end
         self._cached_book_unresolved = context.unresolved_orders
-        visible_position_symbols = book_position_symbols | context.open_position_symbols
+        visible_position_symbols = context.open_position_symbols
         self._cached_book_result = (visible_position_symbols, managed, unmanaged)
         return replace(
             context,

@@ -1097,8 +1097,22 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
         )
 
         assert result.managed_positions == ()
-        assert result.unmanaged_position_symbols == frozenset({"BTCUSDT"})
-        assert result.open_position_symbols == frozenset({"BTCUSDT"})
+        assert result.unmanaged_position_symbols == frozenset()
+        assert result.open_position_symbols == frozenset()
+
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._execution_book = Book()
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset({"ETHUSDT"}),
+    )
+    result = await provider._with_execution_book(
+        context,
+        SimpleNamespace(bucket_end=NOW),
+    )
+    assert result.open_position_symbols == frozenset({"ETHUSDT"})
+    assert result.unmanaged_position_symbols == frozenset({"ETHUSDT"})
 
 
 def test_context_invalidation_preserves_symbol_rules() -> None:
