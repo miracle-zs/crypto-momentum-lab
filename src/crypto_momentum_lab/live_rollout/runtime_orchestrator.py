@@ -56,6 +56,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySide,
 )
+from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
 from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
@@ -581,6 +582,7 @@ async def run_live_daemon(
             ),
             clock=lambda: datetime.now(tz=UTC),
         )
+        loaded_trading_rules: dict[str, SymbolTradingRules] = {}
         try:
             loaded_trading_rules = await _load_trading_rules(market_factory, None)
             trading_rules_hash = compute_trading_rules_hash(loaded_trading_rules)
@@ -1204,6 +1206,23 @@ async def run_live_daemon(
         entry_universe_snapshot_provider = (
             entry_runtime.entry_universe_snapshot_provider
         )
+
+        def _resolve_symbol_lot_rules(sym: str) -> SymbolLotRules | None:
+            rules = loaded_trading_rules.get(sym)
+            if rules is None and live_repository is not None:
+                cached = getattr(live_repository, "_cached_rules", {})
+                rules = cached.get(sym)
+            if rules is not None:
+                return SymbolLotRules(
+                    symbol=rules.symbol,
+                    tick_size=rules.tick_size,
+                    step_size=rules.step_size,
+                    min_quantity=rules.min_quantity,
+                    max_quantity=rules.max_quantity,
+                    min_notional=rules.min_notional,
+                )
+            return None
+
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1249,7 +1268,10 @@ async def run_live_daemon(
                     strategy_name,
                     fact_provider=fact_source.build,
                     durable_decision_commit=fact_source.commit_decision,
-                    effective_policy=runtime_plan.effective_policy,
+                    effective_policy=replace(
+                        runtime_plan.effective_policy,
+                        symbol_lot_rules=_resolve_symbol_lot_rules,
+                    ),
                     clock_sequence_provider=lambda state: max(
                         1, state.source_event_count
                     ),
