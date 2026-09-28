@@ -2490,6 +2490,26 @@ class ExecutionBook:
                 raise RuntimeError(
                     "Execution persistence failed; restore is required before ingest"
                 )
+            # A restored position from an earlier stream cannot be adopted by
+            # an ordinary snapshot. Reject it before cloning its journal or
+            # opening a transaction; account snapshots may contain thousands
+            # of historical flat symbols on every refresh.
+            current_scope = self._stream_scopes.get(canon)
+            if (
+                current_scope is not None
+                and current_scope != scope
+                and (
+                    evidence.coverage_evidence is None
+                    or evidence.fill_load_provenance is None
+                )
+            ):
+                return EvidenceConflict(
+                    evidence_id=evidence.evidence_id,
+                    reason=(
+                        "stream epoch changed without a complete "
+                        "source-anchored fill scan"
+                    ),
+                )
             candidate = self._staged_copy(key=key)
             try:
                 async with self._execution_unit_of_work.transaction(key) as tx:

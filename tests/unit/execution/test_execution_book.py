@@ -44,6 +44,42 @@ def _scope() -> ExecutionScope:
 
 
 @pytest.mark.asyncio
+async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> None:
+    from crypto_momentum_lab.domain.execution.execution_book import EvidenceConflict
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class NoTransaction:
+        def transaction(self, key):
+            raise AssertionError("old-stream snapshot opened a transaction")
+
+    book = ExecutionBook(execution_unit_of_work=NoTransaction())
+    book._persistence_failed = False
+    key = _scope().to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old-epoch"
+    )
+
+    def reject_copy(*, key):
+        raise AssertionError("old-stream snapshot cloned the execution book")
+
+    book._staged_copy = reject_copy
+    result = await book.observe(
+        ExecutionEvidence(
+            evidence_id="new-epoch-snapshot",
+            scope=_scope(),
+            observed_at=_dt(10, 0),
+            stream_id="account_event_hub",
+            stream_epoch="new-epoch",
+            sequence=1,
+        )
+    )
+    assert isinstance(result, EvidenceConflict)
+    assert "stream epoch changed" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_execution_book_read_deterministic_view() -> None:
     book = ExecutionBook()
     scope = _scope()
@@ -1499,4 +1535,3 @@ def test_position_book_get_view_caches_advancing_future_cuts():
     view3 = book.get_view(cut3)
     assert len(book._view_cache) == 1
     assert view3.projection_version == view1.projection_version
-
