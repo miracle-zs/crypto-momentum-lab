@@ -2036,6 +2036,111 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .market-panel > .block { margin-top: 18px; }
 
 /* --- Module: ./styles/sections/risk.css --- */
+.risk-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.risk-meta-strip .chip,
+.risk-meta-strip .chip-source,
+.risk-meta-strip .chip-age,
+.risk-meta-strip .chip-coverage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font: 500 11px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.risk-meta-strip .chip-source {
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--brand) 25%, var(--line));
+}
+
+.risk-meta-strip .chip-source.halted {
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 10%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--down) 25%, var(--line));
+}
+
+.risk-meta-strip .chip-age {
+  color: var(--faint);
+}
+
+.risk-meta-strip .chip-coverage {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--brand) 20%, var(--line));
+}
+
+.alert-coverage-error {
+  border-color: color-mix(in srgb, var(--down) 40%, var(--line));
+  background: color-mix(in srgb, var(--down) 8%, var(--surface-2));
+  margin-bottom: 12px;
+}
+
+.alert-missing-symbols {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface-2));
+  margin-bottom: 12px;
+}
+
+.risk-coverage-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.risk-coverage-bar .coverage-tag {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+
+.risk-coverage-bar .coverage-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.risk-coverage-bar .symbol-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--brand) 12%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--brand) 25%, transparent);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.risk-coverage-bar .symbol-tag.missing {
+  background: color-mix(in srgb, var(--warn) 20%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  color: var(--warn);
+  font-weight: 600;
+}
+
 .risk-priority-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(230px, .75fr);
