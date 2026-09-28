@@ -152,15 +152,24 @@ export function captureViewState(root) {
     const candidate = doc.elementFromPoint(Math.min(200, (view.innerWidth || 400) / 2), 100);
     const anchorEl = candidate?.closest?.("[data-account-index], [data-live-account-label], tr[data-row-key], [data-state-key], .card, h2, h3");
     if (anchorEl && typeof anchorEl.getBoundingClientRect === "function") {
-      const rect = anchorEl.getBoundingClientRect();
-      anchor = {
-        selector: anchorEl.id ? `#${anchorEl.id}` : null,
-        stateKey: anchorEl.dataset?.stateKey || null,
-        accountIndex: anchorEl.dataset?.accountIndex || null,
-        liveAccountLabel: anchorEl.dataset?.liveAccountLabel || null,
-        rowKey: anchorEl.dataset?.rowKey || null,
-        topOffset: rect.top,
-      };
+      const selector = anchorEl.id ? `#${anchorEl.id}` : null;
+      const stateKey = anchorEl.dataset?.stateKey || null;
+      const accountIndex = anchorEl.dataset?.accountIndex || null;
+      const liveAccountLabel = anchorEl.dataset?.liveAccountLabel || null;
+      const rowKey = anchorEl.dataset?.rowKey || null;
+      if (selector || stateKey || accountIndex || liveAccountLabel || rowKey) {
+        const rect = anchorEl.getBoundingClientRect();
+        if (rect.width > 0 || rect.height > 0) {
+          anchor = {
+            selector,
+            stateKey,
+            accountIndex,
+            liveAccountLabel,
+            rowKey,
+            topOffset: rect.top,
+          };
+        }
+      }
     }
   }
 
@@ -186,9 +195,13 @@ export function captureViewState(root) {
 export function restoreViewState(root, state) {
   if (!state) return;
   if (root?.isConnected === false) return;
-  if (state.interactionVersion != null && state.interactionVersion !== userInteractionVersion) return;
   const doc = root.ownerDocument || root;
   const view = doc?.defaultView;
+  if (state.interactionVersion != null && state.interactionVersion !== userInteractionVersion) {
+    const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
+    const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
+    if (currentY !== 0 || state.pageY <= 0) return;
+  }
 
   // 1. Restore disclosures
   const disclosureStates = new Map(
@@ -214,9 +227,18 @@ export function restoreViewState(root, state) {
     container.scrollTop = saved.top;
   });
 
+  // If this root is currently inside a hidden container (e.g. background polling of an inactive tab),
+  // never alter window-level scroll!
+  const isHiddenRoot = Boolean(
+    root.closest?.("[hidden]") ||
+    (typeof root.offsetParent !== "undefined" && root.offsetParent === null && root !== doc?.body && root !== doc?.documentElement)
+  );
+  if (isHiddenRoot) return;
+
   // 3. Compensate from the current position so independent roots can release
   // their height locks in the same frame without replaying one stale scrollY.
   const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
+  const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
   let targetY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY;
   let resolvedAnchor = false;
 
@@ -230,17 +252,19 @@ export function restoreViewState(root, state) {
 
     if (targetAnchor && typeof targetAnchor.getBoundingClientRect === "function") {
       const currentRect = targetAnchor.getBoundingClientRect();
-      const diff = currentRect.top - state.anchor.topOffset;
-      const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY;
-      targetY = Math.max(0, currentY + (Math.abs(diff) > 2 ? diff : 0));
-      resolvedAnchor = true;
+      const isVisible = (currentRect.width > 0 || currentRect.height > 0) &&
+        (targetAnchor.offsetParent !== null || targetAnchor === doc?.body || targetAnchor === doc?.documentElement);
+      if (isVisible) {
+        const diff = currentRect.top - state.anchor.topOffset;
+        targetY = Math.max(0, currentY + (Math.abs(diff) > 2 ? diff : 0));
+        resolvedAnchor = true;
+      }
     }
   }
 
   let applyVerticalScroll = resolvedAnchor;
   if (!resolvedAnchor && state.layoutRelease?.rootAboveAnchorPoint
       && typeof root?.getBoundingClientRect === "function") {
-    const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? state.pageY;
     const currentHeight = root.getBoundingClientRect().height;
     const ownHeightDelta = currentHeight - state.layoutRelease.rootHeight;
     const nativeScrollDelta = currentY - state.layoutRelease.pageY;
@@ -249,6 +273,13 @@ export function restoreViewState(root, state) {
       targetY = Math.max(0, currentY + remainingDelta);
       applyVerticalScroll = true;
     }
+  }
+
+  // Fallback: If no anchor survived and the browser collapsed scroll to top (currentY === 0)
+  // while the captured scroll position was non-zero, restore state.pageY to prevent jumping to top.
+  if (!applyVerticalScroll && currentY === 0 && state.pageY > 0) {
+    targetY = state.pageY;
+    applyVerticalScroll = true;
   }
 
   if (applyVerticalScroll && scrollingElement) {
