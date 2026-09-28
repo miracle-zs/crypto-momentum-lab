@@ -2,7 +2,7 @@
 
 本轮复核结论：四项候选都已实现。账本持久化只发送新增的 append-only 事实（delta），首次全量写入仍按 500 条分块；行情补空桶用 watermark 门禁跳过同桶扫描；事务候选改为容器级拷贝、共享冻结事实；有持仓时只读取当前敞口 scope，Book-only 漂移扫描改为独立周期运行。每项剩余的 O(history) 成本或语义约束见对应章节。
 
-首轮审查基线是 `dfa35e39e2f15da5ab85e82ec60b63b0eecc5ebb`；复核起点 HEAD 为 `91395f54c19fa10564971fca903d03affbcd8a6b`，本轮修复实现基于其后的 `6aac14a`。审查受 Git 管理的行情、执行账本、运行上下文、持久化与前端看板代码；不是全仓库无遗漏证明。未连接服务器、部署或运行交易。
+首轮审查基线是 `dfa35e39e2f15da5ab85e82ec60b63b0eecc5ebb`；复核起点 HEAD 为 `91395f54c19fa10564971fca903d03affbcd8a6b`，本轮修复实现基于其后的 `6aac14a`。审查受 Git 管理的行情、执行账本、运行上下文、持久化与前端看板代码；不是全仓库无遗漏证明。未部署、未运行交易；生产侧只做了只读核对（部署版本、容器状态与库统计），未修改任何生产数据。
 
 ## 运行结构与已有保护
 
@@ -53,6 +53,10 @@ flowchart LR
 | 10,000 | 134.79 ms | 120.7 ms | 0.028 ms |
 
 deepcopy 与摘要两组数字口径不同（前者来自 `benchmark_execution.py` 的合成 snapshots，后者是合成 fills 的 `read_cut` 重建加摘要），但同机、同量级可比：10,000 条事实时一次观察约从 **252 ms 降到 135 ms**，**剩余的摘要成本与被消除的 deepcopy 同量级**。因此本节的收益是“把每次观察中约一半的同步 CPU（历史行构造、编码、SQL 传输）移出”，不是消除了历史规模开销。容器拷贝一列波动较大（100 条处多次运行在 0.003–0.019 ms 之间），但始终比另两列小几个数量级。
+
+**线上规模核对（生产库只读查询，2026-09-29）**：`position_fact_journal_events` 共 20,632 行、6,685 个 scope；构成是 `facts_state` 10,314 + `snapshot` 10,307 + `fill` 9 + `integrity_issue` 2，每 scope 中位 2 行、最大 274 行。`pk_position_fact_journal_events (event_record_id)` 唯一索引存在，说明 delta 依赖的 `ON CONFLICT DO NOTHING` 幂等前提在线上成立。
+
+这同时校正了上表的适用范围：10,000 条事实是压力外推，线上单仓历史最多 274 行，所以 delta 在**当前**线上规模每次观察少发送的是“最多数百行”；`snapshot` 与 `facts_state` 各占约一半，说明重复发送的主要对象正是快照，而 `facts_state`（每次观察一行、与观察次数同阶）无论如何都要写。只有单仓历史继续增长，§1 消除的 O(H) 客户端成本才会成为主要矛盾。
 
 若以后用持久化树/分块摘要实现结构共享和增量校验，必须明确摘要协议版本与迁移；Merkle 根不能直接替换当前序列化内容的 hash 而仍声称版本身份相同。生产 PostgreSQL 的端到端耗时、WAL 与磁盘负载仍未测量。
 
@@ -156,8 +160,10 @@ Book-only drift 诊断没有删除，而是移到独立周期：[`_observe_book_
 
 `readcut_probe.py` 量化 delta 之后仍留在每次观察上的 O(历史) 成本：`read_cut()` 重建、`compute_facts_hash()` 与 `copy_for_transaction()` 容器拷贝（见第 1 节表格）。它同样只用合成数据、不连数据库，运行方式为 `PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/readcut_probe.py`。
 
-本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。前端改动无法用 node 验证（本机无 node），只做了 JavaScriptCore 探针执行与逐行核对；没有运行 PostgreSQL 集成测试，因此数据库端事务、冲突处理和端到端收益仍待验证。
+本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
+
+前端改动无法用 node 验证（本机无 node）：P0 与 P1 均用 JavaScriptCore（`osascript -l JavaScript`）执行从 `dashboard.js` / `dashboard-ui.js` 抽取的真实函数体，并做语法解析检查。
 
 下一轮的上线判断应使用部署版本和真实规模：单仓事实数、每次 observation 的 SQL 次数、锁等待/持锁时间、事件循环 lag、行情输入速率和 dense 扫描次数，以及端到端处理延迟。数据库方案需要真实 PostgreSQL 上事务回滚、并发冲突、恢复重放验证（尤其要确认 delta 在回滚后重发、以及 `facts_state` 行仍保持完整语义）。索引修改应基于实际查询计划；不能因为查询慢就直接新增 B-tree。复合索引依赖过滤条件与列序，见 [PostgreSQL 官方说明](https://www.postgresql.org/docs/current/indexes-multicolumn.html)。
 
-当前剩余优先级：把每次观察仍需的完整 `read_cut()` + `compute_facts_hash()` 成本降下来（需要分块摘要与版本化摘要协议）；把全局 mutation lock 换成安全的按仓位划分提交范围；Book 活跃仓位索引以取代按 symbol 过滤的读取。每桶一次的行情全量扫描已门禁化；只有生产指标显示仍是热点时，才评估最小堆或时间轮。当前没有服务器资源画像，无法断言剩余问题的线上优先级。
+当前剩余优先级：把每次观察仍需的完整 `read_cut()` + `compute_facts_hash()` 成本降下来（需要分块摘要与版本化摘要协议）；把全局 mutation lock 换成安全的按仓位划分提交范围；Book 活跃仓位索引以取代按 symbol 过滤的读取。每桶一次的行情全量扫描已门禁化；只有生产指标显示仍是热点时，才评估最小堆或时间轮。目前只有 journal 表规模与部署版本这两项线上画像（见 §1 与验证范围），缺少 CPU、事件循环 lag 与 SQL 时延画像，因此仍无法断言剩余问题的线上优先级。
