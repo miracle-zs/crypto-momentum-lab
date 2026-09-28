@@ -223,6 +223,80 @@ async def test_flat_position_act_when_head_is_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flat_position_act_live_without_coverage_succeeds() -> None:
+    from contextlib import asynccontextmanager
+    from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class FakeTx:
+        def __init__(self):
+            self.persisted_head = None
+            self.saved_reservations = None
+
+        async def load_head(self, key):
+            return None
+
+        async def save_reservations(self, reservations, **kwargs):
+            self.saved_reservations = reservations
+
+        async def persist_head(self, **kwargs):
+            self.persisted_head = kwargs
+            return 1
+
+        async def upsert_outbox(self, **kwargs):
+            pass
+
+    class FakeUow:
+        def __init__(self):
+            self.tx = FakeTx()
+
+        @asynccontextmanager
+        async def transaction(self, key):
+            yield self.tx
+
+    uow = FakeUow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="ALGOUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    key = scope.to_position_key()
+    stream_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
+    )
+    book._stream_scopes[key.canonical_id] = stream_scope
+    book._ensure_journal(key)
+
+    # In live trading, a clean flat position has stream scope but NO coverage.
+    view = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
+    )
+    assert view.is_ready_for_trade is True
+
+    req = ExecutionRequest(
+        request_id="entry-algo-1",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-1",
+        decision_ref="dec-algo-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("100.0"),
+    )
+    result = await book.act(req)
+    assert isinstance(result, Accepted)
+    assert uow.tx.persisted_head is not None
+    assert uow.tx.persisted_head["expected_revision"] == 0
+    assert book._head_revisions[key.canonical_id] == 1
+
+
+@pytest.mark.asyncio
 async def test_flat_position_act_can_adopt_older_flat_head() -> None:
     from contextlib import asynccontextmanager
     from crypto_momentum_lab.domain.execution.execution_book import Accepted

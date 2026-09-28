@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -420,3 +421,191 @@ def test_filter_evaluates_open_position_exit_when_candidates_empty() -> None:
     assert res.next_policy_state.is_in_cooldown(
         "BTCUSDT", datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
     )
+
+
+def test_filter_admits_flat_stream_position_without_coverage() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="ALGOUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    stream_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="live_ep1"
+    )
+    view = PositionView(
+        key=key,
+        projection_version="pv1",
+        input_revision=1,
+        event_cut=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        policy_version="v1",
+        schema_version="v1",
+        coverage=None,
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.CATCHING_UP,
+        stream_scope=stream_scope,
+        diagnostics=("No durable coverage evidence exists for stream scope",),
+    )
+    assert view.is_ready_for_trade is True
+
+    frozen = FrozenDecisionInputs(
+        position_view=view,
+        cash_balance=Decimal("1000"),
+        policy_state=PolicyState(policy_version=1),
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+    )
+    from crypto_momentum_lab.domain.strategy import (
+        EntryType,
+        OrderIntentCandidate,
+        StrategyDecision,
+        StrategySignal,
+        StrategySide,
+    )
+
+    filt = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        target_notional=Decimal("100"),
+        fact_provider=lambda state: frozen,
+    )
+    state_algo = replace(_state(), symbol="ALGOUSDT")
+    sig_algo = StrategySignal(
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="ALGOUSDT",
+        side=StrategySide.LONG,
+        detected_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        source_state_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        reason="momentum_signal",
+        features={},
+        reference_prices={},
+    )
+    cand_algo = OrderIntentCandidate(
+        candidate_id="cand_algo_1",
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="ALGOUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=Decimal("100"),
+        desired_notional=Decimal("500"),
+        reduce_only=False,
+        expires_at=datetime(2026, 9, 28, 10, 1, tzinfo=UTC),
+        created_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        reason="momentum_entry",
+        features={"business_value": "01.00"},
+    )
+    dec = StrategyDecision(signals=(sig_algo,), candidates=(cand_algo,), rejections=())
+
+    out = filt(dec, state_algo)
+    # The candidate is evaluated and admitted (candidate preserved)
+    assert len(out.candidates) == 1
+    assert out.candidates[0].symbol == "ALGOUSDT"
+    assert len(out.rejections) == 0
+
+
+def test_filter_rejects_catching_up_position_with_other_diagnostics() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.strategy import (
+        EntryType,
+        OrderIntentCandidate,
+        StrategyDecision,
+        StrategySignal,
+        StrategySide,
+    )
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="ALGOUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    stream_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="live_ep1"
+    )
+    view = PositionView(
+        key=key,
+        projection_version="pv1",
+        input_revision=1,
+        event_cut=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        policy_version="v1",
+        schema_version="v1",
+        coverage=None,
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.CATCHING_UP,
+        stream_scope=stream_scope,
+        diagnostics=("Sequence gap detected",),
+    )
+    assert view.is_ready_for_trade is False
+
+    frozen = FrozenDecisionInputs(
+        position_view=view,
+        cash_balance=Decimal("1000"),
+        policy_state=PolicyState(policy_version=1),
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+    )
+    filt = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        target_notional=Decimal("100"),
+        fact_provider=lambda state: frozen,
+    )
+    state_algo = replace(_state(), symbol="ALGOUSDT")
+    sig_algo = StrategySignal(
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="ALGOUSDT",
+        side=StrategySide.LONG,
+        detected_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        source_state_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        reason="momentum_signal",
+        features={},
+        reference_prices={},
+    )
+    cand_algo = OrderIntentCandidate(
+        candidate_id="cand_algo_1",
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="ALGOUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=Decimal("100"),
+        desired_notional=Decimal("500"),
+        reduce_only=False,
+        expires_at=datetime(2026, 9, 28, 10, 1, tzinfo=UTC),
+        created_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+        reason="momentum_entry",
+        features={"business_value": "01.00"},
+    )
+    dec = StrategyDecision(signals=(sig_algo,), candidates=(cand_algo,), rejections=())
+
+    out = filt(dec, state_algo)
+    assert len(out.candidates) == 0
+    assert len(out.rejections) == 1
+    assert out.rejections[0].details["raw_reason"] == "position_health_catching_up"
+
+

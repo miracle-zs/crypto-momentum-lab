@@ -1016,13 +1016,13 @@ def create_authoritative_decision_filter(
         pos_view = frozen.position_view
         if pos_view.key.symbol != state.symbol:
             return _reject_all(decision, state, "frozen_inputs_symbol_mismatch")
-        if pos_view.health_status != PositionHealthStatus.READY:
-            return _reject_all(
-                decision,
-                state,
-                f"position_health_{pos_view.health_status.value.lower()}",
-            )
         if not pos_view.is_ready_for_trade:
+            if pos_view.health_status != PositionHealthStatus.READY:
+                return _reject_all(
+                    decision,
+                    state,
+                    f"position_health_{pos_view.health_status.value.lower()}",
+                )
             return _reject_all(
                 decision,
                 state,
