@@ -898,12 +898,9 @@ class PositionView:
             self.health_status == PositionHealthStatus.READY
             and self.is_comparable
         )
-        is_flat_stream_no_coverage = (
+        is_clean_stream_no_coverage = (
             self.stream_scope is not None
-            and len(self.batches) == 0
-            and self.total_quantity == Decimal("0")
             and self.discrepancy is None
-            and len(self.reservations) == 0
             and self.health_status == PositionHealthStatus.CATCHING_UP
             and self.coverage is None
             and bool(self.diagnostics)
@@ -913,7 +910,7 @@ class PositionView:
             )
         )
         return (
-            (is_ready_health or is_flat_stream_no_coverage)
+            (is_ready_health or is_clean_stream_no_coverage)
             and (
                 self.reconciliation_gap is None
                 or self.reconciliation_gap == Decimal("0")
@@ -923,6 +920,6 @@ class PositionView:
                 has_confirmed_coverage
                 or (self.coverage is None and self.key.environment != "live")
                 or self.zero_position_snapshot_confirmed
-                or is_flat_stream_no_coverage
+                or is_clean_stream_no_coverage
             )
         )

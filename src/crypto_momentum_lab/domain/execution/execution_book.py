@@ -102,6 +102,18 @@ def _digest_json_payload(payload: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object]:
+    payload = asdict(evidence)
+    payload.pop("observed_at", None)
+    order_event = payload.get("order_event")
+    if isinstance(order_event, dict):
+        order_event.pop("occurred_at", None)
+    cumulative_order = payload.get("cumulative_order")
+    if isinstance(cumulative_order, dict):
+        cumulative_order.pop("observed_at", None)
+    return payload
+
+
 def _execution_head_payload(
     book: ExecutionBook,
     key: PositionKey,
@@ -2833,7 +2845,7 @@ class ExecutionBook:
                             stream_epoch=scope.stream_epoch,
                             evidence=ExecutionEvidenceIdentity(
                                 evidence_id=evidence.evidence_id,
-                                payload_digest=_digest_json_payload(asdict(evidence)),
+                                payload_digest=_digest_json_payload(_canonical_evidence_payload(evidence)),
                                 accepted_at=evidence.observed_at,
                                 sequence=evidence.sequence,
                             ),

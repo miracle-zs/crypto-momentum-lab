@@ -358,6 +358,108 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_position_act_live_without_coverage_succeeds() -> None:
+    from contextlib import asynccontextmanager
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        ExecutionHeadSnapshot,
+    )
+
+    class FakeTx:
+        def __init__(self, projection_version: str):
+            self.projection_version = projection_version
+            self.persisted_head = None
+            self.saved_reservations = None
+
+        async def load_head(self, key):
+            return ExecutionHeadSnapshot(
+                revision=1,
+                stream_id="account_event_hub",
+                stream_epoch="live-epoch-20260928",
+                projection_version=self.projection_version,
+                state_payload={"active_reservation_ids": []},
+            )
+
+        async def save_reservations(self, reservations, **kwargs):
+            self.saved_reservations = reservations
+
+        async def persist_head(self, **kwargs):
+            self.persisted_head = kwargs
+            return 2
+
+        async def upsert_outbox(self, **kwargs):
+            pass
+
+    class FakeUow:
+        def __init__(self):
+            self.tx = None
+
+        @asynccontextmanager
+        async def transaction(self, key):
+            yield self.tx
+
+    uow = FakeUow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="ALGOUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    key = scope.to_position_key()
+    stream_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
+    )
+    book._stream_scopes[key.canonical_id] = stream_scope
+    book._head_revisions[key.canonical_id] = 1
+    journal = book._ensure_journal(key)
+    journal.append_fill(
+        AccountFillEvent(
+            environment="live",
+            account_label="primary",
+            symbol="ALGOUSDT",
+            trade_id="fill-1",
+            order_id="order-1",
+            side="BUY",
+            price=Decimal("1.0"),
+            quantity=Decimal("100.0"),
+            realized_pnl=Decimal("0"),
+            fee=Decimal("0.01"),
+            fee_asset="USDT",
+            trade_at=datetime.now(UTC),
+            raw_payload={"row": {"ps": "LONG"}},
+        )
+    )
+
+    view = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
+    )
+    assert view.is_ready_for_trade is True
+    assert view.total_quantity == Decimal("100.0")
+    assert len(view.batches) == 1
+    uow.tx = FakeTx(projection_version=view.projection_version)
+
+    req = ExecutionRequest(
+        request_id="exit-algo-1",
+        scope=scope,
+        strategy_name="trend_v1",
+        strategy_version="1.0.0",
+        run_id="run-1",
+        decision_ref="dec-algo-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.EXIT,
+        requested_quantity=Decimal("100.0"),
+    )
+    result = await book.act(req)
+    assert isinstance(result, Accepted)
+
+
+@pytest.mark.asyncio
 async def test_flat_position_act_can_adopt_older_flat_head() -> None:
     from contextlib import asynccontextmanager
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
