@@ -1113,4 +1113,87 @@ test("restoreViewState recovers saved pageY when browser collapsed scroll to 0",
   assert.equal(mockDoc.scrollingElement.scrollTop, 600);
 });
 
+test("restoreViewState defends against anchor diff collapsing scroll to top when user is scrolled down", () => {
+  const mockDoc = {
+    scrollingElement: { scrollLeft: 0, scrollTop: 0, scrollHeight: 2500 },
+    documentElement: { style: {} },
+    body: { scrollLeft: 0, scrollTop: 0 },
+    defaultView: {
+      scrollX: 0,
+      scrollY: 0,
+      innerHeight: 800,
+      scrollTo(opts) {
+        if (typeof opts === "object") {
+          mockDoc.scrollingElement.scrollTop = opts.top;
+        }
+      },
+    },
+    querySelectorAll: () => [],
+  };
+  const root = {
+    ownerDocument: mockDoc,
+    querySelectorAll: () => [],
+  };
+
+  const state = {
+    pageX: 0,
+    pageY: 850,
+    anchor: {
+      stateKey: "near-top-element",
+      topOffset: 5,
+    },
+  };
+  mockDoc.querySelector = (sel) => {
+    if (sel === '[data-state-key="near-top-element"]') {
+      return {
+        offsetParent: mockDoc.body,
+        getBoundingClientRect: () => ({ top: 20, width: 100, height: 40 }),
+      };
+    }
+    return null;
+  };
+
+  restoreViewState(root, state);
+  // candidateY was 0 + 15 = 15 <= 20, defense correctly kept state.pageY (850)!
+  assert.equal(mockDoc.scrollingElement.scrollTop, 850);
+
+  // Now simulate an anchor that collapsed towards 0 (candidateY <= 20)
+  mockDoc.scrollingElement.scrollTop = 0;
+  mockDoc.querySelector = (sel) => {
+    if (sel === '[data-state-key="near-top-element"]') {
+      return {
+        offsetParent: mockDoc.body,
+        getBoundingClientRect: () => ({ top: 5, width: 100, height: 40 }),
+      };
+    }
+    return null;
+  };
+  state.anchor.topOffset = 840; // diff = -835 -> candidateY = 15 <= 20
+  restoreViewState(root, state);
+  assert.equal(mockDoc.scrollingElement.scrollTop, 850);
+});
+
+test("captureViewState ignores static buttons and cards for focusIdentity", () => {
+  const button = {
+    tagName: "BUTTON",
+    dataset: { liveAccountLabel: "primary", accountIndex: "0" },
+    id: "account-btn",
+  };
+  const mockDoc = {
+    activeElement: button,
+    scrollingElement: { scrollLeft: 0, scrollTop: 100 },
+    defaultView: { scrollX: 0, scrollY: 100, innerHeight: 800 },
+    querySelectorAll: () => [],
+  };
+  const root = {
+    ownerDocument: mockDoc,
+    contains: (el) => el === button,
+    querySelectorAll: () => [],
+  };
+
+  const state = captureViewState(root);
+  assert.equal(state.focusIdentity, null);
+});
+
+
 
