@@ -467,8 +467,9 @@ async function poll() {
   const pollbar = document.getElementById("pollbar");
   if (pollbar) {
     pollbar.classList.remove("run");
-    void pollbar.offsetWidth;
-    pollbar.classList.add("run");
+    requestAnimationFrame(() => {
+      pollbar.classList.add("run");
+    });
   }
   await Promise.allSettled(dueSections.map(refreshSection));
   renderPollState();

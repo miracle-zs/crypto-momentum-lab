@@ -426,7 +426,7 @@ export function refreshEcharts(root = document) {
     if (!payload) return;
     const chart = CHART_INSTANCES.get(shell);
     if (chart) {
-      chart.setOption(buildChartOption(payload), { notMerge: true, lazyUpdate: false });
+      chart.setOption(buildChartOption(payload), { notMerge: false, lazyUpdate: true });
     } else {
       mountChart(shell, doc);
     }

@@ -146,13 +146,19 @@ export function captureViewState(root) {
   const pageX = view?.scrollX ?? scrollingElement?.scrollLeft ?? 0;
   const pageY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
 
-  // Track active focus identity
+  // Track active focus identity only for user-editable text inputs.
+  // Never capture or re-focus static buttons/cards on background polling,
+  // which causes WebKit/Safari to scroll off-screen focused buttons back into view (jumping to top).
   const activeEl = doc?.activeElement;
-  const focusIdentity = ownsFocus(root, doc, activeEl) ? {
-    accountIndex: activeEl.dataset?.accountIndex || null,
-    liveAccountLabel: activeEl.dataset?.liveAccountLabel || null,
-    accountEquityRange: activeEl.dataset?.accountEquityRange || null,
-    liveAccountMetricsRange: activeEl.dataset?.liveAccountMetricsRange || null,
+  const isEditable = Boolean(
+    activeEl && (
+      activeEl.tagName === "INPUT" ||
+      activeEl.tagName === "TEXTAREA" ||
+      activeEl.isContentEditable
+    )
+  );
+  const focusIdentity = (isEditable && ownsFocus(root, doc, activeEl)) ? {
+    isEditable: true,
     tabId: activeEl.id || null,
     stateKey: activeEl.dataset?.stateKey || null,
   } : null;
@@ -274,9 +280,16 @@ export function restoreViewState(root, state) {
         (targetAnchor.offsetParent !== null || targetAnchor === doc?.body || targetAnchor === doc?.documentElement);
       if (isVisible) {
         const diff = currentRect.top - state.anchor.topOffset;
-        targetY = Math.max(0, currentY + (Math.abs(diff) > 2 ? diff : 0));
-        if (targetY <= 2 && state.pageY > 20) {
+        const candidateY = Math.max(0, currentY + (Math.abs(diff) > 2 ? diff : 0));
+        // Defend against anchor calculation collapsing scroll to top
+        if (state.pageY > 20 && candidateY <= 20) {
           targetY = state.pageY;
+        } else if (state.pageY > 100 && candidateY < state.pageY * 0.5) {
+          targetY = state.pageY;
+        } else if (currentY === 0 && state.pageY > 0) {
+          targetY = Math.max(0, state.pageY + (Math.abs(diff) > 2 ? diff : 0));
+        } else {
+          targetY = candidateY;
         }
         resolvedAnchor = true;
       }
@@ -299,6 +312,13 @@ export function restoreViewState(root, state) {
   // Fallback: If no anchor survived and the browser collapsed scroll to top (currentY === 0)
   // while the captured scroll position was non-zero, restore state.pageY to prevent jumping to top.
   if (!applyVerticalScroll && currentY === 0 && state.pageY > 0) {
+    targetY = state.pageY;
+    applyVerticalScroll = true;
+  }
+
+  // Absolute defense: If the user was scrolled down (state.pageY > 20),
+  // targetY MUST NEVER collapse to 0 or near 0 on a background poll!
+  if (state.pageY > 20 && targetY <= 20) {
     targetY = state.pageY;
     applyVerticalScroll = true;
   }
@@ -332,18 +352,10 @@ export function restoreViewState(root, state) {
     scrollingElement.scrollLeft = state.pageX;
   }
 
-  // 4. Restore focus only while the user has not moved to another control.
-  if (state.focusIdentity) {
+  // 4. Restore focus ONLY if the active element was an editable text input.
+  if (state.focusIdentity && state.focusIdentity.isEditable) {
     let focusTarget = null;
-    if (state.focusIdentity.accountIndex) {
-      focusTarget = root.querySelector?.(`[data-account-index="${state.focusIdentity.accountIndex}"]`);
-    } else if (state.focusIdentity.liveAccountLabel) {
-      focusTarget = root.querySelector?.(`[data-live-account-label="${state.focusIdentity.liveAccountLabel}"]`);
-    } else if (state.focusIdentity.accountEquityRange) {
-      focusTarget = root.querySelector?.(`[data-account-equity-range="${state.focusIdentity.accountEquityRange}"]`);
-    } else if (state.focusIdentity.liveAccountMetricsRange) {
-      focusTarget = root.querySelector?.(`[data-live-account-metrics-range="${state.focusIdentity.liveAccountMetricsRange}"]`);
-    } else if (state.focusIdentity.stateKey) {
+    if (state.focusIdentity.stateKey) {
       focusTarget = root.querySelector?.(`[data-state-key="${state.focusIdentity.stateKey}"]`);
     } else if (state.focusIdentity.tabId) {
       focusTarget = root.querySelector?.(`#${state.focusIdentity.tabId}`);
