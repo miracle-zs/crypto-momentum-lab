@@ -95,6 +95,8 @@ class PostgresAccountJournalStore:
         specs = _fact_event_specs(facts)
         inserted = 0
         scope_values = _scope_values(scope)
+        chunk_size = 500
+        row_dicts: list[dict[str, Any]] = []
         for kind, event_id, occurred_at, payload in specs:
             if occurred_at is not None and (
                 occurred_at.tzinfo is None or occurred_at.utcoffset() is None
@@ -104,18 +106,24 @@ class PostgresAccountJournalStore:
             event_record_id = _json_digest(
                 [scope.canonical_id, kind, event_id, payload_hash]
             )
+            row_dicts.append(
+                {
+                    "event_record_id": event_record_id,
+                    **scope_values,
+                    "event_kind": kind,
+                    "event_id": event_id,
+                    "payload_hash": payload_hash,
+                    "source_revision": revision,
+                    "occurred_at": occurred_at if occurred_at is not None else func.now(),
+                    "payload": payload,
+                }
+            )
+
+        for offset in range(0, len(row_dicts), chunk_size):
+            chunk = row_dicts[offset : offset + chunk_size]
             statement = (
                 insert(PositionFactJournalEventRow)
-                .values(
-                    event_record_id=event_record_id,
-                    **scope_values,
-                    event_kind=kind,
-                    event_id=event_id,
-                    payload_hash=payload_hash,
-                    source_revision=revision,
-                    occurred_at=occurred_at if occurred_at is not None else func.now(),
-                    payload=payload,
-                )
+                .values(chunk)
                 .on_conflict_do_nothing(index_elements=["event_record_id"])
             )
             result = await session.execute(statement)

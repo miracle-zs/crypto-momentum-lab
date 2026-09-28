@@ -246,6 +246,7 @@ class RiskExecutionQueries:
 
             try:
                 market_rows = list((await session.execute(market_query)).all())
+                fallback_cutoff = now - timedelta(hours=48)
                 if required_symbols:
                     found_symbols = {row[0] for row in market_rows}
                     missing_from_recent = set(required_symbols) - found_symbols
@@ -259,6 +260,7 @@ class RiskExecutionQueries:
                                 RuntimeMarketState15sRow.environment == self._market_environment,
                                 RuntimeMarketState15sRow.data_complete.is_(True),
                                 RuntimeMarketState15sRow.symbol.in_(missing_from_recent),
+                                RuntimeMarketState15sRow.bucket_start >= fallback_cutoff,
                             )
                             .group_by(RuntimeMarketState15sRow.symbol)
                         )
@@ -276,6 +278,7 @@ class RiskExecutionQueries:
                         .where(
                             RuntimeMarketState15sRow.environment == self._market_environment,
                             RuntimeMarketState15sRow.data_complete.is_(True),
+                            RuntimeMarketState15sRow.bucket_start >= fallback_cutoff,
                         )
                         .group_by(RuntimeMarketState15sRow.symbol)
                     )

@@ -4,10 +4,11 @@ Research and trading infrastructure for independent short-horizon momentum
 strategies on Binance USD-M perpetual futures.
 
 The current implementation is summarized in [docs/current-state.md](docs/current-state.md).
-The [system refactoring plan](docs/architecture/system-refactor-blueprint-20260925.md)
-records the latest architecture review, production evidence, and proposed migration.
-The original design remains available in
-`docs/superpowers/specs/2026-06-14-project-architecture-design.md` as historical context.
+See the [documentation index](docs/README.md) for contracts, runbooks, and research designs.
+The [system refactoring blueprint](docs/architecture/system-refactor-blueprint-20260925.md)
+is a dated design and implementation record; its production claims apply only to
+the snapshots identified in that document. Check `docs/current-state.md` for the
+repository baseline and the dates and limits of production observations.
 
 ## Local Setup
 
@@ -131,7 +132,7 @@ without Binance private credentials. The explicit `live` Compose profile adds
 the primary read-only account synchronizer and gated live strategy. Additional
 account-specific live services are defined in `compose.live.accounts.yaml`; see
 the [small-capital live runbook](docs/runbooks/small-capital-live-session.md)
-and [multi-account live runbook](docs/runbooks/multi-live-accounts.md).
+and [multi-account live runbook](docs/runbooks/small-capital-live-session.md).
 
 ## Server Paper Deployment
 

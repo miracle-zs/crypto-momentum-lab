@@ -122,7 +122,7 @@ $COMPOSE --profile live run --rm --no-deps \
 ```
 
 Review the report and record all three drills from
-`docs/runbooks/shadow-operation-session.md`. The live worker records an
+the Shadow Operation Session section below. The live worker records an
 advisory warning when no completed matching shadow session exists, but this
 check does not block startup. A completed matching shadow session remains useful
 as preflight evidence, and its age is not a runtime gate.
@@ -260,3 +260,194 @@ read-only account sync running until the post-session report is complete.
 Start with one position and materially less than the 100 USDT paper notional.
 Increase exposure only after several reviewed live sessions have no unresolved
 orders, reconciliation mismatch, unexpected exit, or operational halt.
+
+## Shadow Operation Session
+
+Shadow operation exercises live market data, the selected runtime strategy,
+read-only account state, the risk gateway, Binance exchange metadata,
+quantization, persistence, and reconciliation. No Binance write endpoint is
+allowed in this phase.
+
+### Preflight
+
+Record and review:
+
+- current Git commit and strategy config hash;
+- Alembic database migration head;
+- execution account label and `READY_READONLY` state;
+- active trading lease, selected strategy, and required lease owner;
+- current risk config hash and numeric limits;
+- absence of active global halts and unresolved exchange orders.
+
+Run the read-only account synchronization first:
+
+```bash
+cml-execution-account sync-once \
+  --account-label primary \
+  --hedge-mode \
+  --database-url "$CML_DATABASE_URL"
+```
+
+Run a bounded shadow session:
+
+```bash
+cml-shadow-operation run \
+  --account-label primary \
+  --strategy compression_breakout \
+  --market-environment research \
+  --run-id "$RUN_ID" \
+  --database-url "$CML_DATABASE_URL" \
+  --max-runtime-seconds 7200 \
+  --require-lease-owner shadow-preflight \
+  --hedge-mode \
+  --json
+```
+
+Generate the report:
+
+```bash
+cml-shadow-operation report \
+  --run-id "$RUN_ID" \
+  --database-url "$CML_DATABASE_URL" \
+  --json
+```
+
+Review signal count, approved and rejected intents, rejection reasons,
+would-submit and suppression counts, stale/account/risk blocks, min-notional
+blocks, latency percentiles, unresolved plans, and drill outcomes. Store the
+JSON output with the operator notes before considering small-capital trading.
+
+### Drills
+
+Run halt and restart-related drills against the same session:
+
+```bash
+cml-shadow-operation drill --run-id "$RUN_ID" --drill stale_market_data --database-url "$CML_DATABASE_URL"
+cml-shadow-operation drill --run-id "$RUN_ID" --drill process_restart_with_active_lease --database-url "$CML_DATABASE_URL"
+cml-shadow-operation drill --run-id "$RUN_ID" --drill order_submission_ambiguity --database-url "$CML_DATABASE_URL"
+```
+
+Any unexpected exchange write attempt, missing suppression, stale account,
+expired lease, unresolved plan, failed drill, or active halt fails the session.
+
+## Multi-account Live rollout
+
+This runbook adds `account-2`, `account-3`, and `account-4` while keeping one
+shared `market-data` process. The shared process publishes the same market
+state and quote hubs to every Live strategy; each account still gets its own
+read-only account synchronizer, trade credential, lease, session, risk
+configuration, approval, and account-event hub.
+
+The additional services are defined in
+`compose.live.accounts.yaml`. Use it together with `compose.server.yaml`:
+
+```bash
+COMPOSE="docker compose --env-file .env.server \
+  -f compose.server.yaml -f compose.live.accounts.yaml --profile live"
+```
+
+The market-data process protects the union of the configured startup hints and
+the labels discovered from each account's latest ready PostgreSQL
+reconciliation. A stopped account with an open position therefore remains
+protected, while an account whose latest ready reconciliation reports zero
+positions is removed from the protected set. `CML_LIVE_POSITION_ACCOUNT_LABELS`
+can still be set to provide immediate startup hints for accounts that have not
+yet produced their first reconciliation; it no longer has to be kept as an
+exhaustive list.
+
+### Account profiles
+
+The strategy parameters are 15-second buckets unless stated otherwise:
+
+| account | impulse window | confirmation | min return | min imbalance | min intensity | min 5m/30m notional | cooldown |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| primary | 2 | 1 | 0.005 | 0.30 | 4.0 | 1.50 | 0 |
+| account-2 | 2 | 1 | 0.005 | 0.30 | 4.0 | 1.50 | 0 |
+| account-3 | 3 | 1 | 0.015 | 0.30 | 1.5 | 0.00 | 0 |
+| account-4 | 3 | 1 | 0.015 | 0.30 | 1.5 | 0.00 | 0 |
+
+The `min 5m/30m notional` value compares the latest 20 consecutive 15-second
+states with the immediately preceding 120 states. A value of `0` disables
+this optional seventh dimension.
+
+Every profile value is included in the runtime strategy hash. Account 3 and
+account 4 may therefore have the same strategy hash because their strategy
+profiles are identical; their approvals remain separate because their account
+labels, risk limits, credentials, and sessions are different.
+
+### Hash and gate preparation
+
+After the target image is built, generate each additional account's hash from
+the account-specific service environment. Do not copy the primary hash by
+hand:
+
+```bash
+for account in 2 3 4; do
+  $COMPOSE run --rm --no-deps live-strategy-account-$account \
+    strategy-config-hash \
+    --account-label account-$account \
+    --runtime-manifest /app/deploy/live-runtime.yaml
+done
+```
+
+The command derives the hash from the account's `strategy_config` in the
+manifest, while the account-specific environment still supplies the manifest's
+explicit `${CML_LIVE_*}` references. Store the returned values as
+`CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2/3/4`. Then, one account at a time:
+
+1. validate the desired runtime identity against the checked-in manifest:
+
+   ```bash
+   $COMPOSE run --rm --no-deps live-strategy-account-2 \
+     preflight --account-label account-2 \
+     --runtime-manifest /app/deploy/live-runtime.yaml --strict
+   ```
+
+   Use the corresponding service and account label for primary, account-3, or
+   account-4. This check compares the selected strategy, image commit,
+   migration revision, lease owner, and computed strategy hash before touching
+   the live session.
+2. run `prepare` with that account's risk limits and the same
+   `--runtime-manifest /app/deploy/live-runtime.yaml` option;
+3. record an approval with the account hash, risk hash, exact image commit,
+   migration revision, and that account's notional/position/loss caps;
+4. run the normal `preflight` checks and require runtime/configured/approved
+   hashes to match;
+5. start only that account's `execution-account` and `live-strategy` pair;
+6. observe health, reconciliation, lease renewal, submit/cancel audit pairs,
+   and the absence of unexpected entries before moving to the next account.
+
+The long-running `live-strategy` commands include
+`--runtime-manifest /app/deploy/live-runtime.yaml`. At startup, `run` loads the
+account's typed strategy inputs from that file, derives the strategy hash, and
+uses the manifest's session, lease owner, image commit, and migration revision.
+An explicitly supplied conflicting value stops the worker before it reaches the
+database or exchange.
+
+For example, the first account should be started with explicit service names:
+
+```bash
+$COMPOSE up -d \
+  execution-account-live-account-2 \
+  live-strategy-account-2
+```
+
+Do not run `$COMPOSE up -d` without service names during the rollout; that
+would enable and start every profile-enabled Live service at once.
+
+The account-specific read and trade variables are:
+
+```text
+BINANCE_READ_API_KEY_ACCOUNT_2
+BINANCE_READ_API_SECRET_ACCOUNT_2
+BINANCE_TRADE_API_KEY_ACCOUNT_2
+BINANCE_TRADE_API_SECRET_ACCOUNT_2
+```
+
+Use the analogous suffixes for accounts 3 and 4. Do not put secret values in
+the repository, and do not use one account's key pair for another account.
+
+Do not start all three new Live strategies merely because the Compose file
+validates. A missing hash, approval, lease, account readiness state, or
+protected-position label must keep that account stopped without affecting the
+other accounts.

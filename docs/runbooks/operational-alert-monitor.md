@@ -112,3 +112,143 @@ This monitor runs on the trading server itself. It can notify when the
 longer producing a fresh live checkpoint. If the entire server loses power or
 network connectivity, a second monitor outside this host is required to send
 that notification.
+
+## Decision SLO telemetry
+
+This runbook describes the low-cardinality telemetry plane used to answer
+whether the live decision path is healthy. It deliberately reuses
+`strategy_runtime_events`; it does not add Prometheus, a second metrics store,
+or a synchronous database call to the trading path.
+
+### Dashboard query
+
+The read-only dashboard exposes:
+
+```text
+GET /api/decision-slo?window=1h|6h|24h|7d
+```
+
+The response contains:
+
+- `phase_latency`: p50/p95/max milliseconds and sample count for the four
+  decision transitions;
+- `consumers`: observed events, recovery count, unavailable count, lag-event
+  count, last availability, and the last recovery reason for each hub;
+- `terminal_reasons`: counts grouped by lane, trigger source, and reason;
+- `persisted_event_count` and `truncated`, so a bounded query cannot be
+  mistaken for a complete export.
+
+`recovery_count` means a consumer became available after being unavailable.
+`unavailable_event_count` counts the preceding degraded transitions; a
+historical lag event is not treated as a currently unhealthy consumer when a
+later recovery is present.
+
+### Persistence boundary
+
+All live phase points remain available in the bounded in-process telemetry
+trace and latency rollup. Only sparse order-lifecycle events are durable. The
+events for `candidate_accepted`, `intent_saved`, and the first submit request
+carry the completed decision-SLO transition samples:
+
+```text
+market_state_received → context_ready
+context_ready → candidate_accepted
+candidate_accepted → intent_saved
+intent_saved → exchange_request_started
+```
+
+This preserves the historical decision path without writing every 15-second
+market or strategy event to PostgreSQL. `consumer_health` and the low-cardinality
+`terminal_reason` rollup are also durable through the best-effort observability
+writer. A database outage or a full telemetry queue can still lose diagnostic
+events; it must not block or change order execution.
+
+The query reads all persisted runtime events in the selected time window. It
+is bounded at 50,000 rows and uses `truncated=true` when more rows are
+available. The window is based on `occurred_at`, not dashboard request time.
+Migration `20260911_0036` adds the standalone `occurred_at` index used by this
+time-bounded query; apply it to every configured observability database before
+enabling the endpoint in a deployment.
+
+### Verification
+
+Run the focused checks before a release:
+
+```bash
+.venv/bin/python -m pytest -q \
+  tests/unit/live_rollout/test_telemetry.py \
+  tests/unit/live_rollout/test_telemetry_source.py \
+  tests/unit/operator_dashboard/test_queries.py \
+  tests/unit/operator_dashboard/test_api.py \
+  tests/unit/apps/operator_dashboard/test_main.py
+.venv/bin/ruff check src/crypto_momentum_lab/live_rollout/telemetry.py \
+  src/crypto_momentum_lab/operator_dashboard \
+  tests/unit/live_rollout/test_telemetry.py \
+  tests/unit/live_rollout/test_telemetry_source.py
+```
+
+For a live session, treat a missing or stale response as an observability
+failure, not as permission to trade. The existing lease, hub fail-closed
+gates, durable intent barrier, and execution reconciliation remain the safety
+authority.
+
+## Operator Dashboard
+
+Start the local read-only dashboard with:
+
+```bash
+cml-operator-dashboard --database-url "$CML_DATABASE_URL" --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765/`. The dashboard is anonymous unless both
+`CML_DASHBOARD_USERNAME` and `CML_DASHBOARD_PASSWORD` are configured. Review system freshness, the UTC+0 momentum
+universe, selected strategy, read-only account state, risk/execution state,
+ambiguous orders, and paper/shadow/live reports.
+
+The paper-account section displays the two active Orderflow accounts. Equity curves use a shared
+rolling 24-hour window and the latest snapshot from each UTC six-minute bucket,
+up to 240 points. Pair charts compare only buckets available to both accounts,
+normalize both accounts to zero at the common start, and use one y-axis. The
+closed-trade table shows the latest 30 rows; its total count and win rate are
+calculated from the full run history.
+
+The strategy section also exposes a `统一起点权益金额变化` panel. Its shared
+start is fixed at 2026-08-21 02:45 UTC (北京时间 10:45), carries each account's
+latest observation forward on a common grid, and
+plots cash-flow-adjusted equity deltas in USDT from zero. The grid starts at
+15-minute resolution and widens as needed to keep the history within 240
+points. The known live-account deposit of 200 USDT on 2026-08-21 is excluded by
+default. Future cash-flow corrections can be supplied with
+`CML_DASHBOARD_LIVE_CASH_FLOWS_JSON`, for example:
+
+```json
+[{"account_label":"primary","effective_at":"2026-08-21T09:41:19.895915Z","amount":"200","cash_flow_type":"deposit"}]
+```
+
+An explicit `[]` disables the default correction. This is a read-only derived
+view; it does not rewrite the underlying equity snapshots.
+
+The account page's `四账户资金与风险时序` panel anchors each selected range at
+the first daily 08:00 Asia/Shanghai boundary within that range. The API and
+browser use the same anchor for bucket alignment, so equity, margin, and
+drawdown comparisons share one time origin. An active trading lease also supplies
+the account's strategy binding when no `strategy_live_states` row is available;
+the card then shows the leased strategy and `租约有效` instead of reporting an
+unknown strategy. The lease is not treated as proof of a strategy heartbeat.
+
+Status meanings:
+
+- `UNKNOWN`: required telemetry is missing.
+- `STALE`: the last observation exceeds its freshness threshold.
+- `HALTED`: a risk halt, failed service, or ambiguous order blocks entry.
+- `SHADOW`: live data path is active but exchange writes are suppressed.
+- `LIVE`: an explicitly approved live session is enabled.
+
+The dashboard browser never calls Binance directly and never receives API keys,
+secrets, or credential environment names. It reads only the local FastAPI API,
+which reads PostgreSQL. Dashboard write actions remain disabled. The live CLI
+`disable-new-entries` path writes the durable transition first and then pushes
+a low-volume RiskControlHub notification. The `cancel-all-open-entries` and
+`request-flatten` CLI paths likewise write `live_rollback_commands` first and
+are executed by the live worker through its existing order/exit lanes; lease
+release remains a separate future command surface.
