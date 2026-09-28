@@ -381,6 +381,7 @@ class OrderExecutionCoordinator:
         self._active_entry_submissions = 0
         self._entry_submissions_idle = asyncio.Event()
         self._entry_submissions_idle.set()
+        self._confirmed_flat_streams: dict[PositionKey, tuple[str, str]] = {}
 
     @property
     def domain_coordinator(self) -> ExecutionCoordinator | None:
@@ -476,7 +477,8 @@ class OrderExecutionCoordinator:
                 )
             if pos.environment != self._environment:
                 raise ValueError(
-                    f"AccountPositionSnapshot environment must match coordinator ({self._environment})"
+                    "AccountPositionSnapshot environment must match coordinator "
+                    f"({self._environment})"
                 )
             if pos.account_label != self._account_label:
                 raise ValueError(
@@ -529,6 +531,18 @@ class OrderExecutionCoordinator:
         ):
             pos = positions_by_key.get(key)
             scoped_fills = tuple(fills_by_key.get(key, ()))
+            repeated_flat = bool(
+                pos is not None
+                and pos.position_amt == 0
+                and not scoped_fills
+                and stream_id is not None
+                and stream_epoch is not None
+                and self._confirmed_flat_streams.get(key)
+                == (stream_id, stream_epoch)
+            )
+            if repeated_flat:
+                continue
+            self._confirmed_flat_streams.pop(key, None)
             observed_at = (
                 pos.observed_at
                 if pos is not None
@@ -555,7 +569,7 @@ class OrderExecutionCoordinator:
                 symbol=key.symbol,
                 position_side=key.position_side,
             )
-            await self._execution_book.observe(
+            result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=scoped_evidence_id,
                     scope=execution_scope,
@@ -567,6 +581,15 @@ class OrderExecutionCoordinator:
                     sequence=sequence,
                 )
             )
+            if (
+                not isinstance(result, EvidenceConflict)
+                and pos is not None
+                and pos.position_amt == 0
+                and not scoped_fills
+                and stream_id is not None
+                and stream_epoch is not None
+            ):
+                self._confirmed_flat_streams[key] = (stream_id, stream_epoch)
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if self._reservation_repository is None or self._execution_book is None:
@@ -594,7 +617,9 @@ class OrderExecutionCoordinator:
                     )
                 strategy_name = getattr(plan, "strategy_name", None)
                 if not strategy_name or not str(strategy_name).strip():
-                    strategy_name = getattr(self, "_strategy_name", None) or "orderflow_impulse"
+                    strategy_name = (
+                        getattr(self, "_strategy_name", None) or "orderflow_impulse"
+                    )
                 strategy_version = getattr(plan, "strategy_version", None)
                 if not strategy_version or not str(strategy_version).strip():
                     strategy_version = getattr(self, "_strategy_version", None) or "v0"
@@ -700,7 +725,9 @@ class OrderExecutionCoordinator:
 
             strategy_name = getattr(plan, "strategy_name", None)
             if not strategy_name or not str(strategy_name).strip():
-                strategy_name = getattr(self, "_strategy_name", None) or "orderflow_impulse"
+                strategy_name = (
+                    getattr(self, "_strategy_name", None) or "orderflow_impulse"
+                )
             strategy_version = getattr(plan, "strategy_version", None)
             if not strategy_version or not str(strategy_version).strip():
                 strategy_version = getattr(self, "_strategy_version", None) or "v0"
