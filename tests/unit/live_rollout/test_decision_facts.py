@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -203,6 +205,37 @@ def test_real_cash_and_versions_are_used() -> None:
 async def test_fact_source_requires_bound_context() -> None:
     src = LiveDecisionFactSource("primary")
     assert await src.build(_state()) is None
+
+
+async def test_fact_source_degrades_only_mismatched_restored_stream() -> None:
+    class FakeBook:
+        async def read(self, *_args, **_kwargs):
+            raise ValueError(
+                "requested account stream does not match the restored position"
+            )
+
+    src = LiveDecisionFactSource(
+        "primary", execution_book=FakeBook(), hedge_mode=False
+    )
+    src.bind_context(_Ctx(account_snapshot=_snapshot()))
+    src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
+
+    assert await src.build(_state()) is None
+
+
+async def test_fact_source_does_not_hide_other_book_errors() -> None:
+    class FakeBook:
+        async def read(self, *_args, **_kwargs):
+            raise ValueError("corrupt projection")
+
+    src = LiveDecisionFactSource(
+        "primary", execution_book=FakeBook(), hedge_mode=False
+    )
+    src.bind_context(_Ctx(account_snapshot=_snapshot()))
+    src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
+
+    with pytest.raises(ValueError, match="corrupt projection"):
+        await src.build(_state())
 
 
 async def test_fact_source_commit_decision_updates_policy_state() -> None:
