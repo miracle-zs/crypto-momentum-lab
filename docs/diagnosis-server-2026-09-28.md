@@ -131,3 +131,11 @@ docker logs --since 5m crypto-momentum-lab-live-strategy-1 2>&1 | grep -E 'non-c
 按回滚流程将主账户和账户 2 的租约代际、镜像、最新批准恢复至 `0926080`；账户 3、4 未切换。看板保留新镜像。服务器 `.env.server` 的 `CML_CODE_COMMIT` 和 Git main 回到 `0926080`，`CML_DASHBOARD_IMAGE` 仍显式指向 `b655aa4`。主账户与账户 2 的旧版本预检再次均为 `preflight_ok=true`，但策略进程健康还需持续观察。
 
 后续数据库证据：四账户最新 `ready` 对账的 `position_count` 都是 0。抽查主账户 BOMEUSDT、JOEUSDT、SYNUSDT 的账户成交事件，买卖净数量均为 0；其历史非零仓位快照仍保留，执行账本中也有相关旧事实。`PostgresLiveContextProvider._with_execution_book()` 先从账户获取当前仓位，却用 Book 视图无条件覆盖 `managed_positions` 和 `open_position_symbols`，可把 Book-only 历史仓位重新当作待出场仓位。新本地修复要求出场仓位同时存在于实时账户快照，并保留账本和账户不一致的风险标记；缺失持久化仓位事实会降级出场而非使进程崩溃。另在 `LiveContextPrefetcher` 中复现了消费者取消且队列已满时，生产者卡在写结束标记，未完成上下文任务未被取消和等待的错误；本地已修复并有失败先行测试。完整 live_rollout 单测 434 项通过。新补丁尚未上线。
+
+### 06:02–06:44 UTC 最终修复与逐账户上线
+
+第二次切换暴露了上一段修复的不完整性：`_with_execution_book()` 虽已拒绝用账户空仓的旧 Book 批次生成出场单，却仍将 Book-only 视图并入 `open_position_symbols` 和 `unmanaged_position_symbols`。最新四账户对账均为空仓；这一步把主账户约 196 个历史账本符号误判为当前未托管仓位，引发 `unmanaged_live_positions` 全局停机。根因是混淆了两种事实：账户对账决定当前真实敞口，Book 决定有敞口时的批次身份与分配。现在仅从账户视图形成当前仓位和未托管仓位；真实账户仓位缺乏 Book 批次时仍停机保护。Book-only 差异保留聚合告警，并只在差异集合变化时记录。回归测试覆盖账户空仓/Book 残留与账户有仓/Book 缺失两种情况。
+
+预取任务取消时，满队列中的生产者可能卡在写入结束标记，导致上下文数据库任务没有被取消、等待并归还连接；此路径已修复。看板把非行情服务未就绪统一报为 `market_data_not_ready` 的标签错误也已修复。账本缺失持久化仓位事实改为受控降级，不再作为未处理异常使策略进程重启。相关 live_rollout 测试 435 项通过。
+
+服务器最终策略镜像及 `.env.server` 的 `CML_CODE_COMMIT` 为 `9d7c0c2e9861d6d0a4e70b601929066c3ddfe7d8`（服务器从本地补丁 `git am`，故提交哈希与本地不同）；看板仍运行已验证的 `b655aa4` 镜像。四账户分别更新批准、租约代际并逐个重建，最终严格预检均为 `preflight_ok=true`、错误列表为空。至 06:44 UTC，四个策略容器均为 Docker healthy、重启次数 0，均已记录 `FULLY_TRADEABLE` 和继续推进的 `live_checkpoint_persisted`；过去十分钟策略日志未见 `live_runtime_failed`、`unmanaged_live_positions`、`non-checked-in connection`、`market_data_not_ready`、`position_facts_not_restored` 或 `session_shutdown_completed`。Book-only 差异数量分别为主账户 196、账户 2 为 81、账户 3 为 58、账户 4 为 71，每个容器仅告警一次。这些历史账本差异尚未做持久化清理，不能把“当前交易恢复”误称为“账本历史已修复”；后续应单独核对零仓快照与各 stream 的账本投影，再设计可审计的修复事务。
