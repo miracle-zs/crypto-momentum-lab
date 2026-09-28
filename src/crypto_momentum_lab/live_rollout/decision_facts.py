@@ -251,22 +251,33 @@ class LiveDecisionFactSource:
                     else FuturesPositionSide.SHORT
                 )
             else:
-                views = await book.list_position_views(
-                    environment="live",
-                    account_label=self._account_label,
-                    event_cut=state.bucket_end,
-                    stream_id=self._stream_id,
-                    stream_epoch=self._stream_epoch,
-                )
-                active_views = tuple(
-                    view
-                    for view in views
-                    if view.key.symbol == state.symbol
-                    and (
-                        view.total_quantity > 0
-                        or view.unallocated_quantity > 0
+                active_views = []
+                for side in (FuturesPositionSide.LONG, FuturesPositionSide.SHORT):
+                    side_scope = ExecutionScope(
+                        environment="live",
+                        account_label=self._account_label,
+                        symbol=state.symbol,
+                        position_side=side,
                     )
-                )
+                    try:
+                        side_view = await book.read(
+                            side_scope,
+                            event_cut=state.bucket_end,
+                            stream_id=self._stream_id,
+                            stream_epoch=self._stream_epoch,
+                        )
+                    except ValueError as error:
+                        if str(error) != (
+                            "requested account stream does not match the "
+                            "restored position"
+                        ):
+                            raise
+                        continue
+                    if (
+                        side_view.total_quantity > 0
+                        or side_view.unallocated_quantity > 0
+                    ):
+                        active_views.append(side_view)
                 if len(active_views) != 1:
                     return None
                 position_side = active_views[0].key.position_side

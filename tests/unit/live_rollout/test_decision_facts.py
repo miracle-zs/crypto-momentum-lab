@@ -223,6 +223,27 @@ async def test_fact_source_degrades_only_mismatched_restored_stream() -> None:
     assert await src.build(_state()) is None
 
 
+async def test_hedge_side_discovery_reads_only_the_candidate_symbol() -> None:
+    class FakeBook:
+        def __init__(self) -> None:
+            self.sides = []
+
+        async def read(self, scope, **_kwargs):
+            self.sides.append(scope.position_side)
+            return _position_view(position_side=scope.position_side)
+
+        async def list_position_views(self, **_kwargs):
+            raise AssertionError("hedge side discovery scanned every historical symbol")
+
+    book = FakeBook()
+    src = LiveDecisionFactSource("primary", execution_book=book, hedge_mode=True)
+    src.bind_context(_Ctx(account_snapshot=_snapshot()))
+    src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
+
+    assert await src.build(_state()) is None
+    assert book.sides == [FuturesPositionSide.LONG, FuturesPositionSide.SHORT]
+
+
 async def test_fact_source_does_not_hide_other_book_errors() -> None:
     class FakeBook:
         async def read(self, *_args, **_kwargs):
