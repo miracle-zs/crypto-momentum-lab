@@ -1987,3 +1987,85 @@ def test_account_journal_appends_fill_with_nested_position_side():
     assert rev == 1
     assert len(journal.read_cut().fills) == 1
 
+
+@pytest.mark.asyncio
+async def test_restore_durable_positions_migrates_projection_digest_when_no_reservations(
+) -> None:
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="s1", stream_epoch="epoch-1"
+    )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(),
+        prefix_facts_complete=True,
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        as_of=datetime.now(UTC),
+        facts=facts,
+        checkpoint=None,
+        revision=1,
+    )
+    old_payload = {
+        "schema_version": 1,
+        "position_key": {
+            "environment": key.environment,
+            "account_label": key.account_label,
+            "symbol": key.symbol,
+            "position_side": key.position_side.value,
+        },
+        "stream_scope": {
+            "stream_id": scope.stream_id,
+            "stream_epoch": scope.stream_epoch,
+        },
+        "facts_hash": facts.compute_facts_hash(),
+        "projection_digest": "old-stale-digest",
+        "view_digest": "old-stale-view-digest",
+        "journal_revision": 1,
+        "active_reservation_ids": [],
+    }
+    head = ExecutionHeadSnapshot(
+        stream_id=scope.stream_id,
+        stream_epoch=scope.stream_epoch,
+        revision=1,
+        projection_version="pv_test",
+        state_payload=old_payload,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=head,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    class StubUow:
+        async def load_positions(self, **kwargs):
+            return (state,)
+
+    book = ExecutionBook(execution_unit_of_work=StubUow())
+    # Restoration must succeed and migrate the digest instead of crashing
+    await book._restore_durable_positions(
+        account_label="primary",
+        environment="live",
+        as_of=datetime.now(UTC),
+    )
+    assert key.canonical_id in book._books
+    assert book._head_projection_digests[key.canonical_id] != "old-stale-digest"
+
+
