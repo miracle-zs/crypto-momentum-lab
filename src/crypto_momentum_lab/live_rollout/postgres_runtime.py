@@ -1300,42 +1300,38 @@ class PostgresLiveContextProvider(LiveContextReader):
                         )
         exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
-        try:
-            async with self._sessions() as session:
-                reconciliation = await session.scalar(
-                    select(AccountReconciliationRunRow)
-                    .where(
-                        AccountReconciliationRunRow.environment == "live",
-                        AccountReconciliationRunRow.account_label
-                        == self._account_label,
-                        AccountReconciliationRunRow.status == "ready",
-                    )
-                    .order_by(AccountReconciliationRunRow.observed_at.desc())
-                    .limit(1)
+        async with self._sessions() as session:
+            reconciliation = await session.scalar(
+                select(AccountReconciliationRunRow)
+                .where(
+                    AccountReconciliationRunRow.environment == "live",
+                    AccountReconciliationRunRow.account_label
+                    == self._account_label,
+                    AccountReconciliationRunRow.status == "ready",
                 )
-                if (
-                    reconciliation is not None
-                    and getattr(reconciliation, "status", None) == "ready"
-                ):
-                    fill_cursors = (
-                        await session.scalars(
-                            select(AccountFillReconciliationCursorRow).where(
-                                AccountFillReconciliationCursorRow.environment
-                                == "live",
-                                AccountFillReconciliationCursorRow.account_label
-                                == self._account_label,
-                            )
+                .order_by(AccountReconciliationRunRow.observed_at.desc())
+                .limit(1)
+            )
+            if (
+                reconciliation is not None
+                and getattr(reconciliation, "status", None) == "ready"
+            ):
+                fill_cursors = (
+                    await session.scalars(
+                        select(AccountFillReconciliationCursorRow).where(
+                            AccountFillReconciliationCursorRow.environment == "live",
+                            AccountFillReconciliationCursorRow.account_label
+                            == self._account_label,
                         )
-                    ).all()
-                    coverage_by_symbol = {
-                        cursor.symbol: _coverage_evidence_from_sources(
-                            fill_cursor=cursor,
-                            reconciliation=reconciliation,
-                        )
-                        for cursor in fill_cursors
-                    }
-        except (AssertionError, Exception):
-            pass
+                    )
+                ).all()
+                coverage_by_symbol = {
+                    cursor.symbol: _coverage_evidence_from_sources(
+                        fill_cursor=cursor,
+                        reconciliation=reconciliation,
+                    )
+                    for cursor in fill_cursors
+                }
 
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
