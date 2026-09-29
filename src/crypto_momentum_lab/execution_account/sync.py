@@ -907,8 +907,8 @@ class ExecutionAccountSyncService:
                 fill_load_scans=tuple(fill_load_scans),
                 fills_catching_up=fills_catching_up,
             )
-            assert result.snapshot is not None
-            self._remember_observation(result.snapshot.config.observed_at)
+            if result.snapshot is not None:
+                self._remember_observation(result.snapshot.config.observed_at)
             if persist:
                 await self.persist_reconciliation_result(
                     result,
@@ -975,6 +975,7 @@ class ExecutionAccountSyncService:
             details["incomplete_symbols"] = sorted(
                 getattr(self._client, "incomplete_fill_symbols", ())
             )
+        details.update(_position_state_details(snapshot.positions))
         # Same sparsify rule as snapshot_once / user-data persist: the in-memory
         # snapshot keeps every asset, but durable history only stores non-zero
         # balances and the zero that closes a previously non-zero asset.
@@ -1095,6 +1096,24 @@ class ExecutionAccountSyncService:
             snapshot.positions,
             observed_at=event.received_at,
         )
+        event_state = (
+            ExecutionAccountStatus.SYNCING
+            if (
+                not self._has_completed_sync
+                or self._last_persisted_process_state
+                is ExecutionAccountStatus.SYNCING
+            )
+            else ExecutionAccountStatus.READY_READONLY
+        )
+        event_reason = (
+            self._last_persisted_process_state_reason
+            if event_state is self._last_persisted_process_state
+            else (
+                "fills_catching_up"
+                if event_state is ExecutionAccountStatus.SYNCING
+                else None
+            )
+        )
         account_config = self._latest_rest_account_config or snapshot.config
         await self._repository.save_reconciliation_snapshot(
             # Keep the last REST account-config observation as the identity of
@@ -1116,6 +1135,7 @@ class ExecutionAccountSyncService:
                     "event_id": event.event_id,
                     "event_type": event.event_type,
                     "event_at": event.event_at.isoformat(),
+                    **_position_state_details(snapshot.positions),
                 },
                 balance_count=len(persisted_balances),
                 position_count=len(active_positions),
@@ -1129,11 +1149,12 @@ class ExecutionAccountSyncService:
             observed_at=event.received_at,
         )
         await self._save_state(
-            ExecutionAccountStatus.READY_READONLY,
+            event_state,
+            reason=event_reason,
             config=config,
         )
         return ExecutionAccountSyncResult(
-            status=ExecutionAccountStatus.READY_READONLY,
+            status=event_state,
             reconciliation_id=reconciliation_id,
             mismatch_count=0,
             snapshot=snapshot,
@@ -1142,6 +1163,7 @@ class ExecutionAccountSyncService:
             new_fills=fills,
             new_fill_keys=frozenset(_fill_keys(fills)),
             fill_count_by_symbol=_fill_counts_by_symbol(fills),
+            fills_catching_up=event_state is ExecutionAccountStatus.SYNCING,
         )
 
     def _fill_symbols_for_reconciliation(
@@ -1442,6 +1464,30 @@ def _position_keys(
     positions: tuple[AccountPositionSnapshot, ...],
 ) -> set[tuple[str, str]]:
     return {(position.symbol, position.position_side) for position in positions}
+
+
+def _position_state_details(
+    positions: tuple[AccountPositionSnapshot, ...],
+) -> dict[str, JsonValue]:
+    """Persist the complete current position-key set beside each run.
+
+    Position history remains sparse, so readers must not infer the current
+    account state from rows sharing one observation timestamp.
+    """
+    active_keys = [
+        (position.symbol.strip().upper(), position.position_side.strip().upper())
+        for position in positions
+        if position.position_amt != Decimal("0")
+    ]
+    if len(set(active_keys)) != len(active_keys):
+        raise ValueError("account snapshot contains duplicate active position keys")
+    return {
+        "position_state_schema_version": 1,
+        "position_keys": [
+            {"symbol": symbol, "position_side": position_side}
+            for symbol, position_side in sorted(active_keys)
+        ],
+    }
 
 
 def _user_data_reconciliation_id(
