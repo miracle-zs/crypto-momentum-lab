@@ -147,9 +147,16 @@ def compose_fact_coverage(
         checked_through = evidence.fill_checked_through
         checkpoint_cut = evidence.checkpoint_event_cut
         load_start = evidence.fill_load_start
-        assert checked_through is not None
-        assert checkpoint_cut is not None
-        assert load_start is not None
+        if checked_through is None or checkpoint_cut is None or load_start is None:
+            return FactCoverageInterval(
+                start_at=start,
+                end_at=end,
+                source_cursor=evidence.fill_cursor_id,
+                status=FactCoverageStatus.HYPOTHETICAL,
+                confirmed_revision=None,
+                stream_scope=evidence.stream_scope,
+                evidence_observed_at=evidence.evidence_observed_at,
+            )
         return FactCoverageInterval(
             start_at=max(start, load_start),
             end_at=min(end, checked_through, checkpoint_cut),

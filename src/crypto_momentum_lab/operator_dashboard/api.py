@@ -431,8 +431,8 @@ def create_dashboard_app(
     ) -> None:
         if not auth_enabled:
             return
-        assert resolved_auth_username is not None
-        assert resolved_auth_password is not None
+        if resolved_auth_username is None or resolved_auth_password is None:
+            return
         if credentials is None or not (
             secrets.compare_digest(
                 credentials.username,

@@ -267,13 +267,6 @@ def resolve_live_profile_options(
         raise LiveRuntimeOptionsError(
             "all seven order-flow profile options must be provided together"
         )
-    assert impulse_window_buckets is not None
-    assert confirmation_buckets is not None
-    assert min_return_pct is not None
-    assert min_imbalance is not None
-    assert min_intensity is not None
-    assert min_notional_5m_vs_30m is not None
-    assert cooldown_buckets is not None
     try:
         return LiveOrderFlowImpulseProfile(
             impulse_window_buckets=impulse_window_buckets,

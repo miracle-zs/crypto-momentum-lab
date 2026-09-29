@@ -38,12 +38,6 @@ def evaluate_fixed_live_limits(
     missing = _missing_reason(context)
     if missing is not None:
         return LiveLimitDecision(False, missing, None)
-    assert context.requested_notional is not None
-    assert context.open_position_symbols is not None
-    assert context.realized_pnl is not None
-    assert context.unrealized_pnl is not None
-    assert context.gross_exposure is not None
-    assert context.min_notional is not None
     if context.has_unresolved_order:
         return LiveLimitDecision(False, "unresolved_order_uncertainty", None)
     if (

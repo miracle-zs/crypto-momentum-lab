@@ -227,15 +227,16 @@ class LiveEntryRuntime:
         self,
         observed_at: datetime,
     ) -> LiveEntryUniverseData:
-        assert self._universe_repository is not None
-        assert self._positive_gainer_top_count is not None
+        if self._universe_repository is None:
+            return LiveEntryUniverseData(symbols=frozenset(), snapshot=None)
         snapshot = await self._universe_repository.load_snapshot_at(observed_at)
         if snapshot is None:
             self._last_entry_universe_symbols = frozenset()
             return LiveEntryUniverseData(symbols=frozenset(), snapshot=None)
+        top_count = self._positive_gainer_top_count or len(snapshot.ranking.gainers)
         symbols = frozenset(
             entry.symbol
-            for entry in snapshot.ranking.gainers[: self._positive_gainer_top_count]
+            for entry in snapshot.ranking.gainers[:top_count]
             if entry.utc_day_return > 0
         )
         self._last_entry_universe_symbols = symbols
@@ -251,21 +252,24 @@ class LiveEntryRuntime:
         self,
         observed_at: datetime,
     ) -> frozenset[str]:
-        assert self._entry_filter_cache is not None
+        if self._entry_filter_cache is None:
+            return frozenset()
         return self._entry_filter_cache.symbols_for(observed_at)
 
     async def _load_entry_symbols_from_symbol_cache(
         self,
         observed_at: datetime,
     ) -> frozenset[str]:
-        assert self._entry_symbol_cache is not None
+        if self._entry_symbol_cache is None:
+            return frozenset()
         return self._entry_symbol_cache.symbols_for(observed_at)
 
     async def _load_entry_filter_context(
         self,
         state: MarketState15s,
     ) -> LiveEntryFilterContext | None:
-        assert self._ema_provider is not None
+        if self._ema_provider is None:
+            return None
         entry_price = (
             state.last_ask_price
             or state.midpoint
@@ -311,19 +315,18 @@ class LiveEntryRuntime:
         symbol: str,
         observed_at: datetime,
     ) -> dict[str, object] | None:
-        assert self._positive_gainer_top_count is not None
+        top_count = self._positive_gainer_top_count or 0
         return universe_context_for(
             self._cached_universe_data(observed_at),
             symbol=symbol,
-            entry_pool_name=(f"positive_gainer_top{self._positive_gainer_top_count}"),
-            entry_pool_top_count=self._positive_gainer_top_count,
+            entry_pool_name=(f"positive_gainer_top{top_count}"),
+            entry_pool_top_count=top_count,
         )
 
     def _load_entry_universe_policy_snapshot(
         self,
         observed_at: datetime,
     ) -> UniverseRankingSnapshot | None:
-        assert self._positive_gainer_top_count is not None
         universe_data = self._cached_universe_data(observed_at)
         if universe_data is None:
             return None

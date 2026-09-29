@@ -346,9 +346,8 @@ class _ArchiveWriter:
                 self._subscription_generation_min,
                 generation,
             )
-            assert self._subscription_generation_max is not None
             self._subscription_generation_max = max(
-                self._subscription_generation_max,
+                self._subscription_generation_max if self._subscription_generation_max is not None else generation,
                 generation,
             )
         if envelope.exchange_event_at is not None:
@@ -437,10 +436,13 @@ class _ArchiveWriter:
         os.replace(self._temporary_path, self._final_path)
         _fsync_directory(self._final_path.parent)
 
-        assert self._subscription_generation_min is not None
-        assert self._subscription_generation_max is not None
-        assert self._first_received_at is not None
-        assert self._last_received_at is not None
+        if (
+            self._subscription_generation_min is None
+            or self._subscription_generation_max is None
+            or self._first_received_at is None
+            or self._last_received_at is None
+        ):
+            raise ValueError("archive writer closed without any written envelopes")
         return ArchiveManifest(
             manifest_id=uuid5(
                 NAMESPACE_URL,

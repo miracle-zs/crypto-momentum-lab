@@ -263,7 +263,8 @@ class ExitExecutionLane:
             await self._idle.wait()
 
     async def _run_account_worker(self) -> None:
-        assert self._account_queue is not None
+        if self._account_queue is None:
+            return
         while True:
             work = await self._account_queue.get()
             if work is None:
@@ -276,8 +277,8 @@ class ExitExecutionLane:
             self._mark_idle_if_ready()
 
     async def _run_market_worker(self) -> None:
-        assert self._market_queue is not None
-        assert self._market_state_lock is not None
+        if self._market_queue is None or self._market_state_lock is None:
+            return
         while True:
             symbol = await self._market_queue.get()
             if symbol is None:
@@ -294,8 +295,8 @@ class ExitExecutionLane:
             self._mark_idle_if_ready()
 
     async def _run_quote_worker(self) -> None:
-        assert self._quote_queue is not None
-        assert self._market_state_lock is not None
+        if self._quote_queue is None or self._market_state_lock is None:
+            return
         while True:
             symbol = await self._quote_queue.get()
             if symbol is None:

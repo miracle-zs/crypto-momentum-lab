@@ -172,8 +172,8 @@ class StreamAvailabilityClock:
                 raise StreamAvailabilityTimeoutError(msg)
         else:
             if self._state == StreamAvailabilityState.DISRUPTED:
-                assert self._disrupted_since is not None
-                elapsed = now - self._disrupted_since
+                disrupted_since = self._disrupted_since if self._disrupted_since is not None else now
+                elapsed = now - disrupted_since
                 if elapsed >= self._config.disrupted_timeout_seconds:
                     msg = (
                         custom_message
@@ -186,8 +186,8 @@ class StreamAvailabilityClock:
                         raise error_factory(msg)
                     raise StreamAvailabilityTimeoutError(msg)
             elif self._state == StreamAvailabilityState.RECOVERING:
-                assert self._recovering_since is not None
-                elapsed = now - self._recovering_since
+                recovering_since = self._recovering_since if self._recovering_since is not None else now
+                elapsed = now - recovering_since
                 if elapsed >= self._config.recovery_timeout_seconds:
                     msg = (
                         custom_message
@@ -213,15 +213,15 @@ class StreamAvailabilityClock:
                 0.0, self._config.startup_timeout_seconds - (now - self._startup_since)
             )
         if self._state == StreamAvailabilityState.DISRUPTED:
-            assert self._disrupted_since is not None
+            disrupted_since = self._disrupted_since if self._disrupted_since is not None else now
             return max(
                 0.0,
-                self._config.disrupted_timeout_seconds - (now - self._disrupted_since),
+                self._config.disrupted_timeout_seconds - (now - disrupted_since),
             )
         if self._state == StreamAvailabilityState.RECOVERING:
-            assert self._recovering_since is not None
+            recovering_since = self._recovering_since if self._recovering_since is not None else now
             return max(
                 0.0,
-                self._config.recovery_timeout_seconds - (now - self._recovering_since),
+                self._config.recovery_timeout_seconds - (now - recovering_since),
             )
         return float("inf")

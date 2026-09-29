@@ -248,8 +248,8 @@ class AggTradeGapRecoverer:
         for result in results:
             request = result.request
             if result.failure_reason is None:
-                assert request.current.symbol is not None
-                assert request.current.exchange_event_at is not None
+                if request.current.symbol is None or request.current.exchange_event_at is None:
+                    continue
                 request_current = _SeenTrade(
                     request.current_id,
                     request.current.exchange_event_at,
@@ -268,8 +268,8 @@ class AggTradeGapRecoverer:
                 continue
             self._unrecovered_gap_count += 1
             self._missing_trade_count += request.missing_count
-            assert request.current.symbol is not None
-            assert request.current.exchange_event_at is not None
+            if request.current.symbol is None or request.current.exchange_event_at is None:
+                continue
             failure_reason = result.failure_reason
             if (
                 request.previous.connection_session_id
@@ -301,7 +301,8 @@ class AggTradeGapRecoverer:
             return _RecoveryResult(request, (), "rate_limit_cooldown")
         if request.missing_count > self._max_gap_trades:
             return _RecoveryResult(request, (), "gap_too_large")
-        assert request.current.symbol is not None
+        if request.current.symbol is None:
+            return _RecoveryResult(request, (), "missing_symbol")
         next_id = request.previous.aggregate_trade_id + 1
         trades: list[BinanceAggTrade] = []
         try:
@@ -396,7 +397,8 @@ def _recovered_envelope(
     *,
     current: RawEnvelope,
 ) -> RawEnvelope:
-    assert current.symbol is not None
+    if current.symbol is None:
+        raise ValueError("current envelope must have a symbol")
     received_at = datetime.now(UTC)
     return RawEnvelope(
         schema_version=current.schema_version,

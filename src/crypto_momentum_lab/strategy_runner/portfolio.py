@@ -478,7 +478,6 @@ def _apply_candle_grace_exit(
     if started_at is None:
         if not _is_adverse_candle(position, closed_candle):
             return None
-        assert closed_candle is not None
         profitable_exit_price = _first_adverse_profit_exit_price(
             position=position,
             mark_price=mark_price,

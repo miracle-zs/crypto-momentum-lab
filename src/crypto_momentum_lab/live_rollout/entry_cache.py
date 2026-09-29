@@ -294,7 +294,8 @@ class LiveEntryFilterCache:
                 symbols = universe_data.symbols
             else:
                 symbol_loader = self._symbol_loader
-                assert symbol_loader is not None
+                if symbol_loader is None:
+                    return
                 symbols = await symbol_loader(observed_at)
         except asyncio.CancelledError:
             raise
@@ -540,7 +541,8 @@ class LiveEntrySymbolCache:
                 symbols = universe_data.symbols
             else:
                 symbol_loader = self._symbol_loader
-                assert symbol_loader is not None
+                if symbol_loader is None:
+                    return
                 symbols = await symbol_loader(observed_at)
         except asyncio.CancelledError:
             raise

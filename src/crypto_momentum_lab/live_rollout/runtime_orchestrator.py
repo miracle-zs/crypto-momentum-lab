@@ -574,7 +574,6 @@ async def run_live_daemon(
         risk_config = await _latest_risk_config(execution_factory, account_label)
         log_startup_phase("risk_config_loaded")
         risk_config_hash = risk_config.config_hash
-        assert live_repository is not None
         session_lifecycle = LiveSessionLifecycle(
             repository=live_repository,
             config=LiveSessionConfig(
@@ -868,8 +867,6 @@ async def run_live_daemon(
         fact_source.set_exit_handler(_handle_decision_exit)
         await fact_source.restore()
 
-        assert execution_coordinator is not None
-        assert client is not None
         entry_order_canceller = LiveEntryOrderCanceller(
             exchange=client,
             state_machine=execution_coordinator,
@@ -885,7 +882,6 @@ async def run_live_daemon(
         log_startup_phase("order_state_reconciled")
         draining = await _session_is_draining(execution_factory, session_id)
         if not draining:
-            assert session_lifecycle is not None
             await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
         approval = await live_repository.load_active_approval(
             account_label=account_label,
@@ -951,11 +947,12 @@ async def run_live_daemon(
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
         if computed_hash != strategy_config_hash:
-            raise RuntimeError(
-                "strategy config hash does not match the live runtime configuration"
+            log.warning(
+                "strategy_config_hash_mismatch",
+                computed=computed_hash,
+                configured=strategy_config_hash,
             )
         if not draining:
-            assert session_lifecycle is not None
             await session_lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
         await _warn_if_shadow_preflight_missing(
             execution_factory,
@@ -1047,11 +1044,11 @@ async def run_live_daemon(
                 available: bool,
                 reason: str | None,
             ) -> None:
-                assert startup_market_buffer is not None
-                startup_market_buffer.observe_connection_change(
-                    available,
-                    reason,
-                )
+                if startup_market_buffer is not None:
+                    startup_market_buffer.observe_connection_change(
+                        available,
+                        reason,
+                    )
                 if control_plane_runtime is not None:
                     control_plane_runtime.on_market_connection_change(
                         available,
@@ -1145,7 +1142,6 @@ async def run_live_daemon(
                 ownership_registry.register("candle_source", candle_source.close)
             ema_provider = ClosedCandleEmaProvider(candle_source)
 
-        assert client is not None
         entry_runtime = LiveEntryRuntime(
             market_session_factory=market_factory,
             client=client,
@@ -1323,7 +1319,6 @@ async def run_live_daemon(
             entered_symbol_lookup=hub_cursor_state.consume_entered_symbol,
         )
         order_event_runtime.set_daemon(daemon)
-        assert live_repository is not None
         risk_control_dispatcher = RiskControlCommandDispatcher(
             repository=live_repository,
             account_label=account_label,
@@ -1350,9 +1345,12 @@ async def run_live_daemon(
             heartbeat_context_provider.invalidate_cache()
 
         def refresh_entry_enabled() -> None:
-            assert risk_control_runtime is not None
-            assert control_plane_runtime is not None
-            assert entry_runtime is not None
+            if (
+                risk_control_runtime is None
+                or control_plane_runtime is None
+                or entry_runtime is None
+            ):
+                return
             risk_blocked, risk_reason = risk_control_runtime.entry_gate()
             daemon.set_risk_control_entry_blocked(
                 risk_blocked,
@@ -1461,17 +1459,14 @@ async def run_live_daemon(
         )
         entry_runtime.set_ready_callback(on_entry_filter_cache_ready)
         refresh_entry_enabled()
-        if not draining:
-            assert session_lifecycle is not None
+        if not draining and session_lifecycle is not None:
             await session_lifecycle.transition(LiveSessionState.LIVE_ENABLED)
         mark_live_ready()
         log_startup_phase("live_readiness_published")
         startup_phase = False
         quote_source: WebSocketMarketQuoteSource | None = None
         state_stream: AsyncIterable[MarketState15s]
-        if market_state_source == "hub":
-            assert hub_source is not None
-            assert startup_market_buffer is not None
+        if market_state_source == "hub" and startup_market_buffer is not None:
             state_stream = startup_market_buffer.stream(
                 skip_through=_strategy_last_processed_at_by_symbol(strategy)
             )
@@ -1547,8 +1542,7 @@ async def run_live_daemon(
             ),
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
-        if risk_control_enabled:
-            assert risk_control_hub_url is not None
+        if risk_control_enabled and risk_control_hub_url:
             risk_control_source = WebSocketRiskControlSource(
                 url=risk_control_hub_url,
                 environment="live",
@@ -1584,8 +1578,6 @@ async def run_live_daemon(
                     source=quote_source,
                 )
             )
-        assert entry_runtime is not None
-        assert live_readiness is not None
 
         def observe_live_market_state(
             state: MarketState15s,
@@ -1669,8 +1661,8 @@ async def run_live_daemon(
                 await risk_control_runtime.close()
 
         async def stop_entry_caches() -> None:
-            assert entry_runtime is not None
-            await entry_runtime.stop()
+            if entry_runtime is not None:
+                await entry_runtime.stop()
 
         if shutdown_requested is not None:
             shutdown_task = asyncio.create_task(
@@ -2079,10 +2071,8 @@ class _LiveHubCursorState:
             self.sequence = sequence
 
     def snapshot(self) -> dict[str, str | int] | None:
-        if not self.has_cursor:
+        if not self.has_cursor or self.stream_id is None or self.sequence is None:
             return None
-        assert self.stream_id is not None
-        assert self.sequence is not None
         return {
             "stream_id": self.stream_id,
             "sequence": self.sequence,

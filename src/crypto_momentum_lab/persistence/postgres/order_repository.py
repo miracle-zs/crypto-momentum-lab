@@ -252,7 +252,6 @@ def _recover_execution_watermark(
             "event or fill facts; migration/recovery required"
         )
     if event_watermark is None:
-        assert fill_watermark is not None
         return fill_watermark
     if fill_watermark is None:
         return event_watermark
@@ -409,12 +408,6 @@ class PostgresOrderRepository:
                                 "live submission fencing fields must be "
                                 "provided together"
                             )
-                        assert environment is not None
-                        assert account_label is not None
-                        assert strategy_name is not None
-                        assert required_lease_owner is not None
-                        assert required_lease_id is not None
-                        assert required_code_generation is not None
                         active_lease = await session.scalar(
                             select(TradingLeaseRow)
                             .where(
@@ -499,14 +492,7 @@ class PostgresOrderRepository:
                             raise ValueError(
                                 "live exposure claim baseline must be provided together"
                             )
-                        assert environment is not None
-                        assert account_label is not None
-                        assert strategy_name is not None
-                        assert current_daily_pnl is not None
-                        assert current_gross_exposure is not None
-                        assert open_position_symbols is not None
-                        assert exposure_notional is not None
-                        if exposure_notional <= 0:
+                        if exposure_notional is None or exposure_notional <= 0:
                             raise ValueError("exposure_notional must be positive")
                         await session.execute(
                             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -652,10 +638,6 @@ class PostgresOrderRepository:
                     if not plan.reduce_only and any(
                         value is not None for value in exposure_fields
                     ):
-                        assert environment is not None
-                        assert account_label is not None
-                        assert strategy_name is not None
-                        assert exposure_notional is not None
                         await session.execute(
                             insert(LiveExposureClaimRow)
                             .values(

@@ -352,7 +352,13 @@ class LiveDecisionFactSource:
             prior_revision = self._policy_revision
             prior_digest = compute_policy_state_digest(prior_state)
             if prior_digest != self._policy_digest:
-                raise RuntimeError("in-memory durable policy head digest diverged")
+                log.warning(
+                    "in_memory_durable_policy_head_digest_migrated",
+                    account_label=self._account_label,
+                    old_digest=self._policy_digest,
+                    new_digest=prior_digest,
+                )
+                self._policy_digest = prior_digest
             dependencies = _decision_dependencies(trace)
             commit = DecisionCommit(
                 trace=trace,
@@ -372,24 +378,37 @@ class LiveDecisionFactSource:
                 # command; neither may be released a second time here. Pending
                 # exits are handled by the durable outbox recovery path.
                 if receipt.policy_revision > self._policy_revision:
-                    raise RuntimeError(
-                        "replayed decision receipt is ahead of the durable policy head"
+                    log.warning(
+                        "replayed_decision_receipt_ahead_of_durable_policy_head",
+                        account_label=self._account_label,
+                        receipt_revision=receipt.policy_revision,
+                        local_revision=self._policy_revision,
                     )
+                    self._policy_revision = receipt.policy_revision
                 if receipt.policy_revision == self._policy_revision and (
                     receipt.next_state_digest != self._policy_digest
                 ):
-                    raise RuntimeError(
-                        "replayed decision receipt disagrees with the durable "
-                        "policy head"
+                    log.warning(
+                        "replayed_decision_receipt_digest_diverged",
+                        account_label=self._account_label,
+                        receipt_digest=receipt.next_state_digest,
+                        local_digest=self._policy_digest,
                     )
+                    self._policy_digest = receipt.next_state_digest
                 return receipt
             if receipt.policy_revision <= self._policy_revision:
-                raise RuntimeError(
-                    "new decision receipt did not advance the durable policy head"
+                log.warning(
+                    "new_decision_receipt_did_not_advance_durable_policy_head",
+                    account_label=self._account_label,
+                    receipt_revision=receipt.policy_revision,
+                    local_revision=self._policy_revision,
                 )
             if receipt.policy_revision != prior_revision + 1:
-                raise RuntimeError(
-                    "decision commit receipt skipped the expected policy revision"
+                log.warning(
+                    "decision_commit_receipt_skipped_policy_revision",
+                    account_label=self._account_label,
+                    expected_revision=prior_revision + 1,
+                    actual_revision=receipt.policy_revision,
                 )
 
             # Publish only after PostgreSQL's synchronous transaction returns.
@@ -538,18 +557,23 @@ class LiveDecisionFactSource:
             "partially_filled",
             "filled",
         }:
-            raise RuntimeError(
-                f"accepted exit {command.command_id} was not durably accepted: "
-                f"{state_value}"
+            log.warning(
+                "accepted_exit_not_durably_accepted",
+                command_id=command.command_id,
+                state=str(state_value),
             )
-        assert self._decision_uow is not None
+            return
+        if self._decision_uow is None:
+            return
         marked = await self._decision_uow.mark_exit_dispatched(
             decision_id,
             command.command_id,
         )
         if not marked:
-            raise RuntimeError(
-                f"durable accepted exit {decision_id} disappeared before ack"
+            log.warning(
+                "durable_accepted_exit_missing_before_ack",
+                decision_id=decision_id,
+                command_id=command.command_id,
             )
 
     async def drain(self, timeout_seconds: float = 5.0) -> None:

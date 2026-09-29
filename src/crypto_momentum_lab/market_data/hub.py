@@ -483,10 +483,10 @@ class MarketStateHub:
                     reason="market-state replay is unavailable",
                 )
                 return
-            assert subscriber is not None
-            subscriber.writer_task = asyncio.create_task(
-                self._write_messages(connection, queue)
-            )
+            if subscriber is not None:
+                subscriber.writer_task = asyncio.create_task(
+                    self._write_messages(connection, queue)
+                )
             log.info(
                 "market_state_hub_subscriber_connected",
                 consumer_id=consumer_id,

@@ -430,3 +430,82 @@ async def test_unrelated_book_corruption_is_not_swallowed_as_epoch_recovery() ->
         await source.recover_pending_exits()
     handler.assert_not_awaited()
 
+
+async def test_fact_source_commit_decision_heals_diverged_prior_digest() -> None:
+    class FakeUoW:
+        async def commit_decision(self, commit):
+            return SimpleNamespace(
+                policy_revision=commit.expected_policy_revision + 1,
+                next_state_digest="digest_healed",
+                decision_id="dec_heal",
+            )
+
+    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    # Fabricate a diverged in-memory policy digest
+    src._policy_digest = "diverged_in_memory_digest"
+
+    next_st = PolicyState(policy_version=2)
+    res = DecisionResult(
+        decision_id="dec_heal",
+        input_hash="hash_heal",
+        intent=None,
+        exit_command=None,
+        next_policy_state=next_st,
+        rejection_reason=None,
+        evaluated_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+    )
+    trace = DecisionTrace(
+        decision_id="dec_heal",
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        decision_time=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        intent_produced=False,
+        frame_digest="frame_digest",
+        evaluated_market_refs=(
+            SimpleNamespace(bucket_start=datetime(2026, 9, 25, 8, 0, tzinfo=UTC)),
+        ),
+    )
+    receipt = await src.commit_decision(trace, res, None)
+    assert receipt.decision_id == "dec_heal"
+    assert src.current_policy_state.policy_version == 2
+    assert src.policy_revision == 1
+
+
+async def test_fact_source_commit_decision_heals_skipped_revision() -> None:
+    class FakeUoW:
+        async def commit_decision(self, commit):
+            # UoW returns a revision ahead by 5
+            return SimpleNamespace(
+                policy_revision=commit.expected_policy_revision + 5,
+                next_state_digest="digest_advanced",
+                decision_id="dec_skip",
+            )
+
+    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    next_st = PolicyState(policy_version=3)
+    res = DecisionResult(
+        decision_id="dec_skip",
+        input_hash="hash_skip",
+        intent=None,
+        exit_command=None,
+        next_policy_state=next_st,
+        rejection_reason=None,
+        evaluated_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+    )
+    trace = DecisionTrace(
+        decision_id="dec_skip",
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        decision_time=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        intent_produced=False,
+        frame_digest="frame_digest",
+        evaluated_market_refs=(
+            SimpleNamespace(bucket_start=datetime(2026, 9, 25, 8, 0, tzinfo=UTC)),
+        ),
+    )
+    receipt = await src.commit_decision(trace, res, None)
+    assert receipt.decision_id == "dec_skip"
+    assert src.policy_revision == 5
+    assert src.current_policy_state.policy_version == 3
+
+

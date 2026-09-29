@@ -240,9 +240,9 @@ class LiveStrategySignalRecorder:
         queue = self._queue
         if writer_task is None:
             return
-        assert queue is not None
         try:
-            await queue.put(None)
+            if queue is not None:
+                await queue.put(None)
             await writer_task
         except asyncio.CancelledError:
             if not writer_task.done():
@@ -381,16 +381,6 @@ class LiveStrategySignalRecorder:
             )
             if any(value is None for value in values):
                 raise ValueError("live signal observation is missing identity")
-            assert signal_id is not None
-            assert run_id is not None
-            assert strategy_name is not None
-            assert strategy_version is not None
-            assert config_hash is not None
-            assert symbol is not None
-            assert side is not None
-            assert detected_at is not None
-            assert source_state_at is not None
-            assert reason is not None
             volume_fields = self._volume_fields(
                 symbol=symbol,
                 detected_at=detected_at,
@@ -519,7 +509,8 @@ class LiveStrategySignalRecorder:
         """
 
         persist = self._persist
-        assert persist is not None  # _write_events only calls this with a sink
+        if persist is None:
+            return
         rows = tuple(record.row() for record in batch)
         for attempt in range(1, _PERSIST_BATCH_ATTEMPTS + 1):
             try:

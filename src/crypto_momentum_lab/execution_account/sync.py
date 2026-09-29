@@ -907,8 +907,8 @@ class ExecutionAccountSyncService:
                 fill_load_scans=tuple(fill_load_scans),
                 fills_catching_up=fills_catching_up,
             )
-            assert result.snapshot is not None
-            self._remember_observation(result.snapshot.config.observed_at)
+            if result.snapshot is not None:
+                self._remember_observation(result.snapshot.config.observed_at)
             if persist:
                 await self.persist_reconciliation_result(
                     result,

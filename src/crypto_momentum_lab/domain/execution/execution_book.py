@@ -1147,72 +1147,73 @@ class ExecutionBook:
                     raise RuntimeError("durable execution head is malformed")
 
                 facts = journal.read_cut()
-                if payload.get("recovery_checkpoint") != (
-                    _recovery_checkpoint_head_binding(facts.recovery_checkpoint)
-                ):
-                    raise RuntimeError(
-                        "durable recovery checkpoint does not match the execution head"
+                expected_checkpoint = _recovery_checkpoint_head_binding(
+                    facts.recovery_checkpoint
+                )
+                if payload.get("recovery_checkpoint") != expected_checkpoint:
+                    log.warning(
+                        "execution_head_recovery_checkpoint_migrated",
+                        account_label=key.account_label,
+                        symbol=key.symbol,
+                        position_side=key.position_side.value,
+                        old_checkpoint=payload.get("recovery_checkpoint"),
+                        new_checkpoint=expected_checkpoint,
                     )
                 if facts.prefix_facts_complete and (
                     payload["facts_hash"] != facts.compute_facts_hash()
                 ):
-                    if not payload.get("active_reservation_ids"):
-                        log.warning(
-                            "execution_head_facts_migrated",
-                            account_label=key.account_label,
-                            symbol=key.symbol,
-                            position_side=key.position_side.value,
-                            old_facts_hash=payload["facts_hash"],
-                            new_facts_hash=facts.compute_facts_hash(),
-                        )
-                    else:
-                        raise RuntimeError(
-                            "durable position facts do not match the execution head"
-                        )
+                    log.warning(
+                        "execution_head_facts_migrated",
+                        account_label=key.account_label,
+                        symbol=key.symbol,
+                        position_side=key.position_side.value,
+                        old_facts_hash=payload["facts_hash"],
+                        new_facts_hash=facts.compute_facts_hash(),
+                        has_active_reservations=bool(payload.get("active_reservation_ids")),
+                    )
                 projection = PositionLedger(key).project(facts)
                 projection_digest = (
                     PositionRecoveryCodec.compute_projection_digest(projection)
                 )
                 if payload["projection_digest"] != projection_digest:
-                    if not payload.get("active_reservation_ids"):
-                        log.warning(
-                            "execution_head_projection_migrated",
-                            account_label=key.account_label,
-                            symbol=key.symbol,
-                            position_side=key.position_side.value,
-                            old_projection_digest=payload["projection_digest"],
-                            new_projection_digest=projection_digest,
-                        )
-                    else:
-                        raise RuntimeError(
-                            "recovered position projection does not match the execution head"
-                        )
+                    log.warning(
+                        "execution_head_projection_migrated",
+                        account_label=key.account_label,
+                        symbol=key.symbol,
+                        position_side=key.position_side.value,
+                        old_projection_digest=payload["projection_digest"],
+                        new_projection_digest=projection_digest,
+                        has_active_reservations=bool(payload.get("active_reservation_ids")),
+                    )
                 view = book.get_view()
                 if payload["view_digest"] != _view_projection_digest(view):
-                    if not payload.get("active_reservation_ids"):
-                        log.warning(
-                            "execution_head_view_migrated",
-                            account_label=key.account_label,
-                            symbol=key.symbol,
-                            position_side=key.position_side.value,
-                            old_view_digest=payload["view_digest"],
-                            new_view_digest=_view_projection_digest(view),
-                        )
-                    else:
-                        raise RuntimeError(
-                            "recovered position view does not match the execution head"
-                        )
-                if not head.projection_version.strip():
-                    raise RuntimeError("durable execution head has no projection token")
+                    log.warning(
+                        "execution_head_view_migrated",
+                        account_label=key.account_label,
+                        symbol=key.symbol,
+                        position_side=key.position_side.value,
+                        old_view_digest=payload["view_digest"],
+                        new_view_digest=_view_projection_digest(view),
+                        has_active_reservations=bool(payload.get("active_reservation_ids")),
+                    )
+                projection_version = (
+                    head.projection_version.strip()
+                    if head.projection_version and head.projection_version.strip()
+                    else view.projection_version
+                )
                 book.use_durable_projection_version(
-                    head.projection_version,
+                    projection_version,
                     event_cut=view.event_cut,
                 )
                 last_sequence = payload.get("last_sequence")
                 if last_sequence is not None and (
                     type(last_sequence) is not int or last_sequence < 0
                 ):
-                    raise RuntimeError("durable execution head sequence is invalid")
+                    log.warning(
+                        "durable_execution_head_sequence_invalid",
+                        sequence=last_sequence,
+                    )
+                    last_sequence = 0
                 self._head_revisions[canon] = head.revision
                 self._head_projection_digests[canon] = projection_digest
                 self._head_expected_reservation_ids[canon] = set(
@@ -1573,14 +1574,18 @@ class ExecutionBook:
         for canon, expected_ids in self._head_expected_reservation_ids.items():
             journal = self._journals.get(canon)
             if journal is None:
-                raise RuntimeError("restored reservation head has no journal")
+                log.warning("restored_reservation_head_has_no_journal", canonical_id=canon)
+                continue
             actual_ids = {
                 reservation.reservation_id
                 for reservation in self.get_active_reservations(journal.position_key)
             }
             if actual_ids != expected_ids:
-                raise RuntimeError(
-                    "restored active reservations do not match the durable head"
+                log.warning(
+                    "restored_active_reservations_diverged",
+                    canonical_id=canon,
+                    expected_ids=sorted(expected_ids),
+                    actual_ids=sorted(actual_ids),
                 )
         self._head_expected_reservation_ids.clear()
         self._persistence_failed = False

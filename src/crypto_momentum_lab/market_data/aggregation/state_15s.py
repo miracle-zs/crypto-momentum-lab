@@ -365,8 +365,6 @@ class MarketState15sAccumulator:
             self.high_price = event.price
             self.low_price = event.price
         else:
-            assert self.high_price is not None
-            assert self.low_price is not None
-            self.high_price = max(self.high_price, event.price)
-            self.low_price = min(self.low_price, event.price)
+            self.high_price = max(self.high_price if self.high_price is not None else event.price, event.price)
+            self.low_price = min(self.low_price if self.low_price is not None else event.price, event.price)
         self.close_price = event.price

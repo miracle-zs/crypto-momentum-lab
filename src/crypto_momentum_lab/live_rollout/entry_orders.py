@@ -102,7 +102,8 @@ class LiveLimitOrderLifecycle:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _expire(self, plan: OrderExecutionPlan) -> None:
-        assert plan.expires_at is not None
+        if plan.expires_at is None:
+            return
         delay = (plan.expires_at - self._clock()).total_seconds()
         if delay > 0:
             await asyncio.sleep(delay)

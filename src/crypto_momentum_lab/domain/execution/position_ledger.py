@@ -1306,8 +1306,8 @@ def _checkpoint_error(
             if prefix.compute_facts_hash() != checkpoint.facts_hash:
                 return "prefix facts hash mismatch"
         else:
-            assert checkpoint.parent_event_cut is not None
-            assert checkpoint.suffix_facts_hash is not None
+            if checkpoint.parent_event_cut is None or checkpoint.suffix_facts_hash is None:
+                return "checkpoint parent chain incomplete"
             suffix = _facts_after_checkpoint(prefix, checkpoint.parent_event_cut)
             if suffix.compute_facts_hash() != checkpoint.suffix_facts_hash:
                 return "checkpoint suffix facts hash mismatch"

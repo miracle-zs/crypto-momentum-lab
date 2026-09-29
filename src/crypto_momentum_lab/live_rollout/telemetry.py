@@ -1454,7 +1454,8 @@ class LiveRuntimeTelemetry:
         """
 
         persist = self._persist
-        assert persist is not None  # _write_events only calls this with a sink
+        if persist is None:
+            return
         rows = tuple(event.row() for event in batch)
         for attempt in range(1, _PERSIST_BATCH_ATTEMPTS + 1):
             try:

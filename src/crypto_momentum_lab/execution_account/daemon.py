@@ -1087,8 +1087,7 @@ class UserDataAccountSyncDaemon:
             if _is_usable_result(result):
                 self._last_sync_result = result
                 snapshot = result.snapshot
-                assert snapshot is not None
-                if self._state is None:
+                if snapshot is not None and self._state is None:
                     self._state = AccountUserDataState(
                         snapshot,
                         expected_position_registry=(self._expected_position_registry),
@@ -1411,9 +1410,8 @@ def _is_usable_result(result: ExecutionAccountSyncResult) -> bool:
 
 
 def _ready_snapshot(result: ExecutionAccountSyncResult) -> AccountSnapshot:
-    if not _is_ready_result(result):
+    if not _is_ready_result(result) or result.snapshot is None:
         raise ValueError("execution account result does not contain a ready snapshot")
-    assert result.snapshot is not None
     return result.snapshot
 
 
