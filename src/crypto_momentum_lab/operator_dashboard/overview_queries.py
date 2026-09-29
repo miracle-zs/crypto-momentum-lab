@@ -279,7 +279,7 @@ class OverviewQueries:
             head = heads_by_account.get(acc.account_label)
             if head is not None:
                 recon_matched = (
-                    head.status in ("OK", "reconciled", "matched")
+                    head.status in ("OK", "reconciled", "matched", "ready")
                     and head.mismatch_count == 0
                 )
                 head_st = head.status.lower()
