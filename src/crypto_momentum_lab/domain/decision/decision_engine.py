@@ -770,7 +770,9 @@ def decision_trace_from_result(
         and decision_input.market_envelope is not None
     ):
         try:
-            from crypto_momentum_lab.market_data.hub import market_state_to_payload
+            from crypto_momentum_lab.domain.market.state_codec import (
+                market_state_to_payload,
+            )
 
             payload["market_state"] = market_state_to_payload(
                 decision_input.market_envelope.state
