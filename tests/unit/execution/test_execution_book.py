@@ -2417,3 +2417,87 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         as_of=datetime.now(UTC),
     )
     assert key.canonical_id in book._books
+
+
+async def test_restore_rejects_head_mismatch_with_reservation() -> None:
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="test_stream", stream_epoch="test_epoch"
+    )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(),
+        prefix_facts_complete=True,
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        as_of=datetime.now(UTC),
+        facts=facts,
+        checkpoint=None,
+        revision=1,
+    )
+    payload_with_active_res = {
+        "schema_version": 1,
+        "position_key": {
+            "environment": key.environment,
+            "account_label": key.account_label,
+            "symbol": key.symbol,
+            "position_side": key.position_side.value,
+        },
+        "stream_scope": {
+            "stream_id": scope.stream_id,
+            "stream_epoch": scope.stream_epoch,
+        },
+        "facts_hash": "diverged-hash",
+        "projection_digest": "diverged-proj-digest",
+        "view_digest": "diverged-view-digest",
+        "recovery_checkpoint": "diverged-checkpoint",
+        "journal_revision": 1,
+        "active_reservation_ids": ["res-1"],
+    }
+    head = ExecutionHeadSnapshot(
+        stream_id=scope.stream_id,
+        stream_epoch=scope.stream_epoch,
+        revision=1,
+        projection_version="pv_test",
+        state_payload=payload_with_active_res,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=head,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    class StubUow:
+        async def load_positions(self, **kwargs):
+            return (state,)
+
+    book = ExecutionBook(execution_unit_of_work=StubUow())
+    with pytest.raises(RuntimeError, match="durable recovery checkpoint"):
+        await book._restore_durable_positions(
+            account_label="primary",
+            environment="live",
+            as_of=datetime.now(UTC),
+        )
+    assert key.canonical_id not in book._books
