@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.execution_book import (
+    _recovery_checkpoint_head_binding,
     _trade_payload_digest,
     _view_projection_digest,
 )
@@ -277,29 +278,53 @@ async def auto_heal_unmanaged_position(
             ExecutionBookHeadRow.position_side == position_side.value,
         )
     )
+    prev_payload = (
+        dict(head.state_payload)
+        if (head is not None and isinstance(head.state_payload, dict))
+        else {}
+    )
+    raw_reservations = prev_payload.get("active_reservation_ids", [])
+    active_reservations = (
+        [r for r in raw_reservations if isinstance(r, str) and r]
+        if isinstance(raw_reservations, list)
+        else []
+    )
+    last_seq = prev_payload.get("last_sequence")
+    if not isinstance(last_seq, int) or last_seq < 0:
+        last_seq = None
+
+    head_payload: dict[str, object] = {
+        "schema_version": 1,
+        "position_key": {
+            "environment": key.environment,
+            "account_label": key.account_label,
+            "symbol": key.symbol,
+            "position_side": key.position_side.value,
+        },
+        "stream_scope": {
+            "stream_id": active_stream_id,
+            "stream_epoch": active_stream_epoch,
+        },
+        "facts_hash": facts_hash,
+        "projection_digest": proj_digest,
+        "view_digest": view_digest,
+        "recovery_checkpoint": _recovery_checkpoint_head_binding(
+            facts.recovery_checkpoint
+        ),
+        "journal_revision": journal.revision,
+        "last_sequence": last_seq,
+        "seen_trade_count": len(fills),
+        "active_reservation_ids": active_reservations,
+    }
+
     if head is not None:
-        payload = dict(head.state_payload)
-        payload["facts_hash"] = facts_hash
-        payload["projection_digest"] = proj_digest
-        payload["view_digest"] = view_digest
-        payload["journal_revision"] = journal.revision
-        payload["seen_trade_count"] = len(fills)
         head.stream_id = active_stream_id
         head.stream_epoch = active_stream_epoch
         head.projection_version = view.projection_version
-        head.state_payload = payload
+        head.state_payload = head_payload
         head.revision += 1
         head.updated_at = now_utc
     else:
-        head_payload = {
-            "facts_hash": facts_hash,
-            "projection_digest": proj_digest,
-            "view_digest": view_digest,
-            "journal_revision": journal.revision,
-            "seen_trade_count": len(fills),
-            "active_reservation_ids": [],
-            "recovery_checkpoint": None,
-        }
         session.add(
             ExecutionBookHeadRow(
                 environment=environment,

@@ -392,6 +392,9 @@ async def test_auto_heal_unmanaged_position_updates_existing_head_row() -> None:
     session.commit.assert_awaited_once()
     assert existing_head.stream_epoch == "epoch-active"
     assert existing_head.revision == 11
-    # Only 2 new commands added, no duplicate head inserted
+    assert existing_head.state_payload["schema_version"] == 1
+    assert existing_head.state_payload["stream_scope"]["stream_epoch"] == "epoch-active"
+    assert existing_head.state_payload["position_key"]["symbol"] == "GRASSUSDT"
+    # Only 2 new records added (trade identity & fact journal event), no duplicate head inserted
     assert session.add.call_count == 2
 
