@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-import hashlib
-import json
 from typing import Any
 
 from sqlalchemy import select, text
@@ -23,6 +23,14 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
     FuturesPositionSide,
+)
+from crypto_momentum_lab.domain.execution.ports import (
+    DecisionCommitConflict,
+    DurableExecutionPositionState,
+    ExecutionEvidenceIdentity,
+    ExecutionHeadSnapshot,
+    ExecutionTradeIdentity,
+    ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -53,6 +61,10 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
     ExecutionOrderWatermarkRow,
     ExecutionTradeIdentityRow,
 )
+from crypto_momentum_lab.persistence.postgres.models import (
+    DecisionTraceRow,
+    MarketRevisionRefRow,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -65,14 +77,6 @@ from crypto_momentum_lab.persistence.postgres.position_reservation_repository im
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.models import (
-    DecisionTraceRow,
-    MarketRevisionRefRow,
-)
-
-
-class DecisionCommitConflict(RuntimeError):
-    """The durable policy head or immutable trace did not match the candidate."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,52 +121,6 @@ class DurablePolicySnapshot:
     state_digest: str
     revision: int
     last_decision_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionEvidenceIdentity:
-    evidence_id: str
-    payload_digest: str
-    accepted_at: datetime
-    sequence: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionTradeIdentity:
-    trade_id: str
-    order_id: str
-    quantity: Decimal
-    price: Decimal
-    side: str
-    payload_digest: str
-    first_seen_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionWatermark:
-    order_id: str
-    cumulative_quantity: Decimal
-    cumulative_quote: Decimal
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionHeadSnapshot:
-    revision: int
-    stream_id: str
-    stream_epoch: str
-    projection_version: str
-    state_payload: dict[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class DurableExecutionPositionState:
-    scope: AccountFactStreamScope
-    cut: Any
-    head: ExecutionHeadSnapshot | None
-    trade_ids: tuple[str, ...]
-    evidence_ids: tuple[str, ...]
-    watermarks: tuple[ExecutionWatermark, ...]
 
 
 class ExecutionTransaction:

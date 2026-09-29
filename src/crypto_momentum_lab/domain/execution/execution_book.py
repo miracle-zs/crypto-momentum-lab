@@ -33,14 +33,21 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     ExitAllocation,
     FuturesPositionSide,
-    deterministic_client_order_id,
+)
+from crypto_momentum_lab.domain.execution.ports import (
+    DecisionCommitConflict,
+    ExecutionEvidenceIdentity,
+    ExecutionTradeIdentity,
+    ExecutionTransactionPort,
+    ExecutionUnitOfWorkPort,
+    ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
     PositionBook,
 )
+from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    AccountFacts,
     AccountFillLoadProvenance,
     CoverageEvidence,
     ExitOrderSubmissionFact,
@@ -51,14 +58,12 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
     compose_fact_coverage,
 )
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
-from crypto_momentum_lab.domain.execution.recovery_models import (
-    DurableJournalCut,
-    PositionRecoveryCheckpoint,
-    StreamCheckpointAdoption,
-)
 from crypto_momentum_lab.domain.execution.recovery_codec import (
     PositionRecoveryCodec,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    PositionRecoveryCheckpoint,
+    StreamCheckpointAdoption,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
@@ -561,7 +566,7 @@ class ExecutionBook:
         coordinator: ExecutionCoordinator | None = None,
         reservation_repository: Any | None = None,
         command_repository: Any | None = None,
-        execution_unit_of_work: Any | None = None,
+        execution_unit_of_work: ExecutionUnitOfWorkPort | None = None,
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
         self._journals: dict[str, AccountJournal] = journals_by_key or {}
@@ -582,7 +587,7 @@ class ExecutionBook:
         self._reservation_repo = reservation_repository
         self._command_repo = command_repository
         self._execution_unit_of_work = execution_unit_of_work
-        self._active_transaction: Any | None = None
+        self._active_transaction: ExecutionTransactionPort | None = None
         self._stream_scopes: dict[str, AccountFactStreamScope] = {}
         self._active_streams: set[tuple[str, str, str, str]] = set()
         self._latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
@@ -1251,6 +1256,10 @@ class ExecutionBook:
         if self._execution_unit_of_work is not None:
             if not account_label:
                 raise ValueError("durable restore requires an account_label")
+            if command_repository is None:
+                raise RuntimeError(
+                    "durable execution restore requires a command repository"
+                )
             as_of = as_of or datetime.now(UTC)
             if as_of.tzinfo is None or as_of.utcoffset() is None:
                 raise ValueError("restore as_of must be timezone-aware")
@@ -1279,10 +1288,6 @@ class ExecutionBook:
                 environment=environment,
                 as_of=as_of,
             )
-            if command_repository is None:
-                command_repository = getattr(
-                    self._execution_unit_of_work, "_order_repository", None
-                )
         if command_repository is not None:
             loader = getattr(
                 command_repository, "load_active_execution_commands", None
@@ -2742,12 +2747,6 @@ class ExecutionBook:
                 evidence_id=evidence.evidence_id,
                 reason="durable live coverage requires typed pagination provenance",
             )
-        from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-            DecisionCommitConflict,
-            ExecutionEvidenceIdentity,
-            ExecutionTradeIdentity,
-            ExecutionWatermark,
-        )
         if evidence.stream_id and evidence.stream_epoch:
             self._active_streams.add(
                 (

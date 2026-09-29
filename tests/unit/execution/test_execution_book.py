@@ -981,6 +981,16 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
 
 
 @pytest.mark.asyncio
+async def test_durable_restore_requires_explicit_command_repository() -> None:
+    book = ExecutionBook(execution_unit_of_work=object())
+
+    with pytest.raises(RuntimeError, match="requires a command repository"):
+        await book.restore(account_label="primary")
+
+    assert book._persistence_failed is True
+
+
+@pytest.mark.asyncio
 async def test_linked_settlement_ignores_late_duplicate() -> None:
     from crypto_momentum_lab.domain.execution.trade_command import (
         PositionReservation,
