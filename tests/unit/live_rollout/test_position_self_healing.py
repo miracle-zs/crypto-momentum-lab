@@ -287,3 +287,111 @@ async def test_auto_heal_success() -> None:
     session.commit.assert_awaited_once()
     assert session.add.call_count == 3
 
+
+@pytest.mark.asyncio
+async def test_auto_heal_unmanaged_position_updates_existing_head_row() -> None:
+    """Verify that auto_heal updates an existing ExecutionBookHeadRow even if its stream_epoch differs."""
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+        ExecutionBookHeadRow,
+    )
+
+    cmd_row = MagicMock()
+    cmd_row.status = "SUCCESS"
+    cmd_row.opened_at = NOW
+    cmd_row.closed_at = None
+    cmd_row.client_order_id = "cid-1"
+
+    existing_head = ExecutionBookHeadRow(
+        environment="live",
+        account_label="primary",
+        symbol="GRASSUSDT",
+        position_side="LONG",
+        stream_id="account_event_hub",
+        stream_epoch="old-epoch-999",
+        revision=10,
+        projection_version="pv_old",
+        state_payload={},
+        updated_at=NOW,
+    )
+
+    fill_row = MagicMock()
+    fill_row.environment = "live"
+    fill_row.account_label = "primary"
+    fill_row.trade_id = "trade-1"
+    fill_row.order_id = "order-1"
+    fill_row.symbol = "GRASSUSDT"
+    fill_row.side = "BUY"
+    fill_row.price = Decimal("0.7248")
+    fill_row.quantity = Decimal("137.6")
+    fill_row.realized_pnl = Decimal("0")
+    fill_row.fee = Decimal("0.05")
+    fill_row.fee_asset = "USDT"
+    fill_row.trade_at = NOW
+    fill_row.raw_payload = {"mock": True, "positionSide": "LONG"}
+
+    session = MagicMock()
+    mock_scalars = MagicMock()
+    mock_scalars.all.side_effect = [
+        [fill_row],  # fill_rows
+        [cmd_row],   # cmd_rows
+    ]
+    session.scalars = AsyncMock(return_value=mock_scalars)
+    session.scalar = AsyncMock(side_effect=[
+        1,               # 1. has_commands
+        "epoch-active",  # 2. active stream_epoch query
+        None,            # 3. existing trade identity
+        None,            # 4. existing fact event
+        existing_head,   # 5. ExecutionBookHeadRow query
+    ])
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="GRASSUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="epoch-active"
+    )
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.position_ledger_models import AccountFacts
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        trade_id="trade-1",
+        order_id="order-1",
+        symbol="GRASSUSDT",
+        side="BUY",
+        price=Decimal("0.7248"),
+        quantity=Decimal("137.6"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.05"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={"mock": True, "positionSide": "LONG"},
+    )
+    facts = AccountFacts(position_key=key, stream_scope=scope, fills=(fill,))
+    cut = DurableJournalCut(scope=scope, facts=facts, revision=1, as_of=NOW)
+
+    journal_store = MagicMock()
+    journal_store.load_recovery_in_session = AsyncMock(return_value=cut)
+
+    healed = await auto_heal_unmanaged_position(
+        session=session,
+        journal_store=journal_store,
+        environment="live",
+        account_label="primary",
+        symbol="GRASSUSDT",
+    )
+    assert healed is True
+    session.commit.assert_awaited_once()
+    assert existing_head.stream_epoch == "epoch-active"
+    assert existing_head.revision == 11
+    # Only 2 new commands added, no duplicate head inserted
+    assert session.add.call_count == 2
+

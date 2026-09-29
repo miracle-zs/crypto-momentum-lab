@@ -275,8 +275,6 @@ async def auto_heal_unmanaged_position(
             ExecutionBookHeadRow.account_label == account_label,
             ExecutionBookHeadRow.symbol == symbol,
             ExecutionBookHeadRow.position_side == position_side.value,
-            ExecutionBookHeadRow.stream_id == active_stream_id,
-            ExecutionBookHeadRow.stream_epoch == active_stream_epoch,
         )
     )
     if head is not None:
@@ -286,6 +284,8 @@ async def auto_heal_unmanaged_position(
         payload["view_digest"] = view_digest
         payload["journal_revision"] = journal.revision
         payload["seen_trade_count"] = len(fills)
+        head.stream_id = active_stream_id
+        head.stream_epoch = active_stream_epoch
         head.projection_version = view.projection_version
         head.state_payload = payload
         head.revision += 1
