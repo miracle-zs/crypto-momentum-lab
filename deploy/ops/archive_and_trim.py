@@ -109,6 +109,21 @@ def _psql(sql: str, *, container: str, database: str, user: str) -> str:
     return result.stdout.decode().strip()
 
 
+def _terminated(sql: str) -> str:
+    """Return ``sql`` ending with ``;`` so psql runs it before the marker line.
+
+    ``PsqlSession.run`` appends ``SELECT '<marker>';`` on the following line and
+    waits for that marker to come back. A statement without a trailing semicolon
+    is still open on psql's side, so the marker line is parsed as part of it:
+    psql reports ``syntax error at or near "SELECT"`` and, because the session
+    runs with ``ON_ERROR_STOP=1``, exits, which fails the whole prune. Callers
+    written against ``psql -c`` (where the semicolon is optional) must not have
+    to care, so it is added here.
+    """
+    stripped = sql.rstrip()
+    return stripped if stripped.endswith(";") else stripped + ";"
+
+
 class PsqlSession:
     """One long-lived psql session.
 
@@ -170,7 +185,7 @@ class PsqlSession:
             )
         self._seq += 1
         marker = f"__cml_done_{self._seq}__"
-        proc.stdin.write(sql.rstrip() + "\n")
+        proc.stdin.write(_terminated(sql) + "\n")
         proc.stdin.write(f"SELECT '{marker}';\n")
         proc.stdin.flush()
         out: list[str] = []
@@ -671,7 +686,7 @@ def _drop_expired_partitions(
         "JOIN pg_class parent ON parent.oid = i.inhparent "
         "JOIN pg_class child ON child.oid = i.inhrelid "
         "WHERE parent.oid = to_regclass('" + table + "') "
-        "AND child.relispartition ORDER BY child.relname"
+        "AND child.relispartition ORDER BY child.relname;"
     )
     dropped = 0
     for name in rows.splitlines():
@@ -687,7 +702,7 @@ def _drop_expired_partitions(
         # A partition covers [day, day+1); it is fully outside the window
         # once day+1 <= cutoff, i.e. day < cutoff.
         if partition_day < cutoff:
-            _exec(f'DROP TABLE IF EXISTS "{name}"')
+            _exec(f'DROP TABLE IF EXISTS "{name}";')
             print(f"  dropped partition {name}")
             dropped += 1
     return dropped
