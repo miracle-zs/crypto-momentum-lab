@@ -742,3 +742,23 @@ def test_post_deploy_image_prune_is_configured() -> None:
     deploy_commit_idx = script.index('echo "deployed_commit=')
 
     assert total_idx < prune_idx < deploy_commit_idx
+
+
+def test_dashboard_only_deployment_mode_is_configured() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "--dashboard-only" in script
+    assert "--dashboard-only cannot be combined with --live" in script
+    assert "--dashboard-only cannot be combined with --refresh-approvals" in script
+    assert "--dashboard-only cannot be combined with --execution-accounts-only" in script
+
+    phase_start = script.index('if [[ "$dashboard_only" == 1 ]]; then')
+    phase_end = script.index('echo "market_data_services=untouched strategy_services=untouched"', phase_start)
+    block = script[phase_start:phase_end]
+
+    assert "deploy_phase=dashboard-only" in block
+    assert "compose-up:dashboard" in block
+    assert "--force-recreate --no-deps dashboard" in block
+    assert "set_env_value CML_DASHBOARD_IMAGE" in block
+    assert "CML_CODE_COMMIT" not in block  # CML_CODE_COMMIT must not be updated in .env.server
+    assert "exit 0" in script[phase_start:phase_end + 100]

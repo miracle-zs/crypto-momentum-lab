@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard] [--execution-accounts-only]
+Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard] [--execution-accounts-only] [--dashboard-only]
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
@@ -41,6 +41,10 @@ does not refresh approvals, and leaves strategy and Paper services untouched.
 --sync-dashboard forces updating CML_DASHBOARD_IMAGE to the target commit image;
 by default, dashboard images referencing an ancestor repository commit are also
 automatically advanced, while custom non-repo images remain preserved.
+--dashboard-only builds the target commit image and recreates only the
+dashboard service, updating CML_DASHBOARD_IMAGE while leaving market-data,
+research-collector, live strategies, and execution accounts completely untouched.
+It cannot be combined with --live, --refresh-approvals, or --execution-accounts-only.
 The SSH connection uses an agent/key by default. When
 CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
 is never a command-line argument, remote argument, or repository value.
@@ -64,6 +68,7 @@ target_ref_set=0
 live_update=0
 refresh_approvals=0
 execution_accounts_only=0
+dashboard_only=0
 sync_dashboard="${CML_SYNC_DASHBOARD:-0}"
 while (( $# > 0 )); do
   case "$1" in
@@ -75,6 +80,9 @@ while (( $# > 0 )); do
       ;;
     --execution-accounts-only)
       execution_accounts_only=1
+      ;;
+    --dashboard-only)
+      dashboard_only=1
       ;;
     --sync-dashboard)
       sync_dashboard=1
@@ -128,6 +136,21 @@ fi
 
 if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
   echo "--execution-accounts-only cannot be combined with --refresh-approvals" >&2
+  exit 64
+fi
+
+if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
+  echo "--dashboard-only cannot be combined with --live" >&2
+  exit 64
+fi
+
+if [[ "$dashboard_only" == 1 && "$refresh_approvals" == 1 ]]; then
+  echo "--dashboard-only cannot be combined with --refresh-approvals" >&2
+  exit 64
+fi
+
+if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
+  echo "--dashboard-only cannot be combined with --execution-accounts-only" >&2
   exit 64
 fi
 
@@ -197,6 +220,7 @@ if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s 
   "$deploy_operation_timeout" "$deploy_build_timeout" \
   "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
   "$crash_log_directory" "$sync_dashboard" "$execution_accounts_only" \
+  "$dashboard_only" \
   <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
@@ -218,6 +242,7 @@ dashboard_proxy_url="${15}"
 crash_log_directory="${16}"
 sync_dashboard="${17:-0}"
 execution_accounts_only="${18:-0}"
+dashboard_only="${19:-0}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -258,6 +283,22 @@ if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
 fi
 if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
   echo "Execution-account-only rollout cannot refresh approvals" >&2
+  exit 64
+fi
+if [[ "$dashboard_only" != 0 && "$dashboard_only" != 1 ]]; then
+  echo "Invalid dashboard-only flag: $dashboard_only" >&2
+  exit 64
+fi
+if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
+  echo "Dashboard-only rollout cannot be combined with --live" >&2
+  exit 64
+fi
+if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
+  echo "Dashboard-only rollout cannot be combined with --execution-accounts-only" >&2
+  exit 64
+fi
+if [[ "$dashboard_only" == 1 && "$refresh_approvals" == 1 ]]; then
+  echo "Dashboard-only rollout cannot refresh approvals" >&2
   exit 64
 fi
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
@@ -558,7 +599,20 @@ if [[ "$runtime_changed" == 1 ]]; then
   runtime_image_commit="$target_commit"
 fi
 
-if [[ "$runtime_changed" == 0 ]]; then
+if [[ "${dashboard_only:-0}" == 1 ]]; then
+  runtime_image_commit="$target_commit"
+  runtime_commit="$previous_runtime_commit"
+  dashboard_image="crypto-momentum-lab-app:${target_commit}"
+fi
+
+if [[ "${dashboard_only:-0}" == 1 ]]; then
+  if service_is_converged dashboard && image_exists; then
+    echo "dashboard_already_converged=1"
+    write_deploy_state success unchanged
+    echo "deployed_dashboard_image=$dashboard_image"
+    exit 0
+  fi
+elif [[ "$runtime_changed" == 0 ]]; then
   echo "runtime_unchanged=1"
   if [[ "$live_update" != 1 ]]; then
     write_deploy_state success unchanged
@@ -587,7 +641,9 @@ set_env_value() {
 }
 
 current_dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
-if [[ "$sync_dashboard" == 1 ]]; then
+if [[ "${dashboard_only:-0}" == 1 ]]; then
+  dashboard_image="crypto-momentum-lab-app:${target_commit}"
+elif [[ "$sync_dashboard" == 1 ]]; then
   dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
 elif [[ -z "$current_dashboard_image" \
   || "$current_dashboard_image" == "crypto-momentum-lab-app:${previous_env_runtime_commit:-$previous_runtime_commit}" ]]; then
@@ -1578,13 +1634,13 @@ fi
 deploy_phase=build
 if should_run_phase build; then
   write_deploy_state running "$deploy_phase"
-  if [[ "$runtime_changed" == 1 ]]; then
+  if [[ "$runtime_changed" == 1 || "$dashboard_only" == 1 ]]; then
     if image_exists; then
       echo "phase=build skipped target_image_exists=1"
     else
       build_started_at="$(date +%s)"
       run_with_timeout "compose-build" "$deploy_build_timeout" \
-        "${compose[@]}" build
+        CML_CODE_COMMIT="$target_commit" "${compose[@]}" build
       echo "phase=build elapsed_seconds=$(( $(date +%s) - build_started_at ))"
     fi
   else
@@ -1599,7 +1655,7 @@ fi
 # running migrations only through Compose dependency ordering is not enough
 # when a deployment resumes after a partial rollout.
 deploy_phase=migrate
-if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
+if should_run_phase migrate && [[ "$runtime_changed" == 1 && "$dashboard_only" != 1 ]]; then
   write_deploy_state running "$deploy_phase"
   migration_started_at="$(date +%s)"
   failure_service=migrate
@@ -1624,7 +1680,7 @@ fi
 # --no-deps.  In particular, execution-account needs to create the shared
 # Binance request-pacer lock as the unprivileged cml user.
 deploy_phase=volume-init
-if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
+if should_run_phase volume-init && [[ "$runtime_changed" == 1 && "$dashboard_only" != 1 ]]; then
   write_deploy_state running "$deploy_phase"
   volume_init_needed=1
   if run_with_timeout "volume-init-check" "$deploy_operation_timeout" \
@@ -1692,6 +1748,47 @@ if [[ "$execution_accounts_only" == 1 ]]; then
   # strategy preflight after account readiness has recovered.
   deploy_phase=volume-init
   write_deploy_state running "$deploy_phase"
+  exit 0
+fi
+
+if [[ "$dashboard_only" == 1 ]]; then
+  deploy_phase=dashboard-only
+  write_deploy_state running "$deploy_phase"
+  dashboard_only_started_at="$(date +%s)"
+  dashboard_image="crypto-momentum-lab-app:${target_commit}"
+  record_restart_baseline dashboard
+  run_with_timeout "compose-up:dashboard" "$deploy_operation_timeout" \
+    "${compose[@]}" up -d --force-recreate --no-deps dashboard
+  wait_for_services_healthy "$deploy_wait_timeout" dashboard
+  if [[ "$dashboard_required" == 1 ]]; then
+    dashboard_health_started_at="$(date +%s)"
+    if ! is_healthy dashboard; then
+      echo "dashboard is not healthy; refusing to report a successful deployment" >&2
+      exit 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "dashboard verification requires curl on the server" >&2
+      exit 69
+    fi
+    if ! curl --fail --silent --show-error --max-time 10 \
+      http://127.0.0.1:8765/api/health >/dev/null; then
+      echo "dashboard health endpoint is unavailable on 127.0.0.1:8765" >&2
+      exit 1
+    fi
+    if ! curl --fail --silent --show-error --location --max-time 10 \
+      "$dashboard_proxy_url" >/dev/null; then
+      echo "dashboard reverse-proxy health endpoint is unavailable: $dashboard_proxy_url" >&2
+      exit 1
+    fi
+    echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
+  fi
+  set_env_value CML_DASHBOARD_IMAGE "$dashboard_image"
+  chmod 600 .env.server
+  write_deploy_state success complete
+  run_with_timeout --quiet "docker-image-prune" 30 docker image prune --force </dev/null || true
+  echo "phase=dashboard-only elapsed_seconds=$(( $(date +%s) - dashboard_only_started_at ))"
+  echo "deployed_dashboard_image=$dashboard_image"
+  echo "market_data_services=untouched strategy_services=untouched"
   exit 0
 fi
 
