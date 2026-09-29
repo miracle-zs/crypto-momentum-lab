@@ -35,6 +35,7 @@ import {
   standaloneSparkline,
   strategyEquityChart,
 } from "../dashboard-charts.js";
+import { K, sel } from "../ui/css-keys.js";
 import {
   blockTitle,
   dataTable,
@@ -345,7 +346,7 @@ function refreshStrategy(body, data) {
   latestPaperAccounts = accounts;
   if (!accounts.length) return;
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
-  const cards = body.querySelector(".acct-cards");
+  const cards = body.querySelector(sel.acctCards());
   if (!cards) return;
   const activeEl = body.ownerDocument?.activeElement;
   const isCardFocused = activeEl && cards.contains(activeEl);
@@ -353,7 +354,7 @@ function refreshStrategy(body, data) {
   replaceElementFromHtml(cards, paperCards(accounts.map(withPaperEquity)));
   wirePaperAccountTabs(body, { accounts });
   if (focusedIndex == null) return;
-  const focusedTab = [...body.querySelectorAll("[data-account-index]")]
+  const focusedTab = [...body.querySelectorAll(sel.accountIndex())]
     .find((tab) => tab.dataset.accountIndex === focusedIndex);
   if (focusedTab && typeof focusedTab.getBoundingClientRect === "function") {
     const rect = focusedTab.getBoundingClientRect();
@@ -365,7 +366,7 @@ function refreshStrategy(body, data) {
 }
 
 function setPaperAccountTabState(body, selectedIndex) {
-  body.querySelectorAll("[data-account-index]").forEach((candidate) => {
+  body.querySelectorAll(sel.accountIndex()).forEach((candidate) => {
     const isSelected = Number(candidate.dataset.accountIndex) === selectedIndex;
     candidate.classList.toggle("is-active", isSelected);
     candidate.setAttribute("aria-selected", String(isSelected));
@@ -385,8 +386,8 @@ function selectPaperAccount(body, accounts, next) {
 function wirePaperAccountTabs(body, data) {
   const accounts = visiblePaperAccounts(data);
   latestPaperAccounts = accounts;
-  const tabs = () => Array.from(body.querySelectorAll("[data-account-index]"));
-  body.querySelectorAll("[data-account-index]").forEach((tab) => {
+  const tabs = () => Array.from(body.querySelectorAll(sel.accountIndex()));
+  body.querySelectorAll(sel.accountIndex()).forEach((tab) => {
     tab.addEventListener("click", () => {
       selectPaperAccount(body, accounts, Number(tab.dataset.accountIndex));
     });
@@ -417,7 +418,7 @@ function wirePaperAccountTabs(body, data) {
   setPaperAccountTabState(body, selectedPaperAccount);
   const account = accounts[selectedPaperAccount];
   if (account) {
-    const mounted = body.querySelector(".paper-account-detail");
+    const mounted = body.querySelector(sel.paperDetail());
     if (mounted?.dataset.runId !== account.run_id) {
       mountPaperDetail(body, account, selectedPaperAccount);
     } else {
@@ -451,16 +452,16 @@ function currentPaperAccountIs(account) {
 }
 
 function replacePaperDetail(body, html, preserveState = true) {
-  const detail = body.querySelector(".paper-account-detail");
+  const detail = body.querySelector(sel.paperDetail());
   if (!detail) return null;
   const viewState = preserveState ? captureViewState(body) : null;
   replaceElementFromHtml(detail, html);
   if (viewState) restoreViewState(body, viewState);
-  return body.querySelector(".paper-account-detail");
+  return body.querySelector(sel.paperDetail());
 }
 
 function mountPaperDetail(body, account, index) {
-  const detail = body.querySelector(".paper-account-detail");
+  const detail = body.querySelector(sel.paperDetail());
   if (!detail) return;
   const merged = withPaperHistory(withPaperDetail(account));
   const html = paperDetailsByRun.has(account.run_id)
@@ -478,7 +479,7 @@ function wirePaperDetailControls(body, account, index) {
 }
 
 function wirePaperDetailButton(body, account, index) {
-  const button = body.querySelector("[data-load-paper-detail]");
+  const button = body.querySelector(sel.loadPaperDetail());
   if (!button || !account?.run_id || button.dataset.wired === "true") return;
   button.dataset.wired = "true";
   button.addEventListener("click", () => void loadPaperAccountDetail(body, account, index));
@@ -492,7 +493,7 @@ async function loadPaperAccountDetail(body, account, index) {
   }
   const existingRequest = paperDetailRequests.get(account.run_id);
   if (existingRequest) return existingRequest;
-  const button = body.querySelector("[data-load-paper-detail]");
+  const button = body.querySelector(sel.loadPaperDetail());
   if (button) {
     button.disabled = true;
     button.textContent = "加载中…";
@@ -551,15 +552,15 @@ async function loadPaperEquityComparison(body) {
       paperEquityCacheKey = cacheKey;
       paperEquityLoadedAt = Date.now();
       if (body.isConnected === false) return;
-      const comparison = body.querySelector("[data-paper-comparison]");
+      const comparison = body.querySelector(sel.paperComparison());
       if (comparison) replaceElementFromHtml(comparison, paperComparisonBlock(latestPaperAccounts));
-      const cards = body.querySelector(".acct-cards");
+      const cards = body.querySelector(sel.acctCards());
       if (cards) {
         replaceElementFromHtml(cards, paperCards(latestPaperAccounts.map(withPaperEquity)));
         wirePaperAccountTabs(body, { accounts: latestPaperAccounts });
       }
     } catch (error) {
-      const comparison = body.querySelector("[data-paper-comparison]");
+      const comparison = body.querySelector(sel.paperComparison());
       if (comparison) {
         replaceElementFromHtml(
           comparison,
@@ -574,14 +575,14 @@ async function loadPaperEquityComparison(body) {
 }
 
 function wirePaperHistoryButton(body, account, index) {
-  const button = body.querySelector("[data-load-paper-history]");
+  const button = body.querySelector(sel.loadPaperHistory());
   if (!button || !account?.run_id || button.dataset.wired === "true") return;
   button.dataset.wired = "true";
   button.addEventListener("click", () => loadPaperAccountHistory(body, account, index));
 }
 
 async function loadPaperAccountHistory(body, account, index) {
-  const button = body.querySelector("[data-load-paper-history]");
+  const button = body.querySelector(sel.loadPaperHistory());
   if (button) {
     button.disabled = true;
     button.textContent = "加载中…";

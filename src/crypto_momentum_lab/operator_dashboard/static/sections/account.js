@@ -28,6 +28,7 @@ import {
   equityChart,
   liveAccountMetricChart,
 } from "../dashboard-charts.js";
+import { K, sel } from "../ui/css-keys.js";
 import {
   blockTitle,
   dataTable,
@@ -264,7 +265,7 @@ function equityRangeControls(selectedRange) {
 }
 
 export function wireAccountEquityRanges(root, onSelect) {
-  root.querySelectorAll("[data-account-equity-range]").forEach((button) => {
+  root.querySelectorAll(sel.accountEquityRange()).forEach((button) => {
     if (button.dataset.accountEquityRangeWired === "true") return;
     button.dataset.accountEquityRangeWired = "true";
     button.addEventListener("click", async () => {
@@ -275,18 +276,18 @@ export function wireAccountEquityRanges(root, onSelect) {
         ? root
         : root.closest?.("[data-live-account-detail]");
       if (slot) slot.dataset.requestedRange = range;
-      const controls = root.querySelectorAll("[data-account-equity-range]");
+      const controls = root.querySelectorAll(sel.accountEquityRange());
       controls.forEach((control) => {
         control.disabled = true;
         control.setAttribute("aria-pressed", String(control === button));
       });
-      root.querySelector(".account-equity-block")?.classList.add("is-range-loading");
+      root.querySelector(`.${K.accountEquityBlock}`)?.classList.add("is-range-loading");
       try {
         await onSelect(range);
       } finally {
         if (button.isConnected) {
           controls.forEach((control) => { control.disabled = false; });
-          root.querySelector(".account-equity-block")?.classList.remove("is-range-loading");
+          root.querySelector(`.${K.accountEquityBlock}`)?.classList.remove("is-range-loading");
         }
       }
     });
@@ -294,13 +295,13 @@ export function wireAccountEquityRanges(root, onSelect) {
 }
 
 function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessage = "") {
-  const label = slot.querySelector("[data-selected-account-label]");
+  const label = slot.querySelector(sel.selectedAccountLabel());
   if (label) label.textContent = accountLabel || "交易所账户";
-  const status = slot.querySelector(".live-account-detail-status");
+  const status = slot.querySelector(`.${K.liveAccountDetailStatus}`);
   if (status && (data.status || data.observed_at)) {
     status.innerHTML = `${pill(data.status || "UNKNOWN")}<span>${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span><small class="muted" data-account-load-state${loadingMessage ? "" : " hidden"}>${esc(loadingMessage)}</small>`;
   } else {
-    const loadState = slot.querySelector("[data-account-load-state]");
+    const loadState = slot.querySelector(sel.accountLoadState());
     if (loadState) {
       loadState.textContent = loadingMessage;
       loadState.hidden = !loadingMessage;
@@ -309,7 +310,7 @@ function setLiveAccountDetailHeader(slot, accountLabel, data = {}, loadingMessag
 }
 
 function markRefreshStale(root, message) {
-  const state = root.querySelector("[data-refresh-state]");
+  const state = root.querySelector(sel.refreshState());
   if (!state) return;
   state.hidden = false;
   state.textContent = message;
@@ -318,12 +319,12 @@ function markRefreshStale(root, message) {
 }
 
 function detailContentSlot(slot) {
-  return slot.querySelector("[data-live-account-detail-content]") || slot;
+  return slot.querySelector(sel.liveAccountDetailContent()) || slot;
 }
 
 function selectedAccountDetailRange(slot) {
   return slot?.dataset.requestedRange
-    || slot?.querySelector("[data-account-equity-range][aria-pressed='true']")?.dataset.accountEquityRange
+    || slot?.querySelector(sel.accountEquityRangePressed())?.dataset.accountEquityRange
     || slot?.dataset.renderedRange
     || "24h";
 }
@@ -763,7 +764,7 @@ export function renderLiveAccounts(data) {
 }
 
 function setLiveAccountTabState(root, accountLabel) {
-  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+  root.querySelectorAll(sel.accountCards()).forEach((button) => {
     const active = button.dataset.liveAccountLabel === accountLabel;
     button.classList.toggle("is-selected", active);
     button.classList.toggle("is-active", active);
@@ -779,10 +780,10 @@ async function loadLiveAccountDetail(
   equityRange = "24h",
   { forceFetch = false } = {},
 ) {
-  const slot = root.querySelector("[data-live-account-detail]");
+  const slot = root.querySelector(sel.liveAccountDetail());
   if (!slot) return;
   const contentSlot = detailContentSlot(slot);
-  const selectedCard = [...root.querySelectorAll("[data-live-account-label]")]
+  const selectedCard = [...root.querySelectorAll(sel.accountCards())]
     .find((button) => button.dataset.liveAccountLabel === accountLabel);
   const accountData = selectedCard ? (root.__liveAccountData || []).find(
     (account) => account.account_label === accountLabel,
@@ -862,26 +863,26 @@ async function loadLiveAccountDetail(
 }
 
 function wireLiveAccountMetricsRanges(root, onSelect) {
-  root.querySelectorAll("[data-live-account-metrics-range]").forEach((button) => {
+  root.querySelectorAll(sel.liveMetricsRange()).forEach((button) => {
     if (button.dataset.liveMetricsRangeWired === "true") return;
     button.dataset.liveMetricsRangeWired = "true";
     button.addEventListener("click", async () => {
       if (button.getAttribute("aria-pressed") === "true") return;
       const range = button.dataset.liveAccountMetricsRange;
       if (!range) return;
-      const controls = root.querySelectorAll("[data-live-account-metrics-range]");
+      const controls = root.querySelectorAll(sel.liveMetricsRange());
       controls.forEach((control) => {
         control.disabled = true;
         control.setAttribute("aria-pressed", String(control === button));
       });
-      root.querySelector(".live-account-metrics-block")?.classList.add("is-range-loading");
+      root.querySelector(`.${K.liveAccountMetricsBlock}`)?.classList.add("is-range-loading");
       try {
         selectedLiveAccountMetricsRange = range;
         await onSelect(range);
       } finally {
         if (root.isConnected) {
-          root.querySelectorAll("[data-live-account-metrics-range]").forEach((control) => { control.disabled = false; });
-          root.querySelector(".live-account-metrics-block")?.classList.remove("is-range-loading");
+          root.querySelectorAll(sel.liveMetricsRange()).forEach((control) => { control.disabled = false; });
+          root.querySelector(`.${K.liveAccountMetricsBlock}`)?.classList.remove("is-range-loading");
         }
       }
     });
@@ -889,7 +890,7 @@ function wireLiveAccountMetricsRanges(root, onSelect) {
 }
 
 async function loadLiveAccountMetrics(root, requestJson, equityRange) {
-  const slot = root.querySelector("[data-live-account-metrics]");
+  const slot = root.querySelector(sel.liveAccountMetrics());
   if (!slot) return;
   const requestId = ++liveAccountMetricsRequest;
   selectedLiveAccountMetricsRange = equityRange;
@@ -931,7 +932,7 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
   root.__liveAccountData = accounts;
   root.__requestJson = requestJson;
-  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+  root.querySelectorAll(sel.accountCards()).forEach((button) => {
     if (button.dataset.liveAccountWired === "true") return;
     button.dataset.liveAccountWired = "true";
     button.addEventListener("click", () => {
@@ -946,7 +947,7 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
       }
     });
     button.addEventListener("keydown", (event) => {
-      const buttons = [...root.querySelectorAll("[data-live-account-label]")];
+      const buttons = [...root.querySelectorAll(sel.accountCards())];
       const current = buttons.indexOf(button);
       if (current < 0) return;
       let next = null;
@@ -971,7 +972,7 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
       liveAccountDetailRanges.get(selected.account_label) || "24h",
     );
   } else if (selected) {
-    const slot = root.querySelector("[data-live-account-detail]");
+    const slot = root.querySelector(sel.liveAccountDetail());
     if (slot) wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, selected.account_label, requestJson, nextRange));
   }
   void loadLiveAccountMetrics(root, requestJson, selectedLiveAccountMetricsRange);
@@ -985,9 +986,9 @@ export function updateLiveAccountsDynamic(root, data) {
 
   // Update card status, labels, KPIs and footers in-place
   accounts.forEach((account) => {
-    const card = root.querySelector(`[data-live-account-label="${account.account_label}"]`);
+    const card = root.querySelector(`${sel.accountCard(account.account_label)}`);
     if (!card) return;
-    const statusEl = card.querySelector(".live-account-card-status");
+    const statusEl = card.querySelector(`.${K.liveAccountCardStatus}`);
     if (statusEl) {
       statusEl.className = `live-account-card-status ${liveAccountStatusClass(account.status)}`;
       statusEl.textContent = liveAccountStatusLabel(account.status);
@@ -1004,14 +1005,14 @@ export function updateLiveAccountsDynamic(root, data) {
     const readiness = account.readiness || "就绪未知";
     const cardState = financialSnapshot ? reconciliationLabel : readiness;
 
-    const stateEl = card.querySelector(".live-account-card-state");
+    const stateEl = card.querySelector(`.${K.liveAccountCardState}`);
     if (stateEl) {
       stateEl.innerHTML = `<span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(cardState)}</span>`;
     }
 
     // Update secondary details / KPIs
-    const kpisEl = card.querySelector(".live-account-card-kpis");
-    const stateDetailEl = card.querySelector(".live-account-card-state-detail");
+    const kpisEl = card.querySelector(`.${K.liveAccountCardKpis}`);
+    const stateDetailEl = card.querySelector(`.${K.liveAccountCardStateDetail}`);
     if (financialSnapshot) {
       const kpisHtml = `<span><small>USDT 钱包</small><b class="num">${esc(money(summary.usdt_wallet_balance))}</b></span>` +
         `<span><small>可用余额</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>` +
@@ -1037,7 +1038,7 @@ export function updateLiveAccountsDynamic(root, data) {
     }
 
     // Update footer
-    const footerEl = card.querySelector(".live-account-card-footer");
+    const footerEl = card.querySelector(`.${K.liveAccountCardFooter}`);
     if (footerEl) {
       const footerText = financialSnapshot
         ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
@@ -1052,11 +1053,11 @@ export function updateLiveAccountsDynamic(root, data) {
   const reviewCount = accounts.length - readyCount - haltedCount;
   const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
 
-  const fleetStatusEl = root.querySelector(".live-account-fleet-status");
+  const fleetStatusEl = root.querySelector(`.${K.liveAccountFleetStatus}`);
   if (fleetStatusEl) {
     fleetStatusEl.innerHTML = `<small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span>`;
   }
-  const fleetKpisEl = root.querySelector(".live-account-fleet-kpis");
+  const fleetKpisEl = root.querySelector(`.${K.liveAccountFleetKpis}`);
   if (fleetKpisEl) {
     const tiles = [
       tile("实盘账户", `${accounts.length} 个`, "execution-account 独立状态"),
@@ -1076,7 +1077,7 @@ export function updateLiveAccountsDynamic(root, data) {
   // The lightweight /api/live-accounts payload intentionally has no balances,
   // positions, orders, or timeseries. Refresh the selected detail and fleet
   // metrics on every successful poll, even when the outer section key is stable.
-  const slot = root.querySelector("[data-live-account-detail]");
+  const slot = root.querySelector(sel.liveAccountDetail());
   const requestJson = root.__requestJson || defaultAccountRequestJson;
   const currentDetailLabel = slot?.dataset.accountLabel
     || slot?.dataset.renderedAccount
