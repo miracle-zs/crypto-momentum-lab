@@ -46,13 +46,15 @@ flowchart LR
 
 本机 `readcut_probe.py`（合成 fills，每轮让 `_cached_facts_none` 失效以模拟新事实到达，7 次取中位数）：
 
-| fills | `read_cut()`+`compute_facts_hash()` | 修复前单仓 deepcopy | 当前容器拷贝 |
-|---:|---:|---:|---:|
-| 100 | 1.29 ms | 1.12 ms | 0.003 ms |
-| 1,000 | 13.46 ms | 11.67 ms | 0.005 ms |
-| 10,000 | 134.79 ms | 120.7 ms | 0.028 ms |
+| fills | 摘要（修复前） | 摘要（规范化缓存后） | 修复前单仓 deepcopy | 当前容器拷贝 |
+|---:|---:|---:|---:|---:|
+| 100 | 1.29 ms | 0.29 ms | 1.12 ms | 0.003 ms |
+| 1,000 | 13.46 ms | 2.68 ms | 11.67 ms | 0.005 ms |
+| 10,000 | 134.79 ms | 28.05 ms | 120.7 ms | 0.028 ms |
 
-deepcopy 与摘要两组数字口径不同（前者来自 `benchmark_execution.py` 的合成 snapshots，后者是合成 fills 的 `read_cut` 重建加摘要），但同机、同量级可比：10,000 条事实时一次观察约从 **252 ms 降到 135 ms**，**剩余的摘要成本与被消除的 deepcopy 同量级**。因此本节的收益是“把每次观察中约一半的同步 CPU（历史行构造、编码、SQL 传输）移出”，不是消除了历史规模开销。容器拷贝一列波动较大（100 条处多次运行在 0.003–0.019 ms 之间），但始终比另两列小几个数量级。
+（snapshots 口径同量级：10,000 条 142.87 → 26.66 ms。）
+
+deepcopy 与摘要两组数字口径不同（前者来自 `benchmark_execution.py` 的合成 snapshots，后者是合成 fills 的 `read_cut` 重建加摘要），但同机、同量级可比。这两组同量级的成本现在都被压了下去：deepcopy 由容器级拷贝消除，摘要由规范化缓存（提交 `236bf07`）压到约五分之一 —— profile 显示主导项是 canonical 遍历（10k 条约 0.16 s）与逐元素 `json.dumps`（约 0.05 s），排序只有约 0.01 s，SHA-256 更小；缓存同时把 `fields()` 反射按类型 memo 掉（探针 `facts_hash_profile.py`）。10,000 条事实时一次观察因此约从 **255 ms（deepcopy 120.7 + 摘要 134.8）降到约 28 ms**。按线上规模（单仓事实数见下）外推，摘要落在亚毫秒量级；**仍然保留**的 O(H) 项是 `_max_fact_time`（每次写入仍遍历全部事实）、排序（O(H log H)）与最终的 SHA-256。容器拷贝一列波动较大（100 条处多次运行在 0.003–0.019 ms 之间），但始终比另两列小几个数量级。
 
 **线上规模核对（生产库只读查询，2026-09-29）**：`position_fact_journal_events` 共 20,632 行、6,685 个 scope；构成是 `facts_state` 10,314 + `snapshot` 10,307 + `fill` 9 + `integrity_issue` 2，每 scope 中位 2 行、最大 274 行。`pk_position_fact_journal_events (event_record_id)` 唯一索引存在，说明 delta 依赖的 `ON CONFLICT DO NOTHING` 幂等前提在线上成立。
 
@@ -187,7 +189,7 @@ Book-only drift 诊断没有删除，而是移到独立周期：[`_observe_book_
 
 `readcut_probe.py` 量化 delta 之后仍留在每次观察上的 O(历史) 成本：`read_cut()` 重建、`compute_facts_hash()` 与 `copy_for_transaction()` 容器拷贝（见第 1 节表格）。它同样只用合成数据、不连数据库，运行方式为 `PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/readcut_probe.py`。
 
-本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 21 passed（新增跳桶/逐桶等价与前驱查找次数两项）。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**（生产主机上用独立临时容器与代码副本跑过同一套件，结果相同；临时容器与副本跑完即删，未接触生产库）。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
+本次验证：`tests/unit` 全量运行 1919 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 21 passed（新增跳桶/逐桶等价与前驱查找次数两项），`tests/unit/execution/test_canonical_fact_cache.py` 3 passed（缓存与无缓存编码哈希一致、重复调用命中缓存、候选共享缓存）。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**72 passed**（生产主机上用独立临时容器与代码副本跑过同一套件；临时容器与副本跑完即删，未接触生产库）。其中 `test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches` 曾长期失败（期望 `total_quantity == 1.5`，实际 0.5，重启后读 0），已在提交 `4ae5b25` 定位并修复：`set_recovery_checkpoint` 改变 journal 报告的 facts（并清掉 facts 缓存）却用 `max(...)` 赋值 revision，而 `PositionBook` 的视图缓存以 revision 为键 → 一直命中 adoption 中途算出的“仅 suffix”投影。修复改用独立的 `facts_generation` 计数（revision 不能前进：durable 行与 late-fact 判定都以 `revision > checkpoint.source_revision` 为条件，前进会把 adoption 自己写的 snapshot/coverage/fill 误判为 late，使重启后投影归零）。该测试断言本身也有两处笔误（`PositionView` 没有 `active_batches`；把整份 batch 对象与 parent 比较，与同一次观察携带 0.5 卖出矛盾），一并修正。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
 
 前端改动无法用 node 验证（本机无 node）：P0 与 P1 均用 JavaScriptCore（`osascript -l JavaScript`）执行从 `dashboard.js` / `dashboard-ui.js` 抽取的真实函数体，并做语法解析检查。
 
