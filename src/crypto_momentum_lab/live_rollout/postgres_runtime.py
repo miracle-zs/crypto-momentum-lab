@@ -1018,9 +1018,10 @@ class PostgresLiveContextProvider(LiveContextReader):
         unresolved_and_positions = unresolved_and_positions_task.result()
         if realtime_account_state is not None:
             account_state = realtime_account_state
-        else:
-            assert account_state_task is not None
+        elif account_state_task is not None:
             account_state = account_state_task.result()
+        else:
+            raise RuntimeError("account readiness source is unavailable")
         realized = realized_task.result()
         symbol_rules = symbol_rules_task.result()
         strategy_state = strategy_state_task.result()
