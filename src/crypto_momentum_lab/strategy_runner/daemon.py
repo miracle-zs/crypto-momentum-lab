@@ -28,6 +28,7 @@ from crypto_momentum_lab.domain.strategy import (
     compare_entry_policy_request,
     summarize_entry_policy_comparisons,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import PaperEntryFilterConfig
 from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandle15mSource,
@@ -138,29 +139,6 @@ class PaperLiveArtifactRepository(Protocol):
         config: PaperExitConfig,
     ) -> None:
         pass
-
-
-@dataclass(frozen=True, slots=True)
-class PaperEntryFilterConfig:
-    allow_long: bool = True
-    allow_short: bool = True
-    max_abs_aggressive_imbalance: Decimal | None = None
-    max_cluster_trade_count: int | None = None
-    require_price_above_ema5: bool = False
-    require_price_above_ema10: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.allow_long and not self.allow_short:
-            raise ValueError("entry filter must allow at least one side")
-        if self.max_abs_aggressive_imbalance is not None and not Decimal(
-            "0"
-        ) < self.max_abs_aggressive_imbalance <= Decimal("1"):
-            raise ValueError("max_abs_aggressive_imbalance must be in (0, 1]")
-        if (
-            self.max_cluster_trade_count is not None
-            and self.max_cluster_trade_count <= 0
-        ):
-            raise ValueError("max_cluster_trade_count must be positive")
 
 
 @dataclass(frozen=True, slots=True)

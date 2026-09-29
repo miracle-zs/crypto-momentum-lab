@@ -8,6 +8,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.decision import (
     DecisionEngine,
     EffectivePolicy,
@@ -18,10 +22,6 @@ from crypto_momentum_lab.domain.decision import (
     SimulationExecutionAdapter,
     build_decision_input,
     map_decision_rejection_reason,
-)
-from crypto_momentum_lab.domain.account import (
-    AccountFillEvent,
-    AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -44,20 +44,19 @@ from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     SystemAction,
 )
 from crypto_momentum_lab.domain.runtime.runtime_plan import (
-    RuntimePlan,
     RuntimePlanCompiler,
 )
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RejectionReason,
     RunMode,
-    StrategyCheckpoint,
     StrategyRejection,
     StrategyRunIdentity,
     StrategySide,
     StrategySignal,
     deterministic_config_hash,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import PaperTradingRunReport
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
@@ -74,7 +73,6 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
 )
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategy_runner.fills import (
-    FillSummaryValue,
     ReplayExecutionConfig,
     SimulatedFill,
     SimulatedFillStatus,
@@ -171,28 +169,6 @@ class PaperRunnerConfig:
                 "portfolio",
                 replace(self.portfolio, initial_balance=self.initial_cash_balance),
             )
-
-
-@dataclass(frozen=True, slots=True)
-class PaperTradingRunReport:
-    schema_version: int
-    generated_at: datetime
-    run: StrategyRunIdentity
-    execution_config: ReplayExecutionConfig
-    source_description: str
-    input_state_count: int
-    processed_symbol_count: int
-    signals: tuple[StrategySignal, ...]
-    candidates: tuple[OrderIntentCandidate, ...]
-    paper_fills: tuple[SimulatedFill, ...]
-    pending_candidate_count: int
-    rejection_summary: dict[str, dict[str, int]]
-    final_checkpoint: StrategyCheckpoint
-    summary_counts: dict[str, dict[str, int]]
-    fill_summary: dict[str, dict[str, FillSummaryValue]]
-    portfolio_config: PaperExitConfig = field(default_factory=PaperExitConfig)
-    paper_positions: tuple[PaperPosition, ...] = ()
-    runtime_plan: RuntimePlan | None = None
 
 
 def run_paper_trading(

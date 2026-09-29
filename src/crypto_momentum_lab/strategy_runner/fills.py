@@ -1,83 +1,16 @@
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate, StrategySide
-
-
-class SimulatedFillStatus(StrEnum):
-    FILLED = "filled"
-    EXPIRED = "expired"
-    REJECTED = "rejected"
-    PENDING = "pending"
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayExecutionConfig:
-    latency_buckets: int = 1
-    state_interval_seconds: int = 15
-    taker_fee_rate: Decimal = Decimal("0.0005")
-    slippage_bps: Decimal = Decimal("0")
-    require_market_quote: bool = False
-
-    def __post_init__(self) -> None:
-        if self.latency_buckets < 0:
-            raise ValueError("latency_buckets must be non-negative")
-        if self.state_interval_seconds <= 0:
-            raise ValueError("state_interval_seconds must be positive")
-        if self.taker_fee_rate < 0:
-            raise ValueError("taker_fee_rate must be non-negative")
-        if self.slippage_bps < 0:
-            raise ValueError("slippage_bps must be non-negative")
-        if self.slippage_bps >= Decimal("10000"):
-            raise ValueError("slippage_bps must be less than 10000")
-
-
-@dataclass(frozen=True, slots=True)
-class SimulatedFill:
-    fill_id: str
-    candidate_id: str
-    signal_id: str
-    symbol: str
-    side: StrategySide
-    status: SimulatedFillStatus
-    target_fill_at: datetime
-    filled_at: datetime | None
-    requested_notional: Decimal | None
-    filled_notional: Decimal | None
-    quantity: Decimal | None
-    reference_midpoint: Decimal | None
-    spread: Decimal | None
-    fill_price: Decimal | None
-    fee: Decimal
-    total_cost: Decimal
-    cost_bps: Decimal | None
-    reason: str | None
-
-    def __post_init__(self) -> None:
-        if not self.fill_id:
-            raise ValueError("fill_id must not be empty")
-        if not self.candidate_id:
-            raise ValueError("candidate_id must not be empty")
-        if not self.signal_id:
-            raise ValueError("signal_id must not be empty")
-        if not self.symbol:
-            raise ValueError("symbol must not be empty")
-        if not _is_aware(self.target_fill_at):
-            raise ValueError("target_fill_at must be timezone-aware")
-        if self.filled_at is not None and not _is_aware(self.filled_at):
-            raise ValueError("filled_at must be timezone-aware")
-        if self.fee < 0:
-            raise ValueError("fee must be non-negative")
-        if self.total_cost < 0:
-            raise ValueError("total_cost must be non-negative")
-
-
-type FillSummaryValue = int | Decimal
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    FillSummaryValue,
+    ReplayExecutionConfig,
+    SimulatedFill,
+    SimulatedFillStatus,
+)
 
 
 def deterministic_fill_id(*, candidate_id: str) -> str:
@@ -383,7 +316,3 @@ def _market_cost(
     else:
         raw_cost = (midpoint - fill_price) * quantity
     return max(raw_cost, Decimal("0"))
-
-
-def _is_aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None
