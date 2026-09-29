@@ -1640,7 +1640,7 @@ if should_run_phase build; then
     else
       build_started_at="$(date +%s)"
       run_with_timeout "compose-build" "$deploy_build_timeout" \
-        CML_CODE_COMMIT="$target_commit" "${compose[@]}" build
+        env CML_CODE_COMMIT="$target_commit" "${compose[@]}" build
       echo "phase=build elapsed_seconds=$(( $(date +%s) - build_started_at ))"
     fi
   else
