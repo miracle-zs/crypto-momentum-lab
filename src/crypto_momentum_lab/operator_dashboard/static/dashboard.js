@@ -18,6 +18,7 @@ import { renderLiveRuntime } from "./app/runtime-badge.js";
 import { createPoller } from "./app/poller.js";
 import { createShell } from "./app/shell.js";
 import { wireMarketViews, wireTableFilters } from "./app/wire-widgets.js";
+import { installJumpProbe } from "./app/jump-probe.js";
 
 const strategySection = createStrategySection();
 
@@ -65,6 +66,7 @@ const shell = createShell({
 });
 
 shell.selectView(shell.initialView(), { updateHistory: false });
+installJumpProbe();
 wireEcharts(document);
 tick();
 poller.poll();

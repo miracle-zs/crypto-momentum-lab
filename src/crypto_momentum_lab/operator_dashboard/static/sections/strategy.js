@@ -410,7 +410,7 @@ function wirePaperAccountTabs(body, data) {
       }
       if (nextPosition == null) return;
       const nextTab = tabs()[nextPosition];
-      nextTab.focus();
+      nextTab.focus({ preventScroll: true });
       selectPaperAccount(body, accounts, Number(nextTab.dataset.accountIndex));
       event.preventDefault();
     });

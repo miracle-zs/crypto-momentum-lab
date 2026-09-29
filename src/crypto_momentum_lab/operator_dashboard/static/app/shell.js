@@ -89,6 +89,15 @@ export function createShell({ onNavigate }) {
 
   function selectView(value, { updateHistory = true, userInitiated = false } = {}) {
     const id = normalizedView(value);
+    const currentId = document.body.dataset.activeView;
+    const currentCard = currentId ? document.getElementById(currentId) : null;
+    // A repeated select (hashchange after pushState, poll-driven resize, etc.)
+    // must not flip card visibility or dispatch window resize — that reflows the
+    // page and reads as "auto jump".
+    if (currentId === id && currentCard && !currentCard.hidden && !userInitiated) {
+      onNavigate?.(id);
+      return;
+    }
     syncWorkspace(workspaceForView.get(id) || "ops");
     viewCards.forEach((card) => {
       const active = card.id === id;
@@ -117,7 +126,7 @@ export function createShell({ onNavigate }) {
       });
     }
     const activeLink = navLinks.get(id);
-    if (activeLink && window.innerWidth <= 1023 && !activeLink.closest("[hidden]")) {
+    if (userInitiated && activeLink && window.innerWidth <= 1023 && !activeLink.closest("[hidden]")) {
       activeLink.scrollIntoView({ block: "nearest", inline: "center" });
     }
     onNavigate?.(id);
@@ -155,7 +164,13 @@ export function createShell({ onNavigate }) {
   });
 
   window.addEventListener("popstate", () => selectView(window.location.hash, { updateHistory: false }));
-  window.addEventListener("hashchange", () => selectView(window.location.hash, { updateHistory: false }));
+  // Empty / unknown hash must NOT snap the UI to overview — that was an
+  // "auto jump" when something cleared or rewrote location.hash.
+  window.addEventListener("hashchange", () => {
+    const raw = String(window.location.hash || "").replace(/^#/, "");
+    if (!raw || !viewIds.has(raw)) return;
+    selectView(raw, { updateHistory: false });
+  });
 
   return {
     viewIds,

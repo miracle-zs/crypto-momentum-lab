@@ -436,6 +436,9 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
   gap: 16px;
   width: 100%;
   min-width: 0;
+  /* Fixed height so status-text changes cannot reflow the page (auto jump). */
+  min-height: 40px;
+  overflow: hidden;
   padding: 8px 14px;
   border: 1px solid color-mix(in srgb, var(--s, var(--faint)) 35%, var(--line));
   border-radius: 9px;
@@ -447,6 +450,7 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
   align-items: center;
   gap: 9px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .readiness-kicker {
