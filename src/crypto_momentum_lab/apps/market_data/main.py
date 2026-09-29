@@ -200,7 +200,8 @@ def resolve_config_path(value: Path | None) -> Path:
     env_config = os.environ.get("CML_ENVIRONMENT_CONFIG")
     if not env_config or not env_config.strip():
         raise typer.BadParameter(
-            "Configuration file must be explicitly specified via --config or CML_ENVIRONMENT_CONFIG"
+            "Configuration file must be explicitly specified via --config or "
+            "CML_ENVIRONMENT_CONFIG"
         )
     return Path(env_config.strip())
 
@@ -265,23 +266,42 @@ def _ignore_backfill_result(
     return _run
 
 
+@dataclass(frozen=True, slots=True)
+class ProtectedSymbolsSnapshot:
+    symbols: frozenset[str]
+    complete: bool
+    issues: tuple[str, ...] = ()
+
+
+def _coerce_protected_symbols_snapshot(
+    value: ProtectedSymbolsSnapshot | frozenset[str],
+) -> ProtectedSymbolsSnapshot:
+    if isinstance(value, ProtectedSymbolsSnapshot):
+        return value
+    return ProtectedSymbolsSnapshot(symbols=frozenset(value), complete=True)
+
+
 async def _load_protected_symbols(
     *,
     paper_repository: PostgresPaperDaemonRepository,
     account_repository: PostgresAccountRepository,
     protected_run_ids: frozenset[str],
     configured_live_position_account_labels: frozenset[str],
-) -> frozenset[str]:
+) -> ProtectedSymbolsSnapshot:
     """Load paper symbols plus every live account with a durable open position.
 
     The configured labels remain an explicit startup hint for compatibility,
     while the latest ready account reconciliation runs discover labels for
     stopped or newly added live accounts automatically.
     """
+    issues: list[str] = []
     paper_symbols: frozenset[str] = frozenset()
     try:
-        paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
+        paper_symbols = await paper_repository.load_open_position_symbols(
+            protected_run_ids
+        )
     except Exception as error:
+        issues.append(f"paper_position_state:{type(error).__name__}")
         log.warning(
             "market_data_load_paper_symbols_failed",
             error_type=type(error).__name__,
@@ -290,10 +310,13 @@ async def _load_protected_symbols(
 
     discovered_labels: frozenset[str] = frozenset()
     try:
-        discovered_labels = await account_repository.load_active_position_account_labels(
+        discovered_labels = (
+            await account_repository.load_active_position_account_labels(
             environment="live"
+            )
         )
     except Exception as error:
+        issues.append(f"live_account_discovery:{type(error).__name__}")
         log.warning(
             "market_data_discover_live_labels_failed",
             error_type=type(error).__name__,
@@ -306,19 +329,41 @@ async def _load_protected_symbols(
     live_symbols: set[str] = set()
     for account_label in sorted(live_position_account_labels):
         try:
-            account_symbols = await account_repository.load_active_position_symbols(
-                environment="live",
-                account_label=account_label,
+            state_loader = getattr(
+                account_repository, "load_active_position_state", None
             )
-            live_symbols.update(account_symbols)
+            if callable(state_loader):
+                position_state = await state_loader(
+                    environment="live",
+                    account_label=account_label,
+                )
+                if position_state is None:
+                    issues.append(f"missing_position_state:{account_label}")
+                    continue
+                live_symbols.update(position_state.symbols)
+                if not position_state.complete:
+                    issues.append(f"incomplete_position_state:{account_label}")
+            else:
+                # Keep older repository adapters usable, while the Postgres
+                # implementation reports whether legacy sparse data is complete.
+                account_symbols = await account_repository.load_active_position_symbols(
+                    environment="live",
+                    account_label=account_label,
+                )
+                live_symbols.update(account_symbols)
         except Exception as error:
+            issues.append(f"account_position_state:{account_label}:{type(error).__name__}")
             log.warning(
                 "market_data_load_account_symbols_failed",
                 account_label=account_label,
                 error_type=type(error).__name__,
                 error=str(error),
             )
-    return paper_symbols | live_symbols
+    return ProtectedSymbolsSnapshot(
+        symbols=paper_symbols | frozenset(live_symbols),
+        complete=not issues,
+        issues=tuple(issues),
+    )
 
 
 def parse_market_state_hub_port(value: str | None = None) -> int:
@@ -482,7 +527,15 @@ class CaptureUniverseObserver:
         full_stream_max_gainer_rank: int = 0,
         must_warm_max_gainer_rank: int = 0,
         protected_symbol_loader: (
-            Callable[[], Awaitable[frozenset[str]]] | None
+            Callable[
+                [],
+                Awaitable[ProtectedSymbolsSnapshot | frozenset[str]],
+            ]
+            | None
+        ) = None,
+        initial_protected_symbols: ProtectedSymbolsSnapshot | None = None,
+        on_protected_symbols_readiness: (
+            Callable[[bool, tuple[str, ...]], None] | None
         ) = None,
         on_symbols_changed: Callable[[frozenset[str]], None] | None = None,
         on_trade_symbols_promoted: (
@@ -502,6 +555,19 @@ class CaptureUniverseObserver:
         self._full_stream_max_gainer_rank = full_stream_max_gainer_rank
         self._must_warm_max_gainer_rank = must_warm_max_gainer_rank
         self._protected_symbol_loader = protected_symbol_loader
+        self._last_complete_protected_symbols = (
+            initial_protected_symbols.symbols
+            if initial_protected_symbols is not None
+            and initial_protected_symbols.complete
+            else None
+        )
+        self._protected_symbols_complete = False
+        self._protected_symbols_issues = (
+            ()
+            if initial_protected_symbols is None
+            else initial_protected_symbols.issues
+        )
+        self._on_protected_symbols_readiness = on_protected_symbols_readiness
         self._on_symbols_changed = on_symbols_changed
         self._on_trade_symbols_promoted = on_trade_symbols_promoted
         self._lock = asyncio.Lock()
@@ -517,6 +583,10 @@ class CaptureUniverseObserver:
         self._trade_tier_joined_at: dict[str, datetime] = {}
         self._must_warm_symbols: frozenset[str] = frozenset()
         self._backfill_task: asyncio.Task[None] | None = None
+
+    @property
+    def protected_symbols_complete(self) -> bool:
+        return self._protected_symbols_complete
 
     async def snapshot_updated(
         self,
@@ -729,11 +799,20 @@ class CaptureUniverseObserver:
         observed_at = datetime.now(tz=UTC) if now is None else now
         if observed_at.tzinfo is None:
             observed_at = observed_at.replace(tzinfo=UTC)
-        protected_symbols = (
-            frozenset()
+        loaded_protection = (
+            ProtectedSymbolsSnapshot(symbols=frozenset(), complete=True)
             if self._protected_symbol_loader is None
-            else await self._protected_symbol_loader()
+            else _coerce_protected_symbols_snapshot(
+                await self._protected_symbol_loader()
+            )
         )
+        if loaded_protection.complete:
+            self._last_complete_protected_symbols = loaded_protection.symbols
+            protected_symbols = loaded_protection.symbols
+        else:
+            protected_symbols = loaded_protection.symbols | (
+                self._last_complete_protected_symbols or frozenset()
+            )
         symbols = self._trade_stream_symbols(
             universe_symbols=self._universe_symbols,
             protected_symbols=protected_symbols,
@@ -766,6 +845,13 @@ class CaptureUniverseObserver:
         )
         self._must_warm_symbols = current_must_warm
         if symbols == self._applied_symbols:
+            self._protected_symbols_complete = loaded_protection.complete
+            self._protected_symbols_issues = loaded_protection.issues
+            if self._on_protected_symbols_readiness is not None:
+                self._on_protected_symbols_readiness(
+                    self._protected_symbols_complete,
+                    self._protected_symbols_issues,
+                )
             if needing_backfill:
                 self._schedule_history_backfill(needing_backfill)
             return
@@ -780,6 +866,13 @@ class CaptureUniverseObserver:
             generation=self._generation,
         )
         self._applied_symbols = symbols
+        self._protected_symbols_complete = loaded_protection.complete
+        self._protected_symbols_issues = loaded_protection.issues
+        if self._on_protected_symbols_readiness is not None:
+            self._on_protected_symbols_readiness(
+                self._protected_symbols_complete,
+                self._protected_symbols_issues,
+            )
         if self._on_symbols_changed is not None:
             self._on_symbols_changed(symbols)
         watch_symbols = self._universe_symbols - symbols
@@ -1127,6 +1220,7 @@ class MarketDataRuntime:
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
     maintenance_session_factory: async_sessionmaker[AsyncSession] | None = None
+    initial_protected_symbols_complete: bool = False
 
 
 def _archive_retention_repository(
@@ -1143,6 +1237,9 @@ async def build_market_data_runtime(
     config_path: Path,
     *,
     on_durable_state_persisted: Callable[[datetime], None] | None = None,
+    on_protected_symbols_readiness: (
+        Callable[[bool, tuple[str, ...]], None] | None
+    ) = None,
     startup_timer: StartupPhaseTimer | None = None,
 ) -> AsyncIterator[MarketDataRuntime]:
     runtime = load_runtime_config(config_path)
@@ -1211,7 +1308,7 @@ async def build_market_data_runtime(
     protected_run_ids = parse_paper_exit_run_ids()
     configured_live_position_account_labels = parse_live_position_account_labels()
 
-    async def load_protected_symbols() -> frozenset[str]:
+    async def load_protected_symbols() -> ProtectedSymbolsSnapshot:
         return await _load_protected_symbols(
             paper_repository=paper_repository,
             account_repository=account_repository,
@@ -1227,7 +1324,10 @@ async def build_market_data_runtime(
         for symbol, membership in persisted_memberships.items()
         if membership.status is not MembershipStatus.RETAINED
     }
-    initial_symbols = frozenset(initial_memberships) | await load_protected_symbols()
+    initial_protected_symbols = await load_protected_symbols()
+    initial_symbols = (
+        frozenset(initial_memberships) | initial_protected_symbols.symbols
+    )
     runtime_state_publisher.set_expected_symbols(initial_symbols)
     enabled_streams = tuple(
         CaptureStream(item) for item in runtime.capture.enabled_streams
@@ -1446,6 +1546,8 @@ async def build_market_data_runtime(
         # 15s window, not merely be subscribed.
         must_warm_max_gainer_rank=runtime.universe.top_count,
         protected_symbol_loader=load_protected_symbols,
+        initial_protected_symbols=initial_protected_symbols,
+        on_protected_symbols_readiness=on_protected_symbols_readiness,
         on_symbols_changed=runtime_state_publisher.set_expected_symbols,
         on_trade_symbols_promoted=_ignore_backfill_result(
             promotion_backfiller.backfill_symbols
@@ -1488,6 +1590,9 @@ async def build_market_data_runtime(
             maintenance_capture_repository=maintenance_capture_repository,
             operational_retention=operational_retention,
             maintenance_session_factory=maintenance_sessions,
+            initial_protected_symbols_complete=(
+                initial_protected_symbols.complete
+            ),
         )
     finally:
         await rest_client.aclose()
@@ -1544,6 +1649,33 @@ async def run_market_data(
     )
     configure_tracemalloc()
     health = LocalHealthWriter.from_environment()
+    protected_readiness = {
+        "complete": False,
+        "issues": (),
+        "capture_started": False,
+    }
+
+    def on_protected_symbols_readiness(
+        complete: bool,
+        issues: tuple[str, ...],
+    ) -> None:
+        protected_readiness["complete"] = complete
+        protected_readiness["issues"] = issues
+        if health is None:
+            return
+        health.write_readiness(
+            {
+                "service": "market-data",
+                "protected_symbols_complete": complete,
+                "issues": list(issues),
+            }
+        )
+        if not protected_readiness["capture_started"]:
+            return
+        if complete:
+            health.heartbeat()
+        else:
+            health.degraded()
 
     first_durable_state_logged = False
 
@@ -1556,12 +1688,21 @@ async def run_market_data(
             )
             first_durable_state_logged = True
         if health is not None:
-            health.heartbeat(database_ok=True)
+            if (
+                protected_readiness["capture_started"]
+                and protected_readiness["complete"]
+            ):
+                health.heartbeat(database_ok=True)
+            else:
+                health.database_ok()
+                if protected_readiness["capture_started"]:
+                    health.degraded()
 
     health_callback = on_durable_state_persisted
     async with build_market_data_runtime(
         config_path,
         on_durable_state_persisted=health_callback,
+        on_protected_symbols_readiness=on_protected_symbols_readiness,
         startup_timer=startup_timer,
     ) as runtime:
         capture_task: asyncio.Task[None] | None = None
@@ -1619,6 +1760,7 @@ async def run_market_data(
             else:
                 startup_timer.mark("quote_volume_publisher_skipped")
             capture_task = asyncio.create_task(runtime.capture.run())
+            protected_readiness["capture_started"] = True
             startup_timer.mark("capture_task_scheduled")
             auxiliary_tasks = (
                 asyncio.create_task(
@@ -1702,11 +1844,13 @@ async def run_market_data(
                 auxiliary_task_count=len(auxiliary_tasks),
             )
             if health is not None:
-                # Publish readiness as soon as capture is running instead of
-                # waiting for the first 15s state to land. The durable-state
-                # callback keeps refreshing the marker afterwards, so a stalled
-                # persistence path still lets it expire.
-                health.heartbeat(database_ok=True)
+                if runtime.subscription_observer.protected_symbols_complete:
+                    # Publish readiness as soon as capture is running instead
+                    # of waiting for the first 15s state to land.
+                    health.heartbeat(database_ok=True)
+                else:
+                    health.database_ok()
+                    health.degraded()
             monitored_tasks: tuple[asyncio.Task[object], ...] = (
                 capture_task,
                 *auxiliary_tasks,
