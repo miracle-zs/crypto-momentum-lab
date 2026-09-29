@@ -1,16 +1,19 @@
 /**
- * Window scroll intent and collapse-to-top repair.
+ * Window scroll intent and jump repair.
  *
- * Invariants (also asserted in tests/frontend/dashboard-modules.test.mjs):
- * 1. Never scrollTo(pageY) merely because currentY < pageY and currentY > 20.
- *    That fights user scroll-up and native scroll anchoring ("page jumps forward").
- * 2. Only repair a true collapse: pageY > 20 && currentY <= 20.
- * 3. While a real scroll gesture is in flight, restore() is a no-op unless force.
+ * Invariants:
+ * 1. Do not snap back for a modest drop (user scroll-up / native anchoring).
+ * 2. Repair collapse to top (currentY <= 20) and large height-collapse clamps
+ *    (pageY large, currentY near the new maxScroll after content shrank).
+ * 3. A live wheel/touch veto only applies to modest moves — a 2000px jump to
+ *    maxScroll cannot be intentional user scrolling.
  */
 
 let userInteractionVersion = 0;
 let lastScrollIntentAt = 0;
 const SCROLL_INTENT_WINDOW_MS = 350;
+const HEIGHT_COLLAPSE_MIN_PAGE_Y = 200;
+const HEIGHT_COLLAPSE_RATIO = 0.25;
 
 function markScrollIntent() {
   lastScrollIntentAt = Date.now();
@@ -39,9 +42,23 @@ export function isUserScrolling(now = Date.now()) {
   return now - lastScrollIntentAt < SCROLL_INTENT_WINDOW_MS;
 }
 
+function applyScrollTop(view, doc, scrollingElement, pageX, targetY) {
+  const previousBehavior = doc?.documentElement?.style?.scrollBehavior;
+  if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = "auto";
+  try {
+    view.scrollTo({ left: pageX, top: targetY, behavior: "instant" });
+  } catch {
+    view.scrollTo(pageX, targetY);
+  }
+  if (scrollingElement) {
+    if (scrollingElement.scrollTop !== targetY) scrollingElement.scrollTop = targetY;
+    if (scrollingElement.scrollLeft !== pageX) scrollingElement.scrollLeft = pageX;
+  }
+  if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = previousBehavior;
+}
+
 /**
  * Guard window scroll across a batch of DOM mutations (background poll).
- * Only repairs a collapse to the top — see module invariants above.
  */
 export function createScrollGuard() {
   const view = typeof window !== "undefined" ? window : null;
@@ -49,33 +66,55 @@ export function createScrollGuard() {
   const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
   const pageX = view?.scrollX ?? scrollingElement?.scrollLeft ?? 0;
   const pageY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
+  const pageScrollHeight = scrollingElement?.scrollHeight || 0;
   return {
     pageX,
     pageY,
+    pageScrollHeight,
     restore({ force = false } = {}) {
       if (!view) return pageY;
-      if (!force && isUserScrolling()) return view.scrollY ?? 0;
       const currentY = view.scrollY ?? scrollingElement?.scrollTop ?? 0;
-      const collapsed = pageY > 20 && currentY <= 20;
-      if (!force && !collapsed) return currentY;
-      const maxScroll = Math.max(
-        0,
-        (scrollingElement?.scrollHeight || 0) - (view.innerHeight || 0),
+      const currentHeight = scrollingElement?.scrollHeight || 0;
+      const maxScroll = Math.max(0, currentHeight - (view.innerHeight || 0));
+      const collapsedToTop = pageY > 20 && currentY <= 20;
+      // Content shrank and the browser clamped us to the new bottom
+      // (field log: 3331→153, 2474→153 — same maxScroll).
+      const clampedByHeightCollapse = (
+        pageY >= HEIGHT_COLLAPSE_MIN_PAGE_Y
+        && currentY < pageY * HEIGHT_COLLAPSE_RATIO
+        && currentY <= maxScroll + 2
       );
-      const targetY = maxScroll > 0 ? Math.min(pageY, maxScroll) : pageY;
-      const previousBehavior = doc?.documentElement?.style?.scrollBehavior;
-      if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = "auto";
-      try {
-        view.scrollTo({ left: pageX, top: targetY, behavior: "instant" });
-      } catch {
-        view.scrollTo(pageX, targetY);
+      const largeDrop = pageY - currentY > 500;
+      const gestureVeto = !force && isUserScrolling() && !largeDrop && !clampedByHeightCollapse;
+      if (gestureVeto) return currentY;
+      if (!force && !collapsedToTop && !clampedByHeightCollapse) return currentY;
+
+      // Pin document height so pageY is reachable even if chart slots are
+      // briefly empty; release after the next frame(s).
+      const pinHeight = Math.max(pageScrollHeight, currentHeight);
+      const body = doc?.body;
+      let pinned = false;
+      if ((collapsedToTop || clampedByHeightCollapse) && body?.style && pinHeight > 0) {
+        body.style.minHeight = `${pinHeight}px`;
+        pinned = true;
       }
-      if (scrollingElement) {
-        if (scrollingElement.scrollTop !== targetY) scrollingElement.scrollTop = targetY;
-        if (scrollingElement.scrollLeft !== pageX) scrollingElement.scrollLeft = pageX;
+      const targetY = pinHeight > 0 ? Math.min(pageY, Math.max(0, pinHeight - (view.innerHeight || 0))) : pageY;
+      applyScrollTop(view, doc, scrollingElement, pageX, force ? pageY : targetY);
+      if (pinned) {
+        const release = () => {
+          if (body?.style?.minHeight) {
+            body.style.minHeight = "";
+          }
+        };
+        if (typeof view.requestAnimationFrame === "function") {
+          view.requestAnimationFrame(() => {
+            view.requestAnimationFrame(release);
+          });
+        } else {
+          setTimeout(release, 50);
+        }
       }
-      if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = previousBehavior;
-      return targetY;
+      return force ? pageY : targetY;
     },
   };
 }

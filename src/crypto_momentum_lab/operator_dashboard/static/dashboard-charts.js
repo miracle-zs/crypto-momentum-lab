@@ -660,7 +660,11 @@ export function liveAccountMetricChart(
     windowStart,
     windowEnd,
   );
-  if (!model) return emptyBox("等待实盘时序数据", "至少需要两个有效采样点");
+  if (!model) {
+    // Keep the slot tall so a sparse/empty refresh cannot collapse the page
+    // and clamp scrollTop (field jump 2474→153).
+    return `<div class="live-metric-chart" style="min-height:220px">${emptyBox("等待实盘时序数据", "至少需要两个有效采样点")}</div>`;
+  }
   registerChartPayload(chartId, {
     kind: "metric-comparison",
     title,

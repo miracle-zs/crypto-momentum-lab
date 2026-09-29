@@ -56,6 +56,20 @@ test("invariant: no absolute pageY snap-back when currentY is smaller but non-ze
   });
 });
 
+test("invariant: height-collapse clamp (2474→153) is recovered", () => {
+  const { view, doc } = mockWindow({ scrollY: 2474, scrollHeight: 4000, innerHeight: 900 });
+  withWindow(view, () => {
+    const guard = createScrollGuard();
+    // Content shrank; browser clamped scrollTop to the new maxScroll (~153).
+    doc.scrollingElement.scrollHeight = 1100;
+    view.scrollY = 153;
+    doc.scrollingElement.scrollTop = 153;
+    const restored = guard.restore();
+    assert.equal(restored, 2474);
+    assert.equal(view.scrollY, 2474);
+  });
+});
+
 test("invariant: only collapse to top is repaired", () => {
   const { view, doc } = mockWindow({ scrollY: 800 });
   withWindow(view, () => {
