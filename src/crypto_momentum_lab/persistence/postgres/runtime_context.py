@@ -4,10 +4,8 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
-)
 from crypto_momentum_lab.persistence.postgres.models import (
     ContractMetadataRow,
     ExecutionAccountProcessStateRow,
