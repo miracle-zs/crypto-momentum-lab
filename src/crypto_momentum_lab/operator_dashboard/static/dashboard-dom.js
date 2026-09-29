@@ -5,20 +5,79 @@ function fragmentFromHtml(ownerDocument, html) {
 }
 
 let userInteractionVersion = 0;
+// Only a real scroll gesture counts as "the user is moving the page".
+// Clicks, keydowns and pointerdowns must NOT disable scroll restoration —
+// otherwise a single click while reading made every later poll jump.
+let lastScrollIntentAt = 0;
+const SCROLL_INTENT_WINDOW_MS = 350;
+
+function markScrollIntent() {
+  lastScrollIntentAt = Date.now();
+  userInteractionVersion += 1;
+}
+
+function markUserInteraction() {
+  userInteractionVersion += 1;
+}
 
 if (typeof window !== "undefined") {
-  const markUserInteraction = () => {
-    userInteractionVersion += 1;
-  };
-  window.addEventListener("wheel", markUserInteraction, { passive: true });
+  window.addEventListener("wheel", markScrollIntent, { passive: true });
+  window.addEventListener("touchmove", markScrollIntent, { passive: true });
   window.addEventListener("pointerdown", markUserInteraction, { passive: true });
   window.addEventListener("mousedown", markUserInteraction, { passive: true });
   window.addEventListener("touchstart", markUserInteraction, { passive: true });
-  window.addEventListener("touchmove", markUserInteraction, { passive: true });
   window.addEventListener("click", markUserInteraction, { passive: true });
-  window.addEventListener("keydown", (e) => {
-    markUserInteraction();
-  }, { passive: true });
+  window.addEventListener("keydown", markUserInteraction, { passive: true });
+}
+
+export function isUserScrolling(now = Date.now()) {
+  return now - lastScrollIntentAt < SCROLL_INTENT_WINDOW_MS;
+}
+
+/**
+ * Capture the window reading position and restore it after a batch of DOM
+ * mutations (background poll). Unlike restoreViewState this only cares about
+ * page scroll, so it can wrap several section updates safely.
+ */
+export function createScrollGuard() {
+  const view = typeof window !== "undefined" ? window : null;
+  const doc = view?.document;
+  const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
+  const pageX = view?.scrollX ?? scrollingElement?.scrollLeft ?? 0;
+  const pageY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
+  return {
+    pageX,
+    pageY,
+    restore({ force = false } = {}) {
+      if (!view) return pageY;
+      if (!force && isUserScrolling()) return view.scrollY ?? 0;
+      const currentY = view.scrollY ?? scrollingElement?.scrollTop ?? 0;
+      const currentX = view.scrollX ?? scrollingElement?.scrollLeft ?? 0;
+      // Keep the reading position stable on background updates. Any upward
+      // drift toward the top (full or partial) is treated as a poll jump.
+      const jumpedUp = pageY > 20 && currentY < pageY - 2;
+      const collapsed = pageY > 20 && currentY <= 20;
+      if (!force && !jumpedUp && !collapsed) return currentY;
+      const maxScroll = Math.max(
+        0,
+        (scrollingElement?.scrollHeight || 0) - (view.innerHeight || 0),
+      );
+      const targetY = maxScroll > 0 ? Math.min(pageY, maxScroll) : pageY;
+      const previousBehavior = doc?.documentElement?.style?.scrollBehavior;
+      if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = "auto";
+      try {
+        view.scrollTo({ left: pageX, top: targetY, behavior: "instant" });
+      } catch {
+        view.scrollTo(pageX, targetY);
+      }
+      if (scrollingElement) {
+        if (scrollingElement.scrollTop !== targetY) scrollingElement.scrollTop = targetY;
+        if (scrollingElement.scrollLeft !== pageX) scrollingElement.scrollLeft = pageX;
+      }
+      if (doc?.documentElement?.style) doc.documentElement.style.scrollBehavior = previousBehavior;
+      return targetY;
+    },
+  };
 }
 
 function ownsFocus(root, doc, activeEl) {
@@ -218,11 +277,9 @@ export function restoreViewState(root, state) {
   if (root?.isConnected === false) return;
   const doc = root.ownerDocument || root;
   const view = doc?.defaultView;
-  if (state.interactionVersion != null && state.interactionVersion !== userInteractionVersion) {
-    const scrollingElement = doc?.scrollingElement || doc?.documentElement || doc?.body;
-    const currentY = view?.scrollY ?? scrollingElement?.scrollTop ?? 0;
-    if (currentY !== 0 || state.pageY <= 0) return;
-  }
+  // Only a live scroll gesture may veto restoration. A prior click/keydown
+  // must not: that is exactly when background polls were jumping the page.
+  if (isUserScrolling()) return;
 
   // 1. Restore disclosures
   const disclosureStates = new Map(
@@ -316,8 +373,11 @@ export function restoreViewState(root, state) {
     applyVerticalScroll = true;
   }
 
-  // Absolute defense: If the user was scrolled down (state.pageY > 20),
-  // targetY MUST NEVER collapse to 0 or near 0 on a background poll!
+  // Absolute defense: if the user was scrolled down (state.pageY > 20),
+  // targetY MUST NEVER collapse to 0 or near 0 on a background update.
+  // Partial upward drift is handled by createScrollGuard around the DOM batch
+  // (updateChildrenFromHtml / poll), so restoreViewState can still leave a
+  // legitimate mid-page position alone when no semantic anchor survives.
   if (state.pageY > 20 && targetY <= 20) {
     targetY = state.pageY;
     applyVerticalScroll = true;
@@ -379,6 +439,10 @@ function updateChildrenFromHtml(root, html, patch) {
   root.__renderGeneration = generation;
   const state = captureViewState(root);
   const content = fragmentFromHtml(root.ownerDocument, html);
+  // Batch-level reading-position lock. restoreViewState alone only defends a
+  // full collapse to ~0; this also undoes partial jumps (800 → 400) that
+  // background polls used to leave in place.
+  const scrollGuard = createScrollGuard();
 
   if (patch) {
     const previousMinHeight = root.style.minHeight;
@@ -387,7 +451,22 @@ function updateChildrenFromHtml(root, html, patch) {
     }
     reconcileChildren(root, content);
     restoreViewState(root, state);
-    root.style.minHeight = previousMinHeight;
+    scrollGuard.restore();
+    const view = root.ownerDocument?.defaultView;
+    // Release the height lock after layout, same as the replace path.
+    // Releasing it in the same frame let the document shrink and the browser
+    // clamp scrollTop — the classic "jump to top" on background poll.
+    if (typeof view?.requestAnimationFrame === "function") {
+      view.requestAnimationFrame(() => {
+        if (root.__renderGeneration !== generation) return;
+        root.style.minHeight = previousMinHeight;
+        void root.offsetHeight;
+        restoreViewState(root, state);
+        scrollGuard.restore();
+      });
+    } else {
+      root.style.minHeight = previousMinHeight;
+    }
     return;
   }
 
@@ -399,6 +478,7 @@ function updateChildrenFromHtml(root, html, patch) {
   root.replaceChildren(content);
   void root.offsetHeight;
   restoreViewState(root, state);
+  scrollGuard.restore();
   const view = root.ownerDocument?.defaultView;
   if (typeof view?.requestAnimationFrame === "function") {
     view.requestAnimationFrame(() => {
@@ -413,6 +493,7 @@ function updateChildrenFromHtml(root, html, patch) {
       delete root.__previousMinHeight;
       void root.offsetHeight;
       restoreViewState(root, layoutRelease ? { ...state, layoutRelease } : state);
+      scrollGuard.restore();
     });
   } else {
     root.style.minHeight = previousMinHeight;
@@ -424,6 +505,8 @@ export function replaceElementFromHtml(element, html) {
   const doc = element.ownerDocument;
   const root = doc?.body || doc?.documentElement || element;
   const state = captureViewState(root);
+  const scrollGuard = createScrollGuard();
   element.replaceWith(fragmentFromHtml(doc, html));
   restoreViewState(root, state);
+  scrollGuard.restore();
 }

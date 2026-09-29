@@ -34,7 +34,7 @@ import {
   latestStartEquityChart,
   standaloneSparkline,
   strategyEquityChart,
-} from "../dashboard-charts.js?v=20260906-live-account-labels-v1";
+} from "../dashboard-charts.js";
 import {
   blockTitle,
   dataTable,
@@ -44,7 +44,7 @@ import {
   sideTag,
   signalEvidence,
   tile,
-} from "../dashboard-ui.js?v=20260826-flight-deck-v2";
+} from "../dashboard-ui.js";
 
 async function defaultRequestJson(url) {
   const response = await fetch(url, {

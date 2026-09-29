@@ -35,7 +35,7 @@ import {
   SECTION_POLL_MS,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
 import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
-import { captureViewState, restoreViewState, replaceChildrenFromHtml } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
+import { captureViewState, restoreViewState, replaceChildrenFromHtml, createScrollGuard, isUserScrolling } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-dom.js";
 
 test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
   assert.equal(POLL_MS, 15000);
@@ -1193,6 +1193,83 @@ test("captureViewState ignores static buttons and cards for focusIdentity", () =
 
   const state = captureViewState(root);
   assert.equal(state.focusIdentity, null);
+});
+
+function mockScrollDoc({ scrollY = 0, scrollHeight = 2500, innerHeight = 800 } = {}) {
+  const mockDoc = {
+    scrollingElement: { scrollLeft: 0, scrollTop: scrollY, scrollHeight },
+    documentElement: { style: {} },
+    body: { scrollLeft: 0, scrollTop: scrollY },
+    defaultView: {
+      scrollX: 0,
+      scrollY,
+      innerHeight,
+      scrollTo(opts) {
+        const top = typeof opts === "object" ? opts.top : arguments[1];
+        mockDoc.scrollingElement.scrollTop = top;
+        mockDoc.defaultView.scrollY = top;
+      },
+    },
+    querySelectorAll: () => [],
+  };
+  return mockDoc;
+}
+
+test("createScrollGuard recovers a partial upward jump left by background DOM writes", () => {
+  // 800 → 400 is the jump the old absolute defense (targetY <= 20) missed.
+  const previousWindow = globalThis.window;
+  const mockDoc = mockScrollDoc({ scrollY: 800, scrollHeight: 3000 });
+  globalThis.window = mockDoc.defaultView;
+  globalThis.window.document = mockDoc;
+  try {
+    const guard = createScrollGuard();
+    mockDoc.scrollingElement.scrollTop = 400;
+    mockDoc.defaultView.scrollY = 400;
+    const restored = guard.restore();
+    assert.equal(restored, 800);
+    assert.equal(mockDoc.scrollingElement.scrollTop, 800);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("createScrollGuard restores reading position after a background poll batch", () => {
+  const previousWindow = globalThis.window;
+  const mockDoc = mockScrollDoc({ scrollY: 800, scrollHeight: 3000 });
+  globalThis.window = mockDoc.defaultView;
+  globalThis.window.document = mockDoc;
+  try {
+    const guard = createScrollGuard();
+    // Simulate DOM churn collapsing the document and clamping scroll.
+    mockDoc.scrollingElement.scrollTop = 120;
+    mockDoc.defaultView.scrollY = 120;
+    const restored = guard.restore();
+    assert.equal(restored, 800);
+    assert.equal(mockDoc.scrollingElement.scrollTop, 800);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("createScrollGuard can force-restore even while a scroll gesture is active", () => {
+  const previousWindow = globalThis.window;
+  const mockDoc = mockScrollDoc({ scrollY: 800, scrollHeight: 3000 });
+  globalThis.window = mockDoc.defaultView;
+  globalThis.window.document = mockDoc;
+  try {
+    const guard = createScrollGuard();
+    mockDoc.scrollingElement.scrollTop = 120;
+    mockDoc.defaultView.scrollY = 120;
+    guard.restore({ force: true });
+    assert.equal(mockDoc.scrollingElement.scrollTop, 800);
+    // Idle module state: no scroll gesture has been recorded in this process.
+    assert.equal(isUserScrolling(Date.now() + 60_000), false);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });
 
 

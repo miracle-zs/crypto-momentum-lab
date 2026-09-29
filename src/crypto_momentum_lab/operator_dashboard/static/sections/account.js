@@ -37,7 +37,7 @@ import {
   sideTag,
   signalEvidence,
   tile,
-} from "../dashboard-ui.js?v=20260826-flight-deck-v2";
+} from "../dashboard-ui.js";
 
 const ACCOUNT_EQUITY_RANGES = [
   { key: "24h", label: "24小时", shortLabel: "24H" },

@@ -1,4 +1,4 @@
-import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js?v=20260918-perf-v4";
+import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
 import {
   dayTime,
   esc,
