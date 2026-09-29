@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -6,6 +6,7 @@ import pytest
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountPositionSnapshot,
+    AccountPositionStateSnapshot,
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
@@ -95,3 +96,31 @@ def test_hedge_position_snapshots_have_distinct_ids() -> None:
     )
 
     assert long_row["snapshot_id"] != short_row["snapshot_id"]
+
+
+def test_account_position_state_snapshot_requires_complete_count_match() -> None:
+    with pytest.raises(ValueError, match="count must match its keys"):
+        AccountPositionStateSnapshot(
+            environment="live",
+            account_label="primary",
+            reconciliation_id="run-1",
+            observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+            position_count=1,
+            position_keys=(),
+            complete=True,
+        )
+
+
+def test_account_position_state_snapshot_normalizes_hedge_position_keys() -> None:
+    snapshot = AccountPositionStateSnapshot(
+        environment="live",
+        account_label="primary",
+        reconciliation_id="run-1",
+        observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        position_count=2,
+        position_keys=(("btcusdt", "long"), ("BTCUSDT", "short")),
+        complete=True,
+    )
+
+    assert snapshot.position_keys == (("BTCUSDT", "LONG"), ("BTCUSDT", "SHORT"))
+    assert snapshot.symbols == frozenset({"BTCUSDT"})
