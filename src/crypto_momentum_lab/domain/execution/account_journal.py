@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
+    CanonicalFactCache,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     JournalFactDelta,
@@ -88,6 +89,10 @@ class AccountJournal:
         # example when a recovery checkpoint is applied). View caches key off it
         # in addition to the revision, which only counts appended events.
         self._facts_generation: int = 0
+        # Canonical encoding of each recorded fact, reused across the per
+        # observation fact hashes. Facts are immutable once recorded, so this is
+        # derived state that only ever grows alongside the facts themselves.
+        self._canonical_fact_cache = CanonicalFactCache()
         # Append-only events recorded since the last successful durable persist.
         # They are re-sent after a failed or lost transaction and dropped once
         # the commit published this journal.
@@ -403,6 +408,11 @@ class AccountJournal:
         candidate._pending_fills = list(self._pending_fills)
         candidate._pending_snapshots = list(self._pending_snapshots)
         candidate._pending_boundaries = list(self._pending_boundaries)
+        # The canonical encoding cache is derived, append-only state keyed by fact
+        # identity, so the candidate shares it instead of copying it. A candidate
+        # that rolls back may leave entries for facts that were never published;
+        # that costs a few hundred bytes and cannot alias another fact.
+        candidate._canonical_fact_cache = self._canonical_fact_cache
         return candidate
 
     def pending_fact_delta(self) -> JournalFactDelta:
@@ -661,6 +671,7 @@ class AccountJournal:
             prefix_facts_complete=self._prefix_facts_complete,
             fill_cursor_provenance=cursor_provenance,
             fill_load_provenance=fill_load_provenance,
+            _canonical_fact_cache=self._canonical_fact_cache,
         )
         if cut is None:
             self._cached_facts_none = facts
