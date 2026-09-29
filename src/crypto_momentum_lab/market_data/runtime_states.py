@@ -774,23 +774,37 @@ class ClosedMarketStatePublisher:
         if last_bucket is None or exchange is None:
             return
         next_bucket = last_bucket + timedelta(seconds=_BUCKET_SECONDS)
+        if next_bucket > through_bucket:
+            return
+        # Only the first new bucket needs a predecessor lookup. Every later
+        # bucket in this loop is preceded by the one just materialized, so its
+        # state is carried forward instead of re-scanning every bucketed symbol
+        # once per materialized bucket (that scan is quadratic in the number of
+        # buckets being filled, which a long gap or a restart can make large).
+        previous_state = self._previous_state_for_symbol(
+            symbol_key,
+            before_bucket=next_bucket,
+        )
+        initial_quote = (
+            self._durable_latest_quotes.get(symbol_key)
+            or self._realtime_latest_quotes.get(symbol_key)
+        )
         while next_bucket <= through_bucket:
             key = (symbol_key[0], symbol_key[1], next_bucket)
-            if key not in self._accumulators_by_bucket:
-                previous_state = self._previous_state_for_symbol(
-                    symbol_key,
-                    before_bucket=next_bucket,
+            accumulator = self._accumulators_by_bucket.get(key)
+            if accumulator is None:
+                accumulator = MarketState15sAccumulator.empty_bucket(
+                    exchange=exchange,
+                    environment=symbol_key[0],
+                    symbol=symbol_key[1],
+                    bucket_start=next_bucket,
+                    previous_state=previous_state,
                 )
-                self._activate_accumulator(
-                    key,
-                    MarketState15sAccumulator.empty_bucket(
-                        exchange=exchange,
-                        environment=symbol_key[0],
-                        symbol=symbol_key[1],
-                        bucket_start=next_bucket,
-                        previous_state=previous_state,
-                    ),
-                )
+                self._activate_accumulator(key, accumulator)
+            previous_state = accumulator.snapshot(
+                initial_quote=initial_quote,
+                latest_quote=self._latest_book_ticker_by_bucket.get(key),
+            ).state
             self._last_materialized_bucket_by_symbol[symbol_key] = next_bucket
             next_bucket += timedelta(seconds=_BUCKET_SECONDS)
 

@@ -636,3 +636,90 @@ async def test_through_bucket_gating_and_invalidation() -> None:
     await publisher.observe(fixture_trade(2, price="200", sequence=3, symbol="SOLUSDT"))
     assert publisher._last_materialized_empty_buckets_through is None
 
+
+
+async def test_materializing_many_buckets_looks_up_predecessor_once_per_symbol() -> None:
+    """Filling B buckets must not rescan the bucket table once per bucket."""
+    publisher = ClosedMarketStatePublisher(
+        repository=FakeRuntimeStateRepository(),
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    publisher.set_expected_symbols(symbols)
+    publisher._observed_symbol_keys = {("research", symbol) for symbol in symbols}
+    publisher._exchange_by_symbol_key = {
+        ("research", symbol): "binance" for symbol in symbols
+    }
+    publisher._last_materialized_bucket_by_symbol = {
+        ("research", symbol): base for symbol in symbols
+    }
+
+    lookups: list[tuple[str, str]] = []
+    original = publisher._previous_state_for_symbol
+
+    def counting_lookup(symbol_key, *, before_bucket):
+        lookups.append(symbol_key)
+        return original(symbol_key, before_bucket=before_bucket)
+
+    publisher._previous_state_for_symbol = counting_lookup
+    through = base + timedelta(seconds=15 * 5)
+    for symbol in symbols:
+        publisher._materialize_buckets_until(
+            symbol_key=("research", symbol),
+            through_bucket=through,
+        )
+
+    assert len(publisher._accumulators_by_bucket) == 2 * 5
+    # One lookup per symbol instead of one per materialized bucket (10 buckets).
+    assert lookups == [("research", "BTCUSDT"), ("research", "ETHUSDT")]
+
+
+async def test_one_jump_fill_matches_bucket_by_bucket_fill() -> None:
+    """Carrying the predecessor forward must not change the materialized state."""
+    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
+    symbol_key = ("research", "BTCUSDT")
+
+    async def filled(step: int):
+        publisher = ClosedMarketStatePublisher(
+            repository=FakeRuntimeStateRepository(),
+            config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        )
+        publisher.set_expected_symbols(["BTCUSDT"])
+        # Real ingest path so the predecessor state and the per-bucket book
+        # quote cache are populated the way production populates them.
+        await publisher.observe(fixture_book_ticker(0, sequence=1))
+        await publisher.observe(fixture_trade(1, price="101", sequence=2))
+        assert publisher._last_materialized_bucket_by_symbol.get(symbol_key) is not None
+
+        lookups: list[tuple[str, str]] = []
+        original = publisher._previous_state_for_symbol
+
+        def counting_lookup(key, *, before_bucket):
+            lookups.append(key)
+            return original(key, before_bucket=before_bucket)
+
+        publisher._previous_state_for_symbol = counting_lookup
+        for index in range(step, 6, step):
+            publisher._materialize_buckets_until(
+                symbol_key=symbol_key,
+                through_bucket=base + timedelta(seconds=15 * index),
+            )
+        return publisher, lookups
+
+    one_jump, jump_lookups = await filled(5)
+    stepped, stepped_lookups = await filled(1)
+
+    assert one_jump._last_materialized_bucket_by_symbol == (
+        stepped._last_materialized_bucket_by_symbol
+    )
+    assert set(one_jump._accumulators_by_bucket) == set(stepped._accumulators_by_bucket)
+    for key, accumulator in one_jump._accumulators_by_bucket.items():
+        assert accumulator.snapshot().state == (
+            stepped._accumulators_by_bucket[key].snapshot().state
+        )
+    assert one_jump._realtime_deadlines == stepped._realtime_deadlines
+    assert one_jump._durable_deadlines == stepped._durable_deadlines
+    # The jump path looks the predecessor up once; the stepped path once per call.
+    assert len(jump_lookups) == 1
+    assert len(stepped_lookups) > 1
