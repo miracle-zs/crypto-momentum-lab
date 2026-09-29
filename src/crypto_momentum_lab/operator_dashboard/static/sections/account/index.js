@@ -25,14 +25,14 @@ import {
   liveAccountStatusLabel,
   liveAccountStatusClass,
   liveStrategyStateLabel,
-  renderLiveAccounts,
+  renderLiveAccounts as renderLiveAccountsInternal,
 } from "./render-fleet.js";
 
 /** Single section state holder (see frontend-decoupling-plan.md). */
 const state = createAccountSectionState();
 
-export function renderLiveAccountsSection(data) {
-  return renderLiveAccounts(state, data);
+export function renderLiveAccounts(data) {
+  return renderLiveAccountsInternal(state, data);
 }
 
 export function wireLiveAccounts(root, data, { requestJson = defaultAccountRequestJson } = {}) {
@@ -212,4 +212,3 @@ export {
 export {
   wireAccountEquityRanges,
 } from "./loaders.js";
-export { renderLiveAccountsSection as renderLiveAccounts };

@@ -8,11 +8,8 @@ import {
   signedMoney,
 } from "../../dashboard-formatters.js";
 import { emptyBox, pill, tile } from "../../dashboard-ui.js";
-import { K, sel } from "../../ui/css-keys.js";
-import {
-  ACCOUNT_EQUITY_RANGES,
-  DISPLAY_TIME_ZONE_LABEL,
-} from "./constants.js";
+import { K } from "../../ui/css-keys.js";
+import { DISPLAY_TIME_ZONE_LABEL } from "./constants.js";
 import { renderAccount } from "./render-detail.js";
 import {
   normalizeSelectedAccount,
@@ -165,6 +162,3 @@ export function renderLiveAccounts(state, data) {
   const metrics = `<div ${K.liveAccountMetrics} aria-live="polite">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`;
   return [overallStatus, `<div class="live-account-fleet" data-live-account-directory>${liveAccountSummary(accounts, overallStatus)}${cards}${metrics}${detail}</div>`];
 }
-
-// re-export for dynamic updater
-export { ACCOUNT_EQUITY_RANGES, sel };

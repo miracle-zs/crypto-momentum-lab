@@ -5,7 +5,7 @@ import {
 } from "../../dashboard-config.js";
 import { asNumber, dayTime, fullDateTime } from "../../dashboard-formatters.js";
 
-export { COMPARISON_ANCHOR_HOUR, DEFAULT_EQUITY_BUCKET_SECONDS, DISPLAY_TIME_ZONE_LABEL };
+export { DEFAULT_EQUITY_BUCKET_SECONDS, DISPLAY_TIME_ZONE_LABEL };
 
 export const ACCOUNT_EQUITY_RANGES = [
   { key: "24h", label: "24小时", shortLabel: "24H" },

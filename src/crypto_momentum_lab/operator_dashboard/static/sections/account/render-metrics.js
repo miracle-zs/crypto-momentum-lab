@@ -1,16 +1,12 @@
 import {
   asNumber,
-  dayTime,
   esc,
-  fullDateTime,
 } from "../../dashboard-formatters.js";
 import { liveAccountMetricChart } from "../../dashboard-charts.js";
 import { blockTitle } from "../../dashboard-ui.js";
 import {
   ACCOUNT_EQUITY_RANGES,
-  COMPARISON_ANCHOR_HOUR,
   DEFAULT_EQUITY_BUCKET_SECONDS,
-  DISPLAY_TIME_ZONE_LABEL,
   LIVE_ACCOUNT_METRIC_DEFINITIONS,
   anchorLabel,
   equitySampleLabel,
@@ -84,5 +80,3 @@ export function renderLiveAccountMetrics(data) {
     <div class="live-metrics-grid">${charts}</div>
   </div>`;
 }
-
-export { COMPARISON_ANCHOR_HOUR, DISPLAY_TIME_ZONE_LABEL, dayTime, fullDateTime };

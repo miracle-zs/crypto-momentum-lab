@@ -1,13 +1,11 @@
 /**
- * Compatibility facade for the account section.
- * Implementation lives in sections/account/ (render / loaders / state).
+ * Account section public API. Implementation lives in sections/account/.
  */
 
 export {
   renderAccount,
   renderLiveAccountMetrics,
   renderLiveAccounts,
-  renderLiveAccountsSection,
   updateLiveAccountsDynamic,
   wireAccountEquityRanges,
   wireLiveAccounts,

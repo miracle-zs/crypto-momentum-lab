@@ -252,5 +252,3 @@ export async function loadLiveAccountMetrics(state, root, requestJson, equityRan
     }
   }
 }
-
-export { accountDetailRange };

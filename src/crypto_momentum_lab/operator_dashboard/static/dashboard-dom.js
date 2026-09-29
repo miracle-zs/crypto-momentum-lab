@@ -1,11 +1,9 @@
 /**
- * Compatibility facade. Prefer importing from core/scroll-keep.js,
- * core/dom-reconcile.js, core/view-state.js, or core/dom-update.js directly.
+ * DOM facade used by sections and the poller. Implementation is in core/.
  */
 
 export {
   createScrollGuard,
-  getUserInteractionVersion,
   isUserScrolling,
 } from "./core/scroll-keep.js";
 
@@ -13,11 +11,6 @@ export {
   captureViewState,
   restoreViewState,
 } from "./core/view-state.js";
-
-export {
-  fragmentFromHtml,
-  reconcileChildren,
-} from "./core/dom-reconcile.js";
 
 export {
   patchChildrenFromHtml,
