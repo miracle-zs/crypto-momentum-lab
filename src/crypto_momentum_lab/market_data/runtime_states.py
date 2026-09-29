@@ -19,6 +19,9 @@ from crypto_momentum_lab.domain.market.models import (
     RawEnvelope,
     RealtimeMarketQuote,
 )
+from crypto_momentum_lab.domain.market.runtime_state_models import (
+    RuntimeStateSequenceRange,
+)
 from crypto_momentum_lab.market_data.aggregation import (
     MarketState15sAccumulator,
     MarketState15sSnapshot,
@@ -27,9 +30,6 @@ from crypto_momentum_lab.market_data.aggregation import (
 from crypto_momentum_lab.market_data.normalization import (
     BinanceNormalizationError,
     normalize_binance_envelope,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    RuntimeStateSequenceRange,
 )
 
 type _BucketKey = tuple[str, str, datetime]
