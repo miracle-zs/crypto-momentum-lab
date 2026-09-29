@@ -15,7 +15,7 @@ from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     SystemAction,
 )
 from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
 

@@ -12,7 +12,7 @@ from crypto_momentum_lab.execution_account.expectations import (
 from crypto_momentum_lab.execution_account.hub import (
     WebSocketAccountPositionExpectationPublisher,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
 

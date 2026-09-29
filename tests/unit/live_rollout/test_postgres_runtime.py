@@ -19,9 +19,7 @@ from crypto_momentum_lab.domain.live_rollout import (
 )
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
-)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
@@ -33,12 +31,14 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,
     _classify_live_positions_detailed,
-    _load_order_anchor_events,
-    _opening_anchors_from_events,
-    _OrderAnchorEvent,
     _resolve_strategy_live_state,
     live_limits_from_approval,
     poll_live_market_states,
+)
+from crypto_momentum_lab.persistence.postgres.position_order_window import (
+    _load_order_anchor_events,
+    _opening_anchors_from_events,
+    _OrderAnchorEvent,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,

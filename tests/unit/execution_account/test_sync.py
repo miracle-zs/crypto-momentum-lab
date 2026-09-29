@@ -180,7 +180,9 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
     assert repository.reconciliation_runs[-1].details == {
-        "source": "rest_reconciliation"
+        "source": "rest_reconciliation",
+        "position_state_schema_version": 1,
+        "position_keys": [],
     }
 
 
@@ -208,7 +210,9 @@ async def test_realtime_sync_publishes_before_durable_persistence() -> None:
     assert [item.asset for item in repository.balances] == ["USDT"]
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].details == {
-        "source": "rest_reconciliation"
+        "source": "rest_reconciliation",
+        "position_state_schema_version": 1,
+        "position_keys": [],
     }
     assert repository.reconciliation_runs[-1].balance_count == 1
 
@@ -967,6 +971,25 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783166400000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 12, 0, tzinfo=UTC),
+    )
+    assert result.snapshot is not None
+    event_result = await service.persist_user_data_event(
+        snapshot=result.snapshot,
+        event=event,
+    )
+    assert event_result.status is ExecutionAccountStatus.SYNCING
+    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+
     # Heartbeat during incomplete sync must preserve SYNCING and NOT
     # overwrite with READY_READONLY
     heartbeat_time = datetime(2026, 7, 4, 12, 1, tzinfo=UTC)
@@ -997,7 +1020,8 @@ async def test_reconciliation_position_count_ignores_zero_positions() -> None:
         config=_config(),
     )
 
-    # Prime the previous signature with an open position so the zero transition is persisted
+    # Prime the previous signature with an open position so the zero transition
+    # is persisted.
     service._last_position_signatures[("GRASSUSDT", "LONG")] = (
         Decimal("100"),
         Decimal("1.5"),
@@ -1010,3 +1034,43 @@ async def test_reconciliation_position_count_ignores_zero_positions() -> None:
     # Even though a zero position snapshot was persisted to record the closure,
     # the active position count in the reconciliation run must strictly be 0!
     assert repository.reconciliation_runs[0].position_count == 0
+
+
+async def test_reconciliation_run_records_full_state_when_history_is_sparse() -> None:
+    eth_open = _position()
+    btc_open = replace(eth_open, symbol="BTCUSDT")
+    btc_flat = replace(btc_open, position_amt=Decimal("0"))
+
+    class SparsePositionClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.position_sets = [
+                (btc_open, eth_open),
+                (btc_flat, eth_open),
+            ]
+
+        async def fetch_positions(self):
+            return self.position_sets.pop(0)
+
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=SparsePositionClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    await service.sync_once(include_fills=False)
+    await service.sync_once(
+        observed_at=_config().observed_at + timedelta(seconds=1),
+        include_fills=False,
+    )
+
+    latest_run = repository.reconciliation_runs[-1]
+    assert latest_run.position_count == 1
+    assert latest_run.details["position_state_schema_version"] == 1
+    assert latest_run.details["position_keys"] == [
+        {"symbol": "ETHUSDT", "position_side": "BOTH"}
+    ]
+    # The immutable detail history is sparse within the coalescing window:
+    # ETH was not re-written, while BTC's close was.
+    assert [row.symbol for row in repository.positions[-1:]] == ["BTCUSDT"]

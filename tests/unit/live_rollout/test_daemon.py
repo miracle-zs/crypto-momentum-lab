@@ -26,9 +26,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
     universe_snapshot_for_symbols,
 )
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
-)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,

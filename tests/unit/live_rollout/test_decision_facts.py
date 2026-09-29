@@ -507,5 +507,3 @@ async def test_fact_source_commit_decision_heals_skipped_revision() -> None:
     assert receipt.decision_id == "dec_skip"
     assert src.policy_revision == 5
     assert src.current_policy_state.policy_version == 3
-
-

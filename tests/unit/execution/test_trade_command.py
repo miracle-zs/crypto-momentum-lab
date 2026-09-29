@@ -346,9 +346,7 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
     assert cmd.side == StrategySide.SHORT
     assert cmd.reduce_only is True
 
-    from crypto_momentum_lab.execution_account.orders.quantization import (
-        SymbolTradingRules,
-    )
+    from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
     from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
         TradeCommandExecutor,
     )

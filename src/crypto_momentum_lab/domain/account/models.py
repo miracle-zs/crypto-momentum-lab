@@ -206,7 +206,10 @@ class AccountFillPageScan:
     def __post_init__(self) -> None:
         _require_non_empty(self.symbol, "symbol")
         _require_non_empty(self.load_id, "load_id")
-        if type(self.scan_origin_start_time_ms) is not int or self.scan_origin_start_time_ms < 0:
+        if (
+            type(self.scan_origin_start_time_ms) is not int
+            or self.scan_origin_start_time_ms < 0
+        ):
             raise ValueError("scan_origin_start_time_ms must be a non-negative integer")
         if self.next_from_id is not None and (
             type(self.next_from_id) is not int or self.next_from_id < 0
@@ -302,6 +305,40 @@ class AccountConfigSnapshot:
         if self.fee_tier is not None and self.fee_tier < 0:
             raise ValueError("fee_tier must be non-negative")
         _require_aware(self.observed_at, "observed_at")
+
+
+@dataclass(frozen=True, slots=True)
+class AccountPositionStateSnapshot:
+    """The latest authoritative set of non-zero account position legs."""
+
+    environment: str
+    account_label: str
+    reconciliation_id: str
+    observed_at: datetime
+    position_count: int
+    position_keys: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        _require_common(self.environment, self.account_label)
+        _require_non_empty(self.reconciliation_id, "reconciliation_id")
+        _require_aware(self.observed_at, "observed_at")
+        if self.position_count < 0:
+            raise ValueError("position_count must be non-negative")
+        normalized = tuple(
+            (symbol.strip().upper(), side.strip().upper())
+            for symbol, side in self.position_keys
+        )
+        if any(not symbol or not side for symbol, side in normalized):
+            raise ValueError("position keys must contain non-empty symbol and side")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("position keys must be unique")
+        if len(normalized) != self.position_count:
+            raise ValueError("position snapshot count must match its keys")
+        object.__setattr__(self, "position_keys", normalized)
+
+    @property
+    def symbols(self) -> frozenset[str]:
+        return frozenset(symbol for symbol, _side in self.position_keys)
 
 
 @dataclass(frozen=True, slots=True)

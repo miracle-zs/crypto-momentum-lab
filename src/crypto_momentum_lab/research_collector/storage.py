@@ -39,11 +39,11 @@ import structlog
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
 )
-from crypto_momentum_lab.market_data.hub import (
-    MarketStateBatch,
+from crypto_momentum_lab.domain.market.state_codec import (
     market_state_from_payload,
     market_state_to_payload,
 )
+from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.persistence.parquet.datasets import market_state_15s_row
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,

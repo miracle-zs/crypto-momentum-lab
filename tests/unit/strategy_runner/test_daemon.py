@@ -17,9 +17,9 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandleSourceError,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import PaperEntryFilterConfig
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
-    PaperEntryFilterConfig,
     PaperEntryFilterContext,
     PaperLiveArtifactRepository,
     PaperLiveDaemonConfig,
@@ -31,19 +31,19 @@ from crypto_momentum_lab.strategy_runner.daemon import (
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
-from crypto_momentum_lab.strategy_runner.fills import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     ReplayExecutionConfig,
     SimulatedFill,
     SimulatedFillStatus,
 )
-from crypto_momentum_lab.strategy_runner.portfolio import (
-    ClosedCandle15m,
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperExitConfig,
     PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     position_from_entry_fill,
 )
+from crypto_momentum_lab.strategy_runner.portfolio import ClosedCandle15m
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
     fixture_state,
 )

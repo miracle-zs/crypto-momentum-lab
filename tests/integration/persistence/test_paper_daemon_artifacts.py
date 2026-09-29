@@ -31,8 +31,8 @@ from crypto_momentum_lab.persistence.postgres.session import (
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     PostgresStrategyRunRepository,
 )
-from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
-from crypto_momentum_lab.strategy_runner.portfolio import (
+from crypto_momentum_lab.domain.strategy.paper_models import PaperEntryFilterConfig
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperExitConfig,
     PaperPositionStatus,
 )

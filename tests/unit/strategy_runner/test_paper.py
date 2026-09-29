@@ -24,15 +24,17 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    ReplayExecutionConfig,
+    SimulatedFillStatus,
+)
 from crypto_momentum_lab.strategy_runner import (
     InMemoryPaperMarketStateSource,
     PaperRunnerConfig,
     PaperRunnerError,
-    ReplayExecutionConfig,
-    SimulatedFillStatus,
     run_paper_trading,
 )
-from crypto_momentum_lab.strategy_runner.portfolio import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperExitConfig,
     PaperPositionStatus,
 )

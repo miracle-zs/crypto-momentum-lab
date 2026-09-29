@@ -22,6 +22,7 @@ from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
     ExecutionAccountSyncResult,
 )
+from crypto_momentum_lab.execution_account.user_data_sync import AccountUserDataState
 
 
 class FakeStream:
@@ -608,6 +609,42 @@ async def test_daemon_returns_after_apply_while_persistence_runs_in_background()
     finally:
         service.release_persist.set()
         await daemon._stop_pipeline()
+
+
+async def test_replayed_user_data_event_preserves_syncing_readiness() -> None:
+    service = FakeService(_snapshot())
+    published = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda event, result: published.append(result),
+    )
+    daemon._state = AccountUserDataState(_snapshot())
+    daemon._accept_events = True
+    daemon._last_sync_result = ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.SYNCING,
+        reconciliation_id="syncing-reconciliation",
+        mismatch_count=0,
+        snapshot=_snapshot(),
+        fills_catching_up=True,
+    )
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+
+    await daemon._process_event(event, replay=True)
+
+    assert len(published) == 1
+    assert published[0].status is ExecutionAccountStatus.SYNCING
 
 
 async def test_persistence_failure_fails_closed_and_recovers_from_rest() -> None:

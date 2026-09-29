@@ -13,11 +13,8 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowImpulseConfig,
 )
-from crypto_momentum_lab.strategy_runner import (
-    PaperRunnerConfig,
-    ReplayConfig,
-    ReplayExecutionConfig,
-)
+from crypto_momentum_lab.domain.strategy.paper_models import ReplayExecutionConfig
+from crypto_momentum_lab.strategy_runner import PaperRunnerConfig, ReplayConfig
 
 runner = CliRunner()
 

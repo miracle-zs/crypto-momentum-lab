@@ -15,6 +15,10 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
     ShadowSuppressionEvent,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError as _OrderPreSubmissionError,
+    PreparedOrderSubmission as _PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
 
 
@@ -25,10 +29,6 @@ class SubmitPolicy(StrEnum):
 
 class LiveSubmissionDisabledError(RuntimeError):
     pass
-
-
-class OrderPreSubmissionError(RuntimeError):
-    """A local precondition failed before an exchange write was attempted."""
 
 
 class ExchangeOrderRejectedError(RuntimeError):
@@ -151,20 +151,6 @@ class OrderExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedOrderSubmission:
-    """Durable write-ahead journal returned by an atomic order preparation."""
-
-    plan: OrderExecutionPlan
-    submitting_event: ExchangeOrderEvent
-
-    def __post_init__(self) -> None:
-        if self.submitting_event.state is not ExchangeOrderState.SUBMITTING:
-            raise ValueError("prepared submission must contain a SUBMITTING event")
-        if self.submitting_event.client_order_id != self.plan.client_order_id:
-            raise ValueError("prepared submission event must reference the order plan")
-
-
-@dataclass(frozen=True, slots=True)
 class _OrderQueryResult:
     snapshot: ExchangeOrderSnapshot | None
     reason: str | None
@@ -215,7 +201,7 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
         if self._lock is None:
             return await self._execute_approved_intent(
@@ -232,7 +218,7 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
         if not plan.quantized:
             raise ValueError("order plan must be quantized before execution")
@@ -301,7 +287,7 @@ class OrderExecutionStateMachine:
                 None,
                 plan=plan,
             )
-        except OrderPreSubmissionError as exc:
+        except _OrderPreSubmissionError as exc:
             await self._append_event(
                 plan,
                 ExchangeOrderState.REJECTED,

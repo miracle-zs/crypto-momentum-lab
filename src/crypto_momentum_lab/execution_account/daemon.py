@@ -616,7 +616,16 @@ class UserDataAccountSyncDaemon:
                             origin_event=event,
                         )
                 elif update.changed:
-                    applied_result = _event_applied_result(update)
+                    applied_result = _event_applied_result(
+                        update,
+                        readiness_status=_event_readiness_status(
+                            self._last_sync_result
+                        ),
+                        fills_catching_up=(
+                            self._last_sync_result is not None
+                            and self._last_sync_result.fills_catching_up
+                        ),
+                    )
                     persistence_queue = self._persistence_queue
                     if persistence_queue is not None:
                         if persistence_queue.full():
@@ -1084,10 +1093,10 @@ class UserDataAccountSyncDaemon:
                         publish_transient_states=False,
                         include_fills=include_fills,
                     )
-            if _is_usable_result(result):
+            if _is_usable_result(result) and result.snapshot is not None:
                 self._last_sync_result = result
                 snapshot = result.snapshot
-                if snapshot is not None and self._state is None:
+                if self._state is None:
                     self._state = AccountUserDataState(
                         snapshot,
                         expected_position_registry=(self._expected_position_registry),
@@ -1431,11 +1440,14 @@ async def _wait_for_stop(stop_requested: asyncio.Event) -> None:
 
 def _event_applied_result(
     update: AccountUserDataUpdate,
+    *,
+    readiness_status: ExecutionAccountStatus,
+    fills_catching_up: bool,
 ) -> ExecutionAccountSyncResult:
     event = update.event
     fills = update.fills
     return ExecutionAccountSyncResult(
-        status=ExecutionAccountStatus.READY_READONLY,
+        status=readiness_status,
         reconciliation_id=f"account-event:{event.event_id}",
         mismatch_count=0,
         snapshot=update.snapshot,
@@ -1445,7 +1457,21 @@ def _event_applied_result(
         new_fills=fills,
         new_fill_keys=frozenset((fill.symbol, fill.trade_id) for fill in fills),
         fill_count_by_symbol=_fill_counts_by_symbol(fills),
+        fills_catching_up=fills_catching_up,
     )
+
+
+def _event_readiness_status(
+    last_sync_result: ExecutionAccountSyncResult | None,
+) -> ExecutionAccountStatus:
+    """User-data deltas inherit readiness from the last REST reconciliation."""
+    if (
+        last_sync_result is None
+        or last_sync_result.status is ExecutionAccountStatus.SYNCING
+        or last_sync_result.fills_catching_up
+    ):
+        return ExecutionAccountStatus.SYNCING
+    return last_sync_result.status
 
 
 def _fill_counts_by_symbol(

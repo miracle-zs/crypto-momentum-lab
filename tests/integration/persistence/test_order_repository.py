@@ -21,7 +21,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
 from crypto_momentum_lab.persistence.postgres.models import (

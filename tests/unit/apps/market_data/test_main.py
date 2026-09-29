@@ -222,15 +222,15 @@ async def test_protected_symbols_discover_live_accounts_with_positions() -> None
             self.labels_calls.append(environment)
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self,
             *,
             environment: str,
             account_label: str,
-        ) -> frozenset[str]:
+        ) -> SimpleNamespace:
             assert environment == "live"
             self.symbol_calls.append(account_label)
-            return frozenset({f"{account_label.upper()}USDT"})
+            return SimpleNamespace(symbols=frozenset({f"{account_label.upper()}USDT"}))
 
     accounts = FakeAccountRepository()
 
@@ -259,10 +259,10 @@ async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
         ) -> frozenset[str]:
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
-            return frozenset()
+        ) -> SimpleNamespace:
+            return SimpleNamespace(symbols=frozenset())
 
     symbols = await main._load_protected_symbols(
         paper_repository=FakePaperRepository(),
@@ -274,7 +274,7 @@ async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
     assert symbols == frozenset()
 
 
-async def test_load_protected_symbols_isolates_account_exception() -> None:
+async def test_load_protected_symbols_propagates_account_exception() -> None:
     class FakePaperRepository:
         async def load_open_position_symbols(
             self, protected_run_ids: Iterable[str]
@@ -287,25 +287,23 @@ async def test_load_protected_symbols_isolates_account_exception() -> None:
         ) -> frozenset[str]:
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
+        ) -> SimpleNamespace:
             if account_label == "account-2":
-                raise RuntimeError("ready reconciliation is missing active position snapshots")
-            return frozenset({"PRIMARYUSDT"})
+                raise RuntimeError("account state query failed")
+            return SimpleNamespace(symbols=frozenset({"PRIMARYUSDT"}))
 
-    symbols = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        account_repository=FailingAccountRepository(),
-        protected_run_ids=frozenset({"paper-run"}),
-        configured_live_position_account_labels=frozenset({"primary"}),
-    )
-
-    # account-2's exception was isolated and logged as a warning; primary and paper still protected!
-    assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT"})
+    with pytest.raises(RuntimeError, match="account state query failed"):
+        await main._load_protected_symbols(
+            paper_repository=FakePaperRepository(),
+            account_repository=FailingAccountRepository(),
+            protected_run_ids=frozenset({"paper-run"}),
+            configured_live_position_account_labels=frozenset({"primary"}),
+        )
 
 
-async def test_load_protected_symbols_graceful_when_labels_discovery_fails() -> None:
+async def test_load_protected_symbols_propagates_label_discovery_failure() -> None:
     class FakePaperRepository:
         async def load_open_position_symbols(
             self, protected_run_ids: Iterable[str]
@@ -318,19 +316,18 @@ async def test_load_protected_symbols_graceful_when_labels_discovery_fails() -> 
         ) -> frozenset[str]:
             raise RuntimeError("database timeout during discovery")
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
-            return frozenset({"CONFIGUREDUSDT"})
+        ) -> SimpleNamespace:
+            return SimpleNamespace(symbols=frozenset({"CONFIGUREDUSDT"}))
 
-    symbols = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        account_repository=FailingDiscoveryAccountRepository(),
-        protected_run_ids=frozenset({"paper-run"}),
-        configured_live_position_account_labels=frozenset({"primary"}),
-    )
-
-    assert symbols == frozenset({"PAPERUSDT", "CONFIGUREDUSDT"})
+    with pytest.raises(RuntimeError, match="database timeout during discovery"):
+        await main._load_protected_symbols(
+            paper_repository=FakePaperRepository(),
+            account_repository=FailingDiscoveryAccountRepository(),
+            protected_run_ids=frozenset({"paper-run"}),
+            configured_live_position_account_labels=frozenset({"primary"}),
+        )
 
 
 async def test_operational_retention_uses_bounded_batches() -> None:

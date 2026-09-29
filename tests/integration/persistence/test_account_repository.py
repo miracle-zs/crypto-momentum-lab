@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -179,7 +180,33 @@ async def test_load_active_position_account_labels_uses_latest_ready_run(
     ) == frozenset({"open"})
 
 
-async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
+async def test_position_label_discovery_recovers_labels_missing_from_heads(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    await account_repository.save_reconciliation_run(
+        _run("head-present", NOW, position_count=0)
+    )
+    await account_repository.save_reconciliation_run(
+        _run("head-missing", NOW, position_count=1)
+    )
+    async with account_repository._session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                delete(AccountReconciliationHeadRow).where(
+                    AccountReconciliationHeadRow.environment == ENVIRONMENT,
+                    AccountReconciliationHeadRow.account_label == "head-missing",
+                )
+            )
+
+    labels = await account_repository.load_active_position_account_labels(
+        environment=ENVIRONMENT,
+        account_labels=("head-present", "head-missing"),
+    )
+
+    assert labels == frozenset({"head-missing"})
+
+
+async def test_active_position_state_uses_run_timestamp_fence(
     account_repository: PostgresAccountRepository,
 ) -> None:
     ready_at = NOW
@@ -187,7 +214,15 @@ async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
         _position("primary", ready_at)
     )
     await account_repository.save_reconciliation_run(
-        _run("primary", ready_at, position_count=1)
+        replace(
+            _run("primary", ready_at, position_count=1),
+            details={
+                "position_state_schema_version": 1,
+                "position_keys": [
+                    {"symbol": "BTCUSDT", "position_side": "BOTH"}
+                ],
+            },
+        )
     )
     # This observation is newer than the ready run and may belong to a
     # reconciliation that has not committed its run row yet.  It must not be
@@ -200,10 +235,91 @@ async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
         )
     )
 
-    assert await account_repository.load_active_position_symbols(
+    state = await account_repository.load_active_position_state(
         environment=ENVIRONMENT,
         account_label="primary",
-    ) == frozenset({"BTCUSDT"})
+    )
+    assert state is not None
+    assert state.position_keys == (("BTCUSDT", "BOTH"),)
+
+
+async def test_versioned_flat_run_does_not_resurrect_old_positions(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    open_at = NOW
+    await account_repository.save_position_snapshot(
+        _position("primary", open_at, symbol="BTCUSDT")
+    )
+    await account_repository.save_reconciliation_run(
+        _run("primary", open_at, position_count=1)
+    )
+    flat_run = replace(
+        _run("primary", open_at + timedelta(minutes=1), position_count=0),
+        details={
+            "position_state_schema_version": 1,
+            "position_keys": [],
+        },
+    )
+    await account_repository.save_reconciliation_run(flat_run)
+
+    state = await account_repository.load_active_position_state(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    )
+
+    assert state is not None
+    assert state.position_keys == ()
+    assert state.symbols == frozenset()
+
+
+async def test_versioned_sparse_history_keeps_unchanged_open_positions(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    t1 = NOW
+    await account_repository.save_position_snapshot(
+        _position("primary", t1, symbol="BTCUSDT")
+    )
+    await account_repository.save_position_snapshot(
+        _position("primary", t1, symbol="ETHUSDT")
+    )
+    await account_repository.save_reconciliation_run(
+        replace(
+            _run("primary", t1, position_count=2),
+            details={
+                "position_state_schema_version": 1,
+                "position_keys": [
+                    {"symbol": "BTCUSDT", "position_side": "BOTH"},
+                    {"symbol": "ETHUSDT", "position_side": "BOTH"},
+                ],
+            },
+        )
+    )
+
+    t2 = t1 + timedelta(seconds=1)
+    await account_repository.save_position_snapshot(
+        replace(
+            _position("primary", t2, symbol="BTCUSDT"),
+            position_amt=Decimal("0"),
+        )
+    )
+    await account_repository.save_reconciliation_run(
+        replace(
+            _run("primary", t2, position_count=1),
+            details={
+                "position_state_schema_version": 1,
+                "position_keys": [
+                    {"symbol": "ETHUSDT", "position_side": "BOTH"},
+                ],
+            },
+        )
+    )
+
+    state = await account_repository.load_active_position_state(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    )
+    assert state is not None
+    assert state.position_keys == (("ETHUSDT", "BOTH"),)
 
 
 async def test_fill_cursor_upsert_is_monotonic_and_switches_modes(
@@ -412,4 +528,3 @@ async def test_save_reconciliation_fills_and_cursors_idempotent_and_monotonic(
     )
     # The database must have kept 1001, never moving backwards to 999
     assert cursors_after["BTCUSDT"].from_id == 1001
-

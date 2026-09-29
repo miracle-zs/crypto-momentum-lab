@@ -29,10 +29,12 @@ from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutRuntimeConfig,
     CompressionBreakoutRuntimeStrategy,
 )
-from crypto_momentum_lab.strategy_runner.fills import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     FillSummaryValue,
     ReplayExecutionConfig,
     SimulatedFill,
+)
+from crypto_momentum_lab.strategy_runner.fills import (
     fill_summary,
     simulate_candidate_fills,
 )

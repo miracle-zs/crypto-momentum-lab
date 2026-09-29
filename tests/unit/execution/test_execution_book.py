@@ -368,9 +368,7 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-        ExecutionHeadSnapshot,
-    )
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         def __init__(self, projection_version: str):
@@ -470,9 +468,7 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-        ExecutionHeadSnapshot,
-    )
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         def __init__(self):
@@ -562,9 +558,7 @@ async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-        ExecutionHeadSnapshot,
-    )
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         async def load_head(self, key):
@@ -975,6 +969,16 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
     book = ExecutionBook(command_repository=LegacyCommandRepository())
 
     with pytest.raises(RuntimeError, match="restore active execution commands"):
+        await book.restore(account_label="primary")
+
+    assert book._persistence_failed is True
+
+
+@pytest.mark.asyncio
+async def test_durable_restore_requires_explicit_command_repository() -> None:
+    book = ExecutionBook(execution_unit_of_work=object())
+
+    with pytest.raises(RuntimeError, match="requires a command repository"):
         await book.restore(account_label="primary")
 
     assert book._persistence_failed is True
@@ -2185,7 +2189,7 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+    from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
     )
@@ -2268,9 +2272,9 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
     from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
         AsyncPostgresExecutionUnitOfWork,
-        DurableExecutionPositionState,
     )
 
     uow = create_autospec(
@@ -2349,7 +2353,7 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+    from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
     )
@@ -2427,7 +2431,7 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+    from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
         ExecutionHeadSnapshot,
     )
@@ -2494,11 +2498,10 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
             return (state,)
 
     book = ExecutionBook(execution_unit_of_work=StubUow())
-    # Must succeed without raising RuntimeError even with active_reservation_ids and diverged digests/checkpoint
+    # The current durable snapshot repairs the in-memory head while reservations remain active.
     await book._restore_durable_positions(
         account_label="primary",
         environment="live",
         as_of=datetime.now(UTC),
     )
     assert key.canonical_id in book._books
-

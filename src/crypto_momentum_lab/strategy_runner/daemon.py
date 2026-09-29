@@ -28,23 +28,28 @@ from crypto_momentum_lab.domain.strategy import (
     compare_entry_policy_request,
     summarize_entry_policy_comparisons,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperEntryFilterConfig as _PaperEntryFilterConfig,
+)
 from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandle15mSource,
     ClosedCandleSourceError,
 )
-from crypto_momentum_lab.strategy_runner.fills import (
-    ReplayExecutionConfig,
-    SimulatedFill,
-    resolve_candidate_fill_at_state,
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    ReplayExecutionConfig as _ReplayExecutionConfig,
+    SimulatedFill as _SimulatedFill,
+)
+from crypto_momentum_lab.strategy_runner.fills import resolve_candidate_fill_at_state
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitConfig as _PaperExitConfig,
+    PaperExitMode as _PaperExitMode,
+    PaperPosition as _PaperPosition,
+    PaperPositionStatus as _PaperPositionStatus,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
     ClosedCandle15m,
-    PaperExitConfig,
-    PaperExitMode,
-    PaperPosition,
-    PaperPositionStatus,
     mark_positions,
 )
 
@@ -102,9 +107,9 @@ class PaperLiveArtifactRepository(Protocol):
         self,
         identity: StrategyRunIdentity,
         source_description: str,
-        execution: ReplayExecutionConfig,
-        portfolio: PaperExitConfig,
-        entry_filter: "PaperEntryFilterConfig",
+        execution: _ReplayExecutionConfig,
+        portfolio: _PaperExitConfig,
+        entry_filter: _PaperEntryFilterConfig,
     ) -> None:
         pass
 
@@ -120,47 +125,24 @@ class PaperLiveArtifactRepository(Protocol):
     async def save_fills(
         self,
         run_id: str,
-        fills: tuple[SimulatedFill, ...],
-    ) -> tuple[PaperPosition, ...]:
+        fills: tuple[_SimulatedFill, ...],
+    ) -> tuple[_PaperPosition, ...]:
         pass
 
     async def load_open_positions(
         self,
         run_id: str,
-    ) -> tuple[PaperPosition, ...]:
+    ) -> tuple[_PaperPosition, ...]:
         pass
 
     async def save_portfolio(
         self,
         run_id: str,
-        positions: tuple[PaperPosition, ...],
+        positions: tuple[_PaperPosition, ...],
         observed_at: datetime,
-        config: PaperExitConfig,
+        config: _PaperExitConfig,
     ) -> None:
         pass
-
-
-@dataclass(frozen=True, slots=True)
-class PaperEntryFilterConfig:
-    allow_long: bool = True
-    allow_short: bool = True
-    max_abs_aggressive_imbalance: Decimal | None = None
-    max_cluster_trade_count: int | None = None
-    require_price_above_ema5: bool = False
-    require_price_above_ema10: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.allow_long and not self.allow_short:
-            raise ValueError("entry filter must allow at least one side")
-        if self.max_abs_aggressive_imbalance is not None and not Decimal(
-            "0"
-        ) < self.max_abs_aggressive_imbalance <= Decimal("1"):
-            raise ValueError("max_abs_aggressive_imbalance must be in (0, 1]")
-        if (
-            self.max_cluster_trade_count is not None
-            and self.max_cluster_trade_count <= 0
-        ):
-            raise ValueError("max_cluster_trade_count must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,9 +168,9 @@ class PaperLiveDaemonConfig:
     entry_symbol_refresh_seconds: float = 15.0
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
-    execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
-    portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
-    entry_filter: PaperEntryFilterConfig = field(default_factory=PaperEntryFilterConfig)
+    execution: _ReplayExecutionConfig = field(default_factory=_ReplayExecutionConfig)
+    portfolio: _PaperExitConfig = field(default_factory=_PaperExitConfig)
+    entry_filter: _PaperEntryFilterConfig = field(default_factory=_PaperEntryFilterConfig)
     entry_policy_compare_only: bool = False
     checkpoint_phase_seconds: float = 0.0
 
@@ -331,7 +313,7 @@ def run_paired_paper_live_daemon(
         )
 
     pending_by_account: list[list[OrderIntentCandidate]] = []
-    open_positions_by_account: list[dict[str, PaperPosition]] = []
+    open_positions_by_account: list[dict[str, _PaperPosition]] = []
     last_position_persisted_at_by_account: list[dict[str, datetime]] = []
     last_candle_end_by_account: list[dict[str, datetime]] = []
     legacy_candle_cursor_symbols_by_account: list[set[str]] = []
@@ -389,7 +371,7 @@ def run_paired_paper_live_daemon(
         candle_aggregators.append(
             Candle15mAggregator()
             if (
-                config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                config.portfolio.exit_mode is _PaperExitMode.CANDLE_15M
                 and candle_source is None
             )
             else None
@@ -514,7 +496,7 @@ def run_paired_paper_live_daemon(
             entry_symbols_loaded_at = state.bucket_start
         entry_allowed = entry_symbols is None or state.symbol in entry_symbols
 
-        position_updates_by_account: list[tuple[PaperPosition, ...]] = []
+        position_updates_by_account: list[tuple[_PaperPosition, ...]] = []
         for index, account in enumerate(accounts):
             config = account.config
             identity = config.run_identity
@@ -532,7 +514,7 @@ def run_paired_paper_live_daemon(
             )
             if (
                 not closed_candles
-                and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                and config.portfolio.exit_mode is _PaperExitMode.CANDLE_15M
             ):
                 retry_after = candle_retry_after_by_account[index].get(state.symbol)
                 if retry_after is None or now >= retry_after:
@@ -547,7 +529,7 @@ def run_paired_paper_live_daemon(
                             1
                             for position in open_positions_by_account[index].values()
                             if (
-                                position.status is PaperPositionStatus.OPEN
+                                position.status is _PaperPositionStatus.OPEN
                                 and position.symbol == state.symbol
                                 and position.last_candle_end is None
                             )
@@ -585,7 +567,7 @@ def run_paired_paper_live_daemon(
                         )
                     else:
                         candle_retry_after_by_account[index].pop(state.symbol, None)
-            position_updates_by_id: dict[str, PaperPosition] = {}
+            position_updates_by_id: dict[str, _PaperPosition] = {}
             candle_events: tuple[ClosedCandle15m | None, ...] = (
                 closed_candles if closed_candles else (None,)
             )
@@ -622,7 +604,7 @@ def run_paired_paper_live_daemon(
                 )
                 for position in position_updates:
                     position_updates_by_id[position.position_id] = position
-                    if position.status is PaperPositionStatus.CLOSED:
+                    if position.status is _PaperPositionStatus.CLOSED:
                         open_positions_by_account[index].pop(
                             position.position_id,
                             None,
@@ -684,11 +666,11 @@ def run_paired_paper_live_daemon(
                     {
                         position.position_id: position
                         for position in opened_positions
-                        if position.status is PaperPositionStatus.OPEN
+                        if position.status is _PaperPositionStatus.OPEN
                     }
                 )
                 for position in opened_positions:
-                    if position.status is PaperPositionStatus.OPEN:
+                    if position.status is _PaperPositionStatus.OPEN:
                         last_position_persisted_at_by_account[index][
                             position.position_id
                         ] = position.updated_at
@@ -712,7 +694,7 @@ def run_paired_paper_live_daemon(
                     )
                 )
                 for position in persisted_position_updates:
-                    if position.status is PaperPositionStatus.CLOSED:
+                    if position.status is _PaperPositionStatus.CLOSED:
                         last_position_persisted_at_by_account[index].pop(
                             position.position_id, None
                         )
@@ -879,7 +861,7 @@ def _paired_result(
 def _decision_for_account(
     decision: StrategyDecision,
     identity: StrategyRunIdentity | None,
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
     *,
     context: PaperEntryFilterContext | None = None,
     state: MarketState15s | None = None,
@@ -962,7 +944,7 @@ def _decision_for_account(
 
 def _filter_decision(
     decision: StrategyDecision,
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
     *,
     entry_filter_context: PaperEntryFilterContext | None = None,
 ) -> StrategyDecision:
@@ -991,7 +973,7 @@ def _filter_decision(
 
 def _signal_passes_entry_filter(
     signal: StrategySignal,
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
     *,
     context: PaperEntryFilterContext | None = None,
 ) -> bool:
@@ -1032,7 +1014,7 @@ def _signal_passes_entry_filter(
 
 def _paper_signal_gate_reasons(
     signal: StrategySignal | None,
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
 ) -> tuple[str, ...]:
     """Explain non-EMA paper filters for the shared Policy adapter."""
 
@@ -1061,7 +1043,7 @@ def _paper_signal_gate_reasons(
 
 
 def _paper_ema_filter_passes(
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
     context: PaperEntryFilterContext | None,
     *,
     side: StrategySide | None = None,
@@ -1102,7 +1084,7 @@ def _paper_policy_comparisons(
     decision: StrategyDecision,
     state: MarketState15s,
     observed_at: datetime,
-    entry_filter: PaperEntryFilterConfig,
+    entry_filter: _PaperEntryFilterConfig,
     entry_filter_context: PaperEntryFilterContext | None,
     entry_symbols: frozenset[str] | None,
     entry_allowed: bool,
@@ -1261,7 +1243,7 @@ def _checkpoint_progress(checkpoint: StrategyCheckpoint) -> float:
 
 def _load_closed_candles_for_positions(
     *,
-    positions: tuple[PaperPosition, ...],
+    positions: tuple[_PaperPosition, ...],
     state: MarketState15s,
     source: ClosedCandle15mSource | None,
     not_before: datetime,
@@ -1282,7 +1264,7 @@ def _load_closed_candles_for_positions(
     matching = tuple(
         position
         for position in positions
-        if position.status is PaperPositionStatus.OPEN
+        if position.status is _PaperPositionStatus.OPEN
         and position.symbol == state.symbol
         and position.opened_at < candle_end
     )
@@ -1306,13 +1288,13 @@ def _load_closed_candles_for_positions(
 
 
 def _initial_candle_cursors(
-    positions: tuple[PaperPosition, ...],
+    positions: tuple[_PaperPosition, ...],
 ) -> dict[str, datetime]:
     """Recover a symbol cursor only when every open position has one."""
 
-    positions_by_symbol: dict[str, list[PaperPosition]] = {}
+    positions_by_symbol: dict[str, list[_PaperPosition]] = {}
     for position in positions:
-        if position.status is PaperPositionStatus.OPEN:
+        if position.status is _PaperPositionStatus.OPEN:
             positions_by_symbol.setdefault(position.symbol, []).append(position)
     cursors: dict[str, datetime] = {}
     for symbol, symbol_positions in positions_by_symbol.items():
@@ -1380,7 +1362,7 @@ def run_paper_live_daemon(
             market_recovery=market_recovery,
         )
     pending_candidates: list[OrderIntentCandidate] = []
-    open_positions: dict[str, PaperPosition] = {}
+    open_positions: dict[str, _PaperPosition] = {}
     last_position_persisted_at: dict[str, datetime] = {}
     if artifact_repository is not None:
         if config.run_identity is None:
@@ -1459,7 +1441,7 @@ def run_paper_live_daemon(
     candle_aggregator = (
         Candle15mAggregator()
         if (
-            config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            config.portfolio.exit_mode is _PaperExitMode.CANDLE_15M
             and candle_source is None
         )
         else None
@@ -1544,7 +1526,7 @@ def run_paper_live_daemon(
             entry_symbols_loaded_at = state.bucket_start
         entry_allowed = entry_symbols is None or state.symbol in entry_symbols
 
-        position_updates: tuple[PaperPosition, ...] = ()
+        position_updates: tuple[_PaperPosition, ...] = ()
         if artifact_repository is not None:
             observed_candle = (
                 None if candle_aggregator is None else candle_aggregator.observe(state)
@@ -1556,7 +1538,7 @@ def run_paper_live_daemon(
             )
             if (
                 not closed_candles
-                and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                and config.portfolio.exit_mode is _PaperExitMode.CANDLE_15M
             ):
                 retry_after = candle_retry_after_by_symbol.get(state.symbol)
                 if retry_after is None or now >= retry_after:
@@ -1570,7 +1552,7 @@ def run_paper_live_daemon(
                             1
                             for position in open_positions.values()
                             if (
-                                position.status is PaperPositionStatus.OPEN
+                                position.status is _PaperPositionStatus.OPEN
                                 and position.symbol == state.symbol
                                 and position.last_candle_end is None
                             )
@@ -1604,7 +1586,7 @@ def run_paper_live_daemon(
                         )
                     else:
                         candle_retry_after_by_symbol.pop(state.symbol, None)
-            position_updates_by_id: dict[str, PaperPosition] = {}
+            position_updates_by_id: dict[str, _PaperPosition] = {}
             candle_events: tuple[ClosedCandle15m | None, ...] = (
                 closed_candles if closed_candles else (None,)
             )
@@ -1639,7 +1621,7 @@ def run_paper_live_daemon(
                 )
                 for position in position_updates:
                     position_updates_by_id[position.position_id] = position
-                    if position.status is PaperPositionStatus.CLOSED:
+                    if position.status is _PaperPositionStatus.CLOSED:
                         open_positions.pop(position.position_id, None)
                     else:
                         open_positions[position.position_id] = position
@@ -1696,11 +1678,11 @@ def run_paper_live_daemon(
                     {
                         position.position_id: position
                         for position in opened_positions
-                        if position.status is PaperPositionStatus.OPEN
+                        if position.status is _PaperPositionStatus.OPEN
                     }
                 )
                 for position in opened_positions:
-                    if position.status is PaperPositionStatus.OPEN:
+                    if position.status is _PaperPositionStatus.OPEN:
                         last_position_persisted_at[position.position_id] = (
                             position.updated_at
                         )
@@ -1723,7 +1705,7 @@ def run_paper_live_daemon(
                     )
                 )
                 for position in persisted_position_updates:
-                    if position.status is PaperPositionStatus.CLOSED:
+                    if position.status is _PaperPositionStatus.CLOSED:
                         last_position_persisted_at.pop(position.position_id, None)
                     else:
                         last_position_persisted_at[position.position_id] = (
@@ -1792,10 +1774,10 @@ def _resolve_pending_candidates(
     *,
     pending_candidates: tuple[OrderIntentCandidate, ...],
     state: MarketState15s,
-    execution: ReplayExecutionConfig,
-) -> tuple[list[OrderIntentCandidate], list[SimulatedFill]]:
+    execution: _ReplayExecutionConfig,
+) -> tuple[list[OrderIntentCandidate], list[_SimulatedFill]]:
     remaining: list[OrderIntentCandidate] = []
-    fills: list[SimulatedFill] = []
+    fills: list[_SimulatedFill] = []
     for candidate in pending_candidates:
         if candidate.symbol != state.symbol:
             remaining.append(candidate)
@@ -1813,15 +1795,15 @@ def _resolve_pending_candidates(
 
 
 def _persistable_position_updates(
-    position_updates: tuple[PaperPosition, ...],
+    position_updates: tuple[_PaperPosition, ...],
     last_persisted_at: dict[str, datetime],
     observed_at: datetime,
-) -> tuple[PaperPosition, ...]:
+) -> tuple[_PaperPosition, ...]:
     """Throttle open-position marks while keeping exits durable immediately."""
     return tuple(
         position
         for position in position_updates
-        if position.status is PaperPositionStatus.CLOSED
+        if position.status is _PaperPositionStatus.CLOSED
         or position.position_id not in last_persisted_at
         or observed_at - last_persisted_at[position.position_id] >= timedelta(minutes=1)
     )

@@ -200,7 +200,8 @@ def resolve_config_path(value: Path | None) -> Path:
     env_config = os.environ.get("CML_ENVIRONMENT_CONFIG")
     if not env_config or not env_config.strip():
         raise typer.BadParameter(
-            "Configuration file must be explicitly specified via --config or CML_ENVIRONMENT_CONFIG"
+            "Configuration file must be explicitly specified via --config or "
+            "CML_ENVIRONMENT_CONFIG"
         )
     return Path(env_config.strip())
 
@@ -274,50 +275,28 @@ async def _load_protected_symbols(
 ) -> frozenset[str]:
     """Load paper symbols plus every live account with a durable open position.
 
-    The configured labels remain an explicit startup hint for compatibility,
-    while the latest ready account reconciliation runs discover labels for
-    stopped or newly added live accounts automatically.
+    Configured labels and the latest reconciliation runs determine the live
+    accounts whose authoritative position states are included.
     """
-    paper_symbols: frozenset[str] = frozenset()
-    try:
-        paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
-    except Exception as error:
-        log.warning(
-            "market_data_load_paper_symbols_failed",
-            error_type=type(error).__name__,
-            error=str(error),
-        )
-
-    discovered_labels: frozenset[str] = frozenset()
-    try:
-        discovered_labels = await account_repository.load_active_position_account_labels(
-            environment="live"
-        )
-    except Exception as error:
-        log.warning(
-            "market_data_discover_live_labels_failed",
-            error_type=type(error).__name__,
-            error=str(error),
-        )
+    paper_symbols = await paper_repository.load_open_position_symbols(
+        protected_run_ids
+    )
+    discovered_labels = await account_repository.load_active_position_account_labels(
+        environment="live"
+    )
 
     live_position_account_labels = (
         configured_live_position_account_labels | discovered_labels
     )
     live_symbols: set[str] = set()
     for account_label in sorted(live_position_account_labels):
-        try:
-            account_symbols = await account_repository.load_active_position_symbols(
-                environment="live",
-                account_label=account_label,
-            )
-            live_symbols.update(account_symbols)
-        except Exception as error:
-            log.warning(
-                "market_data_load_account_symbols_failed",
-                account_label=account_label,
-                error_type=type(error).__name__,
-                error=str(error),
-            )
+        position_state = await account_repository.load_active_position_state(
+            environment="live",
+            account_label=account_label,
+        )
+        if position_state is None:
+            raise RuntimeError(f"missing account position state for {account_label}")
+        live_symbols.update(position_state.symbols)
     return paper_symbols | live_symbols
 
 

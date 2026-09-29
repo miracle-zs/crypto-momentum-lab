@@ -20,9 +20,9 @@ from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.ids import (
     deterministic_client_order_id,
 )
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
-    SymbolTradingRules,
 )
 
 

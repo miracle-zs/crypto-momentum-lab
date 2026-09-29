@@ -13,7 +13,7 @@ import json
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, cast
@@ -28,6 +28,15 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.state_codec import (
+    MarketStateCodecError,
+)
+from crypto_momentum_lab.domain.market.state_codec import (
+    market_state_from_payload as _market_state_from_payload,
+)
+from crypto_momentum_lab.domain.market.state_codec import (
+    market_state_to_payload as _market_state_to_payload,
+)
 from crypto_momentum_lab.health.stream_availability import (
     StreamAvailabilityClock,
     StreamAvailabilityConfig,
@@ -1092,7 +1101,7 @@ def encode_market_state_batch(
         "sequence": sequence,
         "published_at": published_at.isoformat(),
         "environment": next(iter(environments)),
-        "states": [market_state_to_payload(state) for state in states],
+        "states": [_market_state_to_payload(state) for state in states],
     }
     if stream_id is not None:
         payload["stream_id"] = stream_id
@@ -1125,7 +1134,7 @@ def decode_market_state_batch_envelope(
     if not isinstance(raw_states, list) or not raw_states:
         raise MarketStateHubProtocolError("market-state batch is empty")
     states = tuple(
-        market_state_from_payload(cast(dict[str, object], item))
+        _decode_market_state_payload(cast(dict[str, object], item))
         for item in raw_states
         if isinstance(item, dict)
     )
@@ -1163,72 +1172,11 @@ def decode_market_state_batch(
     ).states
 
 
-def market_state_to_payload(state: MarketState15s) -> dict[str, object]:
-    return {
-        item.name: _encode_value(getattr(state, item.name))
-        for item in fields(MarketState15s)
-    }
-
-
-def market_state_from_payload(payload: dict[str, object]) -> MarketState15s:
-    return MarketState15s(
-        schema_version=_require_int(payload, "schema_version"),
-        exchange=_require_string(payload, "exchange"),
-        environment=_require_string(payload, "environment"),
-        symbol=_require_string(payload, "symbol"),
-        bucket_start=_require_datetime(payload, "bucket_start"),
-        bucket_end=_require_datetime(payload, "bucket_end"),
-        open_price=_optional_decimal(payload, "open_price"),
-        high_price=_optional_decimal(payload, "high_price"),
-        low_price=_optional_decimal(payload, "low_price"),
-        close_price=_optional_decimal(payload, "close_price"),
-        trade_count=_require_int(payload, "trade_count"),
-        trade_notional=_require_decimal(payload, "trade_notional"),
-        aggressive_buy_notional=_require_decimal(payload, "aggressive_buy_notional"),
-        aggressive_sell_notional=_require_decimal(payload, "aggressive_sell_notional"),
-        last_bid_price=_optional_decimal(payload, "last_bid_price"),
-        last_ask_price=_optional_decimal(payload, "last_ask_price"),
-        spread=_optional_decimal(payload, "spread"),
-        midpoint=_optional_decimal(payload, "midpoint"),
-        liquidation_count=_require_int(payload, "liquidation_count"),
-        liquidation_notional=_require_decimal(payload, "liquidation_notional"),
-        mark_price=_optional_decimal(payload, "mark_price"),
-        closed_kline_count=_require_int(payload, "closed_kline_count"),
-        source_event_count=_require_int(payload, "source_event_count"),
-        first_received_at=_optional_datetime(payload, "first_received_at"),
-        last_received_at=_optional_datetime(payload, "last_received_at"),
-        closed_kline_1m_open_time=_optional_datetime(
-            payload, "closed_kline_1m_open_time"
-        ),
-        closed_kline_1m_close_time=_optional_datetime(
-            payload, "closed_kline_1m_close_time"
-        ),
-        closed_kline_1m_open_price=_optional_decimal(
-            payload, "closed_kline_1m_open_price"
-        ),
-        closed_kline_1m_close_price=_optional_decimal(
-            payload, "closed_kline_1m_close_price"
-        ),
-        data_complete=_optional_bool_default(
-            payload,
-            "data_complete",
-            default=True,
-        ),
-        missing_agg_trade_count=(
-            _optional_int(payload, "missing_agg_trade_count") or 0
-        ),
-        is_backfill=_optional_bool_default(
-            payload,
-            "is_backfill",
-            default=False,
-        ),
-    )
-
-
-def _encode_value(value: object) -> object:
-    if isinstance(value, Decimal | datetime):
-        return value.isoformat() if isinstance(value, datetime) else str(value)
-    return value
+def _decode_market_state_payload(payload: dict[str, object]) -> MarketState15s:
+    try:
+        return _market_state_from_payload(payload)
+    except MarketStateCodecError as error:
+        raise MarketStateHubProtocolError(str(error)) from error
 
 
 def _decode_object(raw_message: str | bytes | object) -> dict[str, object]:

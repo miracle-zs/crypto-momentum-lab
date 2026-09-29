@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from crypto_momentum_lab.shadow_operation.models import ShadowOrderPlan
+from crypto_momentum_lab.domain.shadow_operation.models import ShadowOrderPlan
 
 
 def test_shadow_order_plan_requires_order_payload() -> None:

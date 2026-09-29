@@ -1,83 +1,16 @@
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate, StrategySide
-
-
-class SimulatedFillStatus(StrEnum):
-    FILLED = "filled"
-    EXPIRED = "expired"
-    REJECTED = "rejected"
-    PENDING = "pending"
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayExecutionConfig:
-    latency_buckets: int = 1
-    state_interval_seconds: int = 15
-    taker_fee_rate: Decimal = Decimal("0.0005")
-    slippage_bps: Decimal = Decimal("0")
-    require_market_quote: bool = False
-
-    def __post_init__(self) -> None:
-        if self.latency_buckets < 0:
-            raise ValueError("latency_buckets must be non-negative")
-        if self.state_interval_seconds <= 0:
-            raise ValueError("state_interval_seconds must be positive")
-        if self.taker_fee_rate < 0:
-            raise ValueError("taker_fee_rate must be non-negative")
-        if self.slippage_bps < 0:
-            raise ValueError("slippage_bps must be non-negative")
-        if self.slippage_bps >= Decimal("10000"):
-            raise ValueError("slippage_bps must be less than 10000")
-
-
-@dataclass(frozen=True, slots=True)
-class SimulatedFill:
-    fill_id: str
-    candidate_id: str
-    signal_id: str
-    symbol: str
-    side: StrategySide
-    status: SimulatedFillStatus
-    target_fill_at: datetime
-    filled_at: datetime | None
-    requested_notional: Decimal | None
-    filled_notional: Decimal | None
-    quantity: Decimal | None
-    reference_midpoint: Decimal | None
-    spread: Decimal | None
-    fill_price: Decimal | None
-    fee: Decimal
-    total_cost: Decimal
-    cost_bps: Decimal | None
-    reason: str | None
-
-    def __post_init__(self) -> None:
-        if not self.fill_id:
-            raise ValueError("fill_id must not be empty")
-        if not self.candidate_id:
-            raise ValueError("candidate_id must not be empty")
-        if not self.signal_id:
-            raise ValueError("signal_id must not be empty")
-        if not self.symbol:
-            raise ValueError("symbol must not be empty")
-        if not _is_aware(self.target_fill_at):
-            raise ValueError("target_fill_at must be timezone-aware")
-        if self.filled_at is not None and not _is_aware(self.filled_at):
-            raise ValueError("filled_at must be timezone-aware")
-        if self.fee < 0:
-            raise ValueError("fee must be non-negative")
-        if self.total_cost < 0:
-            raise ValueError("total_cost must be non-negative")
-
-
-type FillSummaryValue = int | Decimal
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    FillSummaryValue as _FillSummaryValue,
+    ReplayExecutionConfig as _ReplayExecutionConfig,
+    SimulatedFill as _SimulatedFill,
+    SimulatedFillStatus as _SimulatedFillStatus,
+)
 
 
 def deterministic_fill_id(*, candidate_id: str) -> str:
@@ -88,7 +21,7 @@ def deterministic_fill_id(*, candidate_id: str) -> str:
 
 def candidate_target_fill_at(
     candidate: OrderIntentCandidate,
-    execution: ReplayExecutionConfig,
+    execution: _ReplayExecutionConfig,
 ) -> datetime:
     """Return the earliest time a closed-state execution may be filled.
 
@@ -106,8 +39,8 @@ def resolve_candidate_fill_at_state(
     *,
     candidate: OrderIntentCandidate,
     state: MarketState15s,
-    execution: ReplayExecutionConfig,
-) -> SimulatedFill | None:
+    execution: _ReplayExecutionConfig,
+) -> _SimulatedFill | None:
     """Resolve one pending candidate against the next closed market state."""
     target_fill_at = candidate_target_fill_at(candidate, execution)
     if state.bucket_end > candidate.expires_at:
@@ -129,8 +62,8 @@ def simulate_candidate_fills(
     *,
     candidates: tuple[OrderIntentCandidate, ...],
     ordered_states: tuple[MarketState15s, ...],
-    execution: ReplayExecutionConfig | None,
-) -> tuple[SimulatedFill, ...]:
+    execution: _ReplayExecutionConfig | None,
+) -> tuple[_SimulatedFill, ...]:
     if execution is None:
         return ()
     states_by_symbol: dict[str, list[MarketState15s]] = {}
@@ -150,13 +83,13 @@ def simulate_candidate_fill(
     *,
     candidate: OrderIntentCandidate,
     states: tuple[MarketState15s, ...],
-    execution: ReplayExecutionConfig,
-) -> SimulatedFill:
+    execution: _ReplayExecutionConfig,
+) -> _SimulatedFill:
     target_fill_at = candidate_target_fill_at(candidate, execution)
     if target_fill_at > candidate.expires_at:
         return _unfilled(
             candidate=candidate,
-            status=SimulatedFillStatus.EXPIRED,
+            status=_SimulatedFillStatus.EXPIRED,
             target_fill_at=target_fill_at,
             reason="candidate_expired",
         )
@@ -171,14 +104,14 @@ def simulate_candidate_fill(
     if fill_state is None:
         return _unfilled(
             candidate=candidate,
-            status=SimulatedFillStatus.EXPIRED,
+            status=_SimulatedFillStatus.EXPIRED,
             target_fill_at=target_fill_at,
             reason="no_market_state_before_expiry",
         )
     if candidate.desired_notional is None:
         return _unfilled(
             candidate=candidate,
-            status=SimulatedFillStatus.REJECTED,
+            status=_SimulatedFillStatus.REJECTED,
             target_fill_at=target_fill_at,
             reason="missing_desired_notional",
         )
@@ -190,7 +123,7 @@ def simulate_candidate_fill(
     if quote is None:
         return _unfilled(
             candidate=candidate,
-            status=SimulatedFillStatus.REJECTED,
+            status=_SimulatedFillStatus.REJECTED,
             target_fill_at=target_fill_at,
             reason=(
                 "missing_executable_quote"
@@ -207,7 +140,7 @@ def simulate_candidate_fill(
     if fill_price <= 0:
         return _unfilled(
             candidate=candidate,
-            status=SimulatedFillStatus.REJECTED,
+            status=_SimulatedFillStatus.REJECTED,
             target_fill_at=target_fill_at,
             reason="invalid_fill_price",
         )
@@ -222,13 +155,13 @@ def simulate_candidate_fill(
         side=candidate.side,
     )
     total_cost = fee + market_cost
-    return SimulatedFill(
+    return _SimulatedFill(
         fill_id=deterministic_fill_id(candidate_id=candidate.candidate_id),
         candidate_id=candidate.candidate_id,
         signal_id=candidate.signal_id,
         symbol=candidate.symbol,
         side=candidate.side,
-        status=SimulatedFillStatus.FILLED,
+        status=_SimulatedFillStatus.FILLED,
         target_fill_at=target_fill_at,
         filled_at=fill_state.bucket_end,
         requested_notional=requested_notional,
@@ -247,28 +180,28 @@ def simulate_candidate_fill(
 def pending_candidate_fill(
     *,
     candidate: OrderIntentCandidate,
-    execution: ReplayExecutionConfig,
+    execution: _ReplayExecutionConfig,
     reason: str,
-) -> SimulatedFill:
+) -> _SimulatedFill:
     if not reason:
         raise ValueError("reason must not be empty")
     return _unfilled(
         candidate=candidate,
-        status=SimulatedFillStatus.PENDING,
+        status=_SimulatedFillStatus.PENDING,
         target_fill_at=candidate_target_fill_at(candidate, execution),
         reason=reason,
     )
 
 
 def fill_summary(
-    simulated_fills: tuple[SimulatedFill, ...],
-) -> dict[str, dict[str, FillSummaryValue]]:
+    simulated_fills: tuple[_SimulatedFill, ...],
+) -> dict[str, dict[str, _FillSummaryValue]]:
     by_status = Counter(fill.status.value for fill in simulated_fills)
     filled_notional_by_symbol: dict[str, Decimal] = {}
     fee_by_symbol: dict[str, Decimal] = {}
     cost_by_symbol: dict[str, Decimal] = {}
     for fill in simulated_fills:
-        if fill.status is not SimulatedFillStatus.FILLED:
+        if fill.status is not _SimulatedFillStatus.FILLED:
             continue
         filled_notional_by_symbol[fill.symbol] = filled_notional_by_symbol.get(
             fill.symbol, Decimal("0")
@@ -290,11 +223,11 @@ def fill_summary(
 def _unfilled(
     *,
     candidate: OrderIntentCandidate,
-    status: SimulatedFillStatus,
+    status: _SimulatedFillStatus,
     target_fill_at: datetime,
     reason: str,
-) -> SimulatedFill:
-    return SimulatedFill(
+) -> _SimulatedFill:
+    return _SimulatedFill(
         fill_id=deterministic_fill_id(candidate_id=candidate.candidate_id),
         candidate_id=candidate.candidate_id,
         signal_id=candidate.signal_id,
@@ -383,7 +316,3 @@ def _market_cost(
     else:
         raw_cost = (midpoint - fill_price) * quantity
     return max(raw_cost, Decimal("0"))
-
-
-def _is_aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None

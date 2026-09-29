@@ -18,9 +18,11 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionKey,
     _KeyCommandScheduler,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
-    OrderPreSubmissionError,
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
@@ -363,7 +365,7 @@ def _result(
 
 
 def _prepared(plan: OrderExecutionPlan):
-    from crypto_momentum_lab.execution_account.orders.state_machine import (
+    from crypto_momentum_lab.domain.execution.order_submission import (
         PreparedOrderSubmission,
     )
 

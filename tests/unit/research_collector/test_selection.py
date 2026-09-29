@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
 
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
@@ -108,7 +111,7 @@ def test_top30_selection_keeps_retained_and_open_position_symbols() -> None:
     }
 
 
-async def test_top30_selector_gracefully_degrades_when_missing_snapshot() -> None:
+async def test_top30_selector_propagates_position_state_load_failure() -> None:
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.research_collector.selection import (
@@ -139,8 +142,8 @@ async def test_top30_selector_gracefully_degrades_when_missing_snapshot() -> Non
 
     account_repo = AsyncMock()
     # 1. First call: returns SOLUSDT position successfully
-    account_repo.load_active_position_symbols = AsyncMock(
-        return_value=frozenset({"SOLUSDT"})
+    account_repo.load_active_position_state = AsyncMock(
+        return_value=SimpleNamespace(symbols=frozenset({"SOLUSDT"}))
     )
 
     selector = PostgresTop30Selector(
@@ -157,12 +160,9 @@ async def test_top30_selector_gracefully_degrades_when_missing_snapshot() -> Non
 
     # 2. Advance time past cache expiry. Position discovery now raises RuntimeError!
     t2 = observed_at + timedelta(seconds=3601)
-    account_repo.load_active_position_symbols = AsyncMock(
+    account_repo.load_active_position_state = AsyncMock(
         side_effect=RuntimeError("missing active position snapshots")
     )
 
-    # Selector must NOT crash, and must preserve the previously cached SOLUSDT!
-    s2 = await selector.selection_at(t2)
-    assert "SOLUSDT" in s2.by_symbol
-    # Degraded refresh delay is short (15s), not 3600s!
-    assert selector._next_refresh_at == t2 + timedelta(seconds=15)
+    with pytest.raises(RuntimeError, match="missing active position snapshots"):
+        await selector.selection_at(t2)

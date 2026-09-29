@@ -11,10 +11,12 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
-from crypto_momentum_lab.strategy_runner.fills import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     ReplayExecutionConfig,
     SimulatedFill,
     SimulatedFillStatus,
+)
+from crypto_momentum_lab.strategy_runner.fills import (
     deterministic_fill_id,
     fill_summary,
     pending_candidate_fill,
