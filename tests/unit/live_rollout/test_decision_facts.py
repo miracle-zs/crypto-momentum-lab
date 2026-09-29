@@ -296,3 +296,43 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
     assert receipt.decision_id == "dec_test"
     assert src.current_policy_state.policy_version == 7
     assert src.policy_revision == 1
+
+
+async def test_recover_pending_exits_defers_when_book_stream_mismatches() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+
+    cmd = MagicMock(spec=TradeCommand)
+    cmd.command_id = "cmd_123"
+    cmd.expected_projection_version = "pv_abc"
+    cmd.position_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="GRASSUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+
+    uow = MagicMock()
+    uow.load_pending_exits = AsyncMock(return_value=[("dec_123", cmd)])
+
+    mock_book = MagicMock()
+    mock_book.read = AsyncMock(
+        side_effect=ValueError("requested account stream does not match the restored position")
+    )
+
+    src = LiveDecisionFactSource(
+        "primary",
+        decision_unit_of_work=uow,
+        execution_book=mock_book,
+    )
+    src.set_exit_handler(AsyncMock())
+    src.bind_account_stream(
+        stream_id="account_event_hub",
+        stream_epoch="epoch-new",
+        sequence=10,
+    )
+
+    # Should not raise ValueError; should defer the pending exit gracefully
+    await src.recover_pending_exits()
+    src._exit_handler.assert_not_called()
+

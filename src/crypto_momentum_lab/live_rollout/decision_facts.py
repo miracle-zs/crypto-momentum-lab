@@ -456,11 +456,18 @@ class LiveDecisionFactSource:
             symbol=key.symbol,
             position_side=key.position_side,
         )
-        view = await book.read(
-            scope,
-            stream_id=self._stream_id,
-            stream_epoch=self._stream_epoch,
-        )
+        try:
+            view = await book.read(
+                scope,
+                stream_id=self._stream_id,
+                stream_epoch=self._stream_epoch,
+            )
+        except ValueError as error:
+            if str(error) != (
+                "requested account stream does not match the restored position"
+            ):
+                raise
+            return False
         expected_scope = AccountFactStreamScope.for_position_key(
             key,
             stream_id=self._stream_id,
