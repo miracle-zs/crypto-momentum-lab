@@ -197,21 +197,27 @@ for timeout_value in \
   fi
 done
 
-ssh_opts=( -o ConnectTimeout=15 )
-ssh_command=(ssh)
-if [[ -n "${CML_SSH_PASSWORD:-}" ]]; then
-  if ! command -v sshpass >/dev/null 2>&1; then
-    echo "CML_SSH_PASSWORD is set but sshpass is not installed" >&2
-    exit 69
-  fi
-  export SSHPASS="$CML_SSH_PASSWORD"
-  ssh_command=(sshpass -e ssh)
+runner=()
+if [[ "$server_host" == "local" || "$server_host" == "localhost" || ( "$server_host" == "127.0.0.1" && -z "${CML_FORCE_SSH:-}" ) ]]; then
+  runner=(bash -s --)
 else
-  ssh_opts+=( -o BatchMode=yes )
+  ssh_opts=( -o ConnectTimeout=15 )
+  ssh_command=(ssh)
+  if [[ -n "${CML_SSH_PASSWORD:-}" ]]; then
+    if ! command -v sshpass >/dev/null 2>&1; then
+      echo "CML_SSH_PASSWORD is set but sshpass is not installed" >&2
+      exit 69
+    fi
+    export SSHPASS="$CML_SSH_PASSWORD"
+    ssh_command=(sshpass -e ssh)
+  else
+    ssh_opts+=( -o BatchMode=yes )
+  fi
+  runner=("${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s --)
 fi
 
 client_started_at="$(date +%s)"
-if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
+if "${runner[@]}" \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
   "$live_control_concurrency" \
   "$deploy_wait_timeout" "$market_data_wait_timeout" \
