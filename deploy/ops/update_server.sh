@@ -201,7 +201,7 @@ runner=()
 if [[ "$server_host" == "local" || "$server_host" == "localhost" || ( "$server_host" == "127.0.0.1" && -z "${CML_FORCE_SSH:-}" ) ]]; then
   runner=(bash -s --)
 else
-  ssh_opts=( -o ConnectTimeout=15 )
+  ssh_opts=( -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o StrictHostKeyChecking=no )
   ssh_command=(ssh)
   if [[ -n "${CML_SSH_PASSWORD:-}" ]]; then
     if ! command -v sshpass >/dev/null 2>&1; then
