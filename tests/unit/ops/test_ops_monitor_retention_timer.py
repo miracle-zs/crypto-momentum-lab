@@ -20,8 +20,10 @@ from deploy.ops.cml_ops_monitor import (
     read_systemd_unit_state,
 )
 
-NOW = datetime(2026, 9, 29, 9, 0, tzinfo=UTC)
-NOW_EPOCH = int(NOW.timestamp())
+NOW_DT = datetime(2026, 9, 29, 9, 0, tzinfo=UTC)
+# What OpsMonitor._clock() returns: epoch seconds, not a datetime.
+NOW = NOW_DT.timestamp()
+NOW_EPOCH = int(NOW)
 TIMER = "cml-archive-trim.timer"
 SERVICE = "cml-archive-trim.service"
 TIMER_OUTPUT = (
@@ -80,7 +82,7 @@ def _service(**overrides) -> SystemdUnitState:
         "unit_file_state": "static",
         "result": "success",
         "exec_main_status": 0,
-        "last_start": NOW - timedelta(hours=20),
+        "last_start": NOW_DT - timedelta(hours=20),
     }
     values.update(overrides)
     return SystemdUnitState(**values)
@@ -202,7 +204,7 @@ def test_failed_service_run_alerts() -> None:
 
 def test_stale_service_run_alerts() -> None:
     alerts = evaluate_retention_timer(
-        _schedule(service=_service(last_start=NOW - timedelta(hours=30))),
+        _schedule(service=_service(last_start=NOW_DT - timedelta(hours=30))),
         now=NOW,
         max_age_seconds=26 * 3600,
     )
@@ -273,6 +275,20 @@ def test_empty_unit_disables_the_check(tmp_path) -> None:
 
     assert monitor._retention_schedule_state() is None
     assert runner.calls == []
+
+
+def test_evaluate_once_runs_with_the_monitor_clock(tmp_path) -> None:
+    """The monitor clock is epoch seconds; a datetime here blinds every check."""
+    runner = Runner({TIMER: TIMER_OUTPUT, SERVICE: SERVICE_OUTPUT})
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json", retention_timer_unit=TIMER),
+        runner=runner,
+        clock=lambda: NOW,
+    )
+
+    alerts = monitor._evaluate_once()
+
+    assert [alert.name for alert in alerts if alert.name.startswith("retention_timer")] == []
 
 
 def test_max_age_must_be_positive(tmp_path) -> None:

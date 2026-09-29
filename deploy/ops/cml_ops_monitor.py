@@ -1461,7 +1461,7 @@ class RetentionScheduleState:
 def evaluate_retention_timer(
     schedule: RetentionScheduleState | None,
     *,
-    now: datetime,
+    now: float,
     max_age_seconds: float,
 ) -> tuple[Alert, ...]:
     """Alert when the retention schedule stopped running or stopped succeeding.
@@ -1469,6 +1469,9 @@ def evaluate_retention_timer(
     A disabled or never-firing timer looks identical to a healthy system from
     the outside until the disk fills, so the schedule itself has to be observed
     and not only the data it is supposed to trim.
+
+    ``now`` is epoch seconds, matching ``OpsMonitor._clock``; mixing in a
+    ``datetime`` here raises inside the monitor loop and blinds every check.
     """
     if schedule is None:
         return ()
@@ -1507,7 +1510,7 @@ def evaluate_retention_timer(
     details["exec_main_status"] = service.exec_main_status
     age_seconds: float | None = None
     if service.last_start is not None:
-        age_seconds = (now - service.last_start).total_seconds()
+        age_seconds = now - service.last_start.timestamp()
         details["last_start"] = service.last_start.isoformat()
         details["age_seconds"] = age_seconds
     if service.result and service.result != "success":
