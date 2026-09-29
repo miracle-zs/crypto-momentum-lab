@@ -1,7 +1,37 @@
 import re
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 STATIC = Path("src/crypto_momentum_lab/operator_dashboard/static")
+
+
+class _DashboardMarkupParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stylesheets: list[str] = []
+        self.scripts: list[str] = []
+        self.module_scripts: list[str] = []
+        self.endpoints: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        attributes = dict(attrs)
+        endpoint = attributes.get("data-endpoint")
+        if endpoint is not None:
+            self.endpoints.append(endpoint)
+
+        if tag == "link" and attributes.get("rel") == "stylesheet":
+            href = attributes.get("href")
+            if href is not None:
+                self.stylesheets.append(href)
+        elif tag == "script":
+            src = attributes.get("src")
+            if src is not None:
+                self.scripts.append(src)
+                if attributes.get("type") == "module":
+                    self.module_scripts.append(src)
 
 
 def read_stylesheet(target: Path | None = None) -> str:
@@ -39,67 +69,67 @@ def test_static_index_contains_dashboard_mount() -> None:
 def test_static_javascript_uses_relative_api_paths() -> None:
     text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
+    markup = _DashboardMarkupParser()
+    markup.feed(index)
 
-    assert 'data-endpoint="api/overview"' in index
-    assert (
-        'href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges"' in index
-    )
-    assert 'src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"' in index
-    assert (
-        'type="module" src="static/dashboard.js?v=20260824-control-room-'
-        'v18-equity-ranges"' in index
-    )
-    assert "dashboard.css?v=20260903-research-collector-v1" in index
-    assert "dashboard.js?v=20260903-research-collector-v1" in index
-    assert "dashboard.css?v=20260906-multi-live-accounts-v1" in index
-    assert "dashboard.js?v=20260906-multi-live-accounts-v1" in index
-    assert 'data-endpoint="/api/' not in index
+    assert "api/overview" in markup.endpoints
+    assert all(not endpoint.startswith("/") for endpoint in markup.endpoints)
     assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
+
+    active_assets = markup.stylesheets + markup.scripts
+    active_paths = {urlsplit(asset).path for asset in active_assets}
+    assert {
+        "static/dashboard.css",
+        "static/vendor/echarts.min.js",
+        "static/dashboard.js",
+    } <= active_paths
+    assert all(not urlsplit(asset).path.startswith("/") for asset in active_assets)
+    assert all(urlsplit(asset).query.startswith("v=") for asset in active_assets)
 
 
 def test_dashboard_loads_stable_frontend_modules() -> None:
     javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
+    markup = _DashboardMarkupParser()
+    markup.feed(index)
 
-    assert 'type="module"' in index
-    for module in (
-        'from "./dashboard-config.js?v=20260903-research-collector-v1"',
-        'from "./dashboard-formatters.js"',
-        'from "./dashboard-dom.js"',
-        'from "./dashboard-readiness.js"',
-        'from "./dashboard-chart-engine.js"',
-        'from "./sections/overview.js"',
-        'from "./sections/universe.js"',
-        'from "./sections/risk.js"',
-        'from "./sections/account.js"',
-        'from "./sections/reports.js"',
-        'from "./sections/strategy.js"',
-        'from "./sections/collector.js"',
-        # Cache-busted import may append ?v= before the closing quote.
-        'from "./sections/performance.js',
-    ):
-        assert module in javascript
-    assert (STATIC / "dashboard-config.js").exists()
-    assert (STATIC / "dashboard-formatters.js").exists()
-    assert (STATIC / "dashboard-dom.js").exists()
-    assert (STATIC / "dashboard-readiness.js").exists()
-    assert (STATIC / "dashboard-chart-engine.js").exists()
-    assert (STATIC / "dashboard-charts.js").exists()
-    assert (STATIC / "dashboard-ui.js").exists()
-    assert (STATIC / "vendor" / "echarts.min.js").exists()
-    assert (STATIC / "package.json").exists()
-    for section in (
-        "overview",
-        "universe",
-        "risk",
-        "account",
-        "reports",
-        "strategy",
-        "collector",
-        "performance",
-    ):
-        assert (STATIC / "sections" / f"{section}.js").exists()
+    assert any(
+        urlsplit(source).path == "static/dashboard.js"
+        for source in markup.module_scripts
+    )
+
+    uncommented_javascript = "\n".join(
+        line
+        for line in javascript.splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    imported_modules = re.findall(
+        r'''(?ms)^[ \t]*import\b[\s\S]*?\bfrom\s*["']([^"']+)["']\s*;''',
+        uncommented_javascript,
+    )
+    imported_paths = {urlsplit(module).path for module in imported_modules}
+    assert {
+        "./dashboard-config.js",
+        "./dashboard-formatters.js",
+        "./dashboard-dom.js",
+        "./dashboard-rendering.js",
+        "./dashboard-readiness.js",
+        "./dashboard-chart-engine.js",
+        "./dashboard-ui.js",
+        "./sections/overview.js",
+        "./sections/universe.js",
+        "./sections/risk.js",
+        "./sections/account.js",
+        "./sections/reports.js",
+        "./sections/strategy.js",
+        "./sections/collector.js",
+        "./sections/performance.js",
+    } <= imported_paths
+    assert all(urlsplit(module).query.startswith("v=") for module in imported_modules)
+    for module in imported_modules:
+        path = STATIC / urlsplit(module).path.removeprefix("./")
+        assert path.is_file(), f"missing imported dashboard module: {path}"
 
 
 def test_degraded_status_labels_are_visible() -> None:
