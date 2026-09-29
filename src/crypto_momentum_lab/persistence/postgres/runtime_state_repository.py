@@ -12,7 +12,10 @@ from crypto_momentum_lab.domain.market.market_book import (
     compute_market_state_hash,
 )
 from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
-from crypto_momentum_lab.market_data.hub import market_state_to_payload
+from crypto_momentum_lab.domain.market.runtime_state_models import (
+    RuntimeStateSequenceRange,
+)
+from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
 from crypto_momentum_lab.persistence.postgres.models import (
     MarketRevisionRefRow,
     RuntimeMarketState15sRow,
@@ -29,12 +32,6 @@ type _RuntimeStateKey = tuple[str, str, datetime]
 class RuntimeStateCursor:
     bucket_start: datetime | None = None
     symbol: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStateSequenceRange:
-    minimum: int | None = None
-    maximum: int | None = None
 
 
 def validate_closed_states(states: tuple[MarketState15s, ...]) -> None:
