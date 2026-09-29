@@ -166,7 +166,7 @@ class LiveDaemonConfig:
     entry_limit_ttl_seconds: int = 900
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
     max_concurrency_per_symbol: int | None = None
-    readiness_provider: Callable[[], ExecutionReadiness] | None = None
+    readiness_provider: Callable[..., ExecutionReadiness] | None = None
     unmanaged_halt_debounce_seconds: float = 15.0
     decision_filter: (
         Callable[
@@ -643,13 +643,22 @@ class LiveStrategyDaemon:
         candidates = [wm for wm in (market_wm, account_wm) if wm is not None]
         return min(candidates) if candidates else None
 
-    def evaluate_readiness(self) -> ExecutionReadiness:
+    def evaluate_readiness(self, symbol: str | None = None) -> ExecutionReadiness:
         reconciliation_gap = Decimal("0")
         ctx = getattr(self._context_provider, "cached_context", None) or getattr(
             self._context_provider, "_cached_context", None
         )
         if ctx is not None:
-            gap_count = len(ctx.unmanaged_position_symbols) + len(ctx.unresolved_orders)
+            if symbol is not None:
+                gap_count = int(symbol in ctx.unmanaged_position_symbols) + sum(
+                    1
+                    for o in ctx.unresolved_orders
+                    if getattr(o, "symbol", None) == symbol
+                )
+            else:
+                gap_count = len(ctx.unmanaged_position_symbols) + len(
+                    ctx.unresolved_orders
+                )
             reconciliation_gap = Decimal(str(gap_count))
 
         assessment = ReadinessEvaluator.evaluate(

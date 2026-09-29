@@ -86,7 +86,7 @@ class EntryLaneConfig:
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     max_concurrency_per_symbol: int | None = None
-    readiness_provider: Callable[[], ExecutionReadiness] | None = None
+    readiness_provider: Callable[..., ExecutionReadiness] | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -179,9 +179,15 @@ class EntryExecutionLane:
         self._entry_symbols = None
         self._entry_symbols_loaded_at = None
 
-    def _current_readiness(self) -> ExecutionReadiness:
+    def _current_readiness(self, symbol: str | None = None) -> ExecutionReadiness:
         if self._config.readiness_provider is not None:
-            return self._config.readiness_provider()
+            try:
+                return self._config.readiness_provider(symbol=symbol)
+            except TypeError:
+                try:
+                    return self._config.readiness_provider(symbol)
+                except TypeError:
+                    return self._config.readiness_provider()
         return ExecutionReadiness.INDEPENDENT_EXECUTABLE
 
     def record_decision(
@@ -213,7 +219,7 @@ class EntryExecutionLane:
                 require_price_above_ema10=self._config.require_price_above_ema10,
                 max_concurrency_per_symbol=self._config.max_concurrency_per_symbol,
                 symbol_concurrency=symbol_concurrency,
-                readiness=self._current_readiness(),
+                readiness=self._current_readiness(candidate.symbol),
                 now=recorded_at,
             )
             candidate_filter_results[candidate.candidate_id] = {
@@ -471,7 +477,7 @@ class EntryExecutionLane:
                     symbol_concurrency=_count_symbol_concurrency(
                         candidate.symbol, context
                     ),
-                    readiness=self._current_readiness(),
+                    readiness=self._current_readiness(candidate.symbol),
                     now=recorded_at,
                 )
                 is not None
@@ -559,7 +565,7 @@ class EntryExecutionLane:
                 context=entry_filter_context,
                 require_price_above_ema5=self._config.require_price_above_ema5,
                 require_price_above_ema10=self._config.require_price_above_ema10,
-                readiness=self._current_readiness(),
+                readiness=self._current_readiness(candidate.symbol),
                 now=recorded_at,
             )
 

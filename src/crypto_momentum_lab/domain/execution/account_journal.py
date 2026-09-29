@@ -134,6 +134,14 @@ class AccountJournal:
     def stream_scope(self) -> AccountFactStreamScope | None:
         return self._stream_scope
 
+    def adopt_stream_scope(self, new_scope: AccountFactStreamScope) -> None:
+        """Adopt an updated active stream scope while preserving existing facts."""
+        if not new_scope.matches(self._position_key):
+            raise ValueError("stream scope does not match journal position key")
+        self._stream_scope = new_scope
+        self._facts_generation += 1
+        self._cached_facts_none = None
+
     def append_fill(self, fill: AccountFillEvent) -> bool:
         """
         Appends a fill event. Returns True if accepted, False if

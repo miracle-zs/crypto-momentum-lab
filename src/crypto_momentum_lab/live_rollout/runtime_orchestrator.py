@@ -1277,8 +1277,8 @@ async def run_live_daemon(
                     ),
                 ),
                 decision_fact_binder=fact_source.bind_context,
-                readiness_provider=lambda: (
-                    daemon.evaluate_readiness()
+                readiness_provider=lambda symbol=None: (
+                    daemon.evaluate_readiness(symbol=symbol)
                     if daemon is not None
                     else ExecutionReadiness.INDEPENDENT_EXECUTABLE
                 ),

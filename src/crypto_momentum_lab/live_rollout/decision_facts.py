@@ -413,7 +413,25 @@ class LiveDecisionFactSource:
         for decision_id, command in await self._decision_uow.load_pending_exits(
             self._policy_key
         ):
-            if not await self._exit_matches_current_book(command):
+            view = await self._read_book_view(command)
+            total_qty = (
+                getattr(view, "total_quantity", None) if view is not None else None
+            )
+            if total_qty is not None and total_qty <= Decimal("0"):
+                log.info(
+                    "durable_decision_exit_superseded_position_flat",
+                    decision_id=decision_id,
+                    command_id=command.command_id,
+                    symbol=command.position_key.symbol,
+                )
+                await self._decision_uow.mark_exit_superseded(
+                    decision_id,
+                    command.command_id,
+                    "position_already_flat",
+                )
+                continue
+
+            if not await self._exit_matches_current_book(command, view=view):
                 log.warning(
                     "durable_decision_exit_deferred_until_book_ready",
                     decision_id=decision_id,
@@ -438,18 +456,17 @@ class LiveDecisionFactSource:
                     command_id=command.command_id,
                 )
 
-    async def _exit_matches_current_book(self, command: TradeCommand) -> bool:
+    async def _read_book_view(self, command: TradeCommand) -> PositionView | None:
         book = self._execution_book
         if (
             book is None
             or self._stream_id is None
             or self._stream_epoch is None
-            or command.expected_projection_version is None
         ):
-            return False
+            return None
         key = command.position_key
         if key.environment != "live" or key.account_label != self._account_label:
-            return False
+            return None
         scope = ExecutionScope(
             environment=key.environment,
             account_label=key.account_label,
@@ -457,7 +474,7 @@ class LiveDecisionFactSource:
             position_side=key.position_side,
         )
         try:
-            view = await book.read(
+            return await book.read(
                 scope,
                 stream_id=self._stream_id,
                 stream_epoch=self._stream_epoch,
@@ -467,15 +484,30 @@ class LiveDecisionFactSource:
                 "requested account stream does not match the restored position"
             ):
                 raise
+            return None
+
+    async def _exit_matches_current_book(
+        self,
+        command: TradeCommand,
+        *,
+        view: PositionView | None = None,
+    ) -> bool:
+        if command.expected_projection_version is None:
+            return False
+        if view is None:
+            view = await self._read_book_view(command)
+        if view is None:
             return False
         expected_scope = AccountFactStreamScope.for_position_key(
-            key,
+            command.position_key,
             stream_id=self._stream_id,
             stream_epoch=self._stream_epoch,
         )
+        total_qty = getattr(view, "total_quantity", None)
         return (
             view.stream_scope == expected_scope
             and view.is_ready_for_trade
+            and (total_qty is None or total_qty > Decimal("0"))
             and view.projection_version == command.expected_projection_version
             and command.allocation_plan is not None
             and command.allocation_plan.projection_version

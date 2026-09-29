@@ -2809,9 +2809,17 @@ class ExecutionBook:
             # opening a transaction; account snapshots may contain thousands
             # of historical symbols on every refresh.
             current_scope = self._stream_scopes.get(canon)
+            current_book = self._books.get(canon)
+            can_rollover = (
+                current_book is not None
+                and evidence.snapshot is not None
+                and evidence.snapshot.position_amt == current_book.get_view().total_quantity
+                and not bool(self.get_active_reservations(key))
+            )
             if (
                 current_scope is not None
                 and current_scope != scope
+                and not can_rollover
                 and (
                     evidence.coverage_evidence is None
                     or evidence.fill_load_provenance is None
@@ -2847,8 +2855,11 @@ class ExecutionBook:
                         ):
                             adopting_epoch = True
                             if (
-                                evidence.coverage_evidence is None
-                                or evidence.fill_load_provenance is None
+                                not can_rollover
+                                and (
+                                    evidence.coverage_evidence is None
+                                    or evidence.fill_load_provenance is None
+                                )
                             ):
                                 raise _AbortObservation(
                                     EvidenceConflict(
@@ -2885,8 +2896,11 @@ class ExecutionBook:
                     if current_scope is not None and current_scope != scope:
                         adopting_epoch = True
                         if (
-                            evidence.coverage_evidence is None
-                            or evidence.fill_load_provenance is None
+                            not can_rollover
+                            and (
+                                evidence.coverage_evidence is None
+                                or evidence.fill_load_provenance is None
+                            )
                         ):
                             raise _AbortObservation(
                                 EvidenceConflict(
@@ -2954,16 +2968,23 @@ class ExecutionBook:
                             )
 
                     if adopting_epoch:
-                        candidate._journals[canon] = AccountJournal(
-                            key, stream_scope=scope
-                        )
-                        candidate._books[canon] = PositionBook(
-                            candidate._journals[canon]
-                        )
-                        candidate._stream_scopes[canon] = scope
-                        candidate._journal_revisions[canon] = 0
-                        candidate._last_sequences.pop(canon, None)
-                        candidate._recovery_adoption_scope = scope
+                        if can_rollover:
+                            candidate._stream_scopes[canon] = scope
+                            journal = candidate._journals.get(canon)
+                            if journal is not None:
+                                journal.adopt_stream_scope(scope)
+                            candidate._recovery_adoption_scope = scope
+                        else:
+                            candidate._journals[canon] = AccountJournal(
+                                key, stream_scope=scope
+                            )
+                            candidate._books[canon] = PositionBook(
+                                candidate._journals[canon]
+                            )
+                            candidate._stream_scopes[canon] = scope
+                            candidate._journal_revisions[canon] = 0
+                            candidate._last_sequences.pop(canon, None)
+                            candidate._recovery_adoption_scope = scope
                     else:
                         candidate._journal_for_scope(key, scope)
                     try:
@@ -3299,13 +3320,26 @@ class ExecutionBook:
             )
             current_scope = self._stream_scopes.get(key.canonical_id)
             if current_scope is not None and current_scope != scope:
-                return EvidenceConflict(
-                    evidence_id=evidence.evidence_id,
-                    reason=(
-                        "execution stream changed; a validated recovery checkpoint "
-                        "must be adopted before this position can continue"
-                    ),
+                current_book = self._books.get(key.canonical_id)
+                can_rollover = (
+                    current_book is not None
+                    and evidence.snapshot is not None
+                    and evidence.snapshot.position_amt == current_book.get_view().total_quantity
+                    and not bool(self.get_active_reservations(key))
                 )
+                if can_rollover:
+                    self._stream_scopes[key.canonical_id] = scope
+                    journal = self._journals.get(key.canonical_id)
+                    if journal is not None:
+                        journal.adopt_stream_scope(scope)
+                else:
+                    return EvidenceConflict(
+                        evidence_id=evidence.evidence_id,
+                        reason=(
+                            "execution stream changed; a validated recovery checkpoint "
+                            "must be adopted before this position can continue"
+                        ),
+                    )
             try:
                 journal = self._journal_for_scope(key, scope)
             except RuntimeError as err:
