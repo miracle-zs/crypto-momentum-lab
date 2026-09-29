@@ -1,4 +1,5 @@
 import pytest
+
 from tests.conftest import assert_safe_test_database_url
 
 

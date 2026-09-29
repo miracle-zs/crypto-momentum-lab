@@ -2,6 +2,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import pytest
@@ -159,9 +160,8 @@ class FakeUniverseRepository:
         return None
 
 
-from urllib.parse import urlsplit
-
 _ALLOWED_TEST_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
 
 
 def assert_safe_test_database_url(url: str) -> None:

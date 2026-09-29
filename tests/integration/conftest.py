@@ -15,8 +15,6 @@ from crypto_momentum_lab.domain.universe.models import (
     TrackedMembership,
     UniverseSnapshot,
 )
-
-
 from tests.conftest import assert_safe_test_database_url
 
 

@@ -13,8 +13,10 @@ from crypto_momentum_lab.strategies.liquidation_cascade.event_study import (
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[3]
     / "scripts"
+    / "research_archive"
     / "replay_liquidation_entry_variants.py"
 )
+
 SPEC = importlib.util.spec_from_file_location(
     "liquidation_entry_replay_script", SCRIPT_PATH
 )

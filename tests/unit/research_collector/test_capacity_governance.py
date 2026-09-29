@@ -1,6 +1,4 @@
-import asyncio
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,13 +9,11 @@ from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
     CollectorConfig,
     CollectorPaused,
-    SourceKind,
 )
 from crypto_momentum_lab.research_collector.selection import StaticSymbolSelector
 from crypto_momentum_lab.research_collector.service import ResearchStateCollector
 from crypto_momentum_lab.research_collector.storage import (
     CapacityGuard,
-    CapacitySnapshot,
     CapacityState,
 )
 from tests.unit.persistence.postgres.test_runtime_state_repository import (

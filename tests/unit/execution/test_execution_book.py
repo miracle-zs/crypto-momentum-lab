@@ -205,6 +205,7 @@ async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is
 @pytest.mark.asyncio
 async def test_flat_position_act_when_head_is_none() -> None:
     from contextlib import asynccontextmanager
+
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -286,6 +287,7 @@ async def test_flat_position_act_when_head_is_none() -> None:
 @pytest.mark.asyncio
 async def test_flat_position_act_live_without_coverage_succeeds() -> None:
     from contextlib import asynccontextmanager
+
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -360,6 +362,7 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
 @pytest.mark.asyncio
 async def test_open_position_act_live_without_coverage_succeeds() -> None:
     from contextlib import asynccontextmanager
+
     from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -462,6 +465,7 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
 @pytest.mark.asyncio
 async def test_flat_position_act_can_adopt_older_flat_head() -> None:
     from contextlib import asynccontextmanager
+
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -553,6 +557,7 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
 @pytest.mark.asyncio
 async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
     from contextlib import asynccontextmanager
+
     from crypto_momentum_lab.domain.execution.execution_book import Blocked
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -2062,9 +2067,9 @@ async def test_staged_copy_shares_frozen_facts_without_leaking_candidate_writes(
 
 def test_position_book_get_view_caches_projection_until_revision_changes():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
     journal = AccountJournal(key)
@@ -2102,8 +2107,11 @@ def test_position_book_get_view_caches_projection_until_revision_changes():
 
 
 def test_account_facts_compute_facts_hash_caching():
-    from crypto_momentum_lab.domain.execution.position_ledger_models import AccountFacts, PositionKey
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        PositionKey,
+    )
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
     facts = AccountFacts(position_key=key)
@@ -2115,9 +2123,9 @@ def test_account_facts_compute_facts_hash_caching():
 
 def test_position_book_get_view_caches_advancing_future_cuts():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
     journal = AccountJournal(key)

@@ -360,8 +360,9 @@ def test_recover_deformed_float_sequence_resolution_does_not_delete_pending_reco
     selection = SelectionSnapshot(observed_at=state.bucket_start, symbols=())
 
     # 1. Accept valid pending record sequence=1
-    receipt = journal.accept(batch, selection, (state,))
+    journal.accept(batch, selection, (state,))
     assert len(journal.pending_records()) == 1
+
     pending_files = list((journal_dir / "pending").rglob("*.json"))
     assert len(pending_files) == 1
     pending_file = pending_files[0]

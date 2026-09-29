@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
 
 
 def test_retention_consumer_requirement_validations() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     req = RetentionConsumerRequirement(
         consumer_id="active_episodes",
         min_required_watermark=now,
@@ -40,7 +40,7 @@ def test_retention_consumer_requirement_validations() -> None:
 
 
 def test_retention_gating_evaluation_validations() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     older = now - timedelta(days=1)
     newer = now + timedelta(days=1)
 
@@ -66,7 +66,7 @@ def test_retention_gating_evaluation_validations() -> None:
 
 
 def test_retention_watermark_evaluator_unconstrained() -> None:
-    requested = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+    requested = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
     res = RetentionWatermarkEvaluator.evaluate_cutoff(
         requested_cutoff=requested,
         requirements=(),
@@ -78,10 +78,10 @@ def test_retention_watermark_evaluator_unconstrained() -> None:
 
 
 def test_retention_watermark_evaluator_constrained_by_active_episode() -> None:
-    requested = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+    requested = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
     req_active = RetentionConsumerRequirement(
         consumer_id="active_episodes",
-        min_required_watermark=datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc),
+        min_required_watermark=datetime(2026, 9, 10, 12, 0, tzinfo=UTC),
         reason="Active trade episode opened on Sep 10",
     )
 
@@ -90,27 +90,27 @@ def test_retention_watermark_evaluator_constrained_by_active_episode() -> None:
         requirements=(req_active,),
     )
     assert res.is_constrained is True
-    assert res.effective_cutoff == datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+    assert res.effective_cutoff == datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     assert res.binding_constraint == req_active
 
 
 def test_retention_watermark_evaluator_multiple_requirements_takes_safest_minimum() -> (
     None
 ):
-    requested = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+    requested = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
     req_journal = RetentionConsumerRequirement(
         consumer_id="uncommitted_journal",
-        min_required_watermark=datetime(2026, 9, 15, 0, 0, tzinfo=timezone.utc),
+        min_required_watermark=datetime(2026, 9, 15, 0, 0, tzinfo=UTC),
         reason="Uncommitted journal buffer",
     )
     req_episode = RetentionConsumerRequirement(
         consumer_id="active_episodes",
-        min_required_watermark=datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc),
+        min_required_watermark=datetime(2026, 9, 5, 0, 0, tzinfo=UTC),
         reason="Long running episode",
     )
     req_dashboard = RetentionConsumerRequirement(
         consumer_id="dashboard_metrics",
-        min_required_watermark=datetime(2026, 9, 18, 0, 0, tzinfo=timezone.utc),
+        min_required_watermark=datetime(2026, 9, 18, 0, 0, tzinfo=UTC),
         reason="Dashboard 48h rolling window",
     )
 
@@ -119,16 +119,16 @@ def test_retention_watermark_evaluator_multiple_requirements_takes_safest_minimu
         requirements=(req_journal, req_episode, req_dashboard),
     )
     assert res.is_constrained is True
-    assert res.effective_cutoff == datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc)
+    assert res.effective_cutoff == datetime(2026, 9, 5, 0, 0, tzinfo=UTC)
     assert res.binding_constraint == req_episode
 
 
 def test_retention_watermark_evaluator_ignores_future_requirements() -> None:
-    requested = datetime(2026, 9, 10, 0, 0, tzinfo=timezone.utc)
+    requested = datetime(2026, 9, 10, 0, 0, tzinfo=UTC)
     # A requirement that only needs data from Sep 15 onwards doesn't restrict pruning before Sep 10
     req_future = RetentionConsumerRequirement(
         consumer_id="future_worker",
-        min_required_watermark=datetime(2026, 9, 15, 0, 0, tzinfo=timezone.utc),
+        min_required_watermark=datetime(2026, 9, 15, 0, 0, tzinfo=UTC),
         reason="Worker starts from Sep 15",
     )
 

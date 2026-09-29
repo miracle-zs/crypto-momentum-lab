@@ -8,7 +8,7 @@ Validates:
 5. Execution readiness guard on degraded views.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -28,23 +28,17 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
-    PositionLedgerBatch,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocation,
-    ExitAllocationPlan,
     ExitAllocator,
     ExitPolicyMode,
-    PositionReservation,
     TradeCommand,
     TradeCommandType,
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -51,14 +52,14 @@ def test_execution_account_has_no_dependency_on_live_rollout() -> None:
 
 def test_domain_authorization_require_authorized_command() -> None:
     """Verify authorization domain contract validates operator commands correctly."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     cmd = RollbackCommand(
         command_id="cmd-1",
         command_type="emergency_flatten",
         requested_by="operator-1",
         confirmation_text=EMERGENCY_FLATTEN_CONFIRMATION,
-        requested_at=datetime.now(timezone.utc),
+        requested_at=datetime.now(UTC),
         idempotency_key="idemp-1",
         account_label="binance-prod",
         strategy_name="top_momentum",

@@ -1186,11 +1186,11 @@ def test_account_event_hub_bootstrap_message_caching() -> None:
 
 
 def test_account_event_with_fills_roundtrip() -> None:
+    from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.execution_account.hub import (
         decode_account_event,
         encode_account_event,
     )
-    from crypto_momentum_lab.domain.account import AccountFillEvent
 
     fill = AccountFillEvent(
         environment="live",

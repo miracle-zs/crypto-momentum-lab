@@ -6,6 +6,7 @@ read both units or it reports "never ran" forever.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -88,11 +89,17 @@ def _service(**overrides) -> SystemdUnitState:
     return SystemdUnitState(**values)
 
 
+_OMITTED: Any = object()
+
+
 def _schedule(
     timer: SystemdUnitState | None = None,
-    service: SystemdUnitState | None = _service(),
+    service: Any = _OMITTED,
 ) -> RetentionScheduleState:
-    return RetentionScheduleState(timer=timer or _timer(), service=service)
+    resolved_service = _service() if service is _OMITTED else service
+    return RetentionScheduleState(timer=timer or _timer(), service=resolved_service)
+
+
 
 
 def test_service_unit_is_derived_from_the_timer() -> None:

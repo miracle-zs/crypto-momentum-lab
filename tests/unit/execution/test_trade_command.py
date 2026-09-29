@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -25,7 +25,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
-NOW = datetime(2026, 9, 20, 10, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 20, 10, 0, 0, tzinfo=UTC)
 POS_KEY_LONG = PositionKey(
     environment="production",
     account_label="binance-prod",
@@ -346,11 +346,11 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
     assert cmd.side == StrategySide.SHORT
     assert cmd.reduce_only is True
 
-    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-        TradeCommandExecutor,
-    )
     from crypto_momentum_lab.execution_account.orders.quantization import (
         SymbolTradingRules,
+    )
+    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
+        TradeCommandExecutor,
     )
 
     rules = SymbolTradingRules(

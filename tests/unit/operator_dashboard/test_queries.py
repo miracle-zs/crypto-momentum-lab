@@ -1197,8 +1197,8 @@ def _paper_position_row(
 async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> None:
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountSummaryResponse,
         LiveAccountsResponse,
+        LiveAccountSummaryResponse,
         ServiceStatusResponse,
         SystemOverviewResponse,
     )
@@ -1262,8 +1262,8 @@ async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> Non
 async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -> None:
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountSummaryResponse,
         LiveAccountsResponse,
+        LiveAccountSummaryResponse,
         ServiceStatusResponse,
         SystemOverviewResponse,
     )
@@ -1330,8 +1330,8 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
 async def test_readiness_identifies_stale_strategy_stream_without_blame_on_market_data() -> None:
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountSummaryResponse,
         LiveAccountsResponse,
+        LiveAccountSummaryResponse,
         ServiceStatusResponse,
         SystemOverviewResponse,
     )
@@ -1399,8 +1399,8 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
 ):
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
-        LiveAccountSummaryResponse,
         LiveAccountsResponse,
+        LiveAccountSummaryResponse,
         ServiceStatusResponse,
         SystemOverviewResponse,
     )
@@ -1517,6 +1517,7 @@ def test_live_account_status_syncing_is_degraded() -> None:
 
 async def test_risk_execution_computes_data_age_and_freshness() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1574,6 +1575,7 @@ async def test_risk_execution_computes_data_age_and_freshness() -> None:
 
 async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1626,6 +1628,7 @@ async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None
 
 async def test_risk_execution_filters_by_environment_and_complete_data() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1656,6 +1659,7 @@ async def test_risk_execution_filters_by_environment_and_complete_data() -> None
 async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
     """F04: A single fresh symbol cannot mask a stale symbol among required symbols."""
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1695,6 +1699,7 @@ async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
 async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
     """F04: Incomplete symbol coverage must cause STALE status, even if present symbol is fresh."""
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1732,6 +1737,7 @@ async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
 async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
     """F04: When all required symbols have complete, fresh data, status is READY / LIVE."""
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1774,6 +1780,7 @@ async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_exte
     """Snapshot UUIDs and active target memberships are loaded without falling back to all historical symbols."""
     from unittest.mock import AsyncMock, MagicMock
     from uuid import uuid4
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1813,6 +1820,7 @@ async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_exte
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     """F04: When coverage query fails, API MUST return only safe error code & trace ID without raw exception text."""
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )
@@ -1861,6 +1869,7 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
 async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
     """F04: If halts exist when coverage query fails, status is HALTED but safe error code & trace are preserved."""
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         RiskExecutionQueries,
     )

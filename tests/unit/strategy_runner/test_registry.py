@@ -4,6 +4,8 @@ from decimal import Decimal
 import pytest
 
 from crypto_momentum_lab.domain.strategy import RunMode, StrategyRunIdentity
+from crypto_momentum_lab.strategies.liquidation_cascade import LiquidationCascadeConfig
+from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategy_runner.registry import (
     StrategyRegistryError,
     build_runtime_config,
@@ -29,11 +31,8 @@ def test_registry_rejects_unknown_strategy() -> None:
         )
 
 
-from crypto_momentum_lab.strategies.liquidation_cascade import LiquidationCascadeConfig
-from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
-
-
 def test_registry_fails_closed_when_strategy_config_missing() -> None:
+
     with pytest.raises(StrategyRegistryError, match="orderflow_impulse configuration is required"):
         build_runtime_strategy(
             "orderflow_impulse",

@@ -604,11 +604,10 @@ async def test_through_bucket_gating_and_invalidation() -> None:
     # Observe initial events for BTCUSDT to establish baseline
     await publisher.observe(fixture_trade(0, price="100", sequence=1, symbol="BTCUSDT"))
     await publisher.observe(fixture_trade(1, price="101", sequence=2, symbol="BTCUSDT"))
+    # Verify gate skips re-scan
     assert publisher._last_materialized_empty_buckets_through is not None
-
-    # Save through-bucket and verify gate skips re-scan
-    through = publisher._last_materialized_empty_buckets_through
     scan_count = 0
+
     original_materialize = publisher._materialize_buckets_until
 
     def count_materialize(*args, **kwargs):

@@ -103,9 +103,10 @@ async def _load_capture_state(
     tuple[MarketDataProcessStateRow, ...],
 ]:
     if not database_url:
-        raise AssertionError(
+        pytest.skip(
             "set CML_TEST_ASYNC_DATABASE_URL or CML_DATABASE_URL for live smoke"
         )
+
     engine = create_async_database_engine(database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:

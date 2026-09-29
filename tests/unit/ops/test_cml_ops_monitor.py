@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from deploy.ops.cml_ops_monitor import (
+    _ALERT_LABELS,
     Alert,
     ContainerSnapshot,
     LogSignals,
@@ -17,7 +18,6 @@ from deploy.ops.cml_ops_monitor import (
     OrderIntentObservation,
     PositionObservation,
     SignalObservation,
-    _ALERT_LABELS,
     _alert_action,
     _alert_scope,
     _deliver_external_heartbeat,

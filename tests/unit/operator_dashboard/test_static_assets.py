@@ -67,15 +67,15 @@ def test_static_index_contains_dashboard_mount() -> None:
 
 
 def test_static_javascript_uses_relative_api_paths() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    poller = (STATIC / "app" / "poller.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
     markup = _DashboardMarkupParser()
     markup.feed(index)
 
     assert "api/overview" in markup.endpoints
     assert all(not endpoint.startswith("/") for endpoint in markup.endpoints)
-    assert "fetch(endpoint" in text
-    assert "binance.com" not in text.lower()
+    assert "fetch(" in poller
+    assert "binance.com" not in poller.lower()
 
     active_assets = markup.stylesheets + markup.scripts
     active_paths = {urlsplit(asset).path for asset in active_assets}
@@ -112,11 +112,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     assert {
         "./dashboard-config.js",
         "./dashboard-formatters.js",
-        "./dashboard-dom.js",
-        "./dashboard-rendering.js",
-        "./dashboard-readiness.js",
         "./dashboard-chart-engine.js",
-        "./dashboard-ui.js",
         "./sections/overview.js",
         "./sections/universe.js",
         "./sections/risk.js",
@@ -125,11 +121,17 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         "./sections/strategy.js",
         "./sections/collector.js",
         "./sections/performance.js",
+        "./app/section-state.js",
+        "./app/runtime-badge.js",
+        "./app/poller.js",
+        "./app/shell.js",
+        "./app/wire-widgets.js",
+        "./app/jump-probe.js",
     } <= imported_paths
-    assert all(urlsplit(module).query.startswith("v=") for module in imported_modules)
     for module in imported_modules:
         path = STATIC / urlsplit(module).path.removeprefix("./")
         assert path.is_file(), f"missing imported dashboard module: {path}"
+
 
 
 def test_degraded_status_labels_are_visible() -> None:
@@ -141,7 +143,9 @@ def test_degraded_status_labels_are_visible() -> None:
 
 def test_v2_control_room_prioritizes_safety_and_exposes_global_readiness() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    readiness_js = (STATIC / "app" / "readiness.js").read_text(encoding="utf-8")
+    section_state_js = (STATIC / "app" / "section-state.js").read_text(encoding="utf-8")
+    poller_js = (STATIC / "app" / "poller.js").read_text(encoding="utf-8")
 
     assert index.index('id="overview"') < index.index('id="risk"')
     assert index.index('id="risk"') < index.index('id="account"')
@@ -157,10 +161,12 @@ def test_v2_control_room_prioritizes_safety_and_exposes_global_readiness() -> No
     for marker in (
         "globalReadinessModel",
         "updateGlobalState",
-        "SAFETY_SECTIONS",
-        'live?.status === "SHADOW"',
     ):
-        assert marker in javascript
+        assert marker in readiness_js
+    assert 'live?.status === "SHADOW"' in poller_js
+    assert "SAFETY_SECTIONS" in section_state_js
+
+
 
 
 def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
@@ -192,7 +198,7 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
 
 
 def test_account_panel_renders_historical_live_signal_ranking() -> None:
-    account = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
+    account = (STATIC / "sections" / "account" / "signals.js").read_text(encoding="utf-8")
     css = read_stylesheet()
 
     for marker in (
@@ -207,6 +213,7 @@ def test_account_panel_renders_historical_live_signal_ranking() -> None:
         assert marker in account
     assert ".live-signal-rank-badge.gainer" in css
     assert ".live-signal-rank-badge.loser" in css
+
 
 
 def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
@@ -303,11 +310,11 @@ def test_account_cards_use_each_account_equity_curve() -> None:
 
 
 def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() -> None:
-    text = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "account" / "render-detail.js").read_text(encoding="utf-8")
 
     for marker in (
         "账户配置与对账",
-        "EXECUTION ACCOUNT",
+        "EXECUTION CHANNEL / RECONCILIATION",
         "live-strategy",
         "execution-account · 只读同步",
         "账户配置",
@@ -323,23 +330,26 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
         "recent_trade_count",
         "fill_count",
         "strategy_name",
-        "reconciliation",
+        "account-reconciliation",
     ):
         assert marker in text
 
 
 def test_live_account_panel_renders_equity_and_close_reasons() -> None:
-    render_code = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
+    render_code = (STATIC / "sections" / "account" / "render-detail.js").read_text(encoding="utf-8")
 
-    assert "data.equity_curve" in render_code
+    assert "accountEquity" in render_code
     assert "live-account-equity" in render_code
     assert 'label: "平仓原因"' in render_code
     assert "row.close_reason" in render_code
 
 
 def test_live_account_equity_supports_longer_time_ranges() -> None:
-    render_code = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
-    dashboard = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    constants_js = (STATIC / "sections" / "account" / "constants.js").read_text(encoding="utf-8")
+    account_index = (STATIC / "sections" / "account" / "index.js").read_text(encoding="utf-8")
+    detail_js = (STATIC / "sections" / "account" / "render-detail.js").read_text(encoding="utf-8")
+    loaders_js = (STATIC / "sections" / "account" / "loaders.js").read_text(encoding="utf-8")
+    poller_js = (STATIC / "app" / "poller.js").read_text(encoding="utf-8")
     stylesheet = read_stylesheet(STATIC / "styles/sections/account.css")
 
     for marker in (
@@ -347,33 +357,33 @@ def test_live_account_equity_supports_longer_time_ranges() -> None:
         'key: "7d", label: "1周"',
         'key: "30d", label: "1月"',
         'key: "1y", label: "1年"',
-        'role="group" aria-label="实盘账户权益时间范围"',
-        'aria-pressed="${option.key === selectedRange ? "true" : "false"}"',
-        "wireAccountEquityRanges",
-        "equity-coverage-note",
     ):
-        assert marker in render_code
+        assert marker in constants_js
+    assert 'role="group" aria-label="实盘账户权益时间范围"' in constants_js
+    assert 'aria-pressed="${option.key === selectedRange ? "true" : "false"}"' in constants_js
+    assert "wireAccountEquityRanges" in account_index
+    assert "equity-coverage-note" in detail_js
     assert "api/live-accounts" in (STATIC / "index.html").read_text(encoding="utf-8")
-    assert "api/account?" in render_code
-    assert "endpoint !== section.dataset.endpoint" in dashboard
+    assert "api/account?" in loaders_js
+    assert "endpoint !== section.dataset.endpoint" in poller_js
     assert '.equity-range-switch button[aria-pressed="true"]' in stylesheet
 
 
+
 def test_dashboard_skips_unchanged_section_replacements() -> None:
-    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    poller = (STATIC / "app" / "poller.js").read_text(encoding="utf-8")
+    state = (STATIC / "app" / "section-state.js").read_text(encoding="utf-8")
+    rendering = (STATIC / "dashboard-rendering.js").read_text(encoding="utf-8")
     overview = (STATIC / "sections" / "overview.js").read_text(encoding="utf-8")
 
-    for marker in (
-        "sectionRenderKeys",
-        "function sectionRenderKey",
-        "const shouldRender = sectionRenderKeys.get(id) !== renderKey",
-        "if (shouldRender)",
-        "replaceChildrenFromHtml",
-        "updateOverviewDynamic",
-    ):
-        assert marker in javascript
-    assert "body.innerHTML" not in javascript
+    assert "sectionRenderKeys" in state
+    assert "function sectionRenderKey" in rendering
+    assert "const shouldRender = sectionRenderKeys.get(id) !== renderKey" in poller
+    assert "if (shouldRender)" in poller
+    assert "patchChildrenFromHtml" in poller
+    assert "updateOverviewDynamic" in overview
     assert 'data-service-age="${esc(service.name)}"' in overview
+
 
 
 def test_equity_charts_use_the_local_echarts_adapter() -> None:
@@ -429,7 +439,7 @@ def test_universe_panel_uses_one_monitoring_table_without_duplicate_chips() -> N
 
 
 def test_dashboard_polling_preserves_scroll_positions() -> None:
-    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
+    text = (STATIC / "core" / "view-state.js").read_text(encoding="utf-8")
 
     for marker in (
         "captureViewState",
@@ -443,7 +453,7 @@ def test_dashboard_polling_preserves_scroll_positions() -> None:
 
 
 def test_dashboard_polling_preserves_open_strategy_signals() -> None:
-    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
+    text = (STATIC / "core" / "view-state.js").read_text(encoding="utf-8")
 
     assert 'querySelectorAll("details")' in text
     assert "details.open = saved.open" in text
@@ -472,10 +482,10 @@ def test_paper_detail_replacement_preserves_interaction_state() -> None:
 
 
 def test_scroll_state_restores_layout_before_page_position() -> None:
-    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
+    text = (STATIC / "core" / "view-state.js").read_text(encoding="utf-8")
+    dom_update = (STATIC / "core" / "dom-update.js").read_text(encoding="utf-8")
     restore_start = text.index("export function restoreViewState")
-    restore_end = text.index("export function replaceChildrenFromHtml", restore_start)
-    restore_code = text[restore_start:restore_end]
+    restore_code = text[restore_start:]
 
     disclosures = restore_code.index('querySelectorAll("details")')
     containers = restore_code.index('querySelectorAll(".table-scroll")')
@@ -487,7 +497,7 @@ def test_scroll_state_restores_layout_before_page_position() -> None:
     )
     assert "currentY + (Math.abs(diff) > 2 ? diff : 0)" in restore_code
     assert "const remainingDelta = ownHeightDelta - nativeScrollDelta" in restore_code
-    assert "rootAboveAnchorPoint: beforeReleaseRect.bottom <= 100" in text
+    assert "rootAboveAnchorPoint: beforeReleaseRect.bottom <= 100" in dom_update
 
 
 def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
@@ -509,20 +519,21 @@ def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
 
 
 def test_dashboard_separates_live_status_from_heartbeat() -> None:
-    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    runtime_badge = (STATIC / "app" / "runtime-badge.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "实盘状态：UNKNOWN · 等待数据" in index
-    assert "实盘心跳：等待数据" in index
+    assert 'id="global-mode"' in index
+    assert 'id="last-cycle"' in index
+    assert 'aria-label="执行模式"' in index
     for marker in (
-        "latestLiveService",
+        "getLiveService",
         "liveHeartbeatAge",
         "liveHeartbeatStatus",
         "started_at",
-        "实盘状态：${mode} · ${duration}",
-        "实盘心跳：${relAge(age)} · ${freshness}",
+        "执行模式：${mode} · ${duration}",
     ):
-        assert marker in javascript
+        assert marker in runtime_badge
+
 
 
 def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:

@@ -132,14 +132,17 @@ def test_performance_endpoint_returns_504_when_query_exceeds_timeout() -> None:
 def test_dashboard_js_uses_fetch_timeout_and_section_inflight() -> None:
     from pathlib import Path
 
-    javascript = (
+    static_dir = (
         Path(__file__).resolve().parents[3]
-        / "src/crypto_momentum_lab/operator_dashboard/static/dashboard.js"
-    ).read_text(encoding="utf-8")
+        / "src/crypto_momentum_lab/operator_dashboard/static"
+    )
+    poller_js = (static_dir / "app/poller.js").read_text(encoding="utf-8")
+    section_state_js = (static_dir / "app/section-state.js").read_text(encoding="utf-8")
 
-    assert "AbortSignal.timeout" in javascript
-    assert "sectionInFlight" in javascript
-    assert "pollInFlight" not in javascript
+    assert "AbortSignal.timeout" in poller_js
+    assert "sectionInFlight" in section_state_js
+    assert "pollInFlight" not in poller_js
+
 
 
 @pytest.mark.asyncio

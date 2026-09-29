@@ -15,7 +15,6 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     FrozenDecisionInputs,
     PolicyState,
     create_authoritative_async_decision_filter,
-    create_authoritative_decision_filter,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (

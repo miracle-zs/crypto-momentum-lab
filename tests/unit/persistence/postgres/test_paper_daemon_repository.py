@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+
 import pytest
 
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
@@ -336,7 +337,9 @@ def test_candidate_from_row_restores_pending_candidate() -> None:
 @pytest.mark.asyncio
 async def test_save_checkpoint_commits_checkpoint_before_telemetry_event() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from structlog.testing import capture_logs
+
     from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
         PostgresPaperDaemonRepository,
     )
@@ -388,6 +391,7 @@ async def test_save_checkpoint_commits_checkpoint_before_telemetry_event() -> No
 @pytest.mark.asyncio
 async def test_save_checkpoint_does_not_insert_event_when_commit_fails() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
         PostgresPaperDaemonRepository,
     )

@@ -466,8 +466,8 @@ def test_filter_admits_flat_stream_position_without_coverage() -> None:
         EntryType,
         OrderIntentCandidate,
         StrategyDecision,
-        StrategySignal,
         StrategySide,
+        StrategySignal,
     )
 
     filt = create_authoritative_decision_filter(
@@ -525,8 +525,8 @@ def test_filter_rejects_catching_up_position_with_other_diagnostics() -> None:
         EntryType,
         OrderIntentCandidate,
         StrategyDecision,
-        StrategySignal,
         StrategySide,
+        StrategySignal,
     )
 
     key = PositionKey(

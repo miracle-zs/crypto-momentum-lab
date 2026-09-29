@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-
-import pytest
 
 from crypto_momentum_lab.domain.execution.progress_contract import (
     ExecutionReadiness,
-    ProgressFreshnessSLA,
-    ReadinessAssessment,
     ReadinessEvaluator,
 )
 
-NOW = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 20, 12, 0, 0, tzinfo=UTC)
 
 
 def test_progress_contract_fresh_data_is_independent_executable() -> None:
