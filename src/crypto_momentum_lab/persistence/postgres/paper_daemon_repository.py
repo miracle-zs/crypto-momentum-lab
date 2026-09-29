@@ -23,6 +23,16 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySide,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperEntryFilterConfig,
+    PaperExitConfig,
+    PaperExitMode,
+    PaperPosition,
+    PaperPositionStatus,
+    ReplayExecutionConfig,
+    SimulatedFill,
+    position_from_entry_fill,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
     PaperEquitySnapshotRow,
@@ -37,18 +47,6 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     order_intent_candidate_row,
     paper_fill_row,
     strategy_signal_row,
-)
-from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
-from crypto_momentum_lab.strategy_runner.fills import (
-    ReplayExecutionConfig,
-    SimulatedFill,
-)
-from crypto_momentum_lab.strategy_runner.portfolio import (
-    PaperExitConfig,
-    PaperExitMode,
-    PaperPosition,
-    PaperPositionStatus,
-    position_from_entry_fill,
 )
 
 _NEW_EXECUTION_FIELDS = {

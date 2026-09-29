@@ -10,6 +10,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperPosition,
+    PaperTradingRunReport,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
     PaperFillRow,
@@ -18,8 +22,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyRunRow,
     StrategySignalRow,
 )
-from crypto_momentum_lab.strategy_runner.paper import PaperTradingRunReport
-from crypto_momentum_lab.strategy_runner.portfolio import PaperPosition
 
 type RowModel = (
     type[StrategyRunRow]

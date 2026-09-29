@@ -1357,13 +1357,13 @@ class AsyncPostgresDecisionUnitOfWork:
                             f"legacy decision trace {trace.decision_id} has an "
                             "inconsistent decision scope or clock"
                         )
-                    from crypto_momentum_lab.tools.reproduce_decision import (
-                        audit_decision_trace,
+                    from crypto_momentum_lab.domain.decision.trace_audit import (
+                        verify_decision_trace,
                     )
 
-                    audit = await audit_decision_trace(
-                        trace.decision_id,
-                        trace_override=domain_trace,
+                    audit = verify_decision_trace(
+                        domain_trace,
+                        decision_id=trace.decision_id,
                     )
                 except DecisionCommitConflict:
                     raise
