@@ -2338,3 +2338,82 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
         "account_event_hub",
         "other-epoch",
     )
+
+
+@pytest.mark.asyncio
+async def test_restore_durable_positions_migrates_facts_hash_when_no_reservations() -> None:
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
+
+    key = PositionKey("live", "primary", "ZESTUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(),
+        prefix_facts_complete=True,
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        as_of=datetime.now(UTC),
+        facts=facts,
+        checkpoint=None,
+        revision=1,
+    )
+    stale_facts_payload = {
+        "schema_version": 1,
+        "position_key": {
+            "environment": key.environment,
+            "account_label": key.account_label,
+            "symbol": key.symbol,
+            "position_side": key.position_side.value,
+        },
+        "stream_scope": {
+            "stream_id": scope.stream_id,
+            "stream_epoch": scope.stream_epoch,
+        },
+        "facts_hash": "fabricated-or-stale-hash",
+        "projection_digest": "361b284fd6b1a250a670107f715f5522acd1c6e59c3e07f30bfaa76e436b648e",
+        "view_digest": "dffb40e034709dccfa27eda3ead495ca8254381e08a474f559643ffb6a99c2d4",
+        "journal_revision": 1,
+        "active_reservation_ids": [],
+    }
+    head = ExecutionHeadSnapshot(
+        stream_id=scope.stream_id,
+        stream_epoch=scope.stream_epoch,
+        revision=1,
+        projection_version="pv_test",
+        state_payload=stale_facts_payload,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=head,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    class StubUow:
+        async def load_positions(self, **kwargs):
+            return (state,)
+
+    book = ExecutionBook(execution_unit_of_work=StubUow())
+    # Must succeed without raising RuntimeError("durable position facts do not match the execution head")
+    await book._restore_durable_positions(
+        account_label="primary",
+        environment="live",
+        as_of=datetime.now(UTC),
+    )
+    assert key.canonical_id in book._books

@@ -33,6 +33,9 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
     TradeCommand,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    deterministic_client_order_id,
+)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
@@ -830,10 +833,18 @@ async def run_live_daemon(
             allocs = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
+            exit_client_order_id = (
+                cmd.idempotency_key
+                or (
+                    cmd.command_id
+                    if len(cmd.command_id) <= 36
+                    else deterministic_client_order_id(session_id, cmd.command_id)
+                )
+            )
             plan = OrderExecutionPlan(
                 intent_id=f"intent_exit_{cmd.command_id}",
                 run_id=session_id,
-                client_order_id=cmd.command_id,
+                client_order_id=exit_client_order_id,
                 symbol=cmd.position_key.symbol,
                 side="SELL" if cmd.side == StrategySide.LONG else "BUY",
                 order_type=(

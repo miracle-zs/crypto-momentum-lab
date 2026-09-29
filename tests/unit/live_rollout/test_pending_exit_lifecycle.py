@@ -125,3 +125,24 @@ async def test_pending_exit_superseded_when_position_confirmed_flat_on_exchange(
     uow.mark_exit_superseded.assert_awaited_once_with(
         "dec_test_123", command.command_id, "position_already_flat"
     )
+
+
+def test_exit_command_client_order_id_bounded() -> None:
+    """Binance and PostgreSQL strictly limit client_order_id to 36 chars.
+    A 39-char command_id must be deterministically hashed to <= 36 chars.
+    """
+    from crypto_momentum_lab.domain.execution.order_state import (
+        deterministic_client_order_id,
+    )
+
+    long_cmd_id = "cmd_exit_dec_GRASSUSDT_b213547b8a82344f"  # 39 chars
+    assert len(long_cmd_id) == 39
+
+    session_id = "live-b1-long-100u-5x-v1"
+    exit_client_order_id = (
+        long_cmd_id
+        if len(long_cmd_id) <= 36
+        else deterministic_client_order_id(session_id, long_cmd_id)
+    )
+    assert len(exit_client_order_id) <= 36
+    assert exit_client_order_id.startswith("cml_")

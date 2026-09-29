@@ -33,6 +33,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     ExitAllocation,
     FuturesPositionSide,
+    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
     PositionBook,
@@ -1155,9 +1156,19 @@ class ExecutionBook:
                 if facts.prefix_facts_complete and (
                     payload["facts_hash"] != facts.compute_facts_hash()
                 ):
-                    raise RuntimeError(
-                        "durable position facts do not match the execution head"
-                    )
+                    if not payload.get("active_reservation_ids"):
+                        log.warning(
+                            "execution_head_facts_migrated",
+                            account_label=key.account_label,
+                            symbol=key.symbol,
+                            position_side=key.position_side.value,
+                            old_facts_hash=payload["facts_hash"],
+                            new_facts_hash=facts.compute_facts_hash(),
+                        )
+                    else:
+                        raise RuntimeError(
+                            "durable position facts do not match the execution head"
+                        )
                 projection = PositionLedger(key).project(facts)
                 projection_digest = (
                     PositionRecoveryCodec.compute_projection_digest(projection)
