@@ -398,3 +398,98 @@ async def test_auto_heal_unmanaged_position_updates_existing_head_row() -> None:
     # Only 2 new records added (trade identity & fact journal event), no duplicate head inserted
     assert session.add.call_count == 2
 
+
+@pytest.mark.parametrize(
+    "previous_epoch",
+    [
+        "current-epoch",
+        "obsolete-epoch",
+    ],
+)
+async def test_self_heal_sequence_watermark_is_scoped_to_epoch(
+    previous_epoch: str,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import create_autospec
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        FuturesPositionSide,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.persistence.postgres.account_journal_store import (
+        PostgresAccountJournalStore,
+    )
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+        ExecutionBookHeadRow,
+    )
+
+    now = datetime(2026, 9, 29, 10, tzinfo=UTC)
+    key = PositionKey("live", "incident-account", "TESTUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key,
+        stream_id="account_event_hub",
+        stream_epoch="current-epoch",
+    )
+    fill = AccountFillEvent(
+        environment="live",
+        account_label=key.account_label,
+        symbol=key.symbol,
+        trade_id="test-trade",
+        order_id="test-order",
+        side="BUY",
+        quantity=Decimal("1"),
+        price=Decimal("10"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=now,
+        raw_payload={"positionSide": "LONG"},
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        facts=AccountFacts(position_key=key, stream_scope=scope, fills=(fill,)),
+        revision=1,
+        as_of=now,
+    )
+    head = ExecutionBookHeadRow(
+        environment="live",
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side="LONG",
+        stream_id="account_event_hub",
+        stream_epoch=previous_epoch,
+        revision=10,
+        projection_version="pv_previous",
+        state_payload={"last_sequence": 461, "active_reservation_ids": []},
+        updated_at=now,
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=[1, None, None, head])
+    session.scalars = AsyncMock(
+        side_effect=[
+            SimpleNamespace(all=lambda: [fill]),
+            SimpleNamespace(all=lambda: []),
+        ]
+    )
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    store = create_autospec(PostgresAccountJournalStore, instance=True, spec_set=True)
+    store.load_recovery_in_session.return_value = cut
+
+    assert await auto_heal_unmanaged_position(
+        session=session,
+        journal_store=store,
+        environment="live",
+        account_label=key.account_label,
+        symbol=key.symbol,
+        active_stream_epoch="current-epoch",
+    )
+    session.commit.assert_awaited_once()
+    assert head.stream_epoch == "current-epoch"
+    assert head.state_payload["last_sequence"] == (
+        461 if previous_epoch == "current-epoch" else None
+    ), "the new stream starts its own sequence; carrying 461 rejects fresh events"
+

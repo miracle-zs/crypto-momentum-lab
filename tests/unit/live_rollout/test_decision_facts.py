@@ -298,41 +298,135 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
     assert src.policy_revision == 1
 
 
-async def test_recover_pending_exits_defers_when_book_stream_mismatches() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
-
-    cmd = MagicMock(spec=TradeCommand)
-    cmd.command_id = "cmd_123"
-    cmd.expected_projection_version = "pv_abc"
-    cmd.position_key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="GRASSUSDT",
-        position_side=FuturesPositionSide.LONG,
+def _pending_exit_case():
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, create_autospec
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        ExitAllocationPlan,
+        ExitPolicyMode,
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        AsyncPostgresDecisionUnitOfWork,
     )
 
-    uow = MagicMock()
-    uow.load_pending_exits = AsyncMock(return_value=[("dec_123", cmd)])
-
-    mock_book = MagicMock()
-    mock_book.read = AsyncMock(
-        side_effect=ValueError("requested account stream does not match the restored position")
-    )
-
-    src = LiveDecisionFactSource(
-        "primary",
-        decision_unit_of_work=uow,
-        execution_book=mock_book,
-    )
-    src.set_exit_handler(AsyncMock())
-    src.bind_account_stream(
+    key = PositionKey("live", "incident-account", "TESTUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key,
         stream_id="account_event_hub",
-        stream_epoch="epoch-new",
-        sequence=10,
+        stream_epoch="current-epoch",
+    )
+    plan = ExitAllocationPlan(
+        position_key=key,
+        allocations=(ExitAllocation("batch-1", Decimal("1")),),
+        total_allocated_quantity=Decimal("1"),
+        policy=ExitPolicyMode.FULL_POSITION_CLOSE,
+        projection_version="pv_expected",
+    )
+    command = TradeCommand(
+        command_id="incident-exit",
+        position_key=key,
+        command_type=TradeCommandType.EXIT,
+        side=StrategySide.LONG,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("1"),
+        reduce_only=True,
+        allocation_plan=plan,
+        expected_projection_version="pv_expected",
+        created_at=datetime(2026, 9, 29, 10, tzinfo=UTC),
+    )
+    uow = create_autospec(AsyncPostgresDecisionUnitOfWork, instance=True, spec_set=True)
+    uow.load_pending_exits.return_value = (("incident-decision", command),)
+    uow.mark_exit_dispatched.return_value = True
+    book = create_autospec(ExecutionBook, instance=True, spec_set=True)
+    view = SimpleNamespace(
+        stream_scope=scope,
+        is_ready_for_trade=True,
+        projection_version="pv_expected",
+    )
+    book.read.return_value = view
+    source = LiveDecisionFactSource(
+        "incident-account",
+        decision_unit_of_work=uow,
+        execution_book=book,
+    )
+    handler = AsyncMock(return_value=SimpleNamespace(state="submitted"))
+    source.set_exit_handler(handler)
+    source.bind_account_stream(
+        stream_id="account_event_hub", stream_epoch="current-epoch", sequence=1
+    )
+    return source, uow, book, view, handler, command
+
+
+async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
+    source, uow, book, _, handler, command = _pending_exit_case()
+    book.read.side_effect = ValueError(
+        "requested account stream does not match the restored position"
+    )
+    await source.recover_pending_exits()
+    handler.assert_not_awaited()
+    uow.mark_exit_dispatched.assert_not_awaited()
+
+    book.read.side_effect = None
+    await source.recover_pending_exits()
+    handler.assert_awaited_once_with(command)
+    uow.mark_exit_dispatched.assert_awaited_once_with(
+        "incident-decision", command.command_id
     )
 
-    # Should not raise ValueError; should defer the pending exit gracefully
-    await src.recover_pending_exits()
-    src._exit_handler.assert_not_called()
+
+@pytest.mark.parametrize("mismatch", ["epoch", "projection", "allocation", "not_ready"])
+async def test_stale_pending_exit_is_never_dispatched_or_silently_acknowledged(
+    mismatch: str,
+) -> None:
+    from dataclasses import replace
+
+    source, uow, _, view, handler, command = _pending_exit_case()
+    if mismatch == "epoch":
+        view.stream_scope = replace(view.stream_scope, stream_epoch="obsolete-epoch")
+    elif mismatch == "projection":
+        view.projection_version = "pv_newer"
+    elif mismatch == "allocation":
+        command = replace(
+            command,
+            allocation_plan=replace(
+                command.allocation_plan, projection_version="pv_other"
+            ),
+        )
+        uow.load_pending_exits.return_value = (("incident-decision", command),)
+    else:
+        view.is_ready_for_trade = False
+    for _ in range(3):
+        await source.recover_pending_exits()
+    handler.assert_not_awaited()
+    uow.mark_exit_dispatched.assert_not_awaited()
+    # Characterization: there is no exchange reconciliation at this seam that
+    # would justify declaring an unknown submission superseded.
+    uow.mark_exit_superseded.assert_not_awaited()
+
+
+@pytest.mark.parametrize("result_state", ["rejected", "unknown"])
+async def test_unconfirmed_exit_does_not_advance_durable_status(
+    result_state: str,
+) -> None:
+    source, uow, _, _, handler, _ = _pending_exit_case()
+    handler.return_value = SimpleNamespace(state=result_state)
+    await source.recover_pending_exits()
+    handler.assert_awaited_once()
+    uow.mark_exit_dispatched.assert_not_awaited()
+
+
+async def test_unrelated_book_corruption_is_not_swallowed_as_epoch_recovery() -> None:
+    source, _, book, _, handler, _ = _pending_exit_case()
+    book.read.side_effect = ValueError("invalid recovery payload")
+    with pytest.raises(ValueError, match="invalid recovery payload"):
+        await source.recover_pending_exits()
+    handler.assert_not_awaited()
 

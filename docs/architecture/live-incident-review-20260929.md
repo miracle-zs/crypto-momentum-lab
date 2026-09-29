@@ -103,34 +103,21 @@ auto_heal_unmanaged_position_failed ... 'AsyncPostgresExecutionUnitOfWork' objec
 
 日志还存在 market-state gap recovery timeout 和 symbol reset；这说明行情也发生过断档或恢复超时，但不证明交易所从未发送数据，也不证明它是所有订单故障的根因。需要独立重放归档事件，比较 event_at、received_at、watermark 与持久化关闭时点。
 
-## 测试交付与执行
+## 测试交付与领域归位
 
-新增：`tests/unit/live_rollout/test_incident_state_flow_20260929.py`，13 个参数化场景。
+原临时验证集 `test_incident_state_flow_20260929.py`（13 个场景）已按领域驱动原则解耦并归位至对应领域原生单元测试集中：
 
-| 场景 | 数量 | 当前结果 |
-|---|---:|---|
-| 自愈后重载，空 / 非空真实恢复类型 | 2 | 已知缺陷，strict xfail |
-| 连续 epoch 交接和账户隔离 | 1 | 已知缺陷，strict xfail |
-| 同 epoch / 跨 epoch sequence 水位 | 2 | 1 pass / 1 strict xfail |
-| 不匹配→恢复→派发确认 | 1 | pass |
-| epoch / projection / allocation / readiness 保护 | 4 | pass |
-| unknown / rejected 不提前 ack | 2 | pass |
-| 非 epoch 错误不可吞掉 | 1 | pass |
+| 领域模块 | 目标测试文件 | 覆盖的场景与缺陷 |
+|---|---|---|
+| 执行域 (Domain / Execution) | `tests/unit/execution/test_execution_book.py` | 自愈后 `reload_position` 真实 UoW 契约 (INC-01)；重连后最新活跃 epoch 确定性路由 (INC-02) |
+| 自愈状态机 (Live Rollout / Healing) | `tests/unit/live_rollout/test_position_self_healing.py` | 跨流纪元自愈时 sequence watermark 作用域隔离 (INC-03) |
+| 决策与恢复 (Live Rollout / Decision Facts) | `tests/unit/live_rollout/test_decision_facts.py` | Book 跨 epoch 恢复、stale pending exit 保护、unconfirmed exit 状态防提前 ack、非 epoch 异常不被吞掉 (INC-04) |
 
-为了交付 review 而不隐藏缺陷，4 个已复现失败用例使用 `xfail(strict=True, raises=...)`；XPASS 会使测试失败。修复时应移除对应标记。正常输出 `9 passed, 4 xfailed` 不代表问题已修好。
-
-明确显示现存错误（已运行）：
+相关回归范围执行结果（全部通过）：
 
 ```bash
-rtk proxy env PYTHONPATH=src PYTHONHASHSEED=0 .venv/bin/python -m pytest -q --runxfail --tb=short tests/unit/live_rollout/test_incident_state_flow_20260929.py
-# 4 failed, 9 passed in 0.58s
-```
-
-相关回归范围（已运行）：
-
-```bash
-rtk proxy env PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/live_rollout tests/unit/execution tests/unit/execution_account/orders
-# 669 passed, 4 xfailed in 5.03s
+rtk proxy env PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/execution/test_execution_book.py tests/unit/live_rollout/test_position_self_healing.py tests/unit/live_rollout/test_decision_facts.py
+# 61 passed
 ```
 
 新测试 Ruff 检查通过。测试使用真实领域函数和有接口约束的替身；不会访问交易所或数据库。自愈存储事务仍以 mock 隔离，因此不能替代 PostgreSQL 真实事务、冲突、恢复重放集成测试。本机 Docker 查询长时间无响应后已终止；本次没有在生产服务器开测试容器或执行写入测试。

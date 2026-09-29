@@ -2256,3 +2256,85 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
     assert book._head_projection_digests[key.canonical_id] != "old-stale-digest"
 
 
+@pytest.mark.parametrize("has_position", [False, True])
+async def test_repaired_position_reload_uses_the_real_uow_contract(
+    has_position: bool,
+) -> None:
+    from unittest.mock import create_autospec
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        FuturesPositionSide,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        AsyncPostgresExecutionUnitOfWork,
+        DurableExecutionPositionState,
+    )
+
+    uow = create_autospec(
+        AsyncPostgresExecutionUnitOfWork, instance=True, spec_set=True
+    )
+    book = ExecutionBook(execution_unit_of_work=uow)
+    key = PositionKey("live", "incident-account", "TESTUSDT", FuturesPositionSide.LONG)
+    now = datetime(2026, 9, 29, 10, tzinfo=UTC)
+
+    scope = AccountFactStreamScope.for_position_key(
+        key,
+        stream_id="account_event_hub",
+        stream_epoch="current-epoch",
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        facts=AccountFacts(position_key=key, stream_scope=scope),
+        revision=0,
+        as_of=now,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=None,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+    uow.load_positions.return_value = (state,) if has_position else ()
+    result = await book.reload_position(key, as_of=now)
+    if has_position:
+        assert result is not None
+        assert result.stream_scope == scope
+        assert result.total_quantity == Decimal("0")
+    else:
+        assert result is None
+    uow.load_positions.assert_awaited_once_with(
+        environment="live",
+        account_label="incident-account",
+        as_of=now,
+    )
+
+
+def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
+    book = ExecutionBook()
+    book.register_active_stream(
+        environment="live",
+        account_label="other-account",
+        stream_id="account_event_hub",
+        stream_epoch="other-epoch",
+    )
+    for index in range(16):
+        epoch = f"epoch-{index}"
+        book.register_active_stream(
+            environment="live",
+            account_label="incident-account",
+            stream_id="account_event_hub",
+            stream_epoch=epoch,
+        )
+        assert book.get_active_stream("live", "incident-account") == (
+            "account_event_hub",
+            epoch,
+        ), "a reconnect must not route new observations back to an obsolete epoch"
+    assert book.get_active_stream("live", "other-account") == (
+        "account_event_hub",
+        "other-epoch",
+    )
