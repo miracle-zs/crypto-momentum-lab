@@ -2974,6 +2974,7 @@ class ExecutionBook:
                             if journal is not None:
                                 journal.adopt_stream_scope(scope)
                             candidate._recovery_adoption_scope = scope
+                            candidate._last_sequences.pop(canon, None)
                         else:
                             candidate._journals[canon] = AccountJournal(
                                 key, stream_scope=scope
@@ -3020,7 +3021,8 @@ class ExecutionBook:
                     # at that sequence is still rejected below.
                     previous_sequence = candidate._last_sequences.get(canon)
                     if (
-                        evidence.sequence is not None
+                        not adopting_epoch
+                        and evidence.sequence is not None
                         and previous_sequence is not None
                         and evidence.sequence <= previous_sequence
                     ):
@@ -3099,7 +3101,7 @@ class ExecutionBook:
                             evidence=evidence,
                             adopting_epoch=adopting_epoch,
                         )
-                    if adopting_epoch and checkpoint is None:
+                    if adopting_epoch and not can_rollover and checkpoint is None:
                         raise _AbortObservation(
                             EvidenceConflict(
                                 evidence_id=evidence.evidence_id,
@@ -3185,6 +3187,7 @@ class ExecutionBook:
                             if adopting_epoch and checkpoint is not None
                             else None
                         ),
+                        is_flat_adoption=can_rollover,
                     )
                     candidate._head_projection_digests[canon] = str(
                         head_payload["projection_digest"]
@@ -3332,6 +3335,7 @@ class ExecutionBook:
                     journal = self._journals.get(key.canonical_id)
                     if journal is not None:
                         journal.adopt_stream_scope(scope)
+                    self._last_sequences.pop(key.canonical_id, None)
                 else:
                     return EvidenceConflict(
                         evidence_id=evidence.evidence_id,
