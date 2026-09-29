@@ -1215,8 +1215,9 @@ function mockScrollDoc({ scrollY = 0, scrollHeight = 2500, innerHeight = 800 } =
   return mockDoc;
 }
 
-test("createScrollGuard recovers a partial upward jump left by background DOM writes", () => {
-  // 800 → 400 is the jump the old absolute defense (targetY <= 20) missed.
+test("createScrollGuard does not drag the page forward when scroll moved up", () => {
+  // 800 → 400 can be the user scrolling up or native anchoring after content
+  // above shrank. Snapping back to 800 is the "jump forward" bug.
   const previousWindow = globalThis.window;
   const mockDoc = mockScrollDoc({ scrollY: 800, scrollHeight: 3000 });
   globalThis.window = mockDoc.defaultView;
@@ -1226,24 +1227,24 @@ test("createScrollGuard recovers a partial upward jump left by background DOM wr
     mockDoc.scrollingElement.scrollTop = 400;
     mockDoc.defaultView.scrollY = 400;
     const restored = guard.restore();
-    assert.equal(restored, 800);
-    assert.equal(mockDoc.scrollingElement.scrollTop, 800);
+    assert.equal(restored, 400);
+    assert.equal(mockDoc.scrollingElement.scrollTop, 400);
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
 });
 
-test("createScrollGuard restores reading position after a background poll batch", () => {
+test("createScrollGuard restores only when the page collapsed to the top", () => {
   const previousWindow = globalThis.window;
   const mockDoc = mockScrollDoc({ scrollY: 800, scrollHeight: 3000 });
   globalThis.window = mockDoc.defaultView;
   globalThis.window.document = mockDoc;
   try {
     const guard = createScrollGuard();
-    // Simulate DOM churn collapsing the document and clamping scroll.
-    mockDoc.scrollingElement.scrollTop = 120;
-    mockDoc.defaultView.scrollY = 120;
+    // Simulate DOM churn collapsing the document and clamping scroll to top.
+    mockDoc.scrollingElement.scrollTop = 0;
+    mockDoc.defaultView.scrollY = 0;
     const restored = guard.restore();
     assert.equal(restored, 800);
     assert.equal(mockDoc.scrollingElement.scrollTop, 800);
@@ -1260,8 +1261,8 @@ test("createScrollGuard can force-restore even while a scroll gesture is active"
   globalThis.window.document = mockDoc;
   try {
     const guard = createScrollGuard();
-    mockDoc.scrollingElement.scrollTop = 120;
-    mockDoc.defaultView.scrollY = 120;
+    mockDoc.scrollingElement.scrollTop = 0;
+    mockDoc.defaultView.scrollY = 0;
     guard.restore({ force: true });
     assert.equal(mockDoc.scrollingElement.scrollTop, 800);
     // Idle module state: no scroll gesture has been recorded in this process.

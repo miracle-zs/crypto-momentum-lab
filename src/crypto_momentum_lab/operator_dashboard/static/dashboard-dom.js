@@ -35,9 +35,12 @@ export function isUserScrolling(now = Date.now()) {
 }
 
 /**
- * Capture the window reading position and restore it after a batch of DOM
- * mutations (background poll). Unlike restoreViewState this only cares about
- * page scroll, so it can wrap several section updates safely.
+ * Guard window scroll across a batch of DOM mutations (background poll).
+ *
+ * Only repairs a collapse to the top. Never snaps back to a remembered pageY
+ * just because the current offset is smaller: that fights the user scrolling
+ * up and the browser's native scroll anchoring, and shows up as the page
+ * "jumping forward" through content after every refresh.
  */
 export function createScrollGuard() {
   const view = typeof window !== "undefined" ? window : null;
@@ -52,12 +55,10 @@ export function createScrollGuard() {
       if (!view) return pageY;
       if (!force && isUserScrolling()) return view.scrollY ?? 0;
       const currentY = view.scrollY ?? scrollingElement?.scrollTop ?? 0;
-      const currentX = view.scrollX ?? scrollingElement?.scrollLeft ?? 0;
-      // Keep the reading position stable on background updates. Any upward
-      // drift toward the top (full or partial) is treated as a poll jump.
-      const jumpedUp = pageY > 20 && currentY < pageY - 2;
+      // True jump-to-top only. A smaller non-zero offset is legitimate
+      // (user scrolled up, or content above shrank and anchoring compensated).
       const collapsed = pageY > 20 && currentY <= 20;
-      if (!force && !jumpedUp && !collapsed) return currentY;
+      if (!force && !collapsed) return currentY;
       const maxScroll = Math.max(
         0,
         (scrollingElement?.scrollHeight || 0) - (view.innerHeight || 0),
@@ -439,9 +440,9 @@ function updateChildrenFromHtml(root, html, patch) {
   root.__renderGeneration = generation;
   const state = captureViewState(root);
   const content = fragmentFromHtml(root.ownerDocument, html);
-  // Batch-level reading-position lock. restoreViewState alone only defends a
-  // full collapse to ~0; this also undoes partial jumps (800 → 400) that
-  // background polls used to leave in place.
+  // Batch-level lock: only repairs a collapse to the top after DOM writes.
+  // Partial offset changes are left to restoreViewState anchors and native
+  // scroll anchoring so the page never "jumps forward" through content.
   const scrollGuard = createScrollGuard();
 
   if (patch) {
@@ -463,6 +464,12 @@ function updateChildrenFromHtml(root, html, patch) {
         void root.offsetHeight;
         restoreViewState(root, state);
         scrollGuard.restore();
+        // Charts mount on a later task (MutationObserver); catch a late clamp.
+        setTimeout(() => {
+          if (root.__renderGeneration !== generation) return;
+          restoreViewState(root, state);
+          scrollGuard.restore();
+        }, 50);
       });
     } else {
       root.style.minHeight = previousMinHeight;
