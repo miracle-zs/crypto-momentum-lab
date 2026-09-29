@@ -699,7 +699,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                             active_stream_epoch=active_stream[1] if active_stream else None,
                         )
                         if healed:
-                            healed_any = True
                             if hasattr(book, "reload_position"):
                                 key = PositionKey(
                                     environment="live",
@@ -707,7 +706,11 @@ class PostgresLiveContextProvider(LiveContextReader):
                                     symbol=sym,
                                     position_side=pos_side,
                                 )
-                                await book.reload_position(key)
+                                reloaded = await book.reload_position(key)
+                                if reloaded is not None:
+                                    healed_any = True
+                            else:
+                                healed_any = True
                 except Exception as heal_err:
                     structlog.get_logger(__name__).error(
                         "auto_heal_unmanaged_position_failed",

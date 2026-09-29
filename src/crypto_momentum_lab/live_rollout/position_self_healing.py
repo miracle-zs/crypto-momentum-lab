@@ -289,7 +289,8 @@ async def auto_heal_unmanaged_position(
         if isinstance(raw_reservations, list)
         else []
     )
-    last_seq = prev_payload.get("last_sequence")
+    is_same_epoch = head is not None and head.stream_epoch == active_stream_epoch
+    last_seq = prev_payload.get("last_sequence") if is_same_epoch else None
     if not isinstance(last_seq, int) or last_seq < 0:
         last_seq = None
 

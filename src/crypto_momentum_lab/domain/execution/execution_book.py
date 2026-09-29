@@ -584,6 +584,7 @@ class ExecutionBook:
         self._active_transaction: Any | None = None
         self._stream_scopes: dict[str, AccountFactStreamScope] = {}
         self._active_streams: set[tuple[str, str, str, str]] = set()
+        self._latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
         self._head_revisions: dict[str, int] = {}
         self._head_projection_digests: dict[str, str] = {}
         self._head_expected_reservation_ids: dict[str, set[str]] = {}
@@ -617,6 +618,10 @@ class ExecutionBook:
         self._active_streams.add(
             (environment, account_label, stream_id, stream_epoch)
         )
+        self._latest_active_streams[(environment, account_label)] = (
+            stream_id,
+            stream_epoch,
+        )
 
     def get_active_stream(
         self,
@@ -624,6 +629,9 @@ class ExecutionBook:
         account_label: str,
     ) -> tuple[str, str] | None:
         """Return the active (stream_id, stream_epoch) registered for this account, if known."""
+        latest = self._latest_active_streams.get((environment, account_label))
+        if latest is not None:
+            return latest
         for env, acc, sid, epoch in self._active_streams:
             if env == environment and acc == account_label:
                 return (sid, epoch)
@@ -644,13 +652,23 @@ class ExecutionBook:
         as_of = as_of or datetime.now(UTC)
         canon = key.canonical_id
         async with self._mutation_lock(key):
-            states = await self._execution_unit_of_work.load_execution_positions(
+            states = await self._execution_unit_of_work.load_positions(
                 account_label=key.account_label,
                 environment=key.environment,
                 as_of=as_of,
             )
             target_state = next(
-                (s for s in states if s.key == key),
+                (
+                    s
+                    for s in states
+                    if (
+                        s.scope.environment == key.environment
+                        and s.scope.account_label == key.account_label
+                        and s.scope.symbol == key.symbol
+                        and getattr(s.scope.position_side, "value", s.scope.position_side)
+                        == getattr(key.position_side, "value", key.position_side)
+                    )
+                ),
                 None,
             )
             if target_state is None:
@@ -670,6 +688,18 @@ class ExecutionBook:
                 self._head_projection_digests[canon] = str(
                     payload.get("projection_digest", "")
                 )
+                active_res = payload.get("active_reservation_ids", [])
+                self._head_expected_reservation_ids[canon] = (
+                    set(active_res) if isinstance(active_res, list) else set()
+                )
+                last_sequence = payload.get("last_sequence")
+                if isinstance(last_sequence, int) and last_sequence >= 0:
+                    self._last_sequences[canon] = last_sequence
+                else:
+                    self._last_sequences.pop(canon, None)
+            else:
+                self._head_revisions[canon] = 0
+
             self._journals[canon] = journal
             self._books[canon] = book
             self._stream_scopes[canon] = scope
@@ -744,6 +774,7 @@ class ExecutionBook:
         )
         candidate._stream_scopes = dict(self._stream_scopes)
         candidate._active_streams = set(self._active_streams)
+        candidate._latest_active_streams = dict(self._latest_active_streams)
         candidate._head_revisions = dict(self._head_revisions)
         candidate._head_projection_digests = dict(self._head_projection_digests)
         candidate._journal_revisions = dict(self._journal_revisions)
@@ -777,6 +808,7 @@ class ExecutionBook:
             "_dispatch_reconciliation_required_commands",
             "_stream_scopes",
             "_active_streams",
+            "_latest_active_streams",
             "_head_revisions",
             "_head_projection_digests",
             "_journal_revisions",
