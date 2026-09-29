@@ -100,16 +100,41 @@ deepcopy 与摘要两组数字口径不同（前者来自 `benchmark_execution.p
 | B：已提交事实改为真正不可变 + 增量事务 | 未实现；可同时去掉全局锁，但需要嵌套不可变（`raw_payload`）或所有权类型 |
 | C：按仓位划分状态与提交范围 | 未实现；仅把锁换成 per-key lock 不安全：提交会发布多个全局集合，两个并发候选可能覆盖彼此结果 |
 
-## 3. 已解决主要热路径：watermark 门禁跳过同桶扫描
+## 3. 部分解决：同桶扫描已门禁，补桶前驱查找的二次项已修复
 
 [`_observe`](../../src/crypto_momentum_lab/market_data/runtime_states.py#L586) 仍对每个成功归一化事件调用 `_materialize_empty_buckets_through`。当前实现在 [补桶方法](../../src/crypto_momentum_lab/market_data/runtime_states.py#L732) 记录已扫描到的 watermark 桶；同一桶内立即返回。expected-symbol 集合改变或首次观察新标的时会使门禁失效。提交 `93b2919` 已加入实现及失效处理，单元测试覆盖重复 watermark、成员变化和新标的。
 
 目前同一 watermark 桶内每条后续事件为 O(1) 门禁检查；watermark 桶推进时仍需排序和检查所有已观察标的，约 O(S log S)。已退出池的 observed 标的仍会参与该次扫描。此为每桶一次的工作，已不再随桶内每条行情重复。
 
+**补桶前驱查找的二次项（本次修复）**：[`_previous_state_for_symbol`](../../src/crypto_momentum_lab/market_data/runtime_states.py#L797) 要为某个标的找上一个桶时，会遍历 `_accumulators_by_bucket` 的全部条目；而 [`_materialize_buckets_until`](../../src/crypto_momentum_lab/market_data/runtime_states.py#L764) 的 `while` 循环**每个新桶都调用它一次**。于是一次水位推进若补 B 个桶、当时已有 T 个桶，成本是 **O(B×T)** —— 长缺口、重启恢复、新标的加入都会放大它。watermark 门禁只消除同一桶内的重复扫描，完全不触及这一项。
+
+本机 `bucket_lookup_probe.py`（调用真实补桶函数，统计该查找内部遍历过的条目数），修复前：
+
+| 标的数 | 桶/标的 | 新增桶 | 前驱查找次数 | 扫描条目 | 耗时 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 4 | 400 | 400 | 79,800 | 7.74 ms |
+| 200 | 4 | 800 | 800 | 319,600 | 24.40 ms |
+| 400 | 4 | 1,600 | 1,600 | 1,279,200 | 80.73 ms |
+| 35 | 20 | 700 | 700 | 244,650 | 20.82 ms |
+| 35 | 80 | 2,800 | 2,800 | 3,918,600 | 248.70 ms |
+
+最后两行按线上标的数（`monitoring_symbols=35`）取值：**20 分钟缺口对应单次 248.70 ms 的同步阻塞**，与线上观察到的部署/重启恢复形态一致，不是理论担忧。
+
+修复（提交 `4ac51ea`）：只对首个新桶做一次前驱查找，循环内把刚激活（或已存在）的那个桶作为下一桶的前驱。修复后同一组场景：
+
+| 标的数 | 桶/标的 | 新增桶 | 前驱查找次数 | 扫描条目 | 耗时 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 4 | 400 | 100 | 19,800 | 4.69 ms |
+| 400 | 4 | 1,600 | 400 | 319,200 | 36.79 ms |
+| 35 | 20 | 700 | 35 | 11,900 | 7.76 ms |
+| 35 | 80 | 2,800 | 35 | 47,600 | 30.26 ms |
+
+查找次数从 O(桶数) 降到 O(标的数)；跳桶与逐桶两条路径产出完全相同的 accumulators、每标的游标与两个截止堆（`test_one_jump_fill_matches_bucket_by_bucket_fill`），另有 `test_materializing_many_buckets_looks_up_predecessor_once_per_symbol` 锁定查找次数。**仍保留**：每个标的每批仍有一次全表扫描（O(标的数 × 桶总数)），彻底消除需要按标的维护桶索引（账户+symbol → 有序桶），尚未实现。
+
 | 方案 | 数据结构与复杂度 | 适用与约束 |
 |---|---|---|
-| A：watermark 桶门禁 | **已实现**；同桶 O(1)，每次桶推进 O(S log S) | 当前标的规模下先保留；门禁失效规则已有测试 |
-| B：每标的 next_due 最小堆 | 无到期工作时 O(1)，到期 K 个约 O(K log S) | 若实测每桶全量扫描仍贵再比较；需处理池变化与陈旧堆项 |
+| A：watermark 桶门禁 | **已实现**；同桶 O(1)；补桶前驱查找的二次项已修复，降为每标的每批一次查找 | 门禁失效规则与查找次数均有测试 |
+| B：每标的 next_due 最小堆 | 无到期工作时 O(1)，到期 K 个约 O(K log S) | 不解决前驱查找；需处理池变化与陈旧堆项 |
 | C：15 秒时间轮/桶队列 | 按到期桶处理标的 | 当前统一周期适合；跳时、长缺口和重入逻辑更复杂 |
 
 现有 `_realtime_deadlines`、`_durable_deadlines` 已经用堆做关闭调度；同桶重复扫描也已通过水位游标消除。是否用 B/C 替代每桶全量扫描，取决于线上 S 与事件循环耗时，而不是数据结构本身。
@@ -158,9 +183,11 @@ Book-only drift 诊断没有删除，而是移到独立周期：[`_observe_book_
 
 `dense_fill_bench.py` 与同名 `.csv` 为修复前全量扫描和当前 watermark 门禁的对照；同样用 `PYTHONPATH=src` 运行。CSV 另有 2,000/5,000 标的压力规模，仅作复杂度验证，不代表生产标的数。
 
+`bucket_lookup_probe.py` 复现第 3 节的补桶前驱查找计数与耗时（`PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/bucket_lookup_probe.py`），同样只用合成数据、不连数据库。
+
 `readcut_probe.py` 量化 delta 之后仍留在每次观察上的 O(历史) 成本：`read_cut()` 重建、`compute_facts_hash()` 与 `copy_for_transaction()` 容器拷贝（见第 1 节表格）。它同样只用合成数据、不连数据库，运行方式为 `PYTHONPATH=src .venv/bin/python reports/performance-audit-20260929/readcut_probe.py`。
 
-本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 19 passed。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**（生产主机上用独立临时容器与代码副本跑过同一套件，结果相同；临时容器与副本跑完即删，未接触生产库）。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
+本次验证：`tests/unit` 全量运行 1917 passed / 4 skipped（跳过项需要 loopback socket 权限），其中 `tests/unit/market_data/test_runtime_states.py` 21 passed（新增跳桶/逐桶等价与前驱查找次数两项）。Recording-session 脚本确认首次全量写入对 100/1,000/10,000 条事实分别发出 1/3/21 次 INSERT execute，后续观察固定 1 次 execute / 2 行，且首次的绑定行与修复前实现及等价原型一致。PostgreSQL 集成测试已在本机 `postgres:16-alpine` + `alembic upgrade head` 上运行 `tests/integration/persistence`：**71 passed / 1 failed**（生产主机上用独立临时容器与代码副本跑过同一套件，结果相同；临时容器与副本跑完即删，未接触生产库）。唯一失败是 `test_execution_book_epoch_adoption.py::test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches`（期望 `total_quantity == 1.5`，实际 0.5）；同一测试在本次改动之前的提交 `6684588` 上、以及重建的干净 schema 上同样失败，属既有问题，不是本轮改动引入。它尚未定位，也不在本文范围内修复。事务回滚、并发冲突与恢复重放仍需要在真实环境进一步验证。
 
 前端改动无法用 node 验证（本机无 node）：P0 与 P1 均用 JavaScriptCore（`osascript -l JavaScript`）执行从 `dashboard.js` / `dashboard-ui.js` 抽取的真实函数体，并做语法解析检查。
 
