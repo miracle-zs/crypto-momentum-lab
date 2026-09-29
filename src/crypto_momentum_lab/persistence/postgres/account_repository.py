@@ -453,9 +453,14 @@ class PostgresAccountRepository:
                 recent_rows = (await session.execute(recent_statement)).scalars().all()
                 if recent_rows:
                     return frozenset(recent_rows)
-                raise RuntimeError(
-                    "ready reconciliation is missing active position snapshots"
+                log.warning(
+                    "reconciliation_missing_active_position_snapshots",
+                    environment=environment,
+                    account_label=account_label,
+                    position_count=position_count,
+                    observed_at=str(latest_ready_run.c.reconciliation_observed_at),
                 )
+                return frozenset()
             return result
 
     async def load_active_position_account_labels(

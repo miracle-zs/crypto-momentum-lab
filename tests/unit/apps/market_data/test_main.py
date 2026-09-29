@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -243,6 +244,93 @@ async def test_protected_symbols_discover_live_accounts_with_positions() -> None
     assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"})
     assert accounts.labels_calls == ["live"]
     assert set(accounts.symbol_calls) == {"primary", "account-2"}
+
+
+async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
+    class FakePaperRepository:
+        async def load_open_position_symbols(
+            self, protected_run_ids: Iterable[str]
+        ) -> frozenset[str]:
+            return frozenset()
+
+    class FlatAccountRepository:
+        async def load_active_position_account_labels(
+            self, *, environment: str
+        ) -> frozenset[str]:
+            return frozenset({"primary", "account-2"})
+
+        async def load_active_position_symbols(
+            self, *, environment: str, account_label: str
+        ) -> frozenset[str]:
+            return frozenset()
+
+    symbols = await main._load_protected_symbols(
+        paper_repository=FakePaperRepository(),
+        account_repository=FlatAccountRepository(),
+        protected_run_ids=frozenset(),
+        configured_live_position_account_labels=frozenset({"primary"}),
+    )
+
+    assert symbols == frozenset()
+
+
+async def test_load_protected_symbols_isolates_account_exception() -> None:
+    class FakePaperRepository:
+        async def load_open_position_symbols(
+            self, protected_run_ids: Iterable[str]
+        ) -> frozenset[str]:
+            return frozenset({"PAPERUSDT"})
+
+    class FailingAccountRepository:
+        async def load_active_position_account_labels(
+            self, *, environment: str
+        ) -> frozenset[str]:
+            return frozenset({"primary", "account-2"})
+
+        async def load_active_position_symbols(
+            self, *, environment: str, account_label: str
+        ) -> frozenset[str]:
+            if account_label == "account-2":
+                raise RuntimeError("ready reconciliation is missing active position snapshots")
+            return frozenset({"PRIMARYUSDT"})
+
+    symbols = await main._load_protected_symbols(
+        paper_repository=FakePaperRepository(),
+        account_repository=FailingAccountRepository(),
+        protected_run_ids=frozenset({"paper-run"}),
+        configured_live_position_account_labels=frozenset({"primary"}),
+    )
+
+    # account-2's exception was isolated and logged as a warning; primary and paper still protected!
+    assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT"})
+
+
+async def test_load_protected_symbols_graceful_when_labels_discovery_fails() -> None:
+    class FakePaperRepository:
+        async def load_open_position_symbols(
+            self, protected_run_ids: Iterable[str]
+        ) -> frozenset[str]:
+            return frozenset({"PAPERUSDT"})
+
+    class FailingDiscoveryAccountRepository:
+        async def load_active_position_account_labels(
+            self, *, environment: str
+        ) -> frozenset[str]:
+            raise RuntimeError("database timeout during discovery")
+
+        async def load_active_position_symbols(
+            self, *, environment: str, account_label: str
+        ) -> frozenset[str]:
+            return frozenset({"CONFIGUREDUSDT"})
+
+    symbols = await main._load_protected_symbols(
+        paper_repository=FakePaperRepository(),
+        account_repository=FailingDiscoveryAccountRepository(),
+        protected_run_ids=frozenset({"paper-run"}),
+        configured_live_position_account_labels=frozenset({"primary"}),
+    )
+
+    assert symbols == frozenset({"PAPERUSDT", "CONFIGUREDUSDT"})
 
 
 async def test_operational_retention_uses_bounded_batches() -> None:

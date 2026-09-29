@@ -973,3 +973,40 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
     assert repository.process_states[-1].reason == "fills_catching_up"
+
+
+async def test_reconciliation_position_count_ignores_zero_positions() -> None:
+    repository = FakeRepository()
+
+    class ZeroPositionClient(FakeClient):
+        async def fetch_positions(self):
+            return (
+                replace(
+                    _position(),
+                    symbol="GRASSUSDT",
+                    position_side="LONG",
+                    position_amt=Decimal("0"),
+                    entry_price=Decimal("0"),
+                    notional=Decimal("0"),
+                ),
+            )
+
+    service = ExecutionAccountSyncService(
+        client=ZeroPositionClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    # Prime the previous signature with an open position so the zero transition is persisted
+    service._last_position_signatures[("GRASSUSDT", "LONG")] = (
+        Decimal("100"),
+        Decimal("1.5"),
+        datetime(2026, 7, 3, 23, 59, tzinfo=UTC),
+    )
+
+    await service.sync_once()
+
+    assert len(repository.reconciliation_runs) == 1
+    # Even though a zero position snapshot was persisted to record the closure,
+    # the active position count in the reconciliation run must strictly be 0!
+    assert repository.reconciliation_runs[0].position_count == 0

@@ -999,7 +999,9 @@ class ExecutionAccountSyncService:
                 mismatch_count=result.mismatch_count,
                 details=details,
                 balance_count=len(persisted_balances),
-                position_count=len(persisted_positions),
+                position_count=sum(
+                    1 for p in snapshot.positions if p.position_amt != Decimal("0")
+                ),
                 open_order_count=len(snapshot.open_orders),
                 fill_count=result.fill_count,
             ),
@@ -1207,7 +1209,7 @@ class ExecutionAccountSyncService:
             last = self._last_position_signatures.get(key)
             if position.position_amt == 0:
                 # Durable zero only when the previous observation was open.
-                if last is None:
+                if last is None or last[0] == 0:
                     continue
                 persisted.append(position)
                 self._last_position_signatures[key] = (
