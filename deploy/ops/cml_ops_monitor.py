@@ -1428,8 +1428,36 @@ def read_systemd_unit_state(
     return parsed
 
 
+def _service_unit_for(timer_unit: str) -> str:
+    """The service a ``.timer`` activates; other units imply no service."""
+    if timer_unit.endswith(".timer"):
+        return timer_unit[: -len(".timer")] + ".service"
+    return ""
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionScheduleState:
+    """The timer that should fire, plus the service that does the work.
+
+    A timer unit carries no ``ExecMainStartTimestamp`` of its own: the last-run
+    result and timestamp belong to the service it activates. Reading only the
+    timer would report "no recorded run" forever.
+    """
+
+    timer: SystemdUnitState
+    service: SystemdUnitState | None
+
+    @property
+    def unit(self) -> str:
+        return self.timer.unit
+
+    @property
+    def service_unit(self) -> str:
+        return "" if self.service is None else self.service.unit
+
+
 def evaluate_retention_timer(
-    state: SystemdUnitState | None,
+    schedule: RetentionScheduleState | None,
     *,
     now: datetime,
     max_age_seconds: float,
@@ -1440,37 +1468,52 @@ def evaluate_retention_timer(
     the outside until the disk fills, so the schedule itself has to be observed
     and not only the data it is supposed to trim.
     """
-    if state is None:
+    if schedule is None:
         return ()
+    timer = schedule.timer
+    service = schedule.service
     details: dict[str, object] = {
-        "unit": state.unit,
-        "active_state": state.active_state,
-        "unit_file_state": state.unit_file_state,
-        "result": state.result,
-        "exec_main_status": state.exec_main_status,
+        "unit": timer.unit,
+        "active_state": timer.active_state,
+        "unit_file_state": timer.unit_file_state,
+        "service_unit": schedule.service_unit,
     }
     alerts: list[Alert] = []
-    disabled = state.unit_file_state == "disabled"
-    if state.active_state != "active" or disabled:
+    disabled = timer.unit_file_state == "disabled"
+    if timer.active_state != "active" or disabled:
         alerts.append(
             Alert(
                 "retention_timer_inactive",
                 "critical",
-                f"Retention timer {state.unit} is not active",
-                {**details, "reason": "disabled" if disabled else state.active_state},
+                f"Retention timer {timer.unit} is not active",
+                {**details, "reason": "disabled" if disabled else timer.active_state},
             )
         )
+    if service is None:
+        # The timer is scheduled but its work unit cannot be read, so whether
+        # anything ran cannot be established.
+        alerts.append(
+            Alert(
+                "retention_timer_stale",
+                "critical",
+                f"Retention service for {timer.unit} has no readable state",
+                details,
+            )
+        )
+        return tuple(alerts)
+    details["result"] = service.result
+    details["exec_main_status"] = service.exec_main_status
     age_seconds: float | None = None
-    if state.last_start is not None:
-        age_seconds = (now - state.last_start).total_seconds()
-        details["last_start"] = state.last_start.isoformat()
+    if service.last_start is not None:
+        age_seconds = (now - service.last_start).total_seconds()
+        details["last_start"] = service.last_start.isoformat()
         details["age_seconds"] = age_seconds
-    if state.result and state.result != "success":
+    if service.result and service.result != "success":
         alerts.append(
             Alert(
                 "retention_timer_failed",
                 "critical",
-                f"Retention unit {state.unit} last run failed ({state.result})",
+                f"Retention unit {service.unit} last run failed ({service.result})",
                 details,
             )
         )
@@ -1479,7 +1522,7 @@ def evaluate_retention_timer(
             Alert(
                 "retention_timer_stale",
                 "critical",
-                f"Retention unit {state.unit} has no recorded run",
+                f"Retention unit {service.unit} has no recorded run",
                 details,
             )
         )
@@ -1488,7 +1531,7 @@ def evaluate_retention_timer(
             Alert(
                 "retention_timer_stale",
                 "critical",
-                f"Retention unit {state.unit} last ran {age_seconds / 3600.0:.1f}h ago",
+                f"Retention unit {service.unit} last ran {age_seconds / 3600.0:.1f}h ago",
                 {**details, "threshold_seconds": max_age_seconds},
             )
         )
@@ -1527,6 +1570,8 @@ class MonitorConfig:
     retention_timer_max_age_seconds: float = (
         _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS
     )
+    # Empty means "the .service that the .timer activates".
+    retention_service_unit: str = ""
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     # ``None`` means a persistent sibling of state_path.  This keeps the
     # default durable on both the production host and local test hosts.
@@ -1647,16 +1692,31 @@ class OpsMonitor:
             )
         return alerts
 
-    def _retention_timer_state(self) -> SystemdUnitState | None:
+    def _retention_schedule_state(self) -> RetentionScheduleState | None:
         """Observe the cold-data retention schedule, not just its output."""
         unit = self._config.retention_timer_unit
         if not unit.strip():
             return None
-        return read_systemd_unit_state(
+        timer = read_systemd_unit_state(
             unit,
             runner=self._runner,
             timeout_seconds=self._config.command_timeout_seconds,
         )
+        if timer is None:
+            return None
+        service_unit = (
+            self._config.retention_service_unit or _service_unit_for(unit)
+        )
+        service = (
+            read_systemd_unit_state(
+                service_unit,
+                runner=self._runner,
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+            if service_unit
+            else None
+        )
+        return RetentionScheduleState(timer=timer, service=service)
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
@@ -1724,7 +1784,7 @@ class OpsMonitor:
             combined_signals = _merge_log_signals(combined_signals, signals)
         alerts.extend(
             evaluate_retention_timer(
-                self._retention_timer_state(),
+                self._retention_schedule_state(),
                 now=now,
                 max_age_seconds=self._config.retention_timer_max_age_seconds,
             )
@@ -4741,6 +4801,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
                 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS,
             )
         ),
+        retention_service_unit=getattr(args, "retention_service_unit", ""),
         rss_critical_fraction=args.rss_critical_fraction,
         rss_growth_bytes=args.rss_growth_bytes,
         rss_growth_window_seconds=args.rss_growth_window_seconds,
@@ -5096,6 +5157,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "CML_RETENTION_TIMER_UNIT",
             _DEFAULT_RETENTION_TIMER_UNIT,
         ),
+    )
+    parser.add_argument(
+        "--retention-service-unit",
+        default=os.environ.get("CML_RETENTION_SERVICE_UNIT", ""),
     )
     parser.add_argument(
         "--retention-timer-max-age-seconds",
