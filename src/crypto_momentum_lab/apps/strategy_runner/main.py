@@ -34,6 +34,14 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowImpulseConfig,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperEntryFilterConfig,
+    PaperExitConfig,
+    PaperExitMode,
+    PaperTradingRunReport,
+    ReplayExecutionConfig,
+    SimulatedFillStatus,
+)
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     BinanceRestClosedCandle15mSource,
@@ -41,21 +49,15 @@ from crypto_momentum_lab.strategy_runner import (
     EntryPolicyReplayError,
     InMemoryPaperMarketStateSource,
     PairedPaperLiveAccount,
-    PaperEntryFilterConfig,
     PaperEntryFilterContext,
     PaperEntryPolicyComparisonJsonlSink,
     PaperEntryPolicyObservationError,
     PaperEntryPolicyObservationThreshold,
-    PaperExitConfig,
-    PaperExitMode,
     PaperLiveDaemonConfig,
     PaperLiveSourceConfig,
     PaperRunnerConfig,
-    PaperTradingRunReport,
     PostgresPaperMarketStateSource,
     ReplayConfig,
-    ReplayExecutionConfig,
-    SimulatedFillStatus,
     build_entry_policy_replay_report,
     build_strategy_replay_report,
     read_entry_policy_comparison_requests,

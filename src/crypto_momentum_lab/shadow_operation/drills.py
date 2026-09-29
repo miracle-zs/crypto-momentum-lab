@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.shadow_operation.models import ShadowDrillResult
+from crypto_momentum_lab.domain.shadow_operation.models import ShadowDrillResult
 
 SUPPORTED_SHADOW_DRILLS = (
     "market_data_reconnect",

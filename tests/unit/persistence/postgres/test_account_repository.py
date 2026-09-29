@@ -1,8 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 
-from sqlalchemy.dialects import postgresql
+import pytest
 
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
@@ -95,14 +94,12 @@ def test_position_state_run_details_preserve_complete_empty_snapshot() -> None:
 
     state = _position_state_from_run(run)
 
-    assert state is not None
-    assert state.complete is True
     assert state.position_count == 0
     assert state.position_keys == ()
     assert state.symbols == frozenset()
 
 
-def test_position_state_run_details_mark_count_mismatch_incomplete() -> None:
+def test_position_state_run_details_reject_count_mismatch() -> None:
     run = AccountReconciliationRunRow(
         reconciliation_id="run-incomplete",
         environment="live",
@@ -118,12 +115,8 @@ def test_position_state_run_details_mark_count_mismatch_incomplete() -> None:
         },
     )
 
-    state = _position_state_from_run(run)
-
-    assert state is not None
-    assert state.complete is False
-    assert state.position_count == 2
-    assert state.position_keys == (("BTCUSDT", "LONG"),)
+    with pytest.raises(ValueError, match="count must match its keys"):
+        _position_state_from_run(run)
 
 
 async def test_account_repository_reads_versioned_position_state() -> None:
@@ -161,12 +154,11 @@ async def test_account_repository_reads_versioned_position_state() -> None:
     )
 
     assert state is not None
-    assert state.complete is True
     assert state.position_count == 2
     assert state.symbols == frozenset({"BTCUSDT", "ETHUSDT"})
 
 
-async def test_legacy_position_reconstruction_is_per_key_and_fenced_to_run() -> None:
+async def test_unversioned_position_state_is_rejected() -> None:
     run = AccountReconciliationRunRow(
         reconciliation_id="legacy-run",
         environment="live",
@@ -176,26 +168,7 @@ async def test_legacy_position_reconstruction_is_per_key_and_fenced_to_run() -> 
         position_count=1,
         details={},
     )
-    latest_rows = [
-        SimpleNamespace(
-            symbol="BTCUSDT",
-            position_side="BOTH",
-            position_amt=Decimal("0"),
-        ),
-        SimpleNamespace(
-            symbol="ETHUSDT",
-            position_side="BOTH",
-            position_amt=Decimal("1"),
-        ),
-    ]
-
-    class Result:
-        def all(self):
-            return latest_rows
-
     class Session:
-        statement = None
-
         async def __aenter__(self):
             return self
 
@@ -205,24 +178,13 @@ async def test_legacy_position_reconstruction_is_per_key_and_fenced_to_run() -> 
         async def scalar(self, _statement):
             return run
 
-        async def execute(self, statement):
-            self.statement = statement
-            return Result()
+    repository = PostgresAccountRepository(Session)
 
-    session = Session()
-    repository = PostgresAccountRepository(lambda: session)
-
-    state = await repository.load_active_position_state(
-        environment="live",
-        account_label="primary",
-    )
-
-    assert state is not None
-    assert state.complete is False
-    assert state.position_keys == (("ETHUSDT", "BOTH"),)
-    sql = str(session.statement.compile(dialect=postgresql.dialect()))
-    assert "DISTINCT ON" in sql
-    assert "observed_at <= " in sql
+    with pytest.raises(KeyError, match="position_state_schema_version"):
+        await repository.load_active_position_state(
+            environment="live",
+            account_label="primary",
+        )
 
 
 async def test_active_position_label_discovery_fills_partial_head_projection() -> None:

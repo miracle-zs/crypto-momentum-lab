@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from crypto_momentum_lab.domain.execution import ShadowSuppressionEvent
-from crypto_momentum_lab.shadow_operation.models import (
+from crypto_momentum_lab.domain.shadow_operation.models import (
     ShadowDecisionMetric,
     ShadowDrillResult,
     ShadowOrderPlan,

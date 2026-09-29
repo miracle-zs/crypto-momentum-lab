@@ -107,7 +107,6 @@ def test_account_position_state_snapshot_requires_complete_count_match() -> None
             observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
             position_count=1,
             position_keys=(),
-            complete=True,
         )
 
 
@@ -119,7 +118,6 @@ def test_account_position_state_snapshot_normalizes_hedge_position_keys() -> Non
         observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         position_count=2,
         position_keys=(("btcusdt", "long"), ("BTCUSDT", "short")),
-        complete=True,
     )
 
     assert snapshot.position_keys == (("BTCUSDT", "LONG"), ("BTCUSDT", "SHORT"))

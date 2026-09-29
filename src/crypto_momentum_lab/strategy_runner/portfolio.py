@@ -6,12 +6,12 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.strategy.paper_models import (
-    PaperExitConfig,
-    PaperExitMode,
-    PaperPosition,
-    PaperPositionStatus,
-    deterministic_position_id,
-    position_from_entry_fill,
+    PaperExitConfig as _PaperExitConfig,
+    PaperExitMode as _PaperExitMode,
+    PaperPosition as _PaperPosition,
+    PaperPositionStatus as _PaperPositionStatus,
+    deterministic_position_id as _deterministic_position_id,
+    position_from_entry_fill as _position_from_entry_fill,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -24,12 +24,6 @@ __all__ = [
     "Candle15mAggregator",
     "Candle15mGap",
     "ClosedCandle15m",
-    "PaperExitConfig",
-    "PaperExitMode",
-    "PaperPosition",
-    "PaperPositionStatus",
-    "deterministic_position_id",
-    "position_from_entry_fill",
 ]
 
 
@@ -189,19 +183,19 @@ class Candle15mAggregator:
 
 def mark_positions(
     *,
-    positions: tuple[PaperPosition, ...],
+    positions: tuple[_PaperPosition, ...],
     state: MarketState15s,
-    config: PaperExitConfig,
+    config: _PaperExitConfig,
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
     closed_candles: tuple[ClosedCandle15m, ...] = (),
     allow_close: bool = True,
-) -> tuple[PaperPosition, ...]:
-    updates: list[PaperPosition] = []
+) -> tuple[_PaperPosition, ...]:
+    updates: list[_PaperPosition] = []
     observed_at = state.bucket_end
     for position in positions:
         if (
-            position.status is not PaperPositionStatus.OPEN
+            position.status is not _PaperPositionStatus.OPEN
             or position.symbol != state.symbol
             or observed_at <= position.opened_at
         ):
@@ -240,7 +234,7 @@ def mark_positions(
             )
             continue
         if (
-            config.exit_mode is PaperExitMode.CANDLE_15M
+            config.exit_mode is _PaperExitMode.CANDLE_15M
             and config.candle_grace_bars > 0
         ):
             grace_update = _apply_candle_grace_exit(
@@ -288,7 +282,7 @@ def mark_positions(
         updates.append(
             replace(
                 position,
-                status=PaperPositionStatus.CLOSED,
+                status=_PaperPositionStatus.CLOSED,
                 closed_at=closed_at,
                 exit_price=exit_price,
                 exit_fee=exit_fee,
@@ -304,7 +298,7 @@ def mark_positions(
     return tuple(updates)
 
 
-def _gross_pnl(position: PaperPosition, mark_price: Decimal) -> Decimal:
+def _gross_pnl(position: _PaperPosition, mark_price: Decimal) -> Decimal:
     price_delta = mark_price - position.entry_price
     if position.side is StrategySide.SHORT:
         price_delta = -price_delta
@@ -315,12 +309,12 @@ def _close_reason(
     *,
     gross_return: Decimal,
     held_until: datetime,
-    position: PaperPosition,
-    config: PaperExitConfig,
+    position: _PaperPosition,
+    config: _PaperExitConfig,
     closed_candle: ClosedCandle15m | None,
     closed_candles: tuple[ClosedCandle15m, ...],
 ) -> str | None:
-    if config.exit_mode is PaperExitMode.CANDLE_15M and config.candle_grace_bars > 0:
+    if config.exit_mode is _PaperExitMode.CANDLE_15M and config.candle_grace_bars > 0:
         if held_until >= position.opened_at + timedelta(
             seconds=config.max_holding_buckets * config.state_interval_seconds
         ):
@@ -349,14 +343,14 @@ def _close_reason(
 
 def _apply_candle_grace_exit(
     *,
-    position: PaperPosition,
+    position: _PaperPosition,
     state: MarketState15s,
     mark_price: Decimal,
     unrealized_pnl: Decimal,
     closed_candle: ClosedCandle15m | None,
-    config: PaperExitConfig,
+    config: _PaperExitConfig,
     taker_fee_rate: Decimal,
-) -> PaperPosition | None:
+) -> _PaperPosition | None:
     """Apply the profitable-close or grace path after the first adverse candle.
 
     A zero grace value keeps the original B0 behavior.  For B1/B8, an adverse
@@ -453,7 +447,7 @@ def _apply_candle_grace_exit(
 
 def _first_adverse_profit_exit_price(
     *,
-    position: PaperPosition,
+    position: _PaperPosition,
     mark_price: Decimal,
     closed_candle: ClosedCandle15m,
     taker_fee_rate: Decimal,
@@ -487,7 +481,7 @@ def _first_adverse_profit_exit_price(
     return None
 
 
-def _adverse_candle_reason(position: PaperPosition) -> str:
+def _adverse_candle_reason(position: _PaperPosition) -> str:
     return (
         "candle_15m_bearish"
         if position.side is StrategySide.LONG
@@ -496,7 +490,7 @@ def _adverse_candle_reason(position: PaperPosition) -> str:
 
 
 def _is_adverse_candle(
-    position: PaperPosition,
+    position: _PaperPosition,
     candle: ClosedCandle15m | None,
 ) -> bool:
     if candle is None or candle.symbol != position.symbol:
@@ -520,7 +514,7 @@ def _entry_limit_touched(
 
 def _grace_recovery_limit_price(
     *,
-    position: PaperPosition,
+    position: _PaperPosition,
     profit_pct: Decimal,
 ) -> Decimal:
     multiplier = (
@@ -533,7 +527,7 @@ def _grace_recovery_limit_price(
 
 def _realized_pnl_at_price(
     *,
-    position: PaperPosition,
+    position: _PaperPosition,
     exit_price: Decimal,
     taker_fee_rate: Decimal,
 ) -> Decimal:
@@ -543,12 +537,12 @@ def _realized_pnl_at_price(
 
 def _close_at_price(
     *,
-    position: PaperPosition,
+    position: _PaperPosition,
     closed_at: datetime,
     exit_price: Decimal,
     close_reason: str,
     taker_fee_rate: Decimal,
-) -> PaperPosition:
+) -> _PaperPosition:
     exit_notional = position.quantity * exit_price
     exit_fee = exit_notional * taker_fee_rate
     realized_pnl = _realized_pnl_at_price(
@@ -558,7 +552,7 @@ def _close_at_price(
     )
     return replace(
         position,
-        status=PaperPositionStatus.CLOSED,
+        status=_PaperPositionStatus.CLOSED,
         closed_at=closed_at,
         exit_price=exit_price,
         exit_fee=exit_fee,

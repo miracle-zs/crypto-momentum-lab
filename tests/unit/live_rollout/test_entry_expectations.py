@@ -7,7 +7,7 @@ from crypto_momentum_lab.domain.execution import OrderExecutionPlan
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
 from crypto_momentum_lab.live_rollout.entry_expectations import (

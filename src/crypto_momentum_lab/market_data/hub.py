@@ -1101,7 +1101,7 @@ def encode_market_state_batch(
         "sequence": sequence,
         "published_at": published_at.isoformat(),
         "environment": next(iter(environments)),
-        "states": [market_state_to_payload(state) for state in states],
+        "states": [_market_state_to_payload(state) for state in states],
     }
     if stream_id is not None:
         payload["stream_id"] = stream_id
@@ -1134,7 +1134,7 @@ def decode_market_state_batch_envelope(
     if not isinstance(raw_states, list) or not raw_states:
         raise MarketStateHubProtocolError("market-state batch is empty")
     states = tuple(
-        market_state_from_payload(cast(dict[str, object], item))
+        _decode_market_state_payload(cast(dict[str, object], item))
         for item in raw_states
         if isinstance(item, dict)
     )
@@ -1172,11 +1172,7 @@ def decode_market_state_batch(
     ).states
 
 
-def market_state_to_payload(state: MarketState15s) -> dict[str, object]:
-    return _market_state_to_payload(state)
-
-
-def market_state_from_payload(payload: dict[str, object]) -> MarketState15s:
+def _decode_market_state_payload(payload: dict[str, object]) -> MarketState15s:
     try:
         return _market_state_from_payload(payload)
     except MarketStateCodecError as error:

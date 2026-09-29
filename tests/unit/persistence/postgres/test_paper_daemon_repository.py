@@ -14,8 +14,8 @@ from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     paper_live_run_row,
     runtime_event_row,
 )
-from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
-from crypto_momentum_lab.strategy_runner.portfolio import PaperExitConfig
+from crypto_momentum_lab.domain.strategy.paper_models import PaperEntryFilterConfig
+from crypto_momentum_lab.domain.strategy.paper_models import PaperExitConfig
 from tests.unit.persistence.postgres.test_strategy_run_repository import (
     fixture_paper_report,
 )

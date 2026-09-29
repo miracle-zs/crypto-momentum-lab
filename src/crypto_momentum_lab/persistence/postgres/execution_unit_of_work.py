@@ -25,12 +25,12 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.ports import (
-    DecisionCommitConflict,
-    DurableExecutionPositionState,
-    ExecutionEvidenceIdentity,
-    ExecutionHeadSnapshot,
-    ExecutionTradeIdentity,
-    ExecutionWatermark,
+    DecisionCommitConflict as _DecisionCommitConflict,
+    DurableExecutionPositionState as _DurableExecutionPositionState,
+    ExecutionEvidenceIdentity as _ExecutionEvidenceIdentity,
+    ExecutionHeadSnapshot as _ExecutionHeadSnapshot,
+    ExecutionTradeIdentity as _ExecutionTradeIdentity,
+    ExecutionWatermark as _ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -159,7 +159,7 @@ class ExecutionTransaction:
         if checkpoint is not None and fact_checkpoint is not None and (
             checkpoint != fact_checkpoint
         ):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "checkpoint argument differs from checkpoint embedded in facts"
             )
         if checkpoint is not None and fact_checkpoint is None:
@@ -233,7 +233,7 @@ class ExecutionTransaction:
         key: PositionKey,
         stream_id: str,
         stream_epoch: str,
-        evidence: ExecutionEvidenceIdentity,
+        evidence: _ExecutionEvidenceIdentity,
     ) -> bool:
         identity = _execution_identity_values(key, stream_id, stream_epoch)
         primary_key = (*identity, evidence.evidence_id)
@@ -245,7 +245,7 @@ class ExecutionTransaction:
                 existing.payload_digest != evidence.payload_digest
                 or existing.sequence != evidence.sequence
             ):
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     f"evidence {evidence.evidence_id} was reused with different data"
                 )
             return False
@@ -266,7 +266,7 @@ class ExecutionTransaction:
         key: PositionKey,
         stream_id: str,
         stream_epoch: str,
-        trade: ExecutionTradeIdentity,
+        trade: _ExecutionTradeIdentity,
     ) -> bool:
         if (
             not trade.quantity.is_finite()
@@ -291,7 +291,7 @@ class ExecutionTransaction:
                 or existing.side != trade.side
                 or existing.payload_digest != trade.payload_digest
             ):
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     f"trade {trade.trade_id} conflicts with its durable identity"
                 )
             return False
@@ -315,7 +315,7 @@ class ExecutionTransaction:
         key: PositionKey,
         stream_id: str,
         stream_epoch: str,
-        watermark: ExecutionWatermark,
+        watermark: _ExecutionWatermark,
     ) -> None:
         if (
             not watermark.cumulative_quantity.is_finite()
@@ -344,14 +344,14 @@ class ExecutionTransaction:
             )
             return
         if watermark.cumulative_quantity < row.cumulative_quantity:
-            raise DecisionCommitConflict("execution quantity watermark regressed")
+            raise _DecisionCommitConflict("execution quantity watermark regressed")
         if watermark.cumulative_quote < row.cumulative_quote:
-            raise DecisionCommitConflict("execution quote watermark regressed")
+            raise _DecisionCommitConflict("execution quote watermark regressed")
         if (
             watermark.cumulative_quantity == row.cumulative_quantity
             and watermark.cumulative_quote != row.cumulative_quote
         ):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "execution quote changed without a quantity increase"
             )
         row.cumulative_quantity = watermark.cumulative_quantity
@@ -403,23 +403,23 @@ class ExecutionTransaction:
                     "stream_epoch": checkpoint_scope.stream_epoch,
                 }
             ):
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     "execution stream adoption checkpoint is not in this transaction"
                 )
         if row is not None and (
             row.stream_id != stream_id or row.stream_epoch != stream_epoch
         ):
             if not stream_adoption_checkpoint_id and not is_flat_adoption:
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     "execution stream changed without a validated recovery checkpoint"
                 )
             if not is_flat_adoption and stream_adoption_checkpoint_id is None:
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     "execution stream adoption checkpoint could not be verified"
                 )
         current_revision = row.revision if row is not None else 0
         if current_revision != expected_revision:
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 f"execution scope revision changed: expected {expected_revision}, "
                 f"current {current_revision}"
             )
@@ -445,7 +445,7 @@ class ExecutionTransaction:
             row.updated_at = updated_at
         return next_revision
 
-    async def load_head(self, key: PositionKey) -> ExecutionHeadSnapshot | None:
+    async def load_head(self, key: PositionKey) -> _ExecutionHeadSnapshot | None:
         row = await self.session.get(
             ExecutionBookHeadRow,
             _execution_position_values(key),
@@ -453,7 +453,7 @@ class ExecutionTransaction:
         )
         if row is None:
             return None
-        return ExecutionHeadSnapshot(
+        return _ExecutionHeadSnapshot(
             revision=row.revision,
             stream_id=row.stream_id,
             stream_epoch=row.stream_epoch,
@@ -563,7 +563,7 @@ class AsyncPostgresExecutionUnitOfWork:
         environment: str,
         account_label: str,
         as_of: datetime,
-    ) -> tuple[DurableExecutionPositionState, ...]:
+    ) -> tuple[_DurableExecutionPositionState, ...]:
         """Load the exact adopted account stream and all cross-epoch identities."""
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
@@ -586,7 +586,7 @@ class AsyncPostgresExecutionUnitOfWork:
                 )
                 by_position.setdefault(key.canonical_id, []).append(scope)
 
-            recovered: list[DurableExecutionPositionState] = []
+            recovered: list[_DurableExecutionPositionState] = []
             for scoped_rows in by_position.values():
                 first_scope = scoped_rows[0]
                 key = PositionKey(
@@ -600,7 +600,7 @@ class AsyncPostgresExecutionUnitOfWork:
                     _execution_position_values(key),
                 )
                 head = (
-                    ExecutionHeadSnapshot(
+                    _ExecutionHeadSnapshot(
                         revision=head_row.revision,
                         stream_id=head_row.stream_id,
                         stream_epoch=head_row.stream_epoch,
@@ -629,7 +629,7 @@ class AsyncPostgresExecutionUnitOfWork:
                 elif len(scoped_rows) == 1:
                     scope = scoped_rows[0]
                 else:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"position {key.canonical_id} has multiple streams but no durable head"
                     )
 
@@ -669,14 +669,14 @@ class AsyncPostgresExecutionUnitOfWork:
                     )
                 ).all()
                 recovered.append(
-                    DurableExecutionPositionState(
+                    _DurableExecutionPositionState(
                         scope=scope,
                         cut=cut,
                         head=head,
                         trade_ids=tuple(row.trade_id for row in trade_rows),
                         evidence_ids=tuple(row.evidence_id for row in evidence_rows),
                         watermarks=tuple(
-                            ExecutionWatermark(
+                            _ExecutionWatermark(
                                 order_id=row.order_id,
                                 cumulative_quantity=row.cumulative_quantity,
                                 cumulative_quote=row.cumulative_quote,
@@ -874,7 +874,7 @@ class AsyncPostgresDecisionUnitOfWork:
         prior_digest = compute_policy_state_digest(commit.prior_policy_state)
         next_digest = compute_policy_state_digest(commit.next_policy_state)
         if prior_digest != commit.expected_prior_digest:
-            raise DecisionCommitConflict("prior policy state digest does not match")
+            raise _DecisionCommitConflict("prior policy state digest does not match")
         payload = trace.trace_payload
         if (
             not trace.input_hash
@@ -884,7 +884,7 @@ class AsyncPostgresDecisionUnitOfWork:
             or payload.get("next_policy_state")
             != serialize_policy_state(commit.next_policy_state)
         ):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "decision trace is incomplete or does not bind prior/next policy state"
             )
         context = payload.get("decision_context")
@@ -897,7 +897,7 @@ class AsyncPostgresDecisionUnitOfWork:
             else None
         )
         if not isinstance(position_data, dict):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "decision trace is missing its complete position identity"
             )
         environment = position_data.get("environment")
@@ -908,16 +908,16 @@ class AsyncPostgresDecisionUnitOfWork:
             or commit.policy_key
             != f"{environment}/{trace.account_label}/{trace.strategy_name}"
         ):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "policy key and decision trace account/symbol identity disagree"
             )
         if commit.accepted_exit is not None:
             if commit.accepted_exit.command_type != TradeCommandType.EXIT:
-                raise DecisionCommitConflict("accepted decision command must be an exit")
+                raise _DecisionCommitConflict("accepted decision command must be an exit")
             expected_exit = payload.get("output_exit_command")
             actual_exit = canonicalize_policy_value(commit.accepted_exit)
             if expected_exit != actual_exit:
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     "accepted exit does not match the immutable trace output"
                 )
             command_key = commit.accepted_exit.position_key
@@ -928,11 +928,11 @@ class AsyncPostgresDecisionUnitOfWork:
                 or command_key.position_side.value
                 != position_data.get("position_side")
             ):
-                raise DecisionCommitConflict(
+                raise _DecisionCommitConflict(
                     "accepted exit scope does not match the decision input"
                 )
         elif payload.get("output_exit_command") is not None:
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "decision trace has an exit output but the commit omitted it"
             )
 
@@ -988,7 +988,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         or prior_commit.next_state_digest != next_digest
                         or prior_commit.commit_digest != commit_digest
                     ):
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"decision {trace.decision_id} was already committed "
                             "with conflicting policy contents"
                         )
@@ -1009,7 +1009,7 @@ class AsyncPostgresDecisionUnitOfWork:
                             != _trade_command_payload(commit.accepted_exit)
                         )
                     ):
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"decision {trace.decision_id} exit outbox conflicts"
                         )
                     durable_at = prior_commit.committed_at
@@ -1038,12 +1038,12 @@ class AsyncPostgresDecisionUnitOfWork:
                     else compute_policy_state_digest(PolicyState())
                 )
                 if current_revision != commit.expected_policy_revision:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"policy revision changed: expected "
                         f"{commit.expected_policy_revision}, current {current_revision}"
                     )
                 if current_digest != prior_digest:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         "durable policy state does not match the frozen prior state"
                     )
 
@@ -1120,7 +1120,7 @@ class AsyncPostgresDecisionUnitOfWork:
         state = _policy_state_from_payload(row.state_payload)
         digest = compute_policy_state_digest(state)
         if digest != row.state_digest:
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 f"stored policy state {policy_key} failed its digest check"
             )
         return DurablePolicySnapshot(
@@ -1145,7 +1145,7 @@ class AsyncPostgresDecisionUnitOfWork:
         if not policy_key.strip() or not strategy_name.strip() or not account_label.strip():
             raise ValueError("policy, strategy, and account identity are required")
         if not policy_key.endswith(f"/{account_label}/{strategy_name}"):
-            raise DecisionCommitConflict(
+            raise _DecisionCommitConflict(
                 "policy key does not match the requested strategy/account identity"
             )
         async with self._session_factory() as session:
@@ -1161,7 +1161,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     state = _policy_state_from_payload(state_row.state_payload)
                     digest = compute_policy_state_digest(state)
                     if digest != state_row.state_digest:
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"stored policy state {policy_key} failed its digest check"
                         )
                     return DurablePolicySnapshot(
@@ -1196,7 +1196,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     or not isinstance(payload.get("frame_digest"), str)
                     or not payload.get("frame_digest")
                 ):
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} is incomplete"
                     )
 
@@ -1237,19 +1237,19 @@ class AsyncPostgresDecisionUnitOfWork:
                             )
                         )
                     ):
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"legacy decision trace {trace.decision_id} has an "
                             f"incomplete {field_name}"
                         )
                     try:
                         state = _policy_state_from_payload(serialized)
                     except (TypeError, ValueError) as err:
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"legacy decision trace {trace.decision_id} has an "
                             f"invalid {field_name}"
                         ) from err
                     if serialize_policy_state(state) != serialized:
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"legacy decision trace {trace.decision_id} has a "
                             f"non-canonical {field_name}"
                         )
@@ -1266,7 +1266,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     or payload.get("frame_digest")
                     != trace.trace_payload.get("frame_digest")
                 ):
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} does not bind "
                         "its prior policy state"
                     )
@@ -1277,7 +1277,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     or any(not isinstance(value, str) or not value for value in revision_ids)
                     or len(revision_ids) != len(set(revision_ids))
                 ):
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} has invalid "
                         "market revision references"
                     )
@@ -1293,7 +1293,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     or row.payload.get("reference_only") is True
                 for row in refs
                 ):
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} has missing or "
                         "incomplete market facts"
                     )
@@ -1353,7 +1353,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         or clock_event.get("timestamp")
                         != trace.decision_time.astimezone(UTC).isoformat()
                     ):
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"legacy decision trace {trace.decision_id} has an "
                             "inconsistent decision scope or clock"
                         )
@@ -1365,10 +1365,10 @@ class AsyncPostgresDecisionUnitOfWork:
                         domain_trace,
                         decision_id=trace.decision_id,
                     )
-                except DecisionCommitConflict:
+                except _DecisionCommitConflict:
                     raise
                 except Exception as err:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} could not be "
                         "fully reconstructed"
                     ) from err
@@ -1384,7 +1384,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         if isinstance(audit, dict)
                         else "invalid audit result"
                     )
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"legacy decision trace {trace.decision_id} failed strict "
                         f"replay verification: {detail}"
                     )
@@ -1452,13 +1452,13 @@ class AsyncPostgresDecisionUnitOfWork:
                 if row is None:
                     return False
                 if row.command_id != command_id:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"exit command identity conflict for {decision_id}"
                     )
                 if row.status == "DISPATCHED":
                     return True
                 if row.status != "PENDING":
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"exit {decision_id} has invalid status {row.status}"
                     )
                 row.status = "DISPATCHED"
@@ -1491,17 +1491,17 @@ class AsyncPostgresDecisionUnitOfWork:
                 if row is None:
                     return False
                 if row.command_id != command_id:
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"exit command identity conflict for {decision_id}"
                     )
                 if row.status == "SUPERSEDED":
                     if row.disposition_reason != reason:
-                        raise DecisionCommitConflict(
+                        raise _DecisionCommitConflict(
                             f"exit {decision_id} has a different terminal disposition"
                         )
                     return True
                 if row.status != "PENDING":
-                    raise DecisionCommitConflict(
+                    raise _DecisionCommitConflict(
                         f"exit {decision_id} cannot be superseded from {row.status}"
                     )
                 row.status = "SUPERSEDED"
@@ -1569,7 +1569,6 @@ def _policy_state_from_payload(payload: dict[str, Any]) -> PolicyState:
 __all__ = [
     "AsyncPostgresDecisionUnitOfWork",
     "DecisionCommit",
-    "DecisionCommitConflict",
     "DecisionCommitReceipt",
     "DurablePolicySnapshot",
 ]

@@ -206,7 +206,7 @@ async def test_position_label_discovery_recovers_labels_missing_from_heads(
     assert labels == frozenset({"head-missing"})
 
 
-async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
+async def test_active_position_state_uses_run_timestamp_fence(
     account_repository: PostgresAccountRepository,
 ) -> None:
     ready_at = NOW
@@ -214,7 +214,15 @@ async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
         _position("primary", ready_at)
     )
     await account_repository.save_reconciliation_run(
-        _run("primary", ready_at, position_count=1)
+        replace(
+            _run("primary", ready_at, position_count=1),
+            details={
+                "position_state_schema_version": 1,
+                "position_keys": [
+                    {"symbol": "BTCUSDT", "position_side": "BOTH"}
+                ],
+            },
+        )
     )
     # This observation is newer than the ready run and may belong to a
     # reconciliation that has not committed its run row yet.  It must not be
@@ -227,10 +235,12 @@ async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
         )
     )
 
-    assert await account_repository.load_active_position_symbols(
+    state = await account_repository.load_active_position_state(
         environment=ENVIRONMENT,
         account_label="primary",
-    ) == frozenset({"BTCUSDT"})
+    )
+    assert state is not None
+    assert state.position_keys == (("BTCUSDT", "BOTH"),)
 
 
 async def test_versioned_flat_run_does_not_resurrect_old_positions(
@@ -258,12 +268,8 @@ async def test_versioned_flat_run_does_not_resurrect_old_positions(
     )
 
     assert state is not None
-    assert state.complete is True
     assert state.position_keys == ()
-    assert await account_repository.load_active_position_symbols(
-        environment=ENVIRONMENT,
-        account_label="primary",
-    ) == frozenset()
+    assert state.symbols == frozenset()
 
 
 async def test_versioned_sparse_history_keeps_unchanged_open_positions(
@@ -308,10 +314,12 @@ async def test_versioned_sparse_history_keeps_unchanged_open_positions(
         )
     )
 
-    assert await account_repository.load_active_position_symbols(
+    state = await account_repository.load_active_position_state(
         environment=ENVIRONMENT,
         account_label="primary",
-    ) == frozenset({"ETHUSDT"})
+    )
+    assert state is not None
+    assert state.position_keys == (("ETHUSDT", "BOTH"),)
 
 
 async def test_fill_cursor_upsert_is_monotonic_and_switches_modes(

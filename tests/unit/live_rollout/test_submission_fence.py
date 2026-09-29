@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
 from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence

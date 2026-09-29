@@ -29,7 +29,6 @@ from crypto_momentum_lab.persistence.postgres.risk_repository import (
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
-    RuntimeStateSequenceRange,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
     PostgresRuntimeTelemetryRepository,
@@ -67,7 +66,6 @@ __all__ = [
     "PostgresStrategyRunRepository",
     "PostgresUniverseRepository",
     "RuntimeStateCursor",
-    "RuntimeStateSequenceRange",
     "LeaseAlreadyHeldError",
     "LeaseOwnershipError",
     "PersistedExchangeOrder",

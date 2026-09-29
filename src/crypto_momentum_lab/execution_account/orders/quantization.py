@@ -6,7 +6,9 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_rules import (
+    SymbolTradingRules as _SymbolTradingRules,
+)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -25,7 +27,7 @@ class QuantizationRejection:
 
 def quantize_order_plan(
     intent: OrderIntentCandidate,
-    rules: SymbolTradingRules,
+    rules: _SymbolTradingRules,
     *,
     reference_price: Decimal,
     resize_tolerance: Decimal,
@@ -142,7 +144,7 @@ def quantize_order_plan(
 
 def _quantized_price(
     intent: OrderIntentCandidate,
-    rules: SymbolTradingRules,
+    rules: _SymbolTradingRules,
     reference_price: Decimal,
 ) -> Decimal | None:
     if intent.entry_type is EntryType.MARKET:

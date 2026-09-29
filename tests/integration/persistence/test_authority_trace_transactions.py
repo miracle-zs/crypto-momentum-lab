@@ -22,10 +22,10 @@ from crypto_momentum_lab.domain.market.revision_models import (
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
+from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
     DecisionCommit,
-    DecisionCommitConflict,
 )
 from crypto_momentum_lab.persistence.postgres.models import DecisionTraceRow
 from crypto_momentum_lab.persistence.postgres.session import (

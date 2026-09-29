@@ -29,9 +29,7 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
 )
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
-)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext

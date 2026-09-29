@@ -42,6 +42,9 @@ from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryInspectionUnknownError,
     ExitRecoveryObservation,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -49,7 +52,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
-    OrderPreSubmissionError,
 )
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:

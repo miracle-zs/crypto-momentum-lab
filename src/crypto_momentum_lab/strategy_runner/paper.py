@@ -56,7 +56,9 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySignal,
     deterministic_config_hash,
 )
-from crypto_momentum_lab.domain.strategy.paper_models import PaperTradingRunReport
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperTradingRunReport as _PaperTradingRunReport,
+)
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
@@ -72,24 +74,28 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
     LiquidationCascadeConfig,
 )
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    ReplayExecutionConfig as _ReplayExecutionConfig,
+    SimulatedFill as _SimulatedFill,
+    SimulatedFillStatus as _SimulatedFillStatus,
+)
 from crypto_momentum_lab.strategy_runner.fills import (
-    ReplayExecutionConfig,
-    SimulatedFill,
-    SimulatedFillStatus,
     fill_summary,
     pending_candidate_fill,
     resolve_candidate_fill_at_state,
     simulate_candidate_fill,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitConfig as _PaperExitConfig,
+    PaperExitMode as _PaperExitMode,
+    PaperPosition as _PaperPosition,
+    PaperPositionStatus as _PaperPositionStatus,
+    position_from_entry_fill as _position_from_entry_fill,
+)
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
     ClosedCandle15m,
-    PaperExitConfig,
-    PaperExitMode,
-    PaperPosition,
-    PaperPositionStatus,
     mark_positions,
-    position_from_entry_fill,
 )
 from crypto_momentum_lab.strategy_runner.registry import (
     StrategyRegistryError,
@@ -136,10 +142,10 @@ class PaperRunnerConfig:
     initial_cash_balance: Decimal = Decimal("10000.00")
     order_flow_impulse: OrderFlowImpulseConfig | None = None
     liquidation_cascade: LiquidationCascadeConfig | None = None
-    execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
+    execution: _ReplayExecutionConfig = field(default_factory=_ReplayExecutionConfig)
     max_states: int | None = None
     reset_on_gap: bool = True
-    portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
+    portfolio: _PaperExitConfig = field(default_factory=_PaperExitConfig)
     symbol_lot_rules: SymbolLotRules | Mapping[str, SymbolLotRules] | None = None
 
     def __post_init__(self) -> None:
@@ -175,7 +181,7 @@ def run_paper_trading(
     *,
     source: PaperMarketStateSource,
     config: PaperRunnerConfig,
-) -> PaperTradingRunReport:
+) -> _PaperTradingRunReport:
     runtime_plan = RuntimePlanCompiler.compile(
         environment="paper",
         account_label="paper_account",
@@ -240,13 +246,13 @@ def run_paper_trading(
     signals: list[StrategySignal] = []
     candidates: list[OrderIntentCandidate] = []
     rejections: list[StrategyRejection] = []
-    paper_fills: list[SimulatedFill] = []
+    paper_fills: list[_SimulatedFill] = []
     pending_candidates: list[OrderIntentCandidate] = []
-    positions_by_id: dict[str, PaperPosition] = {}
+    positions_by_id: dict[str, _PaperPosition] = {}
     journals_by_symbol: dict[str, AccountJournal] = {}
     candle_aggregator = (
         Candle15mAggregator()
-        if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+        if config.portfolio.exit_mode is _PaperExitMode.CANDLE_15M
         else None
     )
     candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
@@ -301,7 +307,7 @@ def run_paper_trading(
             positions=tuple(
                 position
                 for position in positions_by_id.values()
-                if position.status is PaperPositionStatus.OPEN
+                if position.status is _PaperPositionStatus.OPEN
             ),
             state=state,
             config=config.portfolio,
@@ -344,7 +350,7 @@ def run_paper_trading(
         open_positions = [
             p
             for p in positions_by_id.values()
-            if p.symbol == state.symbol and p.status is PaperPositionStatus.OPEN
+            if p.symbol == state.symbol and p.status is _PaperPositionStatus.OPEN
         ]
         batches = tuple(
             PositionLedgerBatch(
@@ -437,7 +443,7 @@ def run_paper_trading(
                     for p in tuple(positions_by_id.values()):
                         if (
                             p.symbol == state.symbol
-                            and p.status is PaperPositionStatus.OPEN
+                            and p.status is _PaperPositionStatus.OPEN
                             and (
                                 not pos_ids_to_close
                                 or p.position_id in pos_ids_to_close
@@ -451,7 +457,7 @@ def run_paper_trading(
                             realized_pnl = gross_pnl - p.entry_fee - sim_exit_res.fee
                             positions_by_id[p.position_id] = replace(
                                 p,
-                                status=PaperPositionStatus.CLOSED,
+                                status=_PaperPositionStatus.CLOSED,
                                 closed_at=sim_exit_res.filled_at,
                                 exit_price=sim_exit_res.price,
                                 exit_fee=sim_exit_res.fee,
@@ -501,7 +507,7 @@ def run_paper_trading(
         )
         paper_fills.extend(fills)
         for fill in fills:
-            opened = position_from_entry_fill(config.run_id, fill)
+            opened = _position_from_entry_fill(config.run_id, fill)
             if opened is not None:
                 positions_by_id[opened.position_id] = opened
                 matching_cand = next(
@@ -566,7 +572,7 @@ def run_paper_trading(
     )
     paper_fills.extend(shutdown_fills)
     for fill in shutdown_fills:
-        reopened = position_from_entry_fill(config.run_id, fill)
+        reopened = _position_from_entry_fill(config.run_id, fill)
         if reopened is not None:
             positions_by_id[reopened.position_id] = reopened
 
@@ -587,7 +593,7 @@ def run_paper_trading(
         signal_tuple,
         fill_tuple,
     )
-    return PaperTradingRunReport(
+    return _PaperTradingRunReport(
         schema_version=2,
         generated_at=config.generated_at,
         run=identity,
@@ -599,7 +605,7 @@ def run_paper_trading(
         candidates=candidate_tuple,
         paper_fills=fill_tuple,
         pending_candidate_count=sum(
-            1 for fill in fill_tuple if fill.status is SimulatedFillStatus.PENDING
+            1 for fill in fill_tuple if fill.status is _SimulatedFillStatus.PENDING
         ),
         rejection_summary=_rejection_summary(tuple(rejections)),
         final_checkpoint=checkpoint,
@@ -612,7 +618,7 @@ def run_paper_trading(
 
 
 def write_paper_trading_report(
-    report: PaperTradingRunReport,
+    report: _PaperTradingRunReport,
     output_path: Path,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -626,10 +632,10 @@ def _resolve_pending_candidates(
     *,
     pending_candidates: tuple[OrderIntentCandidate, ...],
     state: MarketState15s,
-    execution: ReplayExecutionConfig,
-) -> tuple[list[OrderIntentCandidate], list[SimulatedFill]]:
+    execution: _ReplayExecutionConfig,
+) -> tuple[list[OrderIntentCandidate], list[_SimulatedFill]]:
     remaining: list[OrderIntentCandidate] = []
-    fills: list[SimulatedFill] = []
+    fills: list[_SimulatedFill] = []
     for candidate in pending_candidates:
         if candidate.symbol != state.symbol:
             remaining.append(candidate)
@@ -650,9 +656,9 @@ def _finalize_pending_candidates(
     *,
     pending_candidates: tuple[OrderIntentCandidate, ...],
     last_processed_at_by_symbol: dict[str, datetime],
-    execution: ReplayExecutionConfig,
-) -> tuple[SimulatedFill, ...]:
-    fills: list[SimulatedFill] = []
+    execution: _ReplayExecutionConfig,
+) -> tuple[_SimulatedFill, ...]:
+    fills: list[_SimulatedFill] = []
     for candidate in pending_candidates:
         last_processed_at = last_processed_at_by_symbol.get(candidate.symbol)
         if last_processed_at is not None and last_processed_at >= candidate.expires_at:
@@ -704,7 +710,7 @@ def _runtime_config_payload(config: PaperRunnerConfig) -> dict[str, object]:
 def _validate_unique_ids(
     signals: tuple[StrategySignal, ...],
     candidates: tuple[OrderIntentCandidate, ...],
-    fills: tuple[SimulatedFill, ...],
+    fills: tuple[_SimulatedFill, ...],
 ) -> None:
     signal_ids = tuple(signal.signal_id for signal in signals)
     candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
@@ -728,10 +734,10 @@ def _validate_candidate_references(
 
 
 def _validate_position_references(
-    positions: tuple[PaperPosition, ...],
+    positions: tuple[_PaperPosition, ...],
     run_id: str,
     signals: tuple[StrategySignal, ...],
-    fills: tuple[SimulatedFill, ...],
+    fills: tuple[_SimulatedFill, ...],
 ) -> None:
     signal_ids = {signal.signal_id for signal in signals}
     fills_by_id = {fill.fill_id: fill for fill in fills}
@@ -744,7 +750,7 @@ def _validate_position_references(
         if position.entry_fill_id not in fills_by_id:
             raise PaperRunnerError("position references unknown fill_id")
         fill = fills_by_id[position.entry_fill_id]
-        if fill.status is not SimulatedFillStatus.FILLED:
+        if fill.status is not _SimulatedFillStatus.FILLED:
             raise PaperRunnerError("position references non-filled fill")
         if position.signal_id not in signal_ids:
             raise PaperRunnerError("position references unknown signal_id")
@@ -767,7 +773,7 @@ def _rejection_summary(
 
 def _summary_counts(
     signals: tuple[StrategySignal, ...],
-    positions: tuple[PaperPosition, ...] = (),
+    positions: tuple[_PaperPosition, ...] = (),
 ) -> dict[str, dict[str, int]]:
     by_side = Counter(signal.side.value for signal in signals)
     by_symbol = Counter(signal.symbol for signal in signals)
@@ -779,7 +785,7 @@ def _summary_counts(
     exits_by_reason = Counter(
         position.close_reason
         for position in positions
-        if position.status is PaperPositionStatus.CLOSED
+        if position.status is _PaperPositionStatus.CLOSED
         and position.close_reason is not None
     )
     summary["positions_by_status"] = dict(sorted(positions_by_status.items()))

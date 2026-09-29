@@ -16,8 +16,8 @@ from crypto_momentum_lab.domain.execution import (
     ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
-    PreparedOrderSubmission,
+    OrderPreSubmissionError as _OrderPreSubmissionError,
+    PreparedOrderSubmission as _PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -201,7 +201,7 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
         if self._lock is None:
             return await self._execute_approved_intent(
@@ -218,7 +218,7 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
         if not plan.quantized:
             raise ValueError("order plan must be quantized before execution")
@@ -287,7 +287,7 @@ class OrderExecutionStateMachine:
                 None,
                 plan=plan,
             )
-        except OrderPreSubmissionError as exc:
+        except _OrderPreSubmissionError as exc:
             await self._append_event(
                 plan,
                 ExchangeOrderState.REJECTED,

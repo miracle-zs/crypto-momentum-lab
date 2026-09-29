@@ -12,11 +12,13 @@ from crypto_momentum_lab.persistence.parquet import write_market_states_15s_data
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    ReplayExecutionConfig,
+    SimulatedFillStatus,
+)
 from crypto_momentum_lab.strategy_runner import (
     ReplayConfig,
     ReplayError,
-    ReplayExecutionConfig,
-    SimulatedFillStatus,
     build_strategy_replay_report,
     run_strategy_replay,
     write_strategy_replay_report,

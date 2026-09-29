@@ -222,29 +222,26 @@ async def test_protected_symbols_discover_live_accounts_with_positions() -> None
             self.labels_calls.append(environment)
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self,
             *,
             environment: str,
             account_label: str,
-        ) -> frozenset[str]:
+        ) -> SimpleNamespace:
             assert environment == "live"
             self.symbol_calls.append(account_label)
-            return frozenset({f"{account_label.upper()}USDT"})
+            return SimpleNamespace(symbols=frozenset({f"{account_label.upper()}USDT"}))
 
     accounts = FakeAccountRepository()
 
-    protection = await main._load_protected_symbols(
+    symbols = await main._load_protected_symbols(
         paper_repository=FakePaperRepository(),
         account_repository=accounts,
         protected_run_ids=frozenset({"paper-run"}),
         configured_live_position_account_labels=frozenset({"primary"}),
     )
 
-    assert protection.symbols == frozenset(
-        {"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"}
-    )
-    assert protection.complete is True
+    assert symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"})
     assert accounts.labels_calls == ["live"]
     assert set(accounts.symbol_calls) == {"primary", "account-2"}
 
@@ -262,23 +259,22 @@ async def test_load_protected_symbols_succeeds_when_all_accounts_flat() -> None:
         ) -> frozenset[str]:
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
-            return frozenset()
+        ) -> SimpleNamespace:
+            return SimpleNamespace(symbols=frozenset())
 
-    protection = await main._load_protected_symbols(
+    symbols = await main._load_protected_symbols(
         paper_repository=FakePaperRepository(),
         account_repository=FlatAccountRepository(),
         protected_run_ids=frozenset(),
         configured_live_position_account_labels=frozenset({"primary"}),
     )
 
-    assert protection.symbols == frozenset()
-    assert protection.complete is True
+    assert symbols == frozenset()
 
 
-async def test_load_protected_symbols_isolates_account_exception() -> None:
+async def test_load_protected_symbols_propagates_account_exception() -> None:
     class FakePaperRepository:
         async def load_open_position_symbols(
             self, protected_run_ids: Iterable[str]
@@ -291,31 +287,23 @@ async def test_load_protected_symbols_isolates_account_exception() -> None:
         ) -> frozenset[str]:
             return frozenset({"primary", "account-2"})
 
-        async def load_active_position_symbols(
+        async def load_active_position_state(
             self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
+        ) -> SimpleNamespace:
             if account_label == "account-2":
-                raise RuntimeError(
-                    "ready reconciliation is missing active position snapshots"
-                )
-            return frozenset({"PRIMARYUSDT"})
+                raise RuntimeError("account state query failed")
+            return SimpleNamespace(symbols=frozenset({"PRIMARYUSDT"}))
 
-    protection = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        account_repository=FailingAccountRepository(),
-        protected_run_ids=frozenset({"paper-run"}),
-        configured_live_position_account_labels=frozenset({"primary"}),
-    )
-
-    assert protection.symbols == frozenset({"PAPERUSDT", "PRIMARYUSDT"})
-    assert protection.complete is False
-    assert any(
-        issue.startswith("account_position_state:account-2")
-        for issue in protection.issues
-    )
+    with pytest.raises(RuntimeError, match="account state query failed"):
+        await main._load_protected_symbols(
+            paper_repository=FakePaperRepository(),
+            account_repository=FailingAccountRepository(),
+            protected_run_ids=frozenset({"paper-run"}),
+            configured_live_position_account_labels=frozenset({"primary"}),
+        )
 
 
-async def test_load_protected_symbols_graceful_when_labels_discovery_fails() -> None:
+async def test_load_protected_symbols_propagates_label_discovery_failure() -> None:
     class FakePaperRepository:
         async def load_open_position_symbols(
             self, protected_run_ids: Iterable[str]
@@ -328,56 +316,18 @@ async def test_load_protected_symbols_graceful_when_labels_discovery_fails() -> 
         ) -> frozenset[str]:
             raise RuntimeError("database timeout during discovery")
 
-        async def load_active_position_symbols(
-            self, *, environment: str, account_label: str
-        ) -> frozenset[str]:
-            return frozenset({"CONFIGUREDUSDT"})
-
-    protection = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        account_repository=FailingDiscoveryAccountRepository(),
-        protected_run_ids=frozenset({"paper-run"}),
-        configured_live_position_account_labels=frozenset({"primary"}),
-    )
-
-    assert protection.symbols == frozenset({"PAPERUSDT", "CONFIGUREDUSDT"})
-    assert protection.complete is False
-    assert any(
-        issue.startswith("live_account_discovery:") for issue in protection.issues
-    )
-
-
-async def test_incomplete_legacy_position_state_degrades_protection_result() -> None:
-    class FakePaperRepository:
-        async def load_open_position_symbols(
-            self, protected_run_ids: Iterable[str]
-        ) -> frozenset[str]:
-            return frozenset()
-
-    class LegacyAccountRepository:
-        async def load_active_position_account_labels(
-            self, *, environment: str
-        ) -> frozenset[str]:
-            return frozenset({"primary"})
-
         async def load_active_position_state(
             self, *, environment: str, account_label: str
         ) -> SimpleNamespace:
-            return SimpleNamespace(
-                symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
-                complete=False,
-            )
+            return SimpleNamespace(symbols=frozenset({"CONFIGUREDUSDT"}))
 
-    protection = await main._load_protected_symbols(
-        paper_repository=FakePaperRepository(),
-        account_repository=LegacyAccountRepository(),
-        protected_run_ids=frozenset(),
-        configured_live_position_account_labels=frozenset(),
-    )
-
-    assert protection.symbols == frozenset({"BTCUSDT", "ETHUSDT"})
-    assert protection.complete is False
-    assert protection.issues == ("incomplete_position_state:primary",)
+    with pytest.raises(RuntimeError, match="database timeout during discovery"):
+        await main._load_protected_symbols(
+            paper_repository=FakePaperRepository(),
+            account_repository=FailingDiscoveryAccountRepository(),
+            protected_run_ids=frozenset({"paper-run"}),
+            configured_live_position_account_labels=frozenset({"primary"}),
+        )
 
 
 async def test_operational_retention_uses_bounded_batches() -> None:
@@ -676,11 +626,10 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         config_path: Path,
         *,
         on_durable_state_persisted=None,
-        on_protected_symbols_readiness=None,
         startup_timer=None,
     ):
         assert startup_timer is not None
-        del config_path, on_durable_state_persisted, on_protected_symbols_readiness
+        del config_path, on_durable_state_persisted
         yield runtime
 
     monkeypatch.setattr(main, "build_market_data_runtime", fake_runtime)
@@ -1056,52 +1005,6 @@ async def test_capture_observer_keeps_open_position_symbols_subscribed() -> None
     )
 
 
-async def test_capture_observer_keeps_last_complete_protection_on_refresh_error() -> (
-    None
-):
-    class FakeCapture:
-        def __init__(self) -> None:
-            self.calls = []
-
-        async def apply_symbols(self, symbols, *, streams, generation) -> None:
-            self.calls.append((symbols, streams, generation))
-
-    protection = main.ProtectedSymbolsSnapshot(
-        symbols=frozenset({"OLDUSDT"}),
-        complete=True,
-    )
-    readiness: list[tuple[bool, tuple[str, ...]]] = []
-
-    async def load_protected_symbols() -> main.ProtectedSymbolsSnapshot:
-        return protection
-
-    capture = FakeCapture()
-    observer = main.CaptureUniverseObserver(
-        capture,
-        streams=(CaptureStream.AGG_TRADE,),
-        initial_generation=3,
-        protected_symbol_loader=load_protected_symbols,
-        on_protected_symbols_readiness=lambda complete, issues: readiness.append(
-            (complete, issues)
-        ),
-    )
-    await observer.snapshot_updated(fixture_snapshot())
-
-    protection = main.ProtectedSymbolsSnapshot(
-        symbols=frozenset({"NEWUSDT"}),
-        complete=False,
-        issues=("live_account_discovery:TimeoutError",),
-    )
-    await observer.refresh_protected_symbols()
-
-    assert capture.calls[-1][0] == frozenset({"BTCUSDT", "OLDUSDT", "NEWUSDT"})
-    assert observer.protected_symbols_complete is False
-    assert readiness[-1] == (
-        False,
-        ("live_account_discovery:TimeoutError",),
-    )
-
-
 async def test_logging_refresh_service_times_out_stalled_refresh() -> None:
     class StalledRefreshService:
         async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
@@ -1322,7 +1225,9 @@ async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
     assert "S25USDT" not in capture.calls[-1][0]
 
 
-async def test_watch_only_exit_does_not_subscribe_trade_stream() -> None:
+async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit() -> (
+    None
+):
     class FakeCapture:
         def __init__(self) -> None:
             self.calls = []
@@ -1355,6 +1260,5 @@ async def test_watch_only_exit_does_not_subscribe_trade_stream() -> None:
     )
     await observer.snapshot_updated(second)
 
-    # S35 was NEVER in the trade tier; leaving the universe must NOT give it an
-    # aggTrade stream.
+    # S35 was NEVER in the trade tier; leaving the universe must NOT give it an aggTrade stream.
     assert "S35USDT" not in capture.calls[-1][0]

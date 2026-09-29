@@ -123,9 +123,7 @@ def test_compute_trading_rules_hash() -> None:
     from crypto_momentum_lab.domain.operational.runtime_metadata import (
         compute_trading_rules_hash,
     )
-    from crypto_momentum_lab.execution_account.orders.quantization import (
-        SymbolTradingRules,
-    )
+    from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 
     rules = {
         "BTCUSDT": SymbolTradingRules(

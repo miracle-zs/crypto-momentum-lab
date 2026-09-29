@@ -309,11 +309,7 @@ class AccountConfigSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class AccountPositionStateSnapshot:
-    """The latest known set of non-zero account position legs.
-
-    ``complete`` distinguishes an authoritative account-wide snapshot from a
-    best-effort reconstruction of legacy sparse position history.
-    """
+    """The latest authoritative set of non-zero account position legs."""
 
     environment: str
     account_label: str
@@ -321,7 +317,6 @@ class AccountPositionStateSnapshot:
     observed_at: datetime
     position_count: int
     position_keys: tuple[tuple[str, str], ...]
-    complete: bool
 
     def __post_init__(self) -> None:
         _require_common(self.environment, self.account_label)
@@ -337,8 +332,8 @@ class AccountPositionStateSnapshot:
             raise ValueError("position keys must contain non-empty symbol and side")
         if len(set(normalized)) != len(normalized):
             raise ValueError("position keys must be unique")
-        if self.complete and len(normalized) != self.position_count:
-            raise ValueError("complete position snapshot count must match its keys")
+        if len(normalized) != self.position_count:
+            raise ValueError("position snapshot count must match its keys")
         object.__setattr__(self, "position_keys", normalized)
 
     @property

@@ -69,10 +69,12 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
     OrderExecutionPort,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     OrderExecutionStateMachine,
-    PreparedOrderSubmission,
     SubmitPolicy,
 )
 from crypto_momentum_lab.execution_account.risk_control_hub import (

@@ -20,6 +20,9 @@ from crypto_momentum_lab.execution_account.binance.client import (
     _AsyncRequestPacer,
     _FileRequestPacer,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -27,7 +30,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
-    OrderPreSubmissionError,
 )
 
 

@@ -39,8 +39,8 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
+from crypto_momentum_lab.domain.execution.order_rules import (
+    SymbolTradingRules as _SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
@@ -128,16 +128,7 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
-    _load_order_anchor_events as _load_order_anchor_events,
-)
-from crypto_momentum_lab.persistence.postgres.position_order_window import (
-    _opening_anchors_from_events as _opening_anchors_from_events,
-)
-from crypto_momentum_lab.persistence.postgres.position_order_window import (
-    _OrderAnchorEvent as _OrderAnchorEvent,
-)
-from crypto_momentum_lab.persistence.postgres.position_order_window import (
-    load_position_orders_bounded as _load_position_orders_bounded,
+    load_position_orders_bounded,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
@@ -233,7 +224,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_loaded_at: datetime | None = None
         self._cache_epoch = 0
-        self._cached_rules: dict[str, SymbolTradingRules] = {}
+        self._cached_rules: dict[str, _SymbolTradingRules] = {}
         self._cached_rules_at: dict[str, datetime] = {}
         self._context_load_lock = asyncio.Lock()
         self._rules_load_lock = asyncio.Lock()
@@ -248,7 +239,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_book_unresolved: tuple[Any, ...] | None = None
         self._rules_load_tasks: dict[
             str,
-            asyncio.Task[SymbolTradingRules],
+            asyncio.Task[_SymbolTradingRules],
         ] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
@@ -933,7 +924,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self,
         symbol: str,
         now: datetime,
-    ) -> SymbolTradingRules:
+    ) -> _SymbolTradingRules:
         cached = self._cached_rules.get(symbol)
         cached_at = self._cached_rules_at.get(symbol)
         if (
@@ -981,7 +972,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self,
         symbol: str,
         now: datetime,
-    ) -> SymbolTradingRules:
+    ) -> _SymbolTradingRules:
         market_sessions = getattr(self, "_market_sessions", None)
         if market_sessions is None:
             market_sessions = self._sessions
@@ -1093,7 +1084,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             since_time: datetime | None = None
             if active:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
-                orders = await _load_position_orders_bounded(
+                orders = await load_position_orders_bounded(
                     session,
                     run_id=self._run_id,
                     active_symbols=active_symbols,
@@ -1237,7 +1228,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         if active:
             async with self._sessions() as session:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
-                orders = await _load_position_orders_bounded(
+                orders = await load_position_orders_bounded(
                     session,
                     run_id=self._run_id,
                     active_symbols=active_symbols,

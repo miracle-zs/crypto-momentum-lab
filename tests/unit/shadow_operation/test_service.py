@@ -19,15 +19,13 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    SymbolTradingRules,
-)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     SubmitPolicy,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.shadow_operation.models import (
+from crypto_momentum_lab.domain.shadow_operation.models import (
     ShadowDecisionMetric,
     ShadowOrderPlan,
     ShadowSession,

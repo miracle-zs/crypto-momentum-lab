@@ -13,7 +13,7 @@ from crypto_momentum_lab.domain.market.market_book import (
 )
 from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import (
-    RuntimeStateSequenceRange,
+    RuntimeStateSequenceRange as _RuntimeStateSequenceRange,
 )
 from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -178,7 +178,7 @@ class PostgresRuntimeMarketStateRepository:
         states: tuple[MarketState15s, ...],
         *,
         source_watermark_at: datetime,
-        sequence_range: RuntimeStateSequenceRange,
+        sequence_range: _RuntimeStateSequenceRange,
     ) -> None:
         validate_closed_states(states)
         _require_aware(source_watermark_at, "source_watermark_at")
@@ -651,7 +651,7 @@ def _is_synthetic_runtime_state_row(row: RuntimeMarketState15sRow) -> bool:
     )
 
 
-def _validate_sequence_range(sequence_range: RuntimeStateSequenceRange) -> None:
+def _validate_sequence_range(sequence_range: _RuntimeStateSequenceRange) -> None:
     if (
         sequence_range.minimum is not None
         and sequence_range.maximum is not None

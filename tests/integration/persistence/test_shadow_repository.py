@@ -19,7 +19,10 @@ from crypto_momentum_lab.persistence.postgres.session import (
 from crypto_momentum_lab.persistence.postgres.shadow_repository import (
     PostgresShadowRepository,
 )
-from crypto_momentum_lab.shadow_operation.models import ShadowOrderPlan, ShadowSession
+from crypto_momentum_lab.domain.shadow_operation.models import (
+    ShadowOrderPlan,
+    ShadowSession,
+)
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 

@@ -390,94 +390,7 @@ class PostgresAccountRepository:
             )
             if latest_run is None:
                 return None
-
-            versioned = _position_state_from_run(latest_run)
-            if versioned is not None:
-                return versioned
-            if latest_run.position_count == 0:
-                # A zero-count run is authoritative even in legacy data. Do not
-                # resurrect older non-zero detail rows after a flat reconciliation.
-                return AccountPositionStateSnapshot(
-                    environment=environment,
-                    account_label=account_label,
-                    reconciliation_id=latest_run.reconciliation_id,
-                    observed_at=latest_run.observed_at,
-                    position_count=0,
-                    position_keys=(),
-                    complete=True,
-                )
-
-            # Legacy position history is sparse per key. Reconstruct the best
-            # known set at the run's cut, never from one account-wide timestamp
-            # and never from observations after that cut. The result remains
-            # incomplete because old rows do not prove an account-wide snapshot.
-            latest_by_key = (
-                select(
-                    AccountPositionSnapshotRow.symbol,
-                    AccountPositionSnapshotRow.position_side,
-                    AccountPositionSnapshotRow.position_amt,
-                )
-                .where(
-                    AccountPositionSnapshotRow.environment == environment,
-                    AccountPositionSnapshotRow.account_label == account_label,
-                    AccountPositionSnapshotRow.observed_at <= latest_run.observed_at,
-                )
-                .distinct(
-                    AccountPositionSnapshotRow.symbol,
-                    AccountPositionSnapshotRow.position_side,
-                )
-                .order_by(
-                    AccountPositionSnapshotRow.symbol,
-                    AccountPositionSnapshotRow.position_side,
-                    AccountPositionSnapshotRow.observed_at.desc(),
-                    AccountPositionSnapshotRow.snapshot_id.desc(),
-                )
-                .subquery()
-            )
-            rows = (
-                await session.execute(
-                    select(
-                        latest_by_key.c.symbol,
-                        latest_by_key.c.position_side,
-                        latest_by_key.c.position_amt,
-                    )
-                )
-            ).all()
-            known_keys = tuple(
-                (row.symbol, row.position_side)
-                for row in rows
-                if row.position_amt != 0
-            )
-            if len(known_keys) != latest_run.position_count:
-                log.warning(
-                    "legacy_position_state_incomplete",
-                    environment=environment,
-                    account_label=account_label,
-                    reconciliation_id=latest_run.reconciliation_id,
-                    expected_position_count=latest_run.position_count,
-                    known_position_count=len(known_keys),
-                )
-            return AccountPositionStateSnapshot(
-                environment=environment,
-                account_label=account_label,
-                reconciliation_id=latest_run.reconciliation_id,
-                observed_at=latest_run.observed_at,
-                position_count=latest_run.position_count,
-                position_keys=known_keys,
-                complete=False,
-            )
-
-    async def load_active_position_symbols(
-        self,
-        *,
-        environment: str,
-        account_label: str,
-    ) -> frozenset[str]:
-        state = await self.load_active_position_state(
-            environment=environment,
-            account_label=account_label,
-        )
-        return frozenset() if state is None else state.symbols
+            return _position_state_from_run(latest_run)
 
     async def load_active_position_account_labels(
         self,
@@ -487,9 +400,7 @@ class PostgresAccountRepository:
     ) -> frozenset[str]:
         """Return live account labels whose latest ready run has positions.
 
-        Queries the single-row-per-account `account_reconciliation_heads` projection
-        table. If the projection has not been populated yet for the given environment,
-        it defensively falls back to the historical reconciliation runs query.
+        Reads active labels from the latest reconciliation head or run.
         """
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -507,13 +418,7 @@ class PostgresAccountRepository:
                 )
             heads = (await session.scalars(head_stmt)).all()
             active_by_label = {
-                row.account_label: (
-                    row.position_count > 0
-                    or (
-                        (state := _position_state_from_run(row)) is not None
-                        and not state.complete
-                    )
-                )
+                row.account_label: row.position_count > 0
                 for row in heads
             }
 
@@ -541,11 +446,7 @@ class PostgresAccountRepository:
             )
             current_runs = (await session.scalars(latest_runs)).all()
             for row in current_runs:
-                state = _position_state_from_run(row)
-                active_by_label[row.account_label] = (
-                    row.position_count > 0
-                    or (state is not None and not state.complete)
-                )
+                active_by_label[row.account_label] = row.position_count > 0
 
             return frozenset(
                 label for label, active in active_by_label.items() if active
@@ -777,51 +678,32 @@ def _row_id(namespace: str, *parts: str) -> UUID:
 
 def _position_state_from_run(
     run: AccountReconciliationRunRow | AccountReconciliationHeadRow,
-) -> AccountPositionStateSnapshot | None:
+) -> AccountPositionStateSnapshot:
     details = run.details
     if not isinstance(details, Mapping):
-        return None
-    schema_version = details.get("position_state_schema_version")
-    if schema_version is None:
-        return None
-    raw_keys = details.get("position_keys")
-    position_keys: list[tuple[str, str]] = []
-    malformed = type(schema_version) is not int or schema_version != 1
+        raise TypeError("reconciliation details must be an object")
+    schema_version = details["position_state_schema_version"]
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("position_state_schema_version must be 1")
+    raw_keys = details["position_keys"]
     if not isinstance(raw_keys, list):
-        malformed = True
-    else:
-        for item in raw_keys:
-            if not isinstance(item, Mapping):
-                malformed = True
-                continue
-            symbol = item.get("symbol")
-            side = item.get("position_side")
-            if not isinstance(symbol, str) or not isinstance(side, str):
-                malformed = True
-                continue
-            normalized_key = (symbol.strip().upper(), side.strip().upper())
-            if not all(normalized_key):
-                malformed = True
-                continue
-            position_keys.append(normalized_key)
+        raise TypeError("position_keys must be a list")
+    position_keys: list[tuple[str, str]] = []
+    for index, item in enumerate(raw_keys):
+        if not isinstance(item, Mapping):
+            raise TypeError(f"position_keys[{index}] must be an object")
+        symbol = item["symbol"]
+        side = item["position_side"]
+        if not isinstance(symbol, str) or not isinstance(side, str):
+            raise TypeError(f"position_keys[{index}] symbol and side must be strings")
+        normalized_key = (symbol.strip().upper(), side.strip().upper())
+        if not all(normalized_key):
+            raise ValueError(
+                f"position_keys[{index}] symbol and side must be non-empty"
+            )
+        position_keys.append(normalized_key)
     if len(set(position_keys)) != len(position_keys):
-        malformed = True
-    position_keys = sorted(set(position_keys))
-    complete = (
-        not malformed
-        and schema_version == 1
-        and len(position_keys) == run.position_count
-    )
-    if not complete:
-        log.warning(
-            "account_position_state_details_incomplete",
-            environment=run.environment,
-            account_label=run.account_label,
-            reconciliation_id=run.reconciliation_id,
-            schema_version=schema_version,
-            expected_position_count=run.position_count,
-            known_position_count=len(position_keys),
-        )
+        raise ValueError("position_keys must be unique")
     return AccountPositionStateSnapshot(
         environment=run.environment,
         account_label=run.account_label,
@@ -829,5 +711,4 @@ def _position_state_from_run(
         observed_at=run.observed_at,
         position_count=run.position_count,
         position_keys=tuple(position_keys),
-        complete=complete,
     )

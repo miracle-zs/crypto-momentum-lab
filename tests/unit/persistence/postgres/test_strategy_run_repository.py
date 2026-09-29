@@ -18,13 +18,13 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     strategy_run_report_rows,
     validate_paper_report,
 )
-from crypto_momentum_lab.strategy_runner.fills import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     ReplayExecutionConfig,
     SimulatedFill,
     SimulatedFillStatus,
 )
-from crypto_momentum_lab.strategy_runner.paper import PaperTradingRunReport
-from crypto_momentum_lab.strategy_runner.portfolio import position_from_entry_fill
+from crypto_momentum_lab.domain.strategy.paper_models import PaperTradingRunReport
+from crypto_momentum_lab.domain.strategy.paper_models import position_from_entry_fill
 
 
 def test_report_rows_convert_decimals_and_enums_to_json_values() -> None:

@@ -213,9 +213,7 @@ async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
     from crypto_momentum_lab.domain.execution.recovery_models import (
         JournalPersistResult,
     )
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-        ExecutionHeadSnapshot,
-    )
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class _DurableTx:
         def __init__(self) -> None:

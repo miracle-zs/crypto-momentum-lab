@@ -4,19 +4,21 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.strategy_runner.fills import (
+from crypto_momentum_lab.domain.strategy.paper_models import (
     SimulatedFill,
     SimulatedFillStatus,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitConfig,
+    PaperExitMode,
+    PaperPositionStatus,
+    position_from_entry_fill,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
     Candle15mGap,
     ClosedCandle15m,
-    PaperExitConfig,
-    PaperExitMode,
-    PaperPositionStatus,
     mark_positions,
-    position_from_entry_fill,
 )
 
 
