@@ -19,6 +19,9 @@ from crypto_momentum_lab.config import (
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    RetentionAuthority,
+)
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
@@ -61,6 +64,9 @@ from crypto_momentum_lab.persistence.postgres import (
     create_maintenance_database_engine,
 )
 from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
+from crypto_momentum_lab.persistence.postgres.retention_repository import (
+    AsyncPostgresRetentionRepository,
+)
 
 app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
@@ -582,6 +588,9 @@ async def sync_continuously(
             expire_on_commit=False,
         )
         retention_repository = PostgresOperationalRetentionRepository(retention_factory)
+        retention_authority = RetentionAuthority(
+            repository=AsyncPostgresRetentionRepository(retention_factory)
+        )
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -724,6 +733,7 @@ async def sync_continuously(
                         max_rows_per_table=snapshot_retention_max_rows_per_table,
                         max_runtime_seconds=snapshot_retention_max_runtime_seconds,
                     ),
+                    authority=retention_authority,
                     consumer_requirements_provider=_resolve_active_position_retention_requirements,
                     on_error=lambda error: typer.echo(
                         f"Account snapshot retention failed: {type(error).__name__}",

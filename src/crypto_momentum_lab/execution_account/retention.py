@@ -8,7 +8,6 @@ from typing import Protocol
 
 from crypto_momentum_lab.domain.operational.retention_authority import (
     RetentionAuthority,
-    create_authority_from_repository,
 )
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
@@ -18,9 +17,6 @@ from crypto_momentum_lab.domain.operational.retention_models import (
     PrunePlan,
     PruneReceiptStatus,
     resolve_dataset_scope,
-)
-from crypto_momentum_lab.persistence.postgres.retention_repository import (
-    AsyncPostgresRetentionRepository,
 )
 
 
@@ -73,19 +69,13 @@ async def prune_account_snapshots_once(
     environment: str,
     account_label: str,
     config: AccountSnapshotRetentionConfig,
+    authority: RetentionAuthority,
     now: datetime | None = None,
     consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
-    authority: RetentionAuthority | None = None,
 ) -> dict[str, int]:
     observed_at = now or datetime.now(tz=UTC)
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-
-    if authority is None:
-        authority = create_authority_from_repository(
-            repository,
-            async_repo_factory=AsyncPostgresRetentionRepository,
-        )
 
     scope = resolve_dataset_scope(
         f"account_snapshots_{account_label}",
@@ -139,6 +129,7 @@ async def run_account_snapshot_retention(
     environment: str,
     account_label: str,
     config: AccountSnapshotRetentionConfig,
+    authority: RetentionAuthority,
     consumer_requirements_provider: (
         Callable[[], Awaitable[tuple[RetentionConsumerRequirement, ...]]] | None
     ) = None,
@@ -164,6 +155,7 @@ async def run_account_snapshot_retention(
                     environment=environment,
                     account_label=account_label,
                     config=config,
+                    authority=authority,
                     consumer_requirements=reqs,
                 )
         except Exception as error:
