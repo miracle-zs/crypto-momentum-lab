@@ -1358,9 +1358,11 @@ def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
     last_start = None
     timestamp = values.get("ExecMainStartTimestamp", "")
     if timestamp:
+        # `--timestamp=unix` renders as "@<epoch>"; the default rendering is
+        # "Tue 2026-09-29 08:29:11 CST", accepted below as a fallback.
         try:
             last_start = datetime.fromtimestamp(
-                float(timestamp), tz=_BEIJING_TIMEZONE
+                float(timestamp.lstrip("@")), tz=_BEIJING_TIMEZONE
             )
         except ValueError:
             try:

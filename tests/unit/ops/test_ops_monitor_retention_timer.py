@@ -29,14 +29,14 @@ TIMER_OUTPUT = (
     "UnitFileState=enabled\n"
     "Result=success\n"
     "ExecMainStatus=0\n"
-    f"ExecMainStartTimestamp={NOW_EPOCH}\n"
+    f"ExecMainStartTimestamp=@{NOW_EPOCH}\n"
 )
 SERVICE_OUTPUT = (
     "ActiveState=inactive\n"
     "UnitFileState=static\n"
     "Result=success\n"
     "ExecMainStatus=0\n"
-    f"ExecMainStartTimestamp={NOW_EPOCH - 3600}\n"
+    f"ExecMainStartTimestamp=@{NOW_EPOCH - 3600}\n"
 )
 
 
@@ -116,6 +116,12 @@ def test_parse_reads_unix_and_rendered_timestamps() -> None:
     assert rendered.exec_main_status == 1
     assert rendered.last_start is not None
     assert rendered.last_start.hour == 8
+
+
+def test_parse_accepts_the_default_rendering_too() -> None:
+    parsed = _parse_systemd_show(TIMER, "ExecMainStartTimestamp=Tue 2026-09-29 08:29:11 CST\n")
+    assert parsed.last_start is not None
+    assert parsed.last_start.hour == 8
 
 
 def test_parse_tolerates_missing_and_unparsable_fields() -> None:
