@@ -34,12 +34,13 @@ export function sectionRenderKey(id, data) {
   }
 
   if (id === "account") {
+    // Structural identity only. status / readiness / strategy_state flip on
+    // every sync cycle (syncing ↔ ready_readonly) and must NOT rebuild the
+    // DOM — a full rebuild blanks chart slots and collapses document height,
+    // which clamps scrollTop and reads as an auto jump to the top.
     const fields = [
       "account_label",
-      "status",
       "strategy_name",
-      "strategy_state",
-      "readiness",
       "mode",
       "environment",
     ];
@@ -51,6 +52,7 @@ export function sectionRenderKey(id, data) {
       ),
     );
     delete snapshot.selected_account_label;
+    delete snapshot.status;
   }
 
   if (id === "strategy") {
@@ -60,7 +62,6 @@ export function sectionRenderKey(id, data) {
       "exit_mode",
       "exit_label",
       "config_hash",
-      "status",
     ];
     snapshot.accounts = (snapshot.accounts || []).map((account) =>
       Object.fromEntries(
@@ -69,6 +70,7 @@ export function sectionRenderKey(id, data) {
           .map((field) => [field, account[field]]),
       ),
     );
+    delete snapshot.status;
   }
 
   return JSON.stringify(snapshot);

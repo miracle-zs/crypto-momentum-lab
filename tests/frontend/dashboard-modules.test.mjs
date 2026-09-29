@@ -73,6 +73,32 @@ test("heartbeat-only account updates do not rebuild the active section", () => {
   assert.equal(sectionRenderKey("account", first), sectionRenderKey("account", second));
 });
 
+test("syncing/ready_readonly flips do not rebuild the account section", () => {
+  const base = {
+    status: "DEGRADED",
+    accounts: [{
+      account_label: "primary",
+      status: "DEGRADED",
+      readiness: "syncing",
+      strategy_state: null,
+      strategy_name: "orderflow_impulse",
+      environment: "live",
+    }],
+  };
+  const flipped = {
+    status: "READY",
+    accounts: [{
+      account_label: "primary",
+      status: "READY",
+      readiness: "ready_readonly",
+      strategy_state: "active",
+      strategy_name: "orderflow_impulse",
+      environment: "live",
+    }],
+  };
+  assert.equal(sectionRenderKey("account", base), sectionRenderKey("account", flipped));
+});
+
 test("overview account heartbeats do not rebuild the section", () => {
   const first = {
     status: "READY",
