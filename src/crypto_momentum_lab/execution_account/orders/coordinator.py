@@ -384,6 +384,7 @@ class OrderExecutionCoordinator:
         self._entry_submissions_idle = asyncio.Event()
         self._entry_submissions_idle.set()
         self._confirmed_flat_streams: dict[PositionKey, tuple[str, str]] = {}
+        self._active_stream: tuple[str, str] | None = None
 
     @property
     def domain_coordinator(self) -> ExecutionCoordinator | None:
@@ -458,6 +459,8 @@ class OrderExecutionCoordinator:
                 stream_id=stream_id,
                 stream_epoch=stream_epoch,
             )
+        if stream_id and stream_epoch:
+            self._active_stream = (stream_id, stream_epoch)
         if snapshot is None:
             positions = ()
         elif isinstance(snapshot, AccountPositionSnapshot):
@@ -608,7 +611,7 @@ class OrderExecutionCoordinator:
             ):
                 self._confirmed_flat_streams[key] = (stream_id, stream_epoch)
         if conflict_reasons:
-            log.warning(
+            log.error(
                 "account_snapshot_execution_book_conflicts",
                 account_label=self._account_label,
                 stream_id=stream_id,
@@ -900,12 +903,24 @@ class OrderExecutionCoordinator:
             if self._execution_book.has_execution_unit_of_work:
                 current_view = await self._execution_book.read(scope)
                 stream_scope = current_view.stream_scope
-                if stream_scope is None:
-                    raise RuntimeError(
-                        "cumulative order report has no restored Book stream identity"
-                    )
-                stream_id = stream_scope.stream_id
-                stream_epoch = stream_scope.stream_epoch
+                if stream_scope is not None:
+                    stream_id = stream_scope.stream_id
+                    stream_epoch = stream_scope.stream_epoch
+                else:
+                    active = None
+                    if hasattr(self._execution_book, "get_active_stream"):
+                        active = self._execution_book.get_active_stream(
+                            self._environment, self._account_label
+                        )
+                    if active is not None:
+                        stream_id, stream_epoch = active
+                    elif getattr(self, "_active_stream", None) is not None:
+                        stream_id, stream_epoch = self._active_stream
+                    else:
+                        raise RuntimeError(
+                            "cumulative order report has no restored Book stream identity "
+                            "and no active stream scope is registered"
+                        )
             result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=order_ev.event_id,

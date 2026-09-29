@@ -618,6 +618,73 @@ class ExecutionBook:
             (environment, account_label, stream_id, stream_epoch)
         )
 
+    def get_active_stream(
+        self,
+        environment: str,
+        account_label: str,
+    ) -> tuple[str, str] | None:
+        """Return the active (stream_id, stream_epoch) registered for this account, if known."""
+        for env, acc, sid, epoch in self._active_streams:
+            if env == environment and acc == account_label:
+                return (sid, epoch)
+        for s in self._stream_scopes.values():
+            if s.environment == environment and s.account_label == account_label:
+                return (s.stream_id, s.stream_epoch)
+        return None
+
+    async def reload_position(
+        self,
+        key: PositionKey,
+        *,
+        as_of: datetime | None = None,
+    ) -> PositionView | None:
+        """Reload a single position from durable storage into memory."""
+        if self._execution_unit_of_work is None:
+            return None
+        as_of = as_of or datetime.now(UTC)
+        canon = key.canonical_id
+        async with self._mutation_lock(key):
+            states = await self._execution_unit_of_work.load_execution_positions(
+                account_label=key.account_label,
+                environment=key.environment,
+                as_of=as_of,
+            )
+            target_state = next(
+                (s for s in states if s.key == key),
+                None,
+            )
+            if target_state is None:
+                return None
+            journal = AccountJournal.from_durable_cut(target_state.cut)
+            book = PositionBook(journal)
+            head = target_state.head
+            scope = target_state.cut.scope
+            if head is not None:
+                payload = head.state_payload
+                view = book.get_view()
+                book.use_durable_projection_version(
+                    head.projection_version,
+                    event_cut=view.event_cut,
+                )
+                self._head_revisions[canon] = head.revision
+                self._head_projection_digests[canon] = str(
+                    payload.get("projection_digest", "")
+                )
+            self._journals[canon] = journal
+            self._books[canon] = book
+            self._stream_scopes[canon] = scope
+            self._journal_revisions[canon] = target_state.cut.revision
+            self._seen_trade_ids.update(target_state.trade_ids)
+            for watermark in target_state.watermarks:
+                watermark_key = self._order_watermark_key(key, watermark.order_id)
+                self._order_cumulative_fills[watermark_key] = (
+                    watermark.cumulative_quantity
+                )
+                self._order_cumulative_quotes[watermark_key] = (
+                    watermark.cumulative_quote
+                )
+            return book.get_view()
+
     @property
     def coordinator(self) -> ExecutionCoordinator:
         return self._coordinator
