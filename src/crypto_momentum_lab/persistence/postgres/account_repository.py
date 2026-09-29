@@ -1,11 +1,11 @@
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import structlog
-from sqlalchemy import and_, case, delete, func, select, text, tuple_
+from sqlalchemy import case, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.account import (
     AccountFillReconciliationCursor,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
+    AccountPositionStateSnapshot,
     AccountReconciliationHead,
     AccountReconciliationRun,
     ExecutionAccountProcessState,
@@ -363,105 +364,120 @@ class PostgresAccountRepository:
                     session, cursors
                 )
 
+    async def load_active_position_state(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+    ) -> AccountPositionStateSnapshot | None:
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if not account_label.strip():
+            raise ValueError("account_label must not be empty")
+        async with self._session_factory() as session:
+            latest_run = await session.scalar(
+                select(AccountReconciliationRunRow)
+                .where(
+                    AccountReconciliationRunRow.environment == environment,
+                    AccountReconciliationRunRow.account_label == account_label,
+                    AccountReconciliationRunRow.status.in_(("ready", "catching_up")),
+                )
+                .order_by(
+                    AccountReconciliationRunRow.observed_at.desc(),
+                    AccountReconciliationRunRow.reconciliation_id.desc(),
+                )
+                .limit(1)
+            )
+            if latest_run is None:
+                return None
+
+            versioned = _position_state_from_run(latest_run)
+            if versioned is not None:
+                return versioned
+            if latest_run.position_count == 0:
+                # A zero-count run is authoritative even in legacy data. Do not
+                # resurrect older non-zero detail rows after a flat reconciliation.
+                return AccountPositionStateSnapshot(
+                    environment=environment,
+                    account_label=account_label,
+                    reconciliation_id=latest_run.reconciliation_id,
+                    observed_at=latest_run.observed_at,
+                    position_count=0,
+                    position_keys=(),
+                    complete=True,
+                )
+
+            # Legacy position history is sparse per key. Reconstruct the best
+            # known set at the run's cut, never from one account-wide timestamp
+            # and never from observations after that cut. The result remains
+            # incomplete because old rows do not prove an account-wide snapshot.
+            latest_by_key = (
+                select(
+                    AccountPositionSnapshotRow.symbol,
+                    AccountPositionSnapshotRow.position_side,
+                    AccountPositionSnapshotRow.position_amt,
+                )
+                .where(
+                    AccountPositionSnapshotRow.environment == environment,
+                    AccountPositionSnapshotRow.account_label == account_label,
+                    AccountPositionSnapshotRow.observed_at <= latest_run.observed_at,
+                )
+                .distinct(
+                    AccountPositionSnapshotRow.symbol,
+                    AccountPositionSnapshotRow.position_side,
+                )
+                .order_by(
+                    AccountPositionSnapshotRow.symbol,
+                    AccountPositionSnapshotRow.position_side,
+                    AccountPositionSnapshotRow.observed_at.desc(),
+                    AccountPositionSnapshotRow.snapshot_id.desc(),
+                )
+                .subquery()
+            )
+            rows = (
+                await session.execute(
+                    select(
+                        latest_by_key.c.symbol,
+                        latest_by_key.c.position_side,
+                        latest_by_key.c.position_amt,
+                    )
+                )
+            ).all()
+            known_keys = tuple(
+                (row.symbol, row.position_side)
+                for row in rows
+                if row.position_amt != 0
+            )
+            if len(known_keys) != latest_run.position_count:
+                log.warning(
+                    "legacy_position_state_incomplete",
+                    environment=environment,
+                    account_label=account_label,
+                    reconciliation_id=latest_run.reconciliation_id,
+                    expected_position_count=latest_run.position_count,
+                    known_position_count=len(known_keys),
+                )
+            return AccountPositionStateSnapshot(
+                environment=environment,
+                account_label=account_label,
+                reconciliation_id=latest_run.reconciliation_id,
+                observed_at=latest_run.observed_at,
+                position_count=latest_run.position_count,
+                position_keys=known_keys,
+                complete=False,
+            )
+
     async def load_active_position_symbols(
         self,
         *,
         environment: str,
         account_label: str,
     ) -> frozenset[str]:
-        if not environment.strip():
-            raise ValueError("environment must not be empty")
-        if not account_label.strip():
-            raise ValueError("account_label must not be empty")
-        async with self._session_factory() as session:
-            # Keep the run fence and the position timestamp in one SQL
-            # statement.  Two independent reads can otherwise observe a
-            # newer position snapshot with an older ready-run row while a
-            # reconciliation transaction is committing.
-            latest_ready_run = (
-                select(
-                    AccountReconciliationRunRow.observed_at.label(
-                        "reconciliation_observed_at"
-                    ),
-                    AccountReconciliationRunRow.position_count.label("position_count"),
-                )
-                .where(
-                    AccountReconciliationRunRow.environment == environment,
-                    AccountReconciliationRunRow.account_label == account_label,
-                    AccountReconciliationRunRow.status == "ready",
-                )
-                .order_by(AccountReconciliationRunRow.observed_at.desc())
-                .limit(1)
-                .subquery()
-            )
-            latest_position_observed_at = (
-                select(func.max(AccountPositionSnapshotRow.observed_at))
-                .where(
-                    AccountPositionSnapshotRow.environment == environment,
-                    AccountPositionSnapshotRow.account_label == account_label,
-                    AccountPositionSnapshotRow.observed_at
-                    <= latest_ready_run.c.reconciliation_observed_at,
-                )
-                .correlate(latest_ready_run)
-                .scalar_subquery()
-            )
-            statement = (
-                select(
-                    latest_ready_run.c.position_count,
-                    AccountPositionSnapshotRow.symbol,
-                )
-                .select_from(latest_ready_run)
-                .outerjoin(
-                    AccountPositionSnapshotRow,
-                    and_(
-                        AccountPositionSnapshotRow.environment == environment,
-                        AccountPositionSnapshotRow.account_label == account_label,
-                        AccountPositionSnapshotRow.observed_at
-                        == latest_position_observed_at,
-                        AccountPositionSnapshotRow.position_amt != 0,
-                    ),
-                )
-            )
-            rows = (await session.execute(statement)).all()
-            if not rows:
-                return frozenset()
-            position_count = rows[0].position_count
-            result = frozenset(
-                symbol for _position_count, symbol in rows if symbol is not None
-            )
-            if position_count > 0 and not result:
-                # Check if recent snapshots within 5 minutes contain active positions
-                recent_statement = (
-                    select(AccountPositionSnapshotRow.symbol)
-                    .where(
-                        AccountPositionSnapshotRow.environment == environment,
-                        AccountPositionSnapshotRow.account_label == account_label,
-                        AccountPositionSnapshotRow.observed_at
-                        >= (
-                            latest_ready_run.c.reconciliation_observed_at
-                            - timedelta(minutes=5)
-                        ),
-                        AccountPositionSnapshotRow.observed_at
-                        <= (
-                            latest_ready_run.c.reconciliation_observed_at
-                            + timedelta(minutes=5)
-                        ),
-                        AccountPositionSnapshotRow.position_amt != 0,
-                    )
-                    .distinct()
-                )
-                recent_rows = (await session.execute(recent_statement)).scalars().all()
-                if recent_rows:
-                    return frozenset(recent_rows)
-                log.warning(
-                    "reconciliation_missing_active_position_snapshots",
-                    environment=environment,
-                    account_label=account_label,
-                    position_count=position_count,
-                    observed_at=str(latest_ready_run.c.reconciliation_observed_at),
-                )
-                return frozenset()
-            return result
+        state = await self.load_active_position_state(
+            environment=environment,
+            account_label=account_label,
+        )
+        return frozenset() if state is None else state.symbols
 
     async def load_active_position_account_labels(
         self,
@@ -478,59 +494,62 @@ class PostgresAccountRepository:
         if not environment.strip():
             raise ValueError("environment must not be empty")
         expected_labels = set(account_labels) if account_labels is not None else None
+        if expected_labels == set():
+            return frozenset()
         async with self._session_factory() as session:
-            stmt = select(
-                AccountReconciliationHeadRow.account_label,
-                AccountReconciliationHeadRow.position_count,
-            ).where(
+            head_stmt = select(AccountReconciliationHeadRow).where(
                 AccountReconciliationHeadRow.environment == environment,
                 AccountReconciliationHeadRow.status == "ready",
             )
-            if expected_labels:
-                stmt = stmt.where(
+            if expected_labels is not None:
+                head_stmt = head_stmt.where(
                     AccountReconciliationHeadRow.account_label.in_(expected_labels)
                 )
-            heads = (await session.execute(stmt)).all()
-            if heads:
-                found_labels = {row.account_label for row in heads}
-                if expected_labels and len(found_labels) < len(expected_labels):
-                    missing = sorted(expected_labels - found_labels)
-                    log.warning(
-                        "postgres_heads_incomplete",
-                        environment=environment,
-                        missing_labels=missing,
-                        found_count=len(found_labels),
-                        expected_count=len(expected_labels),
+            heads = (await session.scalars(head_stmt)).all()
+            active_by_label = {
+                row.account_label: (
+                    row.position_count > 0
+                    or (
+                        (state := _position_state_from_run(row)) is not None
+                        and not state.complete
                     )
-                return frozenset(
-                    row.account_label for row in heads if row.position_count > 0
                 )
+                for row in heads
+            }
 
+            # Reconciliation runs also carry complete position state while
+            # fill coverage is catching up. Read the newest usable run per
+            # account so those observations supersede older ready heads.
             latest_runs = (
-                select(
-                    AccountReconciliationRunRow.account_label.label("account_label"),
-                    AccountReconciliationRunRow.position_count.label("position_count"),
-                )
+                select(AccountReconciliationRunRow)
                 .distinct(AccountReconciliationRunRow.account_label)
                 .where(
                     AccountReconciliationRunRow.environment == environment,
-                    AccountReconciliationRunRow.status == "ready",
+                    AccountReconciliationRunRow.status.in_(
+                        ("ready", "catching_up")
+                    ),
                 )
             )
-            if expected_labels:
+            if expected_labels is not None:
                 latest_runs = latest_runs.where(
                     AccountReconciliationRunRow.account_label.in_(expected_labels)
                 )
-            subq = latest_runs.order_by(
+            latest_runs = latest_runs.order_by(
                 AccountReconciliationRunRow.account_label,
                 AccountReconciliationRunRow.observed_at.desc(),
                 AccountReconciliationRunRow.reconciliation_id.desc(),
-            ).subquery()
-
-            labels = await session.scalars(
-                select(subq.c.account_label).where(subq.c.position_count > 0)
             )
-            return frozenset(labels.all())
+            current_runs = (await session.scalars(latest_runs)).all()
+            for row in current_runs:
+                state = _position_state_from_run(row)
+                active_by_label[row.account_label] = (
+                    row.position_count > 0
+                    or (state is not None and not state.complete)
+                )
+
+            return frozenset(
+                label for label, active in active_by_label.items() if active
+            )
 
     async def load_reconciliation_heads(
         self,
@@ -754,3 +773,61 @@ def reconciliation_run_row(run: AccountReconciliationRun) -> dict[str, object]:
 
 def _row_id(namespace: str, *parts: str) -> UUID:
     return uuid5(NAMESPACE_URL, ":".join((namespace, *parts)))
+
+
+def _position_state_from_run(
+    run: AccountReconciliationRunRow | AccountReconciliationHeadRow,
+) -> AccountPositionStateSnapshot | None:
+    details = run.details
+    if not isinstance(details, Mapping):
+        return None
+    schema_version = details.get("position_state_schema_version")
+    if schema_version is None:
+        return None
+    raw_keys = details.get("position_keys")
+    position_keys: list[tuple[str, str]] = []
+    malformed = type(schema_version) is not int or schema_version != 1
+    if not isinstance(raw_keys, list):
+        malformed = True
+    else:
+        for item in raw_keys:
+            if not isinstance(item, Mapping):
+                malformed = True
+                continue
+            symbol = item.get("symbol")
+            side = item.get("position_side")
+            if not isinstance(symbol, str) or not isinstance(side, str):
+                malformed = True
+                continue
+            normalized_key = (symbol.strip().upper(), side.strip().upper())
+            if not all(normalized_key):
+                malformed = True
+                continue
+            position_keys.append(normalized_key)
+    if len(set(position_keys)) != len(position_keys):
+        malformed = True
+    position_keys = sorted(set(position_keys))
+    complete = (
+        not malformed
+        and schema_version == 1
+        and len(position_keys) == run.position_count
+    )
+    if not complete:
+        log.warning(
+            "account_position_state_details_incomplete",
+            environment=run.environment,
+            account_label=run.account_label,
+            reconciliation_id=run.reconciliation_id,
+            schema_version=schema_version,
+            expected_position_count=run.position_count,
+            known_position_count=len(position_keys),
+        )
+    return AccountPositionStateSnapshot(
+        environment=run.environment,
+        account_label=run.account_label,
+        reconciliation_id=run.reconciliation_id,
+        observed_at=run.observed_at,
+        position_count=run.position_count,
+        position_keys=tuple(position_keys),
+        complete=complete,
+    )
