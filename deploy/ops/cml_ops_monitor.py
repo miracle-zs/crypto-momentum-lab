@@ -72,6 +72,9 @@ _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED = 2
 _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED = 2
 _DEFAULT_FLAPPING_WINDOW_SECONDS = 600.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
+_DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
+# The timer runs daily; 26h leaves room for one missed slot before alerting.
+_DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 # How long after a container starts lifecycle alerts stay quiet.  Every deploy
@@ -93,6 +96,9 @@ _SEVERITY_LABELS = {
 }
 _ALERT_LABELS = {
     "container_missing": "服务容器缺失",
+    "retention_timer_inactive": "冷数据归档定时器未激活",
+    "retention_timer_failed": "冷数据归档上次运行失败",
+    "retention_timer_stale": "冷数据归档长时间未运行",
     "container_unhealthy": "服务健康检查失败",
     "container_oom_killed": "服务触发 OOM 终止",
     "container_memory_high": "服务内存占用过高",
@@ -129,6 +135,15 @@ _ALERT_LABELS = {
 }
 _ALERT_IMPACTS = {
     "container_missing": "对应服务未运行，相关功能不可用。",
+    "retention_timer_inactive": (
+        "归档与裁剪的触发器被停用或未运行，冷数据不会再被清理，磁盘只会持续增长。"
+    ),
+    "retention_timer_failed": (
+        "上一次归档或裁剪以失败结束：数据可能已归档但未删除，磁盘占用不降。"
+    ),
+    "retention_timer_stale": (
+        "归档任务已超过预期周期未启动，通常意味着定时器被停用或主机计划未生效。"
+    ),
     "container_unhealthy": "容器健康检查探针持续超时，服务可能处于假死或无法正常响应状态。",
     "container_oom_killed": "对应服务已被系统内核强制终止，相关任务已中断。",
     "container_memory_high": "服务内存占用接近上限，继续增长可能触发 OOM 强杀。",
@@ -181,6 +196,15 @@ _ALERT_IMPACTS = {
 }
 _ALERT_ACTIONS = {
     "container_missing": "检查 Docker Compose 编排状态与服务日志，确认服务退出原因并重新拉起。",
+    "retention_timer_inactive": (
+        "执行 systemctl enable --now <unit>，并确认 systemctl list-timers 中能看到下次触发时间。"
+    ),
+    "retention_timer_failed": (
+        "查看 journalctl -u <unit 对应的 service> 的本次运行输出，修复后手动触发一次并确认退出码为 0。"
+    ),
+    "retention_timer_stale": (
+        "确认 timer 处于 active 且主机时钟正常；若刚恢复，先手动跑一次再观察下一周期。"
+    ),
     "container_unhealthy": (
         "排查容器 recent logs 与 /health 端点响应耗时，确认服务是否假死或死锁。"
     ),
@@ -1305,6 +1329,173 @@ class SubprocessRunner:
 
 
 @dataclass(frozen=True, slots=True)
+class SystemdUnitState:
+    """Activation and last-run state of one systemd unit."""
+
+    unit: str
+    active_state: str
+    unit_file_state: str
+    result: str
+    exec_main_status: int | None
+    last_start: datetime | None
+
+
+_SYSTEMD_SHOW_FIELDS = (
+    "ActiveState",
+    "UnitFileState",
+    "Result",
+    "ExecMainStatus",
+    "ExecMainStartTimestamp",
+)
+
+
+def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    last_start = None
+    timestamp = values.get("ExecMainStartTimestamp", "")
+    if timestamp:
+        try:
+            last_start = datetime.fromtimestamp(
+                float(timestamp), tz=_BEIJING_TIMEZONE
+            )
+        except ValueError:
+            try:
+                last_start = datetime.strptime(
+                    timestamp, "%a %Y-%m-%d %H:%M:%S %Z"
+                ).replace(tzinfo=_BEIJING_TIMEZONE)
+            except ValueError:
+                last_start = None
+    status_text = values.get("ExecMainStatus", "")
+    exec_main_status = (
+        int(status_text) if status_text.lstrip("-").isdigit() else None
+    )
+    return SystemdUnitState(
+        unit=unit,
+        active_state=values.get("ActiveState", "") or "unknown",
+        unit_file_state=values.get("UnitFileState", "") or "",
+        result=values.get("Result", "") or "",
+        exec_main_status=exec_main_status,
+        last_start=last_start,
+    )
+
+
+def read_systemd_unit_state(
+    unit: str,
+    *,
+    runner: CommandRunner,
+    timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> SystemdUnitState | None:
+    """Read one unit's state, or ``None`` when this host has no usable systemd.
+
+    ``--timestamp=unix`` keeps the parse independent of the host locale; the
+    default rendering is accepted too so an older systemctl still works.
+    """
+    if not unit.strip():
+        return None
+    args = ["systemctl", "show", unit, "--no-pager", "--timestamp=unix"]
+    for name in _SYSTEMD_SHOW_FIELDS:
+        args.extend(["-p", name])
+    try:
+        output = runner.run(args, timeout_seconds=timeout_seconds)
+    except FileNotFoundError:
+        # Not a systemd host (a developer machine, for example): stay quiet.
+        return None
+    except RuntimeError:
+        # The unit is missing or systemctl refused to answer. Report it as an
+        # unreadable schedule rather than silence, because the failure mode this
+        # check exists for is exactly "nothing runs and nobody notices".
+        return SystemdUnitState(
+            unit=unit,
+            active_state="unknown",
+            unit_file_state="unknown",
+            result="",
+            exec_main_status=None,
+            last_start=None,
+        )
+    if not output.strip():
+        # Without a single field there is nothing trustworthy to report, so stay
+        # quiet instead of inventing an inactive schedule.
+        return None
+    parsed = _parse_systemd_show(unit, output)
+    if parsed.active_state == "unknown":
+        # Output that carries no ActiveState is not evidence that the unit is
+        # inactive (a stubbed runner, for example). Only a real answer may alert.
+        return None
+    return parsed
+
+
+def evaluate_retention_timer(
+    state: SystemdUnitState | None,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> tuple[Alert, ...]:
+    """Alert when the retention schedule stopped running or stopped succeeding.
+
+    A disabled or never-firing timer looks identical to a healthy system from
+    the outside until the disk fills, so the schedule itself has to be observed
+    and not only the data it is supposed to trim.
+    """
+    if state is None:
+        return ()
+    details: dict[str, object] = {
+        "unit": state.unit,
+        "active_state": state.active_state,
+        "unit_file_state": state.unit_file_state,
+        "result": state.result,
+        "exec_main_status": state.exec_main_status,
+    }
+    alerts: list[Alert] = []
+    disabled = state.unit_file_state == "disabled"
+    if state.active_state != "active" or disabled:
+        alerts.append(
+            Alert(
+                "retention_timer_inactive",
+                "critical",
+                f"Retention timer {state.unit} is not active",
+                {**details, "reason": "disabled" if disabled else state.active_state},
+            )
+        )
+    age_seconds: float | None = None
+    if state.last_start is not None:
+        age_seconds = (now - state.last_start).total_seconds()
+        details["last_start"] = state.last_start.isoformat()
+        details["age_seconds"] = age_seconds
+    if state.result and state.result != "success":
+        alerts.append(
+            Alert(
+                "retention_timer_failed",
+                "critical",
+                f"Retention unit {state.unit} last run failed ({state.result})",
+                details,
+            )
+        )
+    elif age_seconds is None:
+        alerts.append(
+            Alert(
+                "retention_timer_stale",
+                "critical",
+                f"Retention unit {state.unit} has no recorded run",
+                details,
+            )
+        )
+    elif age_seconds > max_age_seconds:
+        alerts.append(
+            Alert(
+                "retention_timer_stale",
+                "critical",
+                f"Retention unit {state.unit} last ran {age_seconds / 3600.0:.1f}h ago",
+                {**details, "threshold_seconds": max_age_seconds},
+            )
+        )
+    return tuple(alerts)
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     project_directory: Path = Path("/opt/crypto-momentum-lab")
     compose_file: Path = Path("/opt/crypto-momentum-lab/compose.server.yaml")
@@ -1331,6 +1522,11 @@ class MonitorConfig:
     consecutive_resolutions_required: int = _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED
     flapping_window_seconds: float = _DEFAULT_FLAPPING_WINDOW_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
+    # Cold-data retention schedule; an empty unit disables the check.
+    retention_timer_unit: str = _DEFAULT_RETENTION_TIMER_UNIT
+    retention_timer_max_age_seconds: float = (
+        _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS
+    )
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     # ``None`` means a persistent sibling of state_path.  This keeps the
     # default durable on both the production host and local test hosts.
@@ -1409,6 +1605,8 @@ class OpsMonitor:
             raise ValueError("consecutive_resolutions_required must be positive")
         if config.flapping_window_seconds <= 0:
             raise ValueError("flapping_window_seconds must be positive")
+        if config.retention_timer_max_age_seconds <= 0:
+            raise ValueError("retention_timer_max_age_seconds must be positive")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -1448,6 +1646,17 @@ class OpsMonitor:
                 alert for alert in alerts if not _is_maintenance_noise(alert.name)
             )
         return alerts
+
+    def _retention_timer_state(self) -> SystemdUnitState | None:
+        """Observe the cold-data retention schedule, not just its output."""
+        unit = self._config.retention_timer_unit
+        if not unit.strip():
+            return None
+        return read_systemd_unit_state(
+            unit,
+            runner=self._runner,
+            timeout_seconds=self._config.command_timeout_seconds,
+        )
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
@@ -1513,6 +1722,13 @@ class OpsMonitor:
                 since_seconds=self._config.log_window_seconds,
             )
             combined_signals = _merge_log_signals(combined_signals, signals)
+        alerts.extend(
+            evaluate_retention_timer(
+                self._retention_timer_state(),
+                now=now,
+                max_age_seconds=self._config.retention_timer_max_age_seconds,
+            )
+        )
         alerts.extend(evaluate_log_signals(combined_signals))
         market_snapshot = next(
             (snapshot for snapshot in containers if snapshot.service == "market-data"),
@@ -4515,6 +4731,16 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         log_window_seconds=args.log_window_seconds,
         telemetry_stale_after_seconds=args.telemetry_stale_after_seconds,
         rss_warning_fraction=args.rss_warning_fraction,
+        retention_timer_unit=getattr(
+            args, "retention_timer_unit", _DEFAULT_RETENTION_TIMER_UNIT
+        ),
+        retention_timer_max_age_seconds=float(
+            getattr(
+                args,
+                "retention_timer_max_age_seconds",
+                _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS,
+            )
+        ),
         rss_critical_fraction=args.rss_critical_fraction,
         rss_growth_bytes=args.rss_growth_bytes,
         rss_growth_window_seconds=args.rss_growth_window_seconds,
@@ -4863,6 +5089,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--crash-log-directory",
         default=os.environ.get("CML_CRASH_LOG_DIRECTORY"),
+    )
+    parser.add_argument(
+        "--retention-timer-unit",
+        default=os.environ.get(
+            "CML_RETENTION_TIMER_UNIT",
+            _DEFAULT_RETENTION_TIMER_UNIT,
+        ),
+    )
+    parser.add_argument(
+        "--retention-timer-max-age-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_RETENTION_TIMER_MAX_AGE_SECONDS",
+                _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS,
+            )
+        ),
     )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)

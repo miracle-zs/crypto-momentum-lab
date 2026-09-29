@@ -805,6 +805,10 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
                     "memory.events.max=12\n"
                     "memory.stat.anon=150\n"
                 )
+            if args and args[0] == "systemctl":
+                # The retention-schedule check reads systemd on the host; this
+                # runner stubs only the container and database probes.
+                return ""
             raise AssertionError(f"unexpected command: {args}")
 
     monitor = OpsMonitor(
@@ -1266,6 +1270,10 @@ def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> No
                     "output\tlive-primary-v1\tMTLUSDT\t2026-09-14 05:14:45+00"
                     "\tcfg\t7\t3\n"
                 )
+            if args and args[0] == "systemctl":
+                # The retention-schedule check reads systemd on the host; this
+                # runner stubs only the container and database probes.
+                return ""
             raise AssertionError(f"unexpected command: {args}")
 
     monitor = OpsMonitor(
@@ -1951,6 +1959,10 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
                 )
             if command[:2] == ["docker", "compose"]:
                 return "restarted\n"
+            if command and command[0] == "systemctl":
+                # The retention-schedule check reads systemd on the host; this
+                # runner stubs only the container and database probes.
+                return ""
             raise AssertionError(f"unexpected command: {command}")
 
     now = [1000.0]
