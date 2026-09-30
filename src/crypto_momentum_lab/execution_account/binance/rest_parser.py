@@ -6,7 +6,11 @@ from decimal import Decimal
 from typing import cast
 
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.binance.order_status import (
+    exchange_order_state,
+)
 
 
 def decimal_value(value: object) -> Decimal:
@@ -83,3 +87,26 @@ def rest_require_sequence_of_mappings(value: object) -> tuple[dict[str, object],
     for item in value:
         rows.append(rest_require_mapping(item))
     return tuple(rows)
+
+
+def order_snapshot_from_response(
+    data: dict[str, object],
+    *,
+    observed_at: datetime,
+    entry_leverage: int | None = None,
+) -> ExchangeOrderSnapshot:
+    executed_quantity = decimal_value(data.get("executedQty", "0"))
+    average_price = decimal_value(data.get("avgPrice", "0"))
+    if executed_quantity > Decimal("0") and average_price <= Decimal("0"):
+        cum_quote = decimal_value(data.get("cumQuote", "0"))
+        if cum_quote > Decimal("0"):
+            average_price = cum_quote / executed_quantity
+    return ExchangeOrderSnapshot(
+        client_order_id=str(data.get("clientOrderId", "")),
+        exchange_order_id=str(data.get("orderId", "")),
+        state=exchange_order_state(str(data.get("status", ""))),
+        observed_at=observed_at,
+        executed_quantity=executed_quantity,
+        average_price=average_price,
+        entry_leverage=entry_leverage,
+    )

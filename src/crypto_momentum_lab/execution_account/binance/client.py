@@ -42,9 +42,6 @@ from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
     exit_position_quantity,
     open_order_matches_exit,
 )
-from crypto_momentum_lab.execution_account.binance.order_status import (
-    exchange_order_state,
-)
 from crypto_momentum_lab.execution_account.binance.request_rules import (
     entry_leverage_candidates,
     normalize_fill_cursors,
@@ -61,6 +58,7 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     decimal_value,
     json_mapping,
+    order_snapshot_from_response,
     rest_optional_int,
     rest_optional_str,
     rest_require_mapping,
@@ -1106,8 +1104,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "Binance order submit returned an unknown server outcome"
                 ) from exc
             raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
-        snapshot = self._order_snapshot(
+        snapshot = order_snapshot_from_response(
             rest_require_mapping(payload),
+            observed_at=self._now(),
             entry_leverage=entry_leverage,
         )
         if snapshot.executed_quantity > Decimal("0") and (
@@ -1373,7 +1372,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeOrderQueryUnknownError(
                 "Binance order lookup failed; order state requires reconciliation"
             ) from exc
-        return self._order_snapshot(rest_require_mapping(payload))
+        return order_snapshot_from_response(
+            rest_require_mapping(payload), observed_at=self._now()
+        )
 
     async def cancel_order_by_client_id(
         self,
@@ -1470,7 +1471,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeCancellationUnknownError(
                 "Binance cancel request was rejected; order state must be reconciled"
             ) from exc
-        return self._order_snapshot(rest_require_mapping(payload))
+        return order_snapshot_from_response(
+            rest_require_mapping(payload), observed_at=self._now()
+        )
 
     async def emergency_flatten(
         self,
@@ -1487,27 +1490,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ValueError("emergency flatten plan must be reduce-only")
         return await self.submit_order(plan)
 
-    def _order_snapshot(
-        self,
-        data: dict[str, object],
-        *,
-        entry_leverage: int | None = None,
-    ) -> ExchangeOrderSnapshot:
-        executed_quantity = decimal_value(data.get("executedQty", "0"))
-        average_price = decimal_value(data.get("avgPrice", "0"))
-        if executed_quantity > Decimal("0") and average_price <= Decimal("0"):
-            cum_quote = decimal_value(data.get("cumQuote", "0"))
-            if cum_quote > Decimal("0"):
-                average_price = cum_quote / executed_quantity
-        return ExchangeOrderSnapshot(
-            client_order_id=str(data.get("clientOrderId", "")),
-            exchange_order_id=str(data.get("orderId", "")),
-            state=exchange_order_state(str(data.get("status", ""))),
-            observed_at=self._now(),
-            executed_quantity=executed_quantity,
-            average_price=average_price,
-            entry_leverage=entry_leverage,
-        )
 
 
 def _raise_for_status(response: httpx.Response) -> None:

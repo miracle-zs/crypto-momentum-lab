@@ -7,6 +7,7 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     decimal_value,
     json_mapping,
+    order_snapshot_from_response,
     rest_optional_int,
     rest_optional_str,
     rest_require_mapping,
@@ -150,3 +151,61 @@ def test_rest_optional_integer_keeps_zero_negative_and_whitespace(value, expecte
 def test_rest_optional_integer_preserves_conversion_errors(value):
     with pytest.raises(ValueError):
         rest_optional_int(value)
+
+
+@pytest.mark.parametrize(
+    "quantity,average,quote,expected",
+    [
+        ("2", "0", "10", "5"),
+        ("2", "-1", "10", "5"),
+        ("2", "7", "10", "7"),
+        ("0", "0", "10", "0"),
+        ("2", "0", "0", "0"),
+        ("2", "0", "-1", "0"),
+    ],
+)
+def test_order_response_average_price_fallback(quantity, average, quote, expected):
+    observed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    data = {
+        "clientOrderId": "entry",
+        "orderId": 42,
+        "status": "NEW",
+        "executedQty": quantity,
+        "avgPrice": average,
+        "cumQuote": quote,
+    }
+    result = order_snapshot_from_response(
+        data, observed_at=observed_at, entry_leverage=5
+    )
+    assert result.average_price == Decimal(expected)
+    assert result.executed_quantity == Decimal(quantity)
+    assert result.client_order_id == "entry" and result.exchange_order_id == "42"
+    assert result.observed_at is observed_at and result.entry_leverage == 5
+    assert data["avgPrice"] == average
+
+
+def test_order_response_optional_numeric_defaults():
+    result = order_snapshot_from_response(
+        {"clientOrderId": "entry", "orderId": 42, "status": "NEW"},
+        observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    assert result.average_price == result.executed_quantity == 0
+    assert result.entry_leverage is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "UNKNOWN"),
+        ("clientOrderId", ""),
+        ("executedQty", "-1"),
+        ("avgPrice", "-1"),
+    ],
+)
+def test_order_response_keeps_status_and_domain_validation(field, value):
+    data = {"clientOrderId": "entry", "orderId": 42, "status": "NEW"}
+    data[field] = value
+    with pytest.raises(ValueError):
+        order_snapshot_from_response(
+            data, observed_at=datetime(2026, 10, 1, tzinfo=UTC)
+        )
