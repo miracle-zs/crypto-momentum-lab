@@ -207,6 +207,47 @@ async def test_fact_source_requires_bound_context() -> None:
     assert await src.build(_state()) is None
 
 
+def test_account_stream_registration_is_explicit_and_rebound_with_book() -> None:
+    from unittest.mock import Mock
+
+    class Reader:
+        @property
+        def register_active_stream(self):
+            raise AssertionError("reader capability was probed")
+
+        async def read(self, *_args, **_kwargs):
+            raise AssertionError("registration must not read positions")
+
+    initial = Mock()
+    replacement = Mock()
+    source = LiveDecisionFactSource(
+        "primary", execution_book=Reader(), register_account_stream=initial
+    )
+    source.bind_account_stream(stream_id="accounts", stream_epoch="epoch", sequence=2)
+    initial.assert_called_once_with(
+        environment="live",
+        account_label="primary",
+        stream_id="accounts",
+        stream_epoch="epoch",
+    )
+    source.set_execution_book(Reader(), register_account_stream=replacement)
+    with pytest.raises(ValueError, match="regressed"):
+        source.bind_account_stream(
+            stream_id="accounts", stream_epoch="epoch", sequence=1
+        )
+    replacement.assert_not_called()
+    source.bind_account_stream(stream_id="accounts", stream_epoch="epoch", sequence=3)
+    replacement.assert_called_once_with(
+        environment="live",
+        account_label="primary",
+        stream_id="accounts",
+        stream_epoch="epoch",
+    )
+    source.set_execution_book(Reader())
+    source.bind_account_stream(stream_id="accounts", stream_epoch="epoch", sequence=4)
+    assert initial.call_count == replacement.call_count == 1
+
+
 async def test_fact_source_degrades_only_mismatched_restored_stream() -> None:
     class FakeBook:
         async def read(self, *_args, **_kwargs):
@@ -354,6 +395,7 @@ def _pending_exit_case():
         "incident-account",
         decision_unit_of_work=uow,
         execution_book=book,
+        register_account_stream=book.register_active_stream,
     )
     handler = AsyncMock(return_value=SimpleNamespace(state="submitted"))
     source.set_exit_handler(handler)

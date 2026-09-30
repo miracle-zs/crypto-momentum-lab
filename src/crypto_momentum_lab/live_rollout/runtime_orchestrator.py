@@ -831,7 +831,10 @@ async def run_live_daemon(
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
-        fact_source.set_execution_book(execution_book)
+        fact_source.set_execution_book(
+            execution_book,
+            register_account_stream=execution_book.register_active_stream,
+        )
 
         async def _handle_decision_exit(cmd: TradeCommand) -> OrderExecutionResult:
             allocs = ()

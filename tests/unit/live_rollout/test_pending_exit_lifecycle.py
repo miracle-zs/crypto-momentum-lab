@@ -73,6 +73,7 @@ def _setup_pending_exit_test():
         "primary",
         decision_unit_of_work=uow,
         execution_book=book,
+        register_account_stream=book.register_active_stream,
     )
     handler = AsyncMock(return_value=SimpleNamespace(state="submitted"))
     source.set_exit_handler(handler)

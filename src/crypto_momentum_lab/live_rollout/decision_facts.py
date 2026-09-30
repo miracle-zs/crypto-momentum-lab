@@ -66,6 +66,19 @@ class DecisionPositionReader(Protocol):
     ) -> PositionView: ...
 
 
+class AccountStreamRegistrar(Protocol):
+    """Register the authoritative stream for subsequent position reads."""
+
+    def __call__(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        stream_id: str,
+        stream_epoch: str,
+    ) -> None: ...
+
+
 def _cash_balance(context: LiveDaemonRuntimeContext) -> Decimal | None:
     snapshot = context.account_snapshot
     if snapshot is None:
@@ -147,6 +160,7 @@ class LiveDecisionFactSource:
         strategy_name: str = "orderflow_impulse",
         *,
         execution_book: DecisionPositionReader | None = None,
+        register_account_stream: AccountStreamRegistrar | None = None,
         decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
     ) -> None:
@@ -156,6 +170,7 @@ class LiveDecisionFactSource:
         self._strategy_name = strategy_name
         self._policy_key = f"live/{account_label}/{strategy_name}"
         self._execution_book = execution_book
+        self._register_account_stream = register_account_stream
         self._decision_uow = decision_unit_of_work
         self._hedge_mode = hedge_mode
         self._context: LiveDaemonRuntimeContext | None = None
@@ -185,10 +200,16 @@ class LiveDecisionFactSource:
     def current_policy_state(self) -> PolicyState:
         return self._policy_state
 
-    def set_execution_book(self, execution_book: DecisionPositionReader) -> None:
+    def set_execution_book(
+        self,
+        execution_book: DecisionPositionReader,
+        *,
+        register_account_stream: AccountStreamRegistrar | None = None,
+    ) -> None:
         if execution_book is None:
             raise ValueError("execution_book is required")
         self._execution_book = execution_book
+        self._register_account_stream = register_account_stream
 
     def set_exit_handler(self, handler: ExitDispatchHandler) -> None:
         self._exit_handler = handler
@@ -212,10 +233,11 @@ class LiveDecisionFactSource:
         self._stream_id = stream_id
         self._stream_epoch = stream_epoch
         self._stream_sequence = sequence
-        if self._execution_book is not None and hasattr(
-            self._execution_book, "register_active_stream"
+        if (
+            self._execution_book is not None
+            and self._register_account_stream is not None
         ):
-            self._execution_book.register_active_stream(
+            self._register_account_stream(
                 environment="live",
                 account_label=self._account_label,
                 stream_id=stream_id,
@@ -632,6 +654,7 @@ def _decision_dependencies(trace: DecisionTrace) -> tuple[ConsumerDependency, ..
 
 
 __all__ = [
+    "AccountStreamRegistrar",
     "DecisionPositionReader",
     "LiveDecisionFactSource",
     "frozen_decision_inputs_from_context",
