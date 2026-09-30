@@ -1180,6 +1180,9 @@ async def test_execution_book_reads_only_current_exposure_scopes(monkeypatch) ->
     calls: list[dict] = []
 
     class Book:
+        def get_active_stream(self, environment, account_label):
+            return None
+
         async def list_position_views(self, **kwargs):
             calls.append(kwargs)
             return ()

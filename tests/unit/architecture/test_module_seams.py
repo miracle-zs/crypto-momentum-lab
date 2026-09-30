@@ -12,6 +12,8 @@ import pytest
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.live_rollout.position_classification",
         "crypto_momentum_lab.operator_dashboard.ports",
+        "crypto_momentum_lab.live_rollout.position_self_healing",
+        "crypto_momentum_lab.domain.execution.position_repair",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import inspect
-import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -20,6 +18,12 @@ from crypto_momentum_lab.domain.account import (
 )
 from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
+)
+from crypto_momentum_lab.domain.execution.evidence_codec import (
+    _digest_json_payload,
+    _recovery_checkpoint_head_binding,
+    _trade_payload_digest,
+    _view_projection_digest,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -58,6 +62,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
     compose_fact_coverage,
 )
+from crypto_momentum_lab.domain.execution.position_repair import (
+    validate_repaired_position,
+)
 from crypto_momentum_lab.domain.execution.recovery_codec import (
     PositionRecoveryCodec,
 )
@@ -87,25 +94,6 @@ async def _maybe_await(val: Any) -> Any:
 class _AbortObservation(Exception):
     def __init__(self, result: ExecutionObserveResult) -> None:
         self.result = result
-
-
-def _digest_json_payload(payload: object) -> str:
-    def encode(value: object) -> object:
-        if isinstance(value, datetime):
-            return value.astimezone(UTC).isoformat()
-        if isinstance(value, Decimal):
-            return format(value, "f")
-        if isinstance(value, StrEnum):
-            return value.value
-        raise TypeError(f"unsupported execution evidence value {type(value).__name__}")
-
-    canonical = json.dumps(
-        payload,
-        default=encode,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object]:
@@ -160,41 +148,6 @@ def _execution_head_payload(
     }
 
 
-def _recovery_checkpoint_head_binding(
-    checkpoint: PositionRecoveryCheckpoint | None,
-) -> dict[str, object] | None:
-    if checkpoint is None:
-        return None
-    parent_scope = getattr(checkpoint, "parent_stream_scope", None)
-    return {
-        "checkpoint_id": checkpoint.checkpoint_id,
-        "stream_scope": PositionRecoveryCodec.encode_scope(checkpoint.stream_scope),
-        "event_cut": checkpoint.event_cut.astimezone(UTC).isoformat(),
-        "facts_hash": checkpoint.facts_hash,
-        "projection_digest": checkpoint.projection_digest,
-        "parent_stream_scope": (
-            PositionRecoveryCodec.encode_scope(parent_scope)
-            if parent_scope is not None
-            else None
-        ),
-        "parent_checkpoint_id": checkpoint.parent_checkpoint_id,
-        "parent_facts_hash": checkpoint.parent_facts_hash,
-        "parent_projection_digest": checkpoint.parent_projection_digest,
-        "parent_event_cut": (
-            checkpoint.parent_event_cut.astimezone(UTC).isoformat()
-            if checkpoint.parent_event_cut is not None
-            else None
-        ),
-        "suffix_facts_hash": checkpoint.suffix_facts_hash,
-    }
-
-
-def _view_projection_digest(view: PositionView) -> str:
-    payload = asdict(view)
-    payload.pop("projection_version", None)
-    return _digest_json_payload(payload)
-
-
 def _evidence_identity(evidence: ExecutionEvidence) -> str:
     if evidence.stream_id is None or evidence.stream_epoch is None:
         return evidence.evidence_id
@@ -219,11 +172,6 @@ def _scoped_evidence_identity(
         f"{key.canonical_id}\x1f{scope.stream_id}\x1f"
         f"{scope.stream_epoch}\x1f{evidence_id}"
     )
-
-
-def _trade_payload_digest(fill: AccountFillEvent) -> str:
-    """Hash global trade identity independently of the transport stream epoch."""
-    return _digest_json_payload(asdict(fill))
 
 
 def _coverage_for_scope(
@@ -651,6 +599,8 @@ class ExecutionBook:
         key: PositionKey,
         *,
         as_of: datetime | None = None,
+        expected_scope: AccountFactStreamScope | None = None,
+        expected_quantity: Decimal | None = None,
     ) -> PositionView | None:
         """Reload a single position from durable storage into memory."""
         if self._execution_unit_of_work is None:
@@ -681,6 +631,15 @@ class ExecutionBook:
                 return None
             journal = AccountJournal.from_durable_cut(target_state.cut)
             book = PositionBook(journal)
+            if expected_scope is not None:
+                validate_repaired_position(
+                    state=target_state,
+                    scope=expected_scope,
+                    expected_quantity=expected_quantity,
+                    reservation_ids={
+                        r.reservation_id for r in self.get_active_reservations(key)
+                    },
+                )
             head = target_state.head
             scope = target_state.cut.scope
             if head is not None:
@@ -711,6 +670,7 @@ class ExecutionBook:
             self._stream_scopes[canon] = scope
             self._journal_revisions[canon] = target_state.cut.revision
             self._seen_trade_ids.update(target_state.trade_ids)
+            self._seen_evidence_ids.update(target_state.evidence_ids)
             for watermark in target_state.watermarks:
                 watermark_key = self._order_watermark_key(key, watermark.order_id)
                 self._order_cumulative_fills[watermark_key] = (

@@ -28,9 +28,11 @@ from crypto_momentum_lab.domain.execution.order_rules import (
     SymbolTradingRules as _SymbolTradingRules,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
     CoverageEvidence,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.position_repair import PositionRepairRequest
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
@@ -69,9 +71,6 @@ from crypto_momentum_lab.live_rollout.position_classification import (
 from crypto_momentum_lab.live_rollout.position_self_healing import (
     auto_heal_unmanaged_position,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
@@ -96,6 +95,9 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
     load_position_orders_bounded,
+)
+from crypto_momentum_lab.persistence.postgres.position_repair import (
+    PostgresPositionRepairUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
@@ -187,6 +189,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._risk_repository = PostgresRiskRepository(execution_sessions)
         self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
         self._order_repository = PostgresOrderRepository(execution_sessions)
+        self._position_repair_uow = PostgresPositionRepairUnitOfWork(execution_sessions)
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_loaded_at: datetime | None = None
@@ -389,54 +392,35 @@ class PostgresLiveContextProvider(LiveContextReader):
             frozenset(context.unmanaged_position_symbols)
             | context.open_position_symbols
         ) - active_symbols
-        if unmanaged and getattr(self, "_sessions", None) is not None:
+        if unmanaged and context.account_snapshot is not None:
             healed_any = False
-            for sym in sorted(unmanaged):
+            active_stream = book.get_active_stream("live", self._account_label)
+            positions_to_repair = tuple(
+                position for position in context.account_snapshot.positions
+                if position.symbol in unmanaged and position.position_amt != 0
+            )
+            for position in positions_to_repair:
+                if active_stream is None:
+                    continue
                 try:
-                    async with self._sessions() as heal_session:
-                        journal_store = getattr(self, "_journal_store", None)
-                        if journal_store is None:
-                            journal_store = PostgresAccountJournalStore()
-                            self._journal_store = journal_store
-                        pos_side = FuturesPositionSide.LONG
-                        if context.account_snapshot is not None:
-                            for p in context.account_snapshot.positions:
-                                if p.symbol == sym and p.position_amt != 0:
-                                    try:
-                                        pos_side = FuturesPositionSide(p.position_side.upper())
-                                    except ValueError:
-                                        pos_side = FuturesPositionSide.LONG
-                                    break
-                        active_stream = None
-                        if hasattr(book, "get_active_stream"):
-                            active_stream = book.get_active_stream("live", self._account_label)
-                        healed = await auto_heal_unmanaged_position(
-                            session=heal_session,
-                            journal_store=journal_store,
-                            environment="live",
-                            account_label=self._account_label,
-                            symbol=sym,
-                            position_side=pos_side,
-                            active_stream_id=active_stream[0] if active_stream else "account_event_hub",
-                            active_stream_epoch=active_stream[1] if active_stream else None,
-                        )
-                        if healed:
-                            if hasattr(book, "reload_position"):
-                                key = PositionKey(
-                                    environment="live",
-                                    account_label=self._account_label,
-                                    symbol=sym,
-                                    position_side=pos_side,
-                                )
-                                reloaded = await book.reload_position(key)
-                                if reloaded is not None:
-                                    healed_any = True
-                            else:
-                                healed_any = True
+                    pos_side = FuturesPositionSide(position.position_side.upper())
+                    key = PositionKey("live", self._account_label, position.symbol, pos_side)
+                    request = PositionRepairRequest(
+                        key=key, run_id=self._run_id,
+                        scope=AccountFactStreamScope.for_position_key(
+                            key, stream_id=active_stream[0], stream_epoch=active_stream[1],
+                        ),
+                        expected_quantity=abs(position.position_amt),
+                        observed_at=position.observed_at,
+                    )
+                    healed = await auto_heal_unmanaged_position(
+                        request=request, uow=self._position_repair_uow, book=book,
+                    )
+                    healed_any = healed_any or healed
                 except Exception as heal_err:
                     structlog.get_logger(__name__).error(
                         "auto_heal_unmanaged_position_failed",
-                        symbol=sym,
+                        symbol=position.symbol,
                         account_label=self._account_label,
                         error=str(heal_err),
                     )
