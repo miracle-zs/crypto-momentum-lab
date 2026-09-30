@@ -18,6 +18,12 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
 )
+from crypto_momentum_lab.domain.execution.command_codec import (
+    SkippedCommand,
+    decode_active_command,
+    decode_order_watermark,
+    encode_outbox_details,
+)
 from crypto_momentum_lab.domain.execution.command_lifecycle import (
     plan_command_transition,
     plan_reservation_release,
@@ -257,13 +263,6 @@ def _coverage_for_scope(
             "supplied coverage interval disagrees with its typed source proof"
         )
     return replace(evidence, coverage=derived)
-
-
-def _required_text(values: Mapping[str, Any], field_name: str) -> str:
-    value = values.get(field_name)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"execution command {field_name} is missing or invalid")
-    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,47 +807,16 @@ class ExecutionBook:
         watermark_key = self._order_watermark_key(
             entry.scope.to_position_key(), entry.command.command_id
         )
-        details = {
-            "scope": {
-                "environment": entry.scope.environment,
-                "account_label": entry.scope.account_label,
-                "symbol": entry.scope.symbol,
-                "position_side": (
-                    entry.scope.position_side.value
-                    if hasattr(entry.scope.position_side, "value")
-                    else str(entry.scope.position_side)
-                ),
-            },
-            "request_id": entry.request_id,
-            "attempt_count": entry.attempt_count,
-            "external_order_id": entry.external_order_id,
-            "last_error": entry.last_error,
-            "quantity": str(entry.command.requested_quantity),
-            "side": (
-                entry.command.side.value
-                if hasattr(entry.command.side, "value")
-                else str(entry.command.side)
+        details = encode_outbox_details(
+            entry,
+            reservation_ids=tuple(self._command_reservations.get(entry.command_id, ())),
+            cumulative_quantity=self._order_cumulative_fills.get(
+                watermark_key, Decimal("0")
             ),
-            "order_type": (
-                entry.command.order_type.value
-                if hasattr(entry.command.order_type, "value")
-                else str(entry.command.order_type)
+            cumulative_quote=self._order_cumulative_quotes.get(
+                watermark_key, Decimal("0")
             ),
-            "limit_price": (
-                str(entry.command.limit_price)
-                if entry.command.limit_price is not None
-                else None
-            ),
-            "reduce_only": entry.command.reduce_only,
-            "expected_projection_version": entry.command.expected_projection_version,
-            "reservations": self._command_reservations.get(entry.command_id, []),
-            "cumulative_filled_quantity": str(
-                self._order_cumulative_fills.get(watermark_key, Decimal("0"))
-            ),
-            "cumulative_filled_quote": str(
-                self._order_cumulative_quotes.get(watermark_key, Decimal("0"))
-            ),
-        }
+        )
         try:
             if self._active_transaction is not None:
                 await self._active_transaction.upsert_outbox(
@@ -984,9 +952,7 @@ class ExecutionBook:
                 as_of=as_of,
             )
         if command_repository is not None:
-            loader = getattr(
-                command_repository, "load_active_execution_commands", None
-            )
+            loader = getattr(command_repository, "load_active_execution_commands", None)
             if callable(loader):
                 try:
                     import inspect
@@ -999,142 +965,33 @@ class ExecutionBook:
                     else:
                         active_cmds = await _maybe_await(loader())
                     for cmd_data in active_cmds:
-                        if not isinstance(cmd_data, Mapping):
-                            raise TypeError("execution command row must be a mapping")
-                        cid = _required_text(cmd_data, "command_id")
-                        client_order_id = _required_text(cmd_data, "client_order_id")
-                        if cid != client_order_id:
-                            raise ValueError(
-                                "execution command_id must match client_order_id"
-                            )
-                        status_str = _required_text(cmd_data, "status")
-                        disp_state = DispatchState(status_str)
-                        dtls = cmd_data.get("details")
-                        if not isinstance(dtls, Mapping):
-                            raise TypeError(
-                                "execution command details must be a mapping"
-                            )
-                        scope_data = dtls.get("scope")
-                        if not isinstance(scope_data, Mapping):
-                            raise TypeError("execution command scope must be a mapping")
-                        environment = _required_text(scope_data, "environment")
-                        acc = _required_text(scope_data, "account_label")
-                        symbol = _required_text(scope_data, "symbol")
-                        position_side = FuturesPositionSide(
-                            _required_text(scope_data, "position_side")
+                        recovered = decode_active_command(
+                            cmd_data,
+                            account_label=account_label,
+                            restored_at=datetime.now(UTC),
                         )
-                        if account_label is not None and acc != account_label:
+                        if recovered is None:
                             continue
-                        scope = ExecutionScope(
-                            environment=environment,
-                            account_label=acc,
-                            symbol=symbol,
-                            position_side=position_side,
-                        )
-                        try:
-                            side = StrategySide(_required_text(dtls, "side"))
-                            order_type = EntryType(
-                                _required_text(dtls, "order_type").lower()
-                            )
-                            command_type = TradeCommandType(
-                                _required_text(cmd_data, "command").lower()
-                            )
-                            quantity = Decimal(_required_text(dtls, "quantity"))
-                            if not quantity.is_finite() or quantity <= Decimal("0"):
-                                raise ValueError(
-                                    "execution command quantity must be positive"
-                                )
-                            if "reduce_only" not in dtls or not isinstance(
-                                dtls["reduce_only"], bool
-                            ):
-                                raise ValueError(
-                                    "execution command reduce_only must be persisted "
-                                    "as bool"
-                                )
-                            raw_res_ids = dtls.get("reservations")
-                            if not isinstance(raw_res_ids, (list, tuple)) or any(
-                                not isinstance(res_id, str) or not res_id
-                                for res_id in raw_res_ids
-                            ):
-                                raise ValueError(
-                                    "execution command reservation links are missing "
-                                    "or invalid"
-                                )
-                            request_id = _required_text(dtls, "request_id")
-                            requested_at = cmd_data.get("requested_at")
-                            if (
-                                not isinstance(requested_at, datetime)
-                                or requested_at.tzinfo is None
-                            ):
-                                raise ValueError(
-                                    "execution command requested_at must be "
-                                    "timezone-aware"
-                                )
-                            attempt_count = dtls.get("attempt_count")
-                            if not isinstance(attempt_count, int) or attempt_count < 0:
-                                raise ValueError(
-                                    "execution command attempt_count is missing "
-                                    "or invalid"
-                                )
-                            limit_price_val = dtls.get("limit_price")
-                            limit_price = (
-                                Decimal(str(limit_price_val))
-                                if limit_price_val is not None
-                                else None
-                            )
-                        except (KeyError, ValueError, TypeError) as parse_err:
+                        if isinstance(recovered, SkippedCommand):
                             log.warning(
                                 "skipping_unparseable_active_execution_command",
-                                command_id=cid,
-                                error=str(parse_err),
+                                command_id=recovered.command_id,
+                                error=recovered.reason,
                             )
                             continue
-
-                        cmd = TradeCommand(
-                            command_id=cid,
-                            position_key=scope.to_position_key(),
-                            command_type=command_type,
-                            side=side,
-                            order_type=order_type,
-                            requested_quantity=quantity,
-                            limit_price=limit_price,
-                            reduce_only=dtls["reduce_only"],
-                            expected_projection_version=dtls.get(
-                                "expected_projection_version"
-                            ),
-                            created_at=requested_at,
-                        )
-                        entry = OutboxEntry(
-                            command_id=cid,
-                            request_id=request_id,
-                            scope=scope,
-                            command=cmd,
-                            state=disp_state,
-                            attempt_count=attempt_count,
-                            external_order_id=dtls.get("external_order_id"),
-                            last_error=dtls.get("last_error"),
-                            created_at=requested_at,
-                            updated_at=requested_at,
-                        )
+                        entry = recovered.entry
+                        cid = entry.command_id
                         self._outbox_by_command_id[cid] = entry
-                        self._command_reservations[cid] = list(raw_res_ids)
-                        if disp_state == DispatchState.UNKNOWN:
+                        self._command_reservations[cid] = list(
+                            recovered.reservation_ids
+                        )
+                        if recovered.requires_reconciliation:
                             self._dispatch_reconciliation_required_commands.add(cid)
-                        elif disp_state == DispatchState.DISPATCHING:
-                            # A process may have stopped after the network write
-                            # but before recording its response. Never redispatch.
-                            unknown = replace(
-                                entry,
-                                state=DispatchState.UNKNOWN,
-                                last_error="restored dispatch requires reconciliation",
-                                updated_at=datetime.now(UTC),
-                            )
-                            self._outbox_by_command_id[cid] = unknown
-                            self._dispatch_reconciliation_required_commands.add(cid)
+                        if recovered.needs_unknown_write:
                             if self._execution_unit_of_work is not None:
                                 deferred_unknown_commands.append(cid)
                             else:
-                                await self._persist_outbox_state(unknown)
+                                await self._persist_outbox_state(entry)
                 except Exception as err:
                     log.error("restore_active_commands_failed", error=str(err))
                     raise RuntimeError(
@@ -1161,9 +1018,7 @@ class ExecutionBook:
                     "command repository does not implement event identity restore"
                 )
 
-            fill_loader = getattr(
-                command_repository, "load_seen_fill_trade_ids", None
-            )
+            fill_loader = getattr(command_repository, "load_seen_fill_trade_ids", None)
             if self._execution_unit_of_work is not None:
                 pass
             elif callable(fill_loader):
@@ -1189,7 +1044,9 @@ class ExecutionBook:
                 )
             try:
                 if self._execution_unit_of_work is not None:
-                    raise LookupError("durable watermarks restored with execution heads")
+                    raise LookupError(
+                        "durable watermarks restored with execution heads"
+                    )
                 import inspect
 
                 sig = inspect.signature(watermark_loader)
@@ -1200,35 +1057,13 @@ class ExecutionBook:
                 else:
                     watermark_rows = await _maybe_await(watermark_loader())
                 for row in watermark_rows:
-                    scope_data = row["scope"]
-                    scope = ExecutionScope(
-                        environment=scope_data["environment"],
-                        account_label=scope_data["account_label"],
-                        symbol=scope_data["symbol"],
-                        position_side=FuturesPositionSide(scope_data["position_side"]),
-                    )
-                    if (
-                        account_label is not None
-                        and scope.account_label != account_label
-                    ):
+                    restored = decode_order_watermark(row, account_label=account_label)
+                    if restored is None:
                         continue
-                    order_id = _required_text(row, "client_order_id")
-                    quantity = Decimal(str(row["cumulative_filled_quantity"]))
-                    if not quantity.is_finite() or quantity < Decimal("0"):
-                        raise ValueError("cumulative fill watermark cannot be negative")
-                    quote = Decimal(str(row["cumulative_filled_quote"]))
-                    if not quote.is_finite() or quote < Decimal("0"):
-                        raise ValueError(
-                            "cumulative quote watermark cannot be negative"
-                        )
-                    if quantity == Decimal("0") and quote != Decimal("0"):
-                        raise ValueError(
-                            "zero-quantity order cannot have cumulative quote"
-                        )
-                    if quantity > Decimal("0") and quote <= Decimal("0"):
-                        raise ValueError(
-                            "positive cumulative quantity requires positive quote"
-                        )
+                    scope = restored.scope
+                    order_id = restored.order_id
+                    quantity = restored.quantity
+                    quote = restored.quote
                     key = self._order_watermark_key(scope.to_position_key(), order_id)
                     self._order_cumulative_fills[key] = max(
                         self._order_cumulative_fills.get(key, Decimal("0")),
@@ -1239,9 +1074,8 @@ class ExecutionBook:
                         quote,
                     )
             except Exception as err:
-                if (
-                    self._execution_unit_of_work is not None
-                    and isinstance(err, LookupError)
+                if self._execution_unit_of_work is not None and isinstance(
+                    err, LookupError
                 ):
                     pass
                 else:
@@ -1273,7 +1107,9 @@ class ExecutionBook:
         for canon, expected_ids in self._head_expected_reservation_ids.items():
             journal = self._journals.get(canon)
             if journal is None:
-                log.warning("restored_reservation_head_has_no_journal", canonical_id=canon)
+                log.warning(
+                    "restored_reservation_head_has_no_journal", canonical_id=canon
+                )
                 continue
             actual_ids = {
                 reservation.reservation_id
