@@ -44,7 +44,9 @@ from crypto_momentum_lab.execution_account.binance.order_status import (
     exchange_order_state,
 )
 from crypto_momentum_lab.execution_account.binance.request_rules import (
+    entry_leverage_candidates,
     normalize_fill_cursors,
+    normalize_margin_type,
     normalize_symbols,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
@@ -85,11 +87,6 @@ _COMMAND_EXIT_PRIORITY = 0
 _COMMAND_ENTRY_PRIORITY = 10
 _COMMAND_BACKGROUND_PRIORITY = 20
 _ENTRY_LEVERAGE_WARMUP_CONCURRENCY = 3
-_MARGIN_TYPE_ALIASES = {
-    "CROSS": "CROSSED",
-    "CROSSED": "CROSSED",
-    "ISOLATED": "ISOLATED",
-}
 
 
 class BinanceRateLimitError(httpx.HTTPStatusError):
@@ -450,7 +447,7 @@ class BinanceUsdMPrivateReadClient:
             return (
                 None
                 if raw_margin_type is None
-                else _normalize_margin_type(raw_margin_type)
+                else normalize_margin_type(raw_margin_type)
             )
         return None
 
@@ -467,7 +464,7 @@ class BinanceUsdMPrivateReadClient:
             margin_types[symbol] = (
                 None
                 if raw_margin_type is None
-                else _normalize_margin_type(raw_margin_type)
+                else normalize_margin_type(raw_margin_type)
             )
         return margin_types
 
@@ -920,7 +917,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if leverage_fallback_steps < 0:
             raise ValueError("leverage_fallback_steps must be non-negative")
         normalized_margin_type = (
-            None if margin_type is None else _normalize_margin_type(margin_type)
+            None if margin_type is None else normalize_margin_type(margin_type)
         )
         super().__init__(
             api_key=api_key,
@@ -1268,7 +1265,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if configured is not None:
             return configured
 
-        candidates = _entry_leverage_candidates(
+        candidates = entry_leverage_candidates(
             self._entry_leverage, max_steps=self._leverage_fallback_steps
         )
         last_rejection: str | None = None
@@ -1553,12 +1550,6 @@ def _open_order_matches_exit(
     return plan.position_side is not FuturesPositionSide.BOTH or order.reduce_only
 
 
-def _entry_leverage_candidates(requested: int, max_steps: int = 2) -> tuple[int, ...]:
-    return tuple(
-        dict.fromkeys(max(1, requested - offset) for offset in range(max_steps + 1))
-    )
-
-
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -1570,15 +1561,6 @@ def _optional_str(value: object) -> str | None:
         return None
     text = str(value)
     return text if text else None
-
-
-def _normalize_margin_type(value: str) -> str:
-    normalized = value.strip().upper()
-    try:
-        return _MARGIN_TYPE_ALIASES[normalized]
-    except KeyError as exc:
-        allowed = ", ".join(sorted(set(_MARGIN_TYPE_ALIASES.values())))
-        raise ValueError(f"margin_type must be one of: {allowed}") from exc
 
 
 def _account_fill_from_trade_item(

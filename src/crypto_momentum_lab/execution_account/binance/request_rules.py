@@ -1,4 +1,4 @@
-"""Pure symbol and fill cursor rules for Binance requests."""
+"""Pure parameter and configuration rules for Binance requests."""
 
 from collections.abc import Iterable, Mapping
 
@@ -28,3 +28,25 @@ def normalize_fill_cursors(
             raise ValueError("fill cursors must be non-negative")
         normalized[symbol] = raw_cursor
     return normalized
+
+
+_MARGIN_TYPE_ALIASES = {
+    "CROSS": "CROSSED",
+    "CROSSED": "CROSSED",
+    "ISOLATED": "ISOLATED",
+}
+
+
+def entry_leverage_candidates(requested: int, max_steps: int = 2) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(max(1, requested - offset) for offset in range(max_steps + 1))
+    )
+
+
+def normalize_margin_type(value: str) -> str:
+    normalized = value.strip().upper()
+    try:
+        return _MARGIN_TYPE_ALIASES[normalized]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(set(_MARGIN_TYPE_ALIASES.values())))
+        raise ValueError(f"margin_type must be one of: {allowed}") from exc
