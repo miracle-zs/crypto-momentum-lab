@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -604,6 +604,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2455 passed**。新增 **6 项**覆盖精确查询截点、空白过滤、显式空/非空 symbols 跳过查询、缺失能力拒绝、连接错误和取消传播。symbols/恢复/CLI/架构定向 **134 passed**。与第四十三批相同的五文件定向 mypy --follow-imports=skip 通过；核心文件及新增测试完整 Ruff、迁移 CLI 测试 F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；既有 SQL 的替身接口验收不能替代真实数据库验收。
+
+## 第四十五批：启动恢复直接消费策略恢复能力
+
+第四十四批提交为 `56eef7d`；第四十五批继续本地实施，未部署生产。
+
+- warm_live_strategy 直接绑定 strategy.warm_market_state；restore_live_strategy_from_checkpoint 直接绑定 warm_market_state 与 clear_market_state_buffers。删除这些已在 LiveRuntimeStrategy 中声明的方法的 getattr/callable 探测，不新增接口转发或另一套恢复实现。
+- 绑定仍发生在入口、读取仓储之前；恢复仍先清空旧派生缓存，再查询耐久历史并预热，最后验证覆盖并生成 compact checkpoint。生产策略原本实现两项方法，正常路径和 cutover/query/提交顺序保持。
+- 不符合契约的旧实现缺失属性时现在抛 AttributeError，替代原自定义 RuntimeError 提示；非可调用属性调用时失败。这是明确的接口错误路径变化，不宣称错误类型完全不变。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。恢复能力/启动恢复/CLI/架构定向 **131 passed**；新增三项能力测试覆盖预热入口缺失、checkpoint 恢复缺失、缺少清空能力均在查询/重放前拒绝。五文件定向 mypy --follow-imports=skip（恢复、运行策略契约及实际 strategy/market 模型与读取接口）通过；核心文件和新增测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；结构性接口迁移不能代替生产异常验收。
 
 ## 后续实施顺序
 

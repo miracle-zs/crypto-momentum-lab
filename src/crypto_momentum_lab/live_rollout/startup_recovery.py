@@ -383,9 +383,7 @@ async def warm_live_strategy(
     warmup_symbols: Collection[str] | None = None,
     on_warmup_status: WarmupStatusCallback | None = None,
 ) -> RuntimeStateCursor:
-    warm_market_state = getattr(strategy, "warm_market_state", None)
-    if not callable(warm_market_state):
-        raise RuntimeError("strategy does not support warm-only startup recovery")
+    warm_market_state = strategy.warm_market_state
     warmup_seconds = live_warmup_seconds(strategy)
     warmup_end = cutover_at or live_market_state_cutover(now)
     cursor = RuntimeStateCursor(
@@ -490,16 +488,8 @@ async def restore_live_strategy_from_checkpoint(
     warmup_symbols: Collection[str] | None = None,
     on_warmup_status: WarmupStatusCallback | None = None,
 ) -> Mapping[str, datetime]:
-    warm_market_state = getattr(strategy, "warm_market_state", None)
-    if not callable(warm_market_state):
-        raise RuntimeError("strategy does not support compact checkpoint recovery")
-    clear_market_state_buffers = getattr(
-        strategy,
-        "clear_market_state_buffers",
-        None,
-    )
-    if not callable(clear_market_state_buffers):
-        raise RuntimeError("strategy does not support forced durable market rewarm")
+    warm_market_state = strategy.warm_market_state
+    clear_market_state_buffers = strategy.clear_market_state_buffers
     # A checkpoint may come from an older worker that persisted derived
     # buffers.  Never combine those buffers with a new stream epoch: discard
     # them first and rebuild from the durable market-state table below.
