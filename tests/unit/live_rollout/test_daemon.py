@@ -2142,6 +2142,7 @@ def _daemon(
     cancel_unfilled_entry_orders=None,
     fetch_exchange_positions=None,
     readiness_provider=None,
+    cached_context_provider=None,
     unmanaged_halt_debounce_seconds: float = 15.0,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
@@ -2162,6 +2163,7 @@ def _daemon(
     submission_repository = repository or FakeLiveRepository()
     checkpoint_repository = checkpoint_repository or submission_repository
     return LiveStrategyDaemon(
+        cached_context_provider=cached_context_provider,
         strategy=strategy or FakeStrategy(),
         risk_gateway=RiskGateway(),
         limits=FixedLiveLimits(
@@ -2522,3 +2524,32 @@ async def test_submission_and_checkpoint_persistence_are_independent():
     assert all(item[0] == "run-1" for item in saved)
     assert not hasattr(submissions, "save_checkpoint")
     assert not hasattr(checkpoints, "save_approved_intent")
+
+
+def test_readiness_reads_latest_explicit_context_without_provider_cache() -> None:
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+
+    class Provider:
+        @property
+        def cached_context(self):
+            pytest.fail("explicit reader must bypass provider cache")
+
+        @property
+        def _cached_context(self):
+            pytest.fail("explicit reader must bypass private cache")
+
+    snapshot = replace(
+        _runtime_context(), account_observed_at=now - timedelta(seconds=120)
+    )
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        context_provider=Provider(),
+        cached_context_provider=lambda: snapshot,
+        clock=lambda: now,
+    )
+    daemon._market_loop._active_state_at = now
+    assert daemon.latest_watermark == now - timedelta(seconds=120)
+    assert daemon.evaluate_readiness() == ExecutionReadiness.PROGRESS_LAGGING
+    snapshot = replace(snapshot, account_observed_at=now)
+    assert daemon.latest_watermark == now
+    assert daemon.evaluate_readiness() != ExecutionReadiness.PROGRESS_LAGGING
