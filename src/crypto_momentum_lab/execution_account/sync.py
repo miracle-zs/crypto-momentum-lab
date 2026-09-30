@@ -31,6 +31,7 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     account_fill_keys,
     advance_fill_cursors,
     fill_counts_by_symbol,
+    merge_fill_cursor,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -625,31 +626,10 @@ class ExecutionAccountSyncService:
         for cursor in cursors:
             sym = cursor.symbol.strip().upper()
             current = self._fill_cursors.get(sym)
-            if cursor.from_id is not None:
-                new_from_id = (
-                    max(current.from_id, cursor.from_id)
-                    if current is not None and current.from_id is not None
-                    else cursor.from_id
-                )
-                new_start_time_ms = None
-            elif cursor.start_time_ms is not None:
-                if current is not None and current.from_id is not None:
-                    new_from_id = current.from_id
-                    new_start_time_ms = None
-                else:
-                    new_from_id = None
-                    new_start_time_ms = (
-                        max(current.start_time_ms, cursor.start_time_ms)
-                        if current is not None and current.start_time_ms is not None
-                        else cursor.start_time_ms
-                    )
-            else:
+            merged = merge_fill_cursor(current, cursor)
+            if merged is None:
                 continue
-
-            self._fill_cursors[sym] = FillCursor(
-                from_id=new_from_id,
-                start_time_ms=new_start_time_ms,
-            )
+            self._fill_cursors[sym] = merged
             current_checked_at = self._fill_cursor_checked_at.get(sym)
             if (
                 current_checked_at is None

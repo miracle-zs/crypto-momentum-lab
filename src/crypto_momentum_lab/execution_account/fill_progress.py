@@ -3,7 +3,10 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from crypto_momentum_lab.domain.account.models import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountFillReconciliationCursor,
+)
 from crypto_momentum_lab.execution_account.sync_models import FillKey
 
 _FILL_FETCH_OVERLAP_MS = 60_000
@@ -62,3 +65,32 @@ def advance_fill_cursors(
                 start_time_ms=max(0, observed_at_ms - _FILL_FETCH_OVERLAP_MS)
             )
     return next_cursors
+
+
+def merge_fill_cursor(
+    current: FillCursor | None,
+    cursor: AccountFillReconciliationCursor,
+) -> FillCursor | None:
+    """Keep ID progress ahead of time progress and reject numeric regression."""
+    if cursor.from_id is not None:
+        new_from_id = (
+            max(current.from_id, cursor.from_id)
+            if current is not None and current.from_id is not None
+            else cursor.from_id
+        )
+        new_start_time_ms = None
+    elif cursor.start_time_ms is not None:
+        if current is not None and current.from_id is not None:
+            new_from_id = current.from_id
+            new_start_time_ms = None
+        else:
+            new_from_id = None
+            new_start_time_ms = (
+                max(current.start_time_ms, cursor.start_time_ms)
+                if current is not None and current.start_time_ms is not None
+                else cursor.start_time_ms
+            )
+    else:
+        return None
+
+    return FillCursor(from_id=new_from_id, start_time_ms=new_start_time_ms)
