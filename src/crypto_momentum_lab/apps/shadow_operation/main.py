@@ -29,6 +29,9 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+    PostgresOrderSubmissionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
 )
@@ -176,6 +179,7 @@ async def _run_from_database(
         risk_repository = PostgresRiskRepository(factory)
         shadow_repository = PostgresShadowRepository(factory)
         order_repository = PostgresOrderRepository(factory)
+        submission_repository = PostgresOrderSubmissionRepository(factory)
         lease = await risk_repository.load_active_lease("live", account_label, now)
         account_state = await _latest_account_state(factory, account_label)
         risk_config = await _latest_risk_config(factory, account_label)
@@ -229,7 +233,7 @@ async def _run_from_database(
             strategy=strategy,
             risk_gateway=RiskGateway(),
             shadow_repository=shadow_repository,
-            approved_intent_repository=order_repository,
+            approved_intent_repository=submission_repository,
             state_machine=state_machine,
             config=ShadowOperationConfig(
                 run_id=run_id,

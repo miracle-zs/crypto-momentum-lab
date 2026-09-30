@@ -254,6 +254,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+    PostgresOrderSubmissionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
@@ -525,6 +528,7 @@ async def run_live_daemon(
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
+        submission_repository = PostgresOrderSubmissionRepository(execution_factory)
         checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
         telemetry_repository = PostgresRuntimeTelemetryRepository(observability_factory)
         telemetry = LiveRuntimeTelemetry(
@@ -894,7 +898,7 @@ async def run_live_daemon(
                         "required_lease_id": active_lease.lease_id,
                         "required_code_generation": git_commit_hash,
                     }
-                return await order_repository.prepare_submission(
+                return await submission_repository.prepare_submission(
                     intent=intent,
                     evaluation=evaluation,
                     plan=plan,
@@ -1293,7 +1297,7 @@ async def run_live_daemon(
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
             ),
             repository=_LiveDaemonRepositoryAdapter(
-                order_repository,
+                submission_repository,
                 checkpoint_repository,
                 mark_live_database_ok,
             ),
@@ -2134,11 +2138,11 @@ class _LiveHubCursorState:
 class _LiveDaemonRepositoryAdapter:
     def __init__(
         self,
-        order_repository: PostgresOrderRepository,
+        submission_repository: PostgresOrderSubmissionRepository,
         checkpoint_repository: PostgresPaperDaemonRepository,
         on_database_success: Callable[[], None] | None = None,
     ) -> None:
-        self._orders = order_repository
+        self._submissions = submission_repository
         self._checkpoints = checkpoint_repository
         self._on_database_success = on_database_success
 
@@ -2147,7 +2151,7 @@ class _LiveDaemonRepositoryAdapter:
         intent: OrderIntentCandidate,
         evaluation: RiskEvaluation,
     ) -> None:
-        await self._orders.save_approved_intent(intent, evaluation)
+        await self._submissions.save_approved_intent(intent, evaluation)
 
     async def prepare_submission(
         self,
@@ -2171,7 +2175,7 @@ class _LiveDaemonRepositoryAdapter:
         open_position_symbols: frozenset[str] | None = None,
         exposure_notional: Decimal | None = None,
     ) -> PreparedOrderSubmission | None:
-        return await self._orders.prepare_submission(
+        return await self._submissions.prepare_submission(
             intent=intent,
             evaluation=evaluation,
             plan=plan,
