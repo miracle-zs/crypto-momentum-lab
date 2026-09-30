@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成二十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成二十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -343,11 +343,25 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库并发、原子失败回滚与进程重启仍未验收；下一步继续核查运行用例和 daemon 中剩余的兼容重导出及状态归属。
 
+## 第二十五批：行情运行契约与生命周期导入方向
+
+第二十四批提交为 `762244a`；第二十五批继续本地实施，未部署生产。
+
+- `live_rollout/market_runtime_contracts.py` 承接 LiveRuntimeStrategy Protocol、LiveDaemonResult、LiveMarketStateContinuityError 与 MarketStateGapRecovery。结果字段、策略方法、gap 异常属性/消息及回调类型保持原定义；纯契约不依赖 daemon、market loop 或具体持久化/交易实现。
+- daemon 删除 LiveDaemonResult/LiveRuntimeStrategy 兼容别名以及 _is_transient_live_gate 转发函数；market_loop 删除原契约定义及相关 __all__ 重导出。两个实现模块以契约模块命名空间使用类型，活跃调用点从所有者显式导入；瞬态 gate 测试直接调用 market_loop 原实现。未建立另一个兼容入口。
+- 运行编排、CLI、startup recovery/resilience、daemon lifecycle、supervisor、session 及对应测试全部同步迁移。独立契约使生命周期管理不必为结果类型导入行情执行循环；具体 runtime_config 的同名配置数据类保留原归属，未与运行策略 Protocol 混淆。
+- live_rollout 包初始化删除 gates 的两项急切重导出，活跃代码已直接从 gates 导入能力；子模块正常导入保持。runtime_session 对具体资源生命周期和 supervisor 的导入移入 TYPE_CHECKING，这些类仅用于注解，运行时继续使用调用方注入的对象；资源关闭、超时和停止顺序不变。
+- 契约定义、daemon/market_loop/runtime_session 的运行函数体在所属模块名称规范化后 AST 与原实现一致。恢复/缺口处理/关闭行为没有改写，不改变 checkpoint、订单提交或状态发布时机。
+
+验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2340 passed**，22.83 秒。新增 **5 项**架构检查：契约模块可禁止数据库导入，以及 live_rollout 包、契约、runtime_supervisor、runtime_session 可同时禁止 daemon、market_loop、sqlalchemy、persistence 和 execution_account 导入。现有策略恢复、gap、daemon 与生命周期回归继续通过。契约模块定向 `mypy --follow-imports=skip`、新模块/包初始化/架构测试完整 Ruff、所有迁移 Python 文件 F/I 和 git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。startup recovery 仍直接使用具体 Postgres 行情读取类型；后续可独立其实际读取接口，不能因契约独立就宣称恢复模块已完全解耦。真实数据库并发、原子失败回滚与进程重启仍未验收。
+
 ## 后续实施顺序
 
 1. 补齐真实 Postgres 并发、原子回滚与完整进程重启验收；第二批已完成自愈事务迁移及提交后重载契约。
 2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；第十六批已提取成交 identity/恢复前缀计划、退出结算判定及真实账户成交水位增量；第十七批已提取订单证据的 outbox/释放/恢复判定；第十八批已提取累计报告结算与水位持久化计划；第十九批已提取候选证据分组协调及观察结果模型；第二十批已提取耐久证据准入与水位写入计划；锁、核心事务和状态所有权继续由 Book 统一管理，不为缩短类而拆开事务。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
-3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，第二十三批已独立 Hub 游标恢复与整批确认状态；第二十四批已分离 daemon 提交与 checkpoint 接口并删除聚合转发适配器，继续处理其他运行子系统与可调用的 CLI 用例。
+3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，第二十三批已独立 Hub 游标恢复与整批确认状态；第二十四批已分离 daemon 提交与 checkpoint 接口并删除聚合转发适配器；第二十五批已独立行情运行契约并清理 daemon/live_rollout 门面及生命周期注解依赖，继续处理 startup recovery 的行情读取接口和其他运行用例。
 4. 第二十一批已解除恢复模型/codec 的摘要循环，保留既有 checkpoint digest 与跨 epoch 保护；第二十二批已清理 execution 包门面的急切导入并迁移活跃调用点，继续核查其他模块级延迟环。
 
 生产账户事实覆盖冲突和策略状态发布缺失属于尚未关闭的运行问题；本次结构迁移不能作为这些问题已经修复的证据。

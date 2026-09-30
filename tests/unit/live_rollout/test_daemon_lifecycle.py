@@ -8,7 +8,7 @@ from crypto_momentum_lab.live_rollout.daemon_lifecycle import (
     LiveDaemonLifecycle,
 )
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
-from crypto_momentum_lab.live_rollout.market_loop import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 
 
 class FakeCheckpointCoordinator:

@@ -16,9 +16,7 @@ from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitLaneOutcome,
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from crypto_momentum_lab.live_rollout.market_loop import (
-    LiveDaemonResult,
-)
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
 )

@@ -20,7 +20,7 @@ from crypto_momentum_lab.live_rollout.gates import (
     LiveGateContext,
     evaluate_live_gate,
 )
-from crypto_momentum_lab.live_rollout.market_loop import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.persistence.postgres.models import LiveSessionTransitionRow
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,

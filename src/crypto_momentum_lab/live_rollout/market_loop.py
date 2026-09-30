@@ -18,17 +18,15 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
+import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
-    StrategyCheckpoint,
     StrategyDecision,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -63,60 +61,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 log = structlog.get_logger()
 
 
-class LiveRuntimeStrategy(Protocol):
-    def on_market_state(self, state: MarketState15s) -> StrategyDecision: ...
-
-    def checkpoint(
-        self,
-        *,
-        include_market_state_buffers: bool = True,
-    ) -> StrategyCheckpoint: ...
-
-    def warm_market_state(self, state: MarketState15s) -> None: ...
-
-    def clear_market_state_buffers(self) -> None: ...
-
-
-class LiveMarketStateContinuityError(RuntimeError):
-    """Raised when an ordered live state stream skips a required bucket."""
-
-    def __init__(
-        self,
-        *,
-        symbol: str,
-        previous_at: datetime,
-        current_at: datetime,
-        expected_interval_seconds: int,
-    ) -> None:
-        observed_delta_seconds = int((current_at - previous_at).total_seconds())
-        super().__init__(
-            "missing market-state bucket: "
-            f"symbol={symbol} previous={previous_at.isoformat()} "
-            f"current={current_at.isoformat()} "
-            f"expected_interval_seconds={expected_interval_seconds} "
-            f"observed_delta_seconds={observed_delta_seconds}"
-        )
-        self.symbol = symbol
-        self.previous_at = previous_at
-        self.current_at = current_at
-        self.expected_interval_seconds = expected_interval_seconds
-        self.observed_delta_seconds = observed_delta_seconds
-
-
-MarketStateGapRecovery = Callable[
-    [LiveMarketStateContinuityError], Awaitable[Sequence[MarketState15s]]
-]
-
-
-@dataclass(frozen=True, slots=True)
-class LiveDaemonResult:
-    processed_state_count: int
-    approved_intent_count: int
-    submitted_order_count: int
-    halt_reason: str | None
-    final_state_at: datetime | None
-
-
 class LiveMarketLoop:
     """Run ordered market states through admission and execution lanes."""
 
@@ -124,7 +68,7 @@ class LiveMarketLoop:
         self,
         *,
         run_id: str,
-        strategy: LiveRuntimeStrategy,
+        strategy: market_runtime_contracts.LiveRuntimeStrategy,
         context_prefetcher: LiveContextPrefetcher,
         runtime_cache: LiveRuntimeCacheMaintenance,
         scheduled_controller: ScheduledRiskWindowController,
@@ -140,7 +84,8 @@ class LiveMarketLoop:
         entry_lane: EntryExecutionLane,
         state_machine: OrderExecutionPort,
         clock: Callable[[], datetime],
-        recover_market_state_gap: MarketStateGapRecovery | None = None,
+        recover_market_state_gap: market_runtime_contracts.MarketStateGapRecovery
+        | None = None,
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
@@ -214,7 +159,7 @@ class LiveMarketLoop:
     async def run(
         self,
         states: AsyncIterable[MarketState15s],
-    ) -> LiveDaemonResult:
+    ) -> market_runtime_contracts.LiveDaemonResult:
         prefetched_states = self._context_prefetcher.stream(states)
         try:
             return await self._run_prefetched(prefetched_states)
@@ -228,7 +173,7 @@ class LiveMarketLoop:
     async def _run_prefetched(
         self,
         prefetched_states: AsyncIterator[PrefetchedContext],
-    ) -> LiveDaemonResult:
+    ) -> market_runtime_contracts.LiveDaemonResult:
         self._entry_lane.reset()
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
@@ -289,7 +234,7 @@ class LiveMarketLoop:
                     last_processed_at=last_processed_at,
                     expected_interval_seconds=state_interval_seconds,
                 )
-            except LiveMarketStateContinuityError as error:
+            except market_runtime_contracts.LiveMarketStateContinuityError as error:
                 recovered_states = await self._recover_gap(error)
                 if not recovered_states:
                     # A MarketState15s stream is event-driven: a quiet symbol
@@ -359,7 +304,7 @@ class LiveMarketLoop:
             exit_lane_failure = self._exit_lane.failure
             if exit_lane_failure is not None:
                 await self._checkpoint_coordinator.save_final()
-                return LiveDaemonResult(
+                return market_runtime_contracts.LiveDaemonResult(
                     processed,
                     approved,
                     submitted,
@@ -386,7 +331,7 @@ class LiveMarketLoop:
                         )
                         continue
                     await self._checkpoint_coordinator.save_final()
-                    return LiveDaemonResult(
+                    return market_runtime_contracts.LiveDaemonResult(
                         processed,
                         approved,
                         submitted,
@@ -504,7 +449,7 @@ class LiveMarketLoop:
                     continue
                 self._last_transient_gate_reasons = None
                 await self._checkpoint_coordinator.save_final()
-                return LiveDaemonResult(
+                return market_runtime_contracts.LiveDaemonResult(
                     processed,
                     approved,
                     submitted,
@@ -542,7 +487,7 @@ class LiveMarketLoop:
                 if expired_symbols:
                     await self._checkpoint_coordinator.save_final()
                     symbols = ",".join(sorted(expired_symbols))
-                    return LiveDaemonResult(
+                    return market_runtime_contracts.LiveDaemonResult(
                         processed,
                         approved,
                         submitted,
@@ -584,7 +529,7 @@ class LiveMarketLoop:
             orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
             if orphan_cancel_reason is not None:
                 await self._checkpoint_coordinator.save_final()
-                return LiveDaemonResult(
+                return market_runtime_contracts.LiveDaemonResult(
                     processed,
                     approved,
                     submitted,
@@ -601,7 +546,7 @@ class LiveMarketLoop:
                 exit_lane_failure = self._exit_lane.failure
                 if exit_lane_failure is not None:
                     await self._checkpoint_coordinator.save_final()
-                    return LiveDaemonResult(
+                    return market_runtime_contracts.LiveDaemonResult(
                         processed,
                         approved,
                         submitted,
@@ -648,7 +593,7 @@ class LiveMarketLoop:
         if self._unmanaged_first_seen_at:
             symbols = ",".join(sorted(self._unmanaged_first_seen_at.keys()))
             final_halt_reason = f"unmanaged_live_positions:{symbols}"
-        return LiveDaemonResult(
+        return market_runtime_contracts.LiveDaemonResult(
             processed,
             approved,
             submitted,
@@ -697,7 +642,7 @@ class LiveMarketLoop:
 
     async def _recover_gap(
         self,
-        error: LiveMarketStateContinuityError,
+        error: market_runtime_contracts.LiveMarketStateContinuityError,
     ) -> tuple[MarketState15s, ...]:
         loader = self._recover_market_state_gap
         if loader is None:
@@ -757,7 +702,7 @@ class LiveMarketLoop:
 
 def _strategy_decision_details(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: market_runtime_contracts.LiveRuntimeStrategy,
     state: MarketState15s,
     last_processed_at: datetime | None,
     recovered_bucket_count: int,
@@ -816,7 +761,9 @@ def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
     }
 
 
-def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:
+def _strategy_max_gap_seconds(
+    strategy: market_runtime_contracts.LiveRuntimeStrategy,
+) -> int | None:
     required_data = getattr(strategy, "required_data", None)
     if not callable(required_data):
         return None
@@ -825,7 +772,9 @@ def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:
     return None if value is None else int(value)
 
 
-def _strategy_state_interval_seconds(strategy: LiveRuntimeStrategy) -> int:
+def _strategy_state_interval_seconds(
+    strategy: market_runtime_contracts.LiveRuntimeStrategy,
+) -> int:
     required_data = getattr(strategy, "required_data", None)
     if not callable(required_data):
         return 15
@@ -871,7 +820,7 @@ def _validate_market_state_continuity(
     # canonical bucket; otherwise at least one bucket was lost or skipped.
     if delta_seconds <= 0 or delta_seconds == expected_interval_seconds:
         return
-    raise LiveMarketStateContinuityError(
+    raise market_runtime_contracts.LiveMarketStateContinuityError(
         symbol=state.symbol,
         previous_at=last_processed_at,
         current_at=state.bucket_start,
@@ -881,7 +830,7 @@ def _validate_market_state_continuity(
 
 def _reset_strategy_for_gap(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: market_runtime_contracts.LiveRuntimeStrategy,
     symbol: str,
     current_at: datetime,
     last_processed_at: datetime | None,
@@ -897,9 +846,9 @@ def _reset_strategy_for_gap(
 
 
 def _is_complete_gap_recovery(
-    error: LiveMarketStateContinuityError,
+    error: market_runtime_contracts.LiveMarketStateContinuityError,
     states: Sequence[MarketState15s],
-    strategy: LiveRuntimeStrategy,
+    strategy: market_runtime_contracts.LiveRuntimeStrategy,
 ) -> bool:
     if (
         error.observed_delta_seconds <= 0
@@ -933,10 +882,4 @@ def _is_complete_gap_recovery(
     )
 
 
-__all__ = [
-    "LiveDaemonResult",
-    "LiveMarketLoop",
-    "LiveMarketStateContinuityError",
-    "MarketStateGapRecovery",
-    "LiveRuntimeStrategy",
-]
+__all__ = ["LiveMarketLoop"]

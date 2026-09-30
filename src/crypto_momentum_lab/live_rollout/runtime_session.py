@@ -17,13 +17,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 import structlog
 
 from crypto_momentum_lab.health import LocalHealthWriter
-from crypto_momentum_lab.live_rollout.daemon import LiveDaemonResult
-from crypto_momentum_lab.live_rollout.resource_lifecycle import LiveResourceLifecycle
-from crypto_momentum_lab.live_rollout.runtime_supervisor import LiveRuntimeSupervisor
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.live_rollout.resource_lifecycle import (
+        LiveResourceLifecycle,
+    )
+    from crypto_momentum_lab.live_rollout.runtime_supervisor import (
+        LiveRuntimeSupervisor,
+    )
 
 log = structlog.get_logger()
 

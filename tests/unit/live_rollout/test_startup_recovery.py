@@ -10,8 +10,10 @@ from crypto_momentum_lab.live_rollout.hub_cursor import (
 )
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveMarketLoop,
-    LiveMarketStateContinuityError,
     _validate_market_state_continuity,
+)
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
+    LiveMarketStateContinuityError,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     load_live_market_state_gap,

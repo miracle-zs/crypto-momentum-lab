@@ -1,3 +1,4 @@
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
+"""Live rollout modules; import gates and runtime use cases from their owners.
 
-__all__ = ["LiveGateContext", "evaluate_live_gate"]
+Package initialization does not load execution gates or runtime implementations.
+"""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
-from crypto_momentum_lab.live_rollout.daemon import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.resource_lifecycle import (
     LiveResourceLifecycle,
 )

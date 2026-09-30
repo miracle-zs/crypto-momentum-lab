@@ -87,11 +87,7 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mFeedConfig,
 )
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
-from crypto_momentum_lab.live_rollout.daemon import (
-    LiveDaemonConfig,
-    LiveDaemonResult,
-    LiveStrategyDaemon,
-)
+from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
@@ -129,7 +125,8 @@ from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
 )
-from crypto_momentum_lab.live_rollout.market_loop import (
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
+    LiveDaemonResult,
     LiveMarketStateContinuityError,
 )
 from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventRuntime

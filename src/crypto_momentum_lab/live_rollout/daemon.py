@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
@@ -82,19 +83,7 @@ from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.market_admission import (
     LiveMarketStateAdmission,
 )
-from crypto_momentum_lab.live_rollout.market_loop import (
-    LiveDaemonResult as _LiveDaemonResult,
-)
-from crypto_momentum_lab.live_rollout.market_loop import (
-    LiveMarketLoop,
-    MarketStateGapRecovery,
-)
-from crypto_momentum_lab.live_rollout.market_loop import (
-    LiveRuntimeStrategy as _LiveRuntimeStrategy,
-)
-from crypto_momentum_lab.live_rollout.market_loop import (
-    _is_transient_live_gate as _market_loop_is_transient_live_gate,
-)
+from crypto_momentum_lab.live_rollout.market_loop import LiveMarketLoop
 from crypto_momentum_lab.live_rollout.pending_entries import (
     LivePendingEntryRegistry,
 )
@@ -121,11 +110,6 @@ from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 from crypto_momentum_lab.risk.gateway import RiskGateway
 
 log = structlog.get_logger()
-
-# Compatibility exports for callers that historically imported these contracts
-# from daemon.py; ownership now lives with the market loop module.
-LiveDaemonResult = _LiveDaemonResult
-LiveRuntimeStrategy = _LiveRuntimeStrategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +199,7 @@ class LiveStrategyDaemon:
     def __init__(
         self,
         *,
-        strategy: LiveRuntimeStrategy,
+        strategy: market_runtime_contracts.LiveRuntimeStrategy,
         risk_gateway: RiskGateway,
         limits: FixedLiveLimits,
         submission_repository: LiveSubmissionRepository,
@@ -239,7 +223,8 @@ class LiveStrategyDaemon:
         fetch_exchange_positions: (
             Callable[[], Awaitable[tuple[AccountPositionSnapshot, ...]]] | None
         ) = None,
-        recover_market_state_gap: MarketStateGapRecovery | None = None,
+        recover_market_state_gap: market_runtime_contracts.MarketStateGapRecovery
+        | None = None,
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
@@ -619,7 +604,7 @@ class LiveStrategyDaemon:
     async def run(
         self,
         states: AsyncIterable[MarketState15s],
-    ) -> LiveDaemonResult:
+    ) -> market_runtime_contracts.LiveDaemonResult:
         return await self._lifecycle.run(states)
 
     def _set_run_active(self, active: bool) -> None:
@@ -685,7 +670,7 @@ class LiveStrategyDaemon:
     async def _run_market_loop(
         self,
         states: AsyncIterable[MarketState15s],
-    ) -> LiveDaemonResult:
+    ) -> market_runtime_contracts.LiveDaemonResult:
         """Run the separated ordered market loop."""
         return await self._market_loop.run(states)
 
@@ -720,8 +705,3 @@ class LiveStrategyDaemon:
                 candidate_id=candidate.candidate_id,
                 error_type=type(error).__name__,
             )
-
-
-def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
-    """Compatibility export for callers that used the old daemon helper."""
-    return _market_loop_is_transient_live_gate(reasons)

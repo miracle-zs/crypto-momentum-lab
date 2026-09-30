@@ -45,7 +45,6 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonRuntimeContext,
     LiveStrategyDaemon,
-    _is_transient_live_gate,
 )
 from crypto_momentum_lab.live_rollout.entry_lane import (
     _live_entry_candidate_passes,
@@ -58,6 +57,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.market_loop import _is_transient_live_gate
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )

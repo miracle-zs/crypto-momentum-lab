@@ -11,6 +11,7 @@ import pytest
     [
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.live_rollout.hub_cursor",
+        "crypto_momentum_lab.live_rollout.market_runtime_contracts",
         "crypto_momentum_lab.live_rollout.position_classification",
         "crypto_momentum_lab.operator_dashboard.ports",
         "crypto_momentum_lab.live_rollout.position_self_healing",
@@ -113,6 +114,43 @@ class CoordinationGuard(MetaPathFinder):
         } or fullname.startswith('crypto_momentum_lab.persistence'):
             raise RuntimeError('value imported execution stack: ' + fullname)
 sys.meta_path.insert(0, CoordinationGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.live_rollout",
+        "crypto_momentum_lab.live_rollout.market_runtime_contracts",
+        "crypto_momentum_lab.live_rollout.runtime_supervisor",
+        "crypto_momentum_lab.live_rollout.runtime_session",
+    ],
+)
+def test_runtime_contract_consumers_import_without_execution_loop(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class LoopGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.live_rollout.daemon',
+            'crypto_momentum_lab.live_rollout.market_loop',
+            'sqlalchemy',
+        } or fullname.startswith((
+            'crypto_momentum_lab.persistence',
+            'crypto_momentum_lab.execution_account',
+        )):
+            raise RuntimeError('contract consumer imported execution: ' + fullname)
+sys.meta_path.insert(0, LoopGuard())
 importlib.import_module(sys.argv[1])
 """
     result = subprocess.run(

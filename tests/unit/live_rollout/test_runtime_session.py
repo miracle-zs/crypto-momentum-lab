@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from crypto_momentum_lab.live_rollout.daemon import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.resource_lifecycle import (
     LiveResourceLifecycle,
 )

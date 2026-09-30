@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from crypto_momentum_lab.live_rollout.entry_cache import LiveEntrySymbolCache
-from crypto_momentum_lab.live_rollout.market_loop import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
     LiveRuntimeTasks,

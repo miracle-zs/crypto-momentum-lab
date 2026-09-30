@@ -9,7 +9,9 @@ import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
-from crypto_momentum_lab.live_rollout.daemon import LiveRuntimeStrategy
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
+    LiveRuntimeStrategy,
+)
 from crypto_momentum_lab.live_rollout.readiness import LiveWarmupStatus
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,

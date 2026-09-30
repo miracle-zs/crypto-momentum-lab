@@ -10,7 +10,7 @@ from typing import Any
 
 import structlog
 
-from crypto_momentum_lab.live_rollout.market_loop import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 
 log = structlog.get_logger()
 
