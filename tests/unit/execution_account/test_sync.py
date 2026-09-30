@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.execution_account.binance.user_data import (
+from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (

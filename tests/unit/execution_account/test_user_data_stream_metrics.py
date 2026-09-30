@@ -4,6 +4,8 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUsdMUserDataStream,
     _fill_event_key,
     _is_fill_event,
+)
+from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
 )
 

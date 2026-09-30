@@ -539,7 +539,14 @@ assert codec not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
-def test_user_data_event_model_imports_without_transport():
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.execution_account.binance.user_data_models",
+        "crypto_momentum_lab.execution_account.binance.user_data_parser",
+    ],
+)
+def test_user_data_event_model_imports_without_transport(module):
     script = """
 import importlib
 import sys
@@ -551,9 +558,12 @@ class TransportGuard(MetaPathFinder):
             or fullname == 'structlog' or fullname.startswith('structlog.')):
             raise RuntimeError('event model imported transport: ' + fullname)
 sys.meta_path.insert(0, TransportGuard())
-importlib.import_module('crypto_momentum_lab.execution_account.binance.user_data_models')
+importlib.import_module(sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 0, result.stderr
