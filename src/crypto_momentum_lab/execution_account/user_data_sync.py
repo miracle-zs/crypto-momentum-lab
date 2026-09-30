@@ -8,6 +8,10 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.execution_account.binance.order_status import (
+    is_open_order_status,
+    should_discard_position_expectation,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
@@ -45,10 +49,6 @@ class AccountUserDataState:
     """Merge Binance partial account events onto the latest REST snapshot."""
 
     _SEEN_TRADE_CACHE_SIZE = 8192
-    _OPEN_ORDER_STATUSES = frozenset({"NEW", "PARTIALLY_FILLED"})
-    _NO_FILL_TERMINAL_ORDER_STATUSES = frozenset(
-        {"CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"}
-    )
 
     def __init__(
         self,
@@ -307,11 +307,10 @@ class AccountUserDataState:
         )
         if (
             self._expected_position_registry is not None
-            and status in self._NO_FILL_TERMINAL_ORDER_STATUSES
-            and order.executed_quantity == 0
+            and should_discard_position_expectation(status, order.executed_quantity)
         ):
             self._expected_position_registry.discard(order.client_order_id)
-        if status in self._OPEN_ORDER_STATUSES:
+        if is_open_order_status(status):
             self._open_orders[key] = order
         else:
             self._open_orders.pop(key, None)
