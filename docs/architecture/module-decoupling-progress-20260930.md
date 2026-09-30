@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十七批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十八批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1730,6 +1730,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 联合类型验收纳入真实 Postgres UoW 与修复适配器后，修复恢复 head 三处校验后类型丢失：reservation 列表保留已校验局部值，sequence 明确 None/非负 exact int/异常降级三分支。异常 reservation 拒绝和异常 sequence 诊断后归零保持，bool 仍不作为合法 int。
 
 验证：账户模型、执行恢复/ledger/journal/position book、修复模型/计算、摘要/codec、证据模型/lifecycle/settlement/attribution/cumulative report、领域 ports、Postgres account_fact_rows/journal store/修复适配与端口/执行 UoW，共二十四文件 mypy --follow-imports=skip 通过，关闭三项新增类型错误。不代表全仓类型或真实数据库验收。全部最终逻辑修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，31.04 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十八批：恢复 head 异常输入与合法边界验收
+
+第一百三十七批提交为 `90f5077`；第一百三十八批于 2026-10-01 继续本地实施，未部署生产。
+
+- 扩展 reservation 拒绝验收：None、tuple、字符串容器以及空字符串/整数元素不得产生恢复候选。
+- sequence 降级覆盖负数、bool、float、字符串、列表、字典，验证诊断保留原异常值并归零；合法 None、零、正数及大整数保持，不凭空加入诊断。
+- 合法空 reservation 列表和重复 ID 列表恢复为去重集合，确认原输入未修改。本批仅补充上批校验收窄的边界验收，未改变生产实现。
+
+验证：恢复计算定向 **29 passed**，新增十七项边界案例。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2561 passed**，31.25 秒，一项现有 Starlette/httpx 警告。修改测试完整 Ruff 与 git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

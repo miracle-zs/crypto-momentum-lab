@@ -101,6 +101,11 @@ def test_existing_migration_policy_returns_diagnostic_and_recomputed_digest(
         ("stream_scope", {}),
         ("journal_revision", True),
         ("active_reservation_ids", [None]),
+        ("active_reservation_ids", None),
+        ("active_reservation_ids", ("reservation",)),
+        ("active_reservation_ids", "reservation"),
+        ("active_reservation_ids", [""]),
+        ("active_reservation_ids", [1]),
     ],
 )
 def test_malformed_head_cannot_produce_recovery_candidate(state, field, value):
@@ -111,14 +116,15 @@ def test_malformed_head_cannot_produce_recovery_candidate(state, field, value):
         )
 
 
-def test_legacy_invalid_sequence_normalization_is_explicit(state):
-    payload = dict(state.head.state_payload, last_sequence=-1)
+@pytest.mark.parametrize("sequence", [-1, True, False, 1.0, "42", [], {}])
+def test_legacy_invalid_sequence_normalization_is_explicit(state, sequence):
+    payload = dict(state.head.state_payload, last_sequence=sequence)
     recovered = recover_durable_position(
         replace(state, head=replace(state.head, state_payload=payload))
     )
     assert recovered.last_sequence == 0
     assert recovered.diagnostics == (
-        ("durable_execution_head_sequence_invalid", {"sequence": -1}),
+        ("durable_execution_head_sequence_invalid", {"sequence": sequence}),
     )
 
 
@@ -127,3 +133,28 @@ def test_headless_recovery_has_no_invented_revision_or_reservations(state):
     assert recovered.head_revision == 0
     assert recovered.last_sequence is None
     assert not recovered.reservation_ids and not recovered.diagnostics
+
+
+@pytest.mark.parametrize("sequence", [None, 0, 1, 2**63])
+def test_valid_sequence_preserves_value_without_diagnostics(state, sequence):
+    payload = dict(state.head.state_payload, last_sequence=sequence)
+    recovered = recover_durable_position(
+        replace(state, head=replace(state.head, state_payload=payload))
+    )
+    assert recovered.last_sequence == sequence
+    assert recovered.diagnostics == ()
+    assert payload["last_sequence"] == sequence
+
+
+@pytest.mark.parametrize("reservations", [[], ["a", "a", "b"]])
+def test_valid_reservation_list_recovers_unique_ids_without_mutation(
+    state, reservations
+):
+    payload = dict(state.head.state_payload, active_reservation_ids=reservations)
+    before = deepcopy(payload)
+    recovered = recover_durable_position(
+        replace(state, head=replace(state.head, state_payload=payload))
+    )
+    assert recovered.reservation_ids == frozenset(reservations)
+    assert recovered.diagnostics == ()
+    assert payload == before
