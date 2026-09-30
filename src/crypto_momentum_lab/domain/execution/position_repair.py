@@ -4,9 +4,9 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_codec import (
-    _recovery_checkpoint_head_binding,
-    _view_projection_digest,
+    recovery_checkpoint_head_binding,
 )
+from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
 )
@@ -97,8 +97,8 @@ def build_position_repair(
         "projection_digest": PositionRecoveryCodec.compute_projection_digest(
             PositionLedger(request.key).project(facts)
         ),
-        "view_digest": _view_projection_digest(view),
-        "recovery_checkpoint": _recovery_checkpoint_head_binding(
+        "view_digest": view_projection_digest(view),
+        "recovery_checkpoint": recovery_checkpoint_head_binding(
             facts.recovery_checkpoint
         ),
         "journal_revision": journal.revision,
@@ -174,8 +174,8 @@ def validate_repaired_position(
         "projection_digest": PositionRecoveryCodec.compute_projection_digest(
             PositionLedger(key).project(facts)
         ),
-        "view_digest": _view_projection_digest(view),
-        "recovery_checkpoint": _recovery_checkpoint_head_binding(
+        "view_digest": view_projection_digest(view),
+        "recovery_checkpoint": recovery_checkpoint_head_binding(
             facts.recovery_checkpoint
         ),
         "journal_revision": journal.revision,

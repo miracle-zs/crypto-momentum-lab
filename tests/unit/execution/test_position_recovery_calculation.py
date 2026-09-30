@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.evidence_codec import _view_projection_digest
+from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
@@ -50,7 +50,7 @@ def state():
         projection_digest=PositionRecoveryCodec.compute_projection_digest(
             PositionLedger(key).project(facts)
         ),
-        view_digest=_view_projection_digest(view),
+        view_digest=view_projection_digest(view),
         recovery_checkpoint=None,
         journal_revision=0,
         active_reservation_ids=["existing-reservation"],

@@ -39,12 +39,12 @@ from crypto_momentum_lab.domain.execution.durable_evidence import (
     prepare_durable_evidence,
 )
 from crypto_momentum_lab.domain.execution.evidence_codec import (
-    _recovery_checkpoint_head_binding,
-    _view_projection_digest,
+    recovery_checkpoint_head_binding,
 )
 from crypto_momentum_lab.domain.execution.evidence_digest import (
     digest_json_payload,
     trade_payload_digest,
+    view_projection_digest,
 )
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
@@ -160,8 +160,8 @@ def _execution_head_payload(
         "projection_digest": PositionRecoveryCodec.compute_projection_digest(
             projection
         ),
-        "view_digest": _view_projection_digest(view),
-        "recovery_checkpoint": _recovery_checkpoint_head_binding(checkpoint),
+        "view_digest": view_projection_digest(view),
+        "recovery_checkpoint": recovery_checkpoint_head_binding(checkpoint),
         "journal_revision": book._journal_revisions.get(key.canonical_id, 0),
         "last_sequence": book._last_sequences.get(key.canonical_id),
         "seen_trade_count": len(book._seen_trade_ids),

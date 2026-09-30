@@ -9,9 +9,9 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_codec import (
-    _recovery_checkpoint_head_binding,
-    _view_projection_digest,
+    recovery_checkpoint_head_binding,
 )
+from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
@@ -220,7 +220,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
         ):
             raise RuntimeError("durable execution head is malformed")
         facts = journal.read_cut()
-        expected_checkpoint = _recovery_checkpoint_head_binding(
+        expected_checkpoint = recovery_checkpoint_head_binding(
             facts.recovery_checkpoint
         )
         if payload.get("recovery_checkpoint") != expected_checkpoint:
@@ -274,7 +274,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
                 )
             )
         view = book.get_view()
-        if payload["view_digest"] != _view_projection_digest(view):
+        if payload["view_digest"] != view_projection_digest(view):
             diagnostics.append(
                 (
                     "execution_head_view_migrated",
@@ -283,7 +283,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
                         "symbol": key.symbol,
                         "position_side": key.position_side.value,
                         "old_view_digest": payload["view_digest"],
-                        "new_view_digest": _view_projection_digest(view),
+                        "new_view_digest": view_projection_digest(view),
                         "has_active_reservations": bool(
                             payload.get("active_reservation_ids")
                         ),

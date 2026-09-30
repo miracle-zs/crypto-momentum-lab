@@ -8,6 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionView
 
 
 def digest_json_payload(payload: object) -> str:
@@ -32,3 +33,9 @@ def digest_json_payload(payload: object) -> str:
 def trade_payload_digest(fill: AccountFillEvent) -> str:
     """Hash global trade identity independently of the transport stream epoch."""
     return digest_json_payload(asdict(fill))
+
+
+def view_projection_digest(view: PositionView) -> str:
+    payload = asdict(view)
+    payload.pop("projection_version", None)
+    return digest_json_payload(payload)
