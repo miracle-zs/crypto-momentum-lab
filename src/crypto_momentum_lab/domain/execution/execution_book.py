@@ -29,6 +29,10 @@ from crypto_momentum_lab.domain.execution.command_models import (
     OutboxEntry,
 )
 from crypto_momentum_lab.domain.execution.command_repository import CommandRepository
+from crypto_momentum_lab.domain.execution.cumulative_report import (
+    plan_cumulative_report,
+    plan_watermark_publication,
+)
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     _digest_json_payload,
     _recovery_checkpoint_head_binding,
@@ -47,7 +51,6 @@ from crypto_momentum_lab.domain.execution.evidence_rules import (
 )
 from crypto_momentum_lab.domain.execution.evidence_settlement import (
     account_trade_delta,
-    cumulative_order_delta,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -2538,9 +2541,6 @@ class ExecutionBook:
         diagnostics: tuple[str, ...] = ()
         pending_watermark: tuple[str, Decimal, Decimal] | None = None
         dispatch_reconciled_command_id: str | None = None
-        observed_fills = evidence.fills or (
-            (evidence.fill,) if evidence.fill is not None else ()
-        )
 
         # 1. Process Fill
         if evidence.fill is not None:
@@ -2661,32 +2661,28 @@ class ExecutionBook:
                 watermark_key, Decimal("0")
             )
             try:
-                order_delta = cumulative_order_delta(
+                report_plan = plan_cumulative_report(
                     report,
-                    previous_quantity=previous_quantity,
-                    previous_quote=previous_quote,
+                    previous_watermark=(previous_quantity, previous_quote),
                     account_fills=journal.read_cut().fills,
+                    outbox=self._outbox_by_command_id.get(report.order_id),
+                    has_active_reservations=bool(
+                        self._find_active_reservations_for_command(report.order_id)
+                    ),
                 )
             except ValueError as error:
                 return EvidenceConflict(evidence.evidence_id, str(error))
-            if order_delta.watermark is not None:
-                target_quantity, target_quote = order_delta.watermark
-                delta_quantity = order_delta.quantity
-                pending_watermark = (watermark_key, target_quantity, target_quote)
-                outbox = self._outbox_by_command_id.get(report.order_id)
-                is_exit_report = bool(
-                    self._find_active_reservations_for_command(report.order_id)
-                    or (outbox is not None and outbox.command.reduce_only)
-                )
-                if is_exit_report:
+            if report_plan.watermark is not None:
+                pending_watermark = (watermark_key, *report_plan.watermark)
+                if report_plan.settlement_quantity > Decimal("0"):
                     (
                         consumed,
                         needs_recovery,
                         settlement_diagnostic,
                     ) = await self._settle_reservation_quantity(
                         report.order_id,
-                        delta_quantity,
-                        reported_quantity=target_quantity,
+                        report_plan.settlement_quantity,
+                        reported_quantity=report_plan.reported_quantity,
                     )
                     consumed_qty += consumed
                     settlement_recovery_required = (
@@ -2738,33 +2734,15 @@ class ExecutionBook:
             watermark_key, cumulative_qty, cumulative_quote = pending_watermark
             self._order_cumulative_fills[watermark_key] = cumulative_qty
             self._order_cumulative_quotes[watermark_key] = cumulative_quote
-            cmd_id = (
-                evidence.cumulative_order.order_id
-                if evidence.cumulative_order is not None
-                else evidence.order_event.client_order_id
-                if evidence.order_event is not None
-                else evidence.fill.order_id
-                if evidence.fill is not None
-                else evidence.fills[0].order_id
-                if evidence.fills
-                else ""
+            publication = plan_watermark_publication(
+                evidence, outbox_by_command_id=self._outbox_by_command_id,
             )
-            current_entry = self._outbox_by_command_id.get(cmd_id)
-            if current_entry is not None:
-                await self._persist_outbox_state(current_entry)
-            elif any(
-                isinstance(fill.raw_payload, dict)
-                and (
-                    fill.raw_payload.get("is_cumulative")
-                    or "cum_qty" in fill.raw_payload
-                )
-                for fill in observed_fills
-            ):
-                self._recovery_required_commands.add(cmd_id)
+            if publication.outbox is not None:
+                await self._persist_outbox_state(publication.outbox)
+            elif publication.recovery_diagnostic is not None:
+                self._recovery_required_commands.add(publication.command_id)
                 settlement_recovery_required = True
-                diagnostics = (
-                    f"No outbox command exists for cumulative fill {cmd_id}",
-                )
+                diagnostics = (publication.recovery_diagnostic,)
 
         if dispatch_reconciled_command_id is not None:
             self._dispatch_reconciliation_required_commands.discard(
