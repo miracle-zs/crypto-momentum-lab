@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -18,6 +19,12 @@ log = structlog.get_logger()
 
 _CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
 _STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyCacheMetrics:
+    buffered_symbol_count: int | None = None
+    buffered_state_count: int | None = None
 
 
 class StrategyCachePruner(Protocol):
@@ -37,19 +44,19 @@ class LiveRuntimeCacheMaintenance:
         self,
         *,
         run_id: str,
-        strategy: object,
         pending_entry_symbols: Callable[[], Iterable[str]],
         strategy_protected_symbols: Callable[[], Iterable[str]] | None = None,
         strategy_pruner: StrategyCachePruner | None = None,
+        strategy_metrics_provider: Callable[[], StrategyCacheMetrics] | None = None,
         volume_metrics_provider: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
         self._run_id = run_id
-        self._strategy = strategy
         self._pending_entry_symbols = pending_entry_symbols
         self._strategy_protected_symbols = strategy_protected_symbols
         self._strategy_pruner = strategy_pruner
+        self._strategy_metrics_provider = strategy_metrics_provider
         self._volume_metrics_provider = volume_metrics_provider
         self._managed_position_symbols: frozenset[str] = frozenset()
         self._managed_order_symbols: frozenset[str] = frozenset()
@@ -107,6 +114,7 @@ class LiveRuntimeCacheMaintenance:
             except Exception:
                 volume_metrics = {}
 
+        strategy_metrics = self._strategy_metrics()
         log.info(
             "live_runtime_memory_snapshot",
             run_id=self._run_id,
@@ -115,16 +123,8 @@ class LiveRuntimeCacheMaintenance:
             **tracemalloc_memory_snapshot(),
             protected_symbol_count=len(protected_symbols),
             evicted_strategy_symbols=len(evicted_strategy_symbols),
-            buffered_symbol_count=getattr(
-                self._strategy,
-                "buffered_symbol_count",
-                None,
-            ),
-            buffered_state_count=getattr(
-                self._strategy,
-                "buffered_state_count",
-                None,
-            ),
+            buffered_symbol_count=strategy_metrics.buffered_symbol_count,
+            buffered_state_count=strategy_metrics.buffered_state_count,
             volume_cached_symbols=volume_metrics.get("cached_symbol_count"),
             volume_total_snapshots=volume_metrics.get("total_snapshot_count"),
             volume_oldest_age_seconds=volume_metrics.get("oldest_snapshot_age_seconds"),
@@ -132,22 +132,20 @@ class LiveRuntimeCacheMaintenance:
             volume_miss_count=volume_metrics.get("lookup_miss_count"),
         )
         if evicted_strategy_symbols:
+            strategy_metrics = self._strategy_metrics()
             log.info(
                 "live_runtime_cache_pruned",
                 run_id=self._run_id,
                 protected_symbol_count=len(protected_symbols),
                 evicted_strategy_symbols=len(evicted_strategy_symbols),
-                buffered_symbol_count=getattr(
-                    self._strategy,
-                    "buffered_symbol_count",
-                    None,
-                ),
-                buffered_state_count=getattr(
-                    self._strategy,
-                    "buffered_state_count",
-                    None,
-                ),
+                buffered_symbol_count=strategy_metrics.buffered_symbol_count,
+                buffered_state_count=strategy_metrics.buffered_state_count,
             )
+
+    def _strategy_metrics(self) -> StrategyCacheMetrics:
+        if self._strategy_metrics_provider is None:
+            return StrategyCacheMetrics()
+        return self._strategy_metrics_provider()
 
 
 def _normalize_symbols(symbols: Iterable[str]) -> set[str]:

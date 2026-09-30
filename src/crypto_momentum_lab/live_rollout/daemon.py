@@ -89,6 +89,7 @@ from crypto_momentum_lab.live_rollout.pending_entries import (
 )
 from crypto_momentum_lab.live_rollout.runtime_cache import (
     LiveRuntimeCacheMaintenance,
+    StrategyCacheMetrics,
 )
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
@@ -278,7 +279,10 @@ class LiveStrategyDaemon:
         strategy_pruner = getattr(strategy, "prune_inactive_symbols", None)
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
-            strategy=self._strategy,
+            strategy_metrics_provider=lambda: StrategyCacheMetrics(
+                buffered_symbol_count=getattr(strategy, "buffered_symbol_count", None),
+                buffered_state_count=getattr(strategy, "buffered_state_count", None),
+            ),
             pending_entry_symbols=self._pending_entries.pending_symbols,
             strategy_protected_symbols=(
                 strategy_protected_symbols
