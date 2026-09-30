@@ -51,6 +51,12 @@ from crypto_momentum_lab.execution_account.binance.request_rules import (
     normalize_margin_type,
     normalize_symbols,
 )
+from crypto_momentum_lab.execution_account.binance.response_rules import (
+    exchange_error_code,
+    exchange_error_message,
+    is_invalid_leverage_rejection,
+    retry_after_seconds,
+)
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     decimal_value,
@@ -109,7 +115,7 @@ class BinanceRateLimitError(httpx.HTTPStatusError):
             request=response.request,
             response=response,
         )
-        self.retry_after_seconds = _retry_after_seconds(response)
+        self.retry_after_seconds = retry_after_seconds(response)
 
 
 class _AsyncRequestPacer:
@@ -1009,7 +1015,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 "Binance entry margin type warmup could not read symbol configs"
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+            raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise ExchangeOrderRejectedError(
                 "Binance entry margin type warmup could not read symbol configs"
@@ -1099,7 +1105,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 raise ExchangeSubmissionTimeoutError(
                     "Binance order submit returned an unknown server outcome"
                 ) from exc
-            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+            raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
         snapshot = self._order_snapshot(
             rest_require_mapping(payload),
             entry_leverage=entry_leverage,
@@ -1247,7 +1253,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     # Binance reports an already-selected mode as an error.
                     # Treat it as a successful confirmation; another read-back
                     # here only adds latency and can observe a stale projection.
-                    if _exchange_error_code(exc) != -4046:
+                    if exchange_error_code(exc) != -4046:
                         raise
                 # The successful write (or -4046 "already selected") is the
                 # exchange acknowledgement. Do not perform a second
@@ -1263,7 +1269,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "Binance entry margin type was not confirmed; order was not sent"
                 ) from exc
             except httpx.HTTPStatusError as exc:
-                raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+                raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
             except (httpx.HTTPError, ValueError, TypeError) as exc:
                 raise ExchangeOrderRejectedError(
                     "Binance entry margin type was not confirmed; order was not sent"
@@ -1302,11 +1308,11 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 ):
                     raise ValueError("unexpected leverage response")
             except httpx.HTTPStatusError as exc:
-                if not _is_invalid_leverage_rejection(exc):
+                if not is_invalid_leverage_rejection(exc):
                     raise ExchangeOrderRejectedError(
-                        _exchange_error_message(exc)
+                        exchange_error_message(exc)
                     ) from exc
-                last_rejection = _exchange_error_message(exc)
+                last_rejection = exchange_error_message(exc)
                 continue
             except (httpx.HTTPError, ValueError) as exc:
                 raise ExchangeOrderRejectedError(
@@ -1344,7 +1350,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 },
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400 and _exchange_error_code(exc) == -2013:
+            if exc.response.status_code == 400 and exchange_error_code(exc) == -2013:
                 return None
             if exc.response.status_code in {418, 429} or (
                 exc.response.status_code >= 500
@@ -1411,8 +1417,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 raise ExchangeCancellationUnknownError(
                     "Binance cancel request returned an unknown server outcome"
                 ) from exc
-            if _exchange_error_code(exc) in {-2011, -2013}:
-                exchange_message = _exchange_error_message(exc)
+            if exchange_error_code(exc) in {-2011, -2013}:
+                exchange_message = exchange_error_message(exc)
                 try:
                     existing = await self.query_order_by_client_id(
                         symbol,
@@ -1456,7 +1462,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     ) from exc
                 raise ExchangeOrderAlreadyAbsentError(
                     exchange_message,
-                    exchange_code=_exchange_error_code(exc),
+                    exchange_code=exchange_error_code(exc),
                     exchange_message=exchange_message,
                     http_status=exc.response.status_code,
                     open_orders_checked=True,
@@ -1504,46 +1510,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         )
 
 
-def _exchange_error_code(exc: httpx.HTTPStatusError) -> int | None:
-    try:
-        payload = exc.response.json()
-    except ValueError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    code = payload.get("code")
-    return int(code) if code is not None else None
-
-
 def _raise_for_status(response: httpx.Response) -> None:
     if response.status_code in {418, 429}:
         raise BinanceRateLimitError(response)
     response.raise_for_status()
-
-
-def _retry_after_seconds(response: httpx.Response) -> float | None:
-    raw_value = response.headers.get("Retry-After")
-    if raw_value is None:
-        return None
-    try:
-        value = float(raw_value)
-    except ValueError:
-        return None
-    if not math.isfinite(value) or value < 0:
-        return None
-    return value
-
-
-def _is_invalid_leverage_rejection(exc: httpx.HTTPStatusError) -> bool:
-    """Return whether Binance rejected only the requested leverage level."""
-    return _exchange_error_code(exc) == -4028
-
-
-def _exchange_error_message(exc: httpx.HTTPStatusError) -> str:
-    try:
-        payload = exc.response.json()
-    except ValueError:
-        return f"Binance rejected order with HTTP {exc.response.status_code}"
-    if isinstance(payload, dict) and payload.get("msg"):
-        return str(payload["msg"])
-    return f"Binance rejected order with HTTP {exc.response.status_code}"
