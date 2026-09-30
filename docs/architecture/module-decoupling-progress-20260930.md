@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百七十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百七十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -2156,6 +2156,17 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 新增迁移前固定摘要测试；独立进程守卫加入 snapshot_encoding，并禁止所有该组模块加载 recovery_codec。对旧提交提取的两方法进行离线对照：三种时区、三种小数形式和两种原始 payload 共十八项编码及锚点完全一致。
 
 验证：前批联合范围加 snapshot_encoding 共十七文件严格 mypy 检查通过（其余依赖 follow_imports=skip，仅 httpx 正常跟随）；恢复 codec 本体仍非本批类型验收范围。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2694 passed**，30.49 秒，一项现有 Starlette/httpx 警告。新模块、扫描计划及测试完整 Ruff，恢复 codec F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百七十四批：账本及持仓视图直接消费锚点编码所有者
+
+第一百七十三批提交为 `3a26681`；第一百七十四批于 2026-10-01 继续本地实施，未部署生产。
+
+- PositionBook 与 PositionLedger 的零持仓来源验证直接导入 snapshot_encoding.stable_snapshot_anchor_id，不再为锚点身份局部加载恢复 codec；账户/环境/符号/方向/归零/时间匹配规则保持。
+- 单元恢复与 Postgres epoch adoption 测试使用同一锚点所有者；源码和测试已无 PositionRecoveryCodec.stable_snapshot_anchor_id 调用。恢复 codec 的已有入口仍保留，账本 projection 编解码依赖并未删除。
+
+验证：PositionBook、PositionLedger、snapshot_encoding、账户/ledger/恢复/订单模型及实际 AccountJournal 八文件 mypy --follow-imports=skip 联合通过；仅前七文件时 AccountJournal 被跳过导致 PositionKey 的 Any 返回，纳入实际所有者后关闭，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2694 passed**，30.62 秒，一项现有 Starlette/httpx 警告。epoch adoption 两项集成测试 collect-only 成功，未执行数据库事务，不能视为真实数据库验收。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

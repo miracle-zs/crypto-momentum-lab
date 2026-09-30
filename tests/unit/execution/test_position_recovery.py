@@ -1,3 +1,7 @@
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
+)
+
 """Recovery checkpoints seed a real ledger and replay only their suffix."""
 
 from dataclasses import replace
@@ -295,7 +299,7 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
         observed_at=cut,
         raw_payload={"include_flat": True},
     )
-    anchor_id = PositionRecoveryCodec.stable_snapshot_anchor_id(snapshot)
+    anchor_id = stable_snapshot_anchor_id(snapshot)
     provenance = AccountFillLoadProvenance(
         stream_scope=scope,
         load_id="flat-bootstrap-1",
@@ -383,7 +387,7 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof() 
         observed_at=parent_cut,
         raw_payload={},
     )
-    parent_anchor = PositionRecoveryCodec.stable_snapshot_anchor_id(flat_snapshot)
+    parent_anchor = stable_snapshot_anchor_id(flat_snapshot)
     parent_provenance = AccountFillLoadProvenance(
         stream_scope=old_scope,
         load_id="old-epoch-load",

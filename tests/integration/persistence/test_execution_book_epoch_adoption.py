@@ -1,3 +1,7 @@
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
+)
+
 """Real PostgreSQL recovery across execution stream epochs."""
 
 from datetime import UTC, datetime, timedelta
@@ -24,9 +28,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFillLoadProvenance,
     CoverageEvidence,
     PositionKey,
-)
-from crypto_momentum_lab.domain.execution.recovery_codec import (
-    PositionRecoveryCodec,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
@@ -203,7 +204,7 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
     flat = _snapshot(key, flat_at, "0", "0")
     parent_snapshot = _snapshot(key, parent_at, "2", "100")
     target_snapshot = _snapshot(key, target_at, "1.5", "100")
-    anchor_id = PositionRecoveryCodec.stable_snapshot_anchor_id(flat)
+    anchor_id = stable_snapshot_anchor_id(flat)
 
     try:
         book = _book(factory)
@@ -342,7 +343,7 @@ async def test_new_epoch_without_checkpoint_adoption_fails_closed(
     )
     anchor_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=3)
     snapshot = _snapshot(key, anchor_at, "0", "0")
-    anchor_id = PositionRecoveryCodec.stable_snapshot_anchor_id(snapshot)
+    anchor_id = stable_snapshot_anchor_id(snapshot)
 
     try:
         book = _book(factory)

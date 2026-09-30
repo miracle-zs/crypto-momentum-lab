@@ -319,8 +319,8 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
     ):
         return False
     if provenance.source_anchor_kind == "zero_snapshot":
-        from crypto_momentum_lab.domain.execution.recovery_codec import (
-            PositionRecoveryCodec,
+        from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+            stable_snapshot_anchor_id,
         )
 
         if any(
@@ -330,7 +330,7 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
             and snapshot.position_side == facts.position_key.position_side.value
             and snapshot.position_amt == Decimal("0")
             and snapshot.observed_at == provenance.source_anchor_event_cut
-            and PositionRecoveryCodec.stable_snapshot_anchor_id(snapshot)
+            and stable_snapshot_anchor_id(snapshot)
             == provenance.source_anchor_id
             for snapshot in facts.snapshots
         ):

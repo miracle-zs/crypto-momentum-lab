@@ -1597,8 +1597,8 @@ def _has_verified_flat_snapshot_anchor(
         or coverage.checkpoint_id != provenance.source_anchor_id
     ):
         return False
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
+    from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+        stable_snapshot_anchor_id,
     )
 
     return any(
@@ -1608,7 +1608,7 @@ def _has_verified_flat_snapshot_anchor(
         and snapshot.position_side == facts.position_key.position_side.value
         and snapshot.position_amt == Decimal("0")
         and snapshot.observed_at == event_cut
-        and PositionRecoveryCodec.stable_snapshot_anchor_id(snapshot)
+        and stable_snapshot_anchor_id(snapshot)
         == provenance.source_anchor_id
         for snapshot in facts.snapshots
     )
