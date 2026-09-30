@@ -461,12 +461,7 @@ class OrderExecutionCoordinator:
             raise ValueError(
                 "durable account evidence requires source stream, epoch, and sequence"
             )
-        if (
-            stream_id
-            and stream_epoch
-            and self._execution_book is not None
-            and hasattr(self._execution_book, "register_active_stream")
-        ):
+        if stream_id and stream_epoch:
             self._execution_book.register_active_stream(
                 environment=self._environment,
                 account_label=self._account_label,
@@ -924,14 +919,12 @@ class OrderExecutionCoordinator:
                     stream_id = stream_scope.stream_id
                     stream_epoch = stream_scope.stream_epoch
                 else:
-                    active = None
-                    if hasattr(self._execution_book, "get_active_stream"):
-                        active = self._execution_book.get_active_stream(
-                            self._environment, self._account_label
-                        )
+                    active = self._execution_book.get_active_stream(
+                        self._environment, self._account_label
+                    )
                     if active is not None:
                         stream_id, stream_epoch = active
-                    elif getattr(self, "_active_stream", None) is not None:
+                    elif self._active_stream is not None:
                         stream_id, stream_epoch = self._active_stream
                     else:
                         raise RuntimeError(

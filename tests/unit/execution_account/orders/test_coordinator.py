@@ -2215,11 +2215,13 @@ async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
         AccountFillEvent,
         AccountPositionSnapshot,
     )
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
-    class Book:
+    class Book(ExecutionBook):
         has_execution_unit_of_work = True
 
         def __init__(self) -> None:
+            super().__init__()
             self.evidence = []
 
         async def observe(self, evidence):
@@ -2259,10 +2261,12 @@ async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
         )
 
     await observe(flat)
+    assert book.get_active_stream("live", "primary") == ("account-stream", "epoch-1")
     await observe(replace(flat, observed_at=NOW + timedelta(minutes=1)), sequence=2)
     assert len(book.evidence) == 1
 
     await observe(flat, epoch="epoch-2", sequence=1)
+    assert book.get_active_stream("live", "primary") == ("account-stream", "epoch-2")
     assert len(book.evidence) == 2
 
     fill = AccountFillEvent(
