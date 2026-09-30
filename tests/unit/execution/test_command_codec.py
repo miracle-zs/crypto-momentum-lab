@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution.command_codec import (
     RestoredCommand,
     SkippedCommand,
     decode_active_command,
+    decode_active_commands,
     decode_order_watermark,
     encode_outbox_details,
 )
@@ -213,3 +214,37 @@ def test_optional_command_text_values_are_preserved(row, field, value):
         else restored.entry
     )
     assert getattr(owner, field) == value
+
+
+def test_batch_decode_preserves_order_filters_account_and_deduplicates(row):
+    second = deepcopy(row)
+    second["command_id"] = second["client_order_id"] = "command-2"
+    foreign = deepcopy(row)
+    foreign["details"]["scope"]["account_label"] = "other-account"
+    rows = [row, foreign, second, deepcopy(row)]
+    before = deepcopy(rows)
+    recovered = decode_active_commands(
+        iter(rows), account_label="account-3", restored_at=NOW
+    )
+    assert isinstance(recovered, tuple)
+    assert [item.entry.command_id for item in recovered] == ["command-1", "command-2"]
+    assert rows == before
+
+
+@pytest.mark.parametrize("failure", ["unparseable", "conflicting"])
+def test_batch_decode_rejects_late_failure_without_mutating_rows(row, failure):
+    bad = deepcopy(row)
+    if failure == "unparseable":
+        bad["command_id"] = bad["client_order_id"] = "bad-command"
+        bad["details"]["last_error"] = []
+    else:
+        bad["details"]["quantity"] = "6"
+    rows = [row, bad]
+    before = deepcopy(rows)
+    with pytest.raises(ValueError, match="cannot be restored|conflicting rows"):
+        decode_active_commands(rows, account_label="account-3", restored_at=NOW)
+    assert rows == before
+
+
+def test_batch_decode_accepts_empty_input():
+    assert decode_active_commands((), account_label=None, restored_at=NOW) == ()
