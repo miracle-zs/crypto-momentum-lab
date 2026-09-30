@@ -198,3 +198,35 @@ def test_context_runtime_with_live_context_reader() -> None:
     assert runtime.generation == 1
     assert reader.invalidation_count == 1
     assert reader.last_event == event
+
+
+@pytest.mark.parametrize("mode", ["primary", "legacy_event", "legacy_noarg"])
+def test_invalidator_binding_preserves_priority_and_legacy_arguments(mode: str) -> None:
+    calls = []
+
+    def primary(event):
+        calls.append(("primary", event))
+
+    def legacy_event(event):
+        calls.append(("legacy_event", event))
+
+    def legacy_noarg():
+        calls.append(("legacy_noarg", None))
+
+    provider = SimpleNamespace(
+        invalidate_cache=legacy_noarg if mode == "legacy_noarg" else legacy_event
+    )
+    if mode == "primary":
+        provider.invalidate = primary
+    runtime = LiveContextRuntime(
+        run_id="run-1",
+        context_provider=provider,
+        set_pending_position_symbols=lambda symbols: None,
+        update_managed_symbols=lambda positions, orders: None,
+    )
+    provider.invalidate = lambda event: pytest.fail("must use bound original method")
+    provider.invalidate_cache = lambda *args: pytest.fail("must use bound cache method")
+    event = object()
+    runtime.invalidate(event)
+    assert runtime.generation == 1
+    assert calls == [(mode, None if mode == "legacy_noarg" else event)]
