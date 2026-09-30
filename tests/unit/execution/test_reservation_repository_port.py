@@ -1,5 +1,6 @@
 """Reservation port adaptation, awaited recovery and identity failure blocking."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionRequest,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    ExecutionCoordinator,
     InMemoryPositionReservationRepository,
 )
 from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
@@ -146,3 +148,27 @@ async def test_missing_update_failure_preserves_original_error(reservation):
         await LegacyReservationRepositoryAdapter(object()).update_reservation(
             reservation
         )
+
+
+def test_candidate_lifecycle_preserves_live_repository(reservation) -> None:
+    repo = InMemoryPositionReservationRepository()
+    repo.save_reservation(reservation)
+    coordinator = ExecutionCoordinator(repository=repo)
+    candidate = coordinator.copy_for_transaction()
+    changed = replace(reservation, released_quantity=Decimal("1"))
+    candidate.update_reservation(changed)
+
+    assert candidate.get_reservation(reservation.reservation_id) == changed
+    assert coordinator.get_reservation(reservation.reservation_id) == reservation
+    assert repo.load_reservation(reservation.reservation_id) == reservation
+
+    coordinator.publish_from(candidate)
+    assert coordinator.get_reservation(reservation.reservation_id) == changed
+    assert repo.load_reservation(reservation.reservation_id) == reservation
+
+    coordinator.clear_reservations()
+    assert coordinator.get_active_reservations() == ()
+    assert coordinator.get_reservation(reservation.reservation_id) is None
+    assert repo.load_reservation(reservation.reservation_id) == reservation
+    assert coordinator.recover() == 1
+    assert coordinator.get_active_reservations() == (reservation,)

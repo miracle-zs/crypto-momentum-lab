@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零八批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1381,6 +1381,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - ExecutionBook 不再读取或写入协调器 _reservations_by_id，亦不再装配 InMemoryPositionReservationRepository；这两项实现知识回到状态所有者，不宣称全仓私有访问清零。
 
 验证：执行领域及 reservation 完整性定向 **332 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2523 passed**，30.58 秒，一项现有 Starlette/httpx 警告。前批十文件联合 mypy --follow-imports=skip、两核心文件 F/I、git diff --check 通过。真实数据库回滚与重启验收仍未完成，现有 fake 测试不能替代该验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零九批：reservation 候选生命周期隔离验收
+
+第一百零八批提交为 `0be3a4a`；第一百零九批补齐验收，未修改运行代码，未部署生产。
+
+- 使用实际 ExecutionCoordinator、内存仓储与 PositionReservation 验证 copy_for_transaction 后候选更新不影响 live 登记或原仓储。
+- publish_from 接管候选登记但不改写原仓储；clear_reservations 清空登记且不删除仓储记录；随后 recover 能从原仓储重新装入原记录，证明发布没有替换 live 仓储。
+- 不新增接口或类型迁移；该测试验证内存生命周期契约，不替代真实数据库事务回滚与完整重启验收。
+
+验证：reservation 仓储定向 **8 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2524 passed**，30.09 秒，一项现有 Starlette/httpx 警告。测试完整 Ruff、git diff --check 通过，本批未扩大类型验收范围。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
