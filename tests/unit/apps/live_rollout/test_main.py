@@ -822,60 +822,6 @@ def test_resolve_missing_order_requires_exact_confirmation() -> None:
     assert "RESOLVE MISSING LIVE ORDER" in result.output
 
 
-def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order() -> (
-    None
-):
-    main._validate_missing_order_resolution(
-        state="unknown_pending_reconciliation",
-        reduce_only=True,
-        exchange_order_id=None,
-        created_at=datetime(2026, 8, 31, 4, 0, tzinfo=UTC),
-        now=datetime(2026, 8, 31, 4, 20, tzinfo=UTC),
-        order_quantity=Decimal("2159.3"),
-        executed_quantity=Decimal("0"),
-        position_quantity=Decimal("2159.3"),
-        exchange_order_found=False,
-        matching_open_order_found=False,
-        min_missing_age_seconds=600,
-    )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"reduce_only": False}, "reduce-only"),
-        ({"exchange_order_found": True}, "still exists"),
-        ({"matching_open_order_found": True}, "open order"),
-        ({"position_quantity": Decimal("2000")}, "position quantity changed"),
-        (
-            {"now": datetime(2026, 8, 31, 4, 5, tzinfo=UTC)},
-            "younger than",
-        ),
-    ],
-)
-def test_missing_order_resolution_guard_fails_closed(
-    overrides: dict[str, object],
-    message: str,
-) -> None:
-    values: dict[str, object] = {
-        "state": "unknown_pending_reconciliation",
-        "reduce_only": True,
-        "exchange_order_id": None,
-        "created_at": datetime(2026, 8, 31, 4, 0, tzinfo=UTC),
-        "now": datetime(2026, 8, 31, 4, 20, tzinfo=UTC),
-        "order_quantity": Decimal("2159.3"),
-        "executed_quantity": Decimal("0"),
-        "position_quantity": Decimal("2159.3"),
-        "exchange_order_found": False,
-        "matching_open_order_found": False,
-        "min_missing_age_seconds": 600,
-    }
-    values.update(overrides)
-
-    with pytest.raises(RuntimeError, match=message):
-        main._validate_missing_order_resolution(**values)  # type: ignore[arg-type]
-
-
 def test_strategy_config_hash_is_stable_for_selected_strategy(monkeypatch) -> None:
     _set_live_profile_env(monkeypatch)
     first = runner.invoke(
@@ -1374,16 +1320,14 @@ def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
     cfg = runtime_config._live_strategy_config(_TEST_PROFILE)
-    assert cfg[
-        "order_flow_impulse_min_aggressive_imbalance"
-    ] == Decimal("0.30")
-    assert cfg[
-        "order_flow_impulse_min_notional_5m_vs_30m"
-    ] == Decimal("1.25")
+    assert cfg["order_flow_impulse_min_aggressive_imbalance"] == Decimal("0.30")
+    assert cfg["order_flow_impulse_min_notional_5m_vs_30m"] == Decimal("1.25")
 
 
 def test_strategy_config_hash_includes_account_scoped_profile() -> None:
-    primary = main._live_strategy_config_hash("orderflow_impulse", profile=_TEST_PROFILE)
+    primary = main._live_strategy_config_hash(
+        "orderflow_impulse", profile=_TEST_PROFILE
+    )
     account_two_profile = main.LiveOrderFlowImpulseProfile(
         impulse_window_buckets=3,
         confirmation_buckets=1,

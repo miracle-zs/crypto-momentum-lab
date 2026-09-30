@@ -60,9 +60,6 @@ from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemon
 from crypto_momentum_lab.live_rollout.missing_order_resolution import (
     resolve_missing_live_order as _resolve_missing_live_order,
 )
-from crypto_momentum_lab.live_rollout.missing_order_resolution import (
-    validate_missing_order_resolution as _validate_missing_order_resolution_impl,
-)
 from crypto_momentum_lab.live_rollout.plan_runner import (
     run_live_plan as _run_live_plan,
 )
@@ -1684,36 +1681,6 @@ def report_command(
             None if transition is None else asdict(transition),
             default=str,
         )
-    )
-
-
-def _validate_missing_order_resolution(
-    *,
-    state: str,
-    reduce_only: bool,
-    exchange_order_id: str | None,
-    created_at: datetime,
-    now: datetime,
-    order_quantity: Decimal,
-    executed_quantity: Decimal,
-    position_quantity: Decimal,
-    exchange_order_found: bool,
-    matching_open_order_found: bool,
-    min_missing_age_seconds: float,
-) -> None:
-    """Compatibility entry point for the operator safety guard."""
-    _validate_missing_order_resolution_impl(
-        state=state,
-        reduce_only=reduce_only,
-        exchange_order_id=exchange_order_id,
-        created_at=created_at,
-        now=now,
-        order_quantity=order_quantity,
-        executed_quantity=executed_quantity,
-        position_quantity=position_quantity,
-        exchange_order_found=exchange_order_found,
-        matching_open_order_found=matching_open_order_found,
-        min_missing_age_seconds=min_missing_age_seconds,
     )
 
 

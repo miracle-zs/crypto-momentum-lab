@@ -10,6 +10,7 @@ import pytest
     "module",
     [
         "crypto_momentum_lab.live_rollout.decision_facts",
+        "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",
         "crypto_momentum_lab.live_rollout.resource_ports",
         "crypto_momentum_lab.live_rollout.resource_lifecycle",
