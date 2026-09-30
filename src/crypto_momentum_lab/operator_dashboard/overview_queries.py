@@ -227,7 +227,7 @@ class OverviewQueries:
                 liveness_ok=db_up,
                 liveness_details=f"query_error: {exc}",
                 lag_seconds=999.0,
-                fact_gaps_count=1,
+                fact_gaps_count=None,
                 capability_permitted=False,
                 capability_reason=f"query_error: {exc}",
                 reconciliation_matched=False,
@@ -290,12 +290,21 @@ class OverviewQueries:
                 recon_matched = False
                 recon_details = "unconfirmed_reconciliation_head_absent"
 
-            cap_ok = (
-                lease_active
-                and strategy_active
-                and acc.status == OperationalStatus.READY
-                and recon_matched
-            )
+            # Report the failed prerequisite itself. Missing strategy state
+            # is not evidence that an otherwise valid lease has expired.
+            if not recon_matched:
+                capability_reason = "reconciliation_mismatched"
+            elif not lease_active:
+                capability_reason = "lease_expired_or_inactive"
+            elif acc.strategy_state is None:
+                capability_reason = "strategy_state_unconfirmed"
+            elif not strategy_active:
+                capability_reason = "strategy_not_active"
+            elif acc.status != OperationalStatus.READY:
+                capability_reason = "account_not_ready"
+            else:
+                capability_reason = "ready"
+            cap_ok = capability_reason == "ready"
 
             acc_view = evaluate_standard_health(
                 scope=f"account:{acc.account_label}",
@@ -303,17 +312,11 @@ class OverviewQueries:
                 liveness_details=f"account_status_{acc.status.value}",
                 lag_seconds=lag,
                 max_lag_seconds=90.0,
-                fact_gaps_count=0 if acc.status == OperationalStatus.READY else 1,
+                # Reconciliation and process state do not establish ledger
+                # fact coverage. Keep this unknown until evidence is queried.
+                fact_gaps_count=None,
                 capability_permitted=cap_ok,
-                capability_reason=(
-                    "ready"
-                    if cap_ok
-                    else (
-                        "reconciliation_mismatched"
-                        if not recon_matched
-                        else "lease_expired_or_inactive"
-                    )
-                ),
+                capability_reason=capability_reason,
                 reconciliation_matched=recon_matched,
                 reconciliation_details=recon_details,
                 observed_at=observed,
@@ -417,10 +420,7 @@ class OverviewQueries:
             and (now - a.observed_at).total_seconds() <= 180.0
             and a.lease_expires_at is not None
             and a.lease_expires_at > now
-            and (
-                a.strategy_state in ("active", "running")
-                or (a.strategy_state is None and a.strategy_name is not None)
-            )
+            and a.strategy_state in ("active", "running")
             for a in accounts_resp.accounts
         )
 
@@ -478,9 +478,10 @@ class OverviewQueries:
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "trading_lease_missing_or_expired"
+            elif any(a.strategy_state is None for a in accounts_resp.accounts):
+                entry_gate_reason = "strategy_state_unconfirmed"
             elif any(
                 a.strategy_state not in ("active", "running")
-                and not (a.strategy_state is None and a.strategy_name is not None)
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "strategy_not_active"

@@ -238,7 +238,7 @@ def evaluate_standard_health(
     liveness_details: str = "daemon_active",
     lag_seconds: float = 0.0,
     max_lag_seconds: float = 5.0,
-    fact_gaps_count: int = 0,
+    fact_gaps_count: int | None = 0,
     capability_permitted: bool = True,
     capability_reason: str = "normal",
     reconciliation_matched: bool = True,
@@ -278,7 +278,10 @@ def evaluate_standard_health(
     )
 
     # 3. Fact Integrity
-    if fact_gaps_count == 0:
+    if fact_gaps_count is None:
+        fact_status = HealthDimensionStatus.UNKNOWN
+        fact_details = "fact_integrity_unconfirmed"
+    elif fact_gaps_count == 0:
         fact_status = HealthDimensionStatus.HEALTHY
         fact_details = "zero_fact_gaps"
     elif fact_gaps_count <= 2:
@@ -292,7 +295,7 @@ def evaluate_standard_health(
         status=fact_status,
         details=fact_details,
         observed_at=now,
-        metric_value=float(fact_gaps_count),
+        metric_value=(None if fact_gaps_count is None else float(fact_gaps_count)),
     )
 
     # 4. Executable Capability

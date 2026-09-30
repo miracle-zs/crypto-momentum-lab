@@ -2464,3 +2464,31 @@ def test_live_daemon_evaluate_readiness_detects_account_watermark_lag() -> None:
 
     readiness = daemon.evaluate_readiness()
     assert readiness == ExecutionReadiness.PROGRESS_LAGGING
+
+
+async def test_history_replay_reaches_live_decision_without_loading_live_context():
+    exchange = PlanAwareExchange()
+    calls = []
+
+    async def context(state):
+        assert not state.is_backfill, "replay must not query or repair live exposure"
+        calls.append(state)
+        return _runtime_context()
+
+    async def states():
+        for index in range(64):
+            yield replace(
+                _state(),
+                is_backfill=True,
+                bucket_start=_state().bucket_start
+                - timedelta(seconds=15 * (64 - index)),
+                bucket_end=_state().bucket_end - timedelta(seconds=15 * (64 - index)),
+            )
+        yield _state()
+
+    daemon = _daemon(exchange=exchange, context_provider=context)
+    result = await daemon.run(states())
+    assert result.processed_state_count == 65
+    assert result.halt_reason is None
+    assert calls == [_state()]
+    assert exchange.calls == ["submit"]

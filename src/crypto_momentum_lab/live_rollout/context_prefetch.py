@@ -36,7 +36,7 @@ class _PendingContext:
     state: MarketState15s
     generation: int
     received_at: datetime
-    task: asyncio.Task[LiveDaemonRuntimeContext]
+    task: asyncio.Task[LiveDaemonRuntimeContext] | None
 
 
 class LiveContextPrefetcher:
@@ -76,10 +76,15 @@ class LiveContextPrefetcher:
                 async for state in states:
                     generation = self._context_generation()
                     received_at = self._clock()
-                    context_task: asyncio.Task[LiveDaemonRuntimeContext] = (
-                        asyncio.ensure_future(self._context_provider(state))
-                    )
-                    pending_tasks.add(context_task)
+                    # Backfill only warms strategy indicators. Loading today's
+                    # account at an old market cut can trigger false unmanaged
+                    # repairs and serialize replay behind database work.
+                    context_task = None
+                    if not state.is_backfill:
+                        context_task = asyncio.ensure_future(
+                            self._context_provider(state)
+                        )
+                        pending_tasks.add(context_task)
                     await queue.put(
                         _PendingContext(
                             state=state,
@@ -109,6 +114,15 @@ class LiveContextPrefetcher:
                     if producer_error is not None:
                         raise producer_error
                     return
+                if pending.task is None:
+                    yield PrefetchedContext(
+                        state=pending.state,
+                        generation=pending.generation,
+                        received_at=pending.received_at,
+                        context=None,
+                        error=None,
+                    )
+                    continue
                 try:
                     context = await pending.task
                 except asyncio.CancelledError:

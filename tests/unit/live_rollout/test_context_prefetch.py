@@ -1,5 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -45,3 +46,37 @@ async def test_cancellation_drains_full_queue_and_awaits_context_tasks() -> None
         await asyncio.wait_for(consumer, timeout=1)
     assert started >= 3
     assert cancelled == started
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_load_or_repair_live_account_context() -> None:
+    calls = []
+    live_context = object()
+
+    async def context_provider(state):
+        calls.append(state)
+        return live_context
+
+    history = replace(_state(), is_backfill=True)
+    current = replace(
+        _state(),
+        bucket_start=history.bucket_start + timedelta(seconds=15),
+        bucket_end=history.bucket_end + timedelta(seconds=15),
+    )
+
+    async def states():
+        yield history
+        yield current
+
+    prefetcher = LiveContextPrefetcher(
+        context_provider=context_provider,
+        context_generation=lambda: 4,
+        clock=lambda: datetime.now(UTC),
+    )
+    results = [item async for item in prefetcher.stream(states())]
+
+    assert calls == [current], "history must not query or repair live positions"
+    assert [item.state for item in results] == [history, current]
+    assert results[0].context is None
+    assert results[0].error is None
+    assert results[1].context is live_context

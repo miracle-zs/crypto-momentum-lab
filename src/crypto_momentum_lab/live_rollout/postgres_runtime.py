@@ -22,6 +22,9 @@ from crypto_momentum_lab.domain.execution import (
     PositionObservation,
     PositionOrderFact,
 )
+from crypto_momentum_lab.domain.execution.order_rules import (
+    SymbolTradingRules as _SymbolTradingRules,
+)
 from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
 )
@@ -39,9 +42,6 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.domain.execution.order_rules import (
-    SymbolTradingRules as _SymbolTradingRules,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.context import (
@@ -373,10 +373,13 @@ class PostgresLiveContextProvider(LiveContextReader):
         # this path; the drift scan below keeps the Book-only diagnostic. When
         # the account snapshot is unavailable the filter is dropped, so an
         # uncertain account view still reads every scope and fails closed.
+        # Operational exposure is current account state, not a historical
+        # market decision. Reading an earlier cut hides fills already visible
+        # in the current snapshot and falsely triggers repeated self-healing.
+        # LiveDecisionFactSource still reads its exact market cut separately.
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
-            event_cut=state.bucket_end,
             symbols=(
                 context.open_position_symbols
                 if context.account_snapshot is not None
@@ -410,7 +413,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             )
         )
         active_symbols = frozenset(position.symbol for position in managed)
-        await self._observe_book_drift(book=book, context=context, state=state)
+        await self._observe_book_drift(book=book, context=context)
         # The account view determines current exposure. Book-only residuals
         # are durable accounting drift, not live positions to exit or subscribe
         # to. A real account position without a matching Book lot remains
@@ -475,7 +478,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                 views = await book.list_position_views(
                     environment="live",
                     account_label=self._account_label,
-                    event_cut=state.bucket_end,
                     symbols=(
                         context.open_position_symbols
                         if context.account_snapshot is not None
@@ -517,7 +519,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         *,
         book: Any,
         context: LiveDaemonRuntimeContext,
-        state: MarketState15s,
     ) -> None:
         """Report Book-only residue that the account view no longer shows.
 
@@ -536,7 +537,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         drift_views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
-            event_cut=state.bucket_end,
         )
         book_position_symbols = frozenset(
             view.key.symbol

@@ -13,13 +13,13 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveOperatorApproval,
 )
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
@@ -35,13 +35,13 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     live_limits_from_approval,
     poll_live_market_states,
 )
+from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
     _load_order_anchor_events,
     _opening_anchors_from_events,
     _OrderAnchorEvent,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
@@ -2036,3 +2036,93 @@ async def test_load_order_identity_metadata_dual_track_query() -> None:
     assert "account_fill_events.order_id IN" in query_str
     assert "account_fill_events.symbol IN" in query_str
     assert "account_fill_events.trade_at >=" in query_str
+
+
+async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
+    monkeypatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="current-epoch"
+    )
+    fill_at = NOW + timedelta(minutes=1)
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        trade_id="entry-fill",
+        order_id="entry-order",
+        symbol="BTCUSDT",
+        side="BUY",
+        price=Decimal("30000"),
+        quantity=Decimal("0.5"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=fill_at,
+        raw_payload={"positionSide": "LONG"},
+    )
+    journal = AccountJournal.from_durable_cut(
+        DurableJournalCut(
+            scope=scope,
+            facts=AccountFacts(position_key=key, stream_scope=scope, fills=(fill,)),
+            revision=1,
+            as_of=fill_at,
+        )
+    )
+    book = ExecutionBook(books_by_key={key.canonical_id: PositionBook(journal)})
+    repair = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime.auto_heal_unmanaged_position",
+        repair,
+    )
+
+    class Sessions:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            pass
+
+        def __call__(self):
+            return self
+
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._execution_book = book
+    provider._sessions = Sessions()
+    context = replace(
+        _runtime_context(),
+        now=fill_at,
+        account_observed_at=fill_at,
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(_position(observed_at=fill_at),)),
+    )
+    for market_cut in (NOW, NOW + timedelta(seconds=15)):
+        result = await provider._with_execution_book(
+            context, SimpleNamespace(bucket_end=market_cut)
+        )
+        assert len(result.managed_positions) == 1
+        assert result.managed_positions[0].quantity == Decimal("0.5")
+        assert result.unmanaged_position_symbols == frozenset()
+    repair.assert_not_awaited()
+    # Current operational classification must not change historical decision
+    # reads or let a future fill leak into an earlier frozen decision.
+    historical = await book.list_position_views(
+        environment="live",
+        account_label="primary",
+        event_cut=NOW,
+    )
+    assert historical[0].total_quantity == Decimal("0")
