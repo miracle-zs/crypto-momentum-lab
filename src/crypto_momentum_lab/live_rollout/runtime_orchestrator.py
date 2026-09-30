@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+import crypto_momentum_lab.live_rollout.session_state as session_state
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
@@ -249,7 +250,6 @@ from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
     PostgresLiveSignalRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    LiveSessionTransitionRow,
     ShadowSessionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
@@ -947,7 +947,7 @@ async def run_live_daemon(
         )
         await order_reconciliation.reconcile_all()
         log_startup_phase("order_state_reconciled")
-        draining = await _session_is_draining(execution_factory, session_id)
+        draining = await session_state.session_is_draining(live_repository, session_id)
         if not draining:
             await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
         approval = await live_repository.load_active_approval(
@@ -1399,8 +1399,8 @@ async def run_live_daemon(
         )
 
         async def load_risk_control_state() -> tuple[bool, bool]:
-            draining_now = await _session_is_draining(
-                heartbeat_factory,
+            draining_now = await session_state.session_is_draining(
+                heartbeat_live_repository,
                 session_id,
             )
             active_halts = await heartbeat_risk_repository.load_active_halts(
@@ -1456,8 +1456,8 @@ async def run_live_daemon(
                 risk_repository=heartbeat_risk_repository,
                 gate_context=gate_context,
                 session_id=session_id,
-                draining=await _session_is_draining(
-                    heartbeat_factory,
+                draining=await session_state.session_is_draining(
+                    heartbeat_live_repository,
                     session_id,
                 ),
                 lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
@@ -2071,25 +2071,3 @@ async def _warn_if_shadow_preflight_missing(
         log.info("live_shadow_preflight_missing_acknowledged", **details)
     else:
         log.warning("live_shadow_preflight_missing", **details)
-
-
-async def _session_is_draining(
-    factory: async_sessionmaker[AsyncSession],
-    session_id: str,
-) -> bool:
-    async with factory() as database_session:
-        latest_state = await database_session.scalar(
-            select(LiveSessionTransitionRow.state)
-            .where(
-                LiveSessionTransitionRow.session_id == session_id,
-                LiveSessionTransitionRow.state.not_in(
-                    (
-                        LiveSessionState.PREFLIGHT.value,
-                        LiveSessionState.SHADOW_PREFLIGHT.value,
-                    )
-                ),
-            )
-            .order_by(LiveSessionTransitionRow.occurred_at.desc())
-            .limit(1)
-        )
-    return latest_state == LiveSessionState.DRAINING.value

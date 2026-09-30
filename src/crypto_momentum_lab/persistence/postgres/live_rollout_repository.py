@@ -76,7 +76,7 @@ class PostgresLiveRolloutRepository:
         self,
         session_id: str,
     ) -> str | None:
-        """Read the latest durable transition before attempting lease recovery."""
+        """Read operating state, ignoring temporary preflight transitions."""
 
         async with self._session_factory() as database_session:
             latest_state = await database_session.scalar(
@@ -94,7 +94,6 @@ class PostgresLiveRolloutRepository:
                 .limit(1)
             )
         return latest_state
-
 
     async def save_transition(self, transition: LiveSessionTransition) -> None:
         values = _prepare_transition_values(transition)

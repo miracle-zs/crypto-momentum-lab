@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -463,6 +463,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：最终完整本地回归 **2395 passed**；新增恢复用例 **7 项**覆盖非活跃/缺失耐久状态拒绝、排空与额外 gate 阻塞、成功租约字段及已有租约不读取/写入；新增仓储 SQL 编译测试检查过滤、排序、limit 与未知状态保留，属于替身查询验收；新增无数据库导入检查。核心文件与新增测试完整 Ruff、编排与 CLI 测试 F/I、lease recovery 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍未验收，替身测试与 SQL 编译不能替代真实 Postgres 验收。
+
+## 第三十四批：排空判断共用耐久会话读取
+
+第三十三批提交为 `27127a7`；第三十四批继续本地实施，未部署生产。
+
+- live_rollout/session_state.py 拥有 LiveSessionStateReader 与排空判断；lease_recovery 从该所有者引用读取协议，不保留旧协议重导出。只有最新运行状态严格等于 draining 才返回 True，读取错误和取消继续传播。
+- runtime_orchestrator 删除 _session_is_draining 及 LiveSessionTransitionRow 导入，首次启动、风险控制轮询与租约恢复分别调用既有 execution/heartbeat 会话仓储。旧排空查询与上一批 load_latest_operating_state 查询 statement AST 一致；同 session、排除 preflight/shadow_preflight、occurred_at 降序及 limit 1 均保持。
+- 单次实盘计划使用自己已构造的会话仓储，通过同一判断为风险准入提供 is_draining 回调。删除 SessionDrainingLoader 参数和 CLI 从运行编排导入/注入旧私有查询的路径，未增加仓储或兼容转发层。
+- 不合并事务内订单提交状态校验，也不替换 Postgres 运行上下文的其他会话查询：它们的过滤语义和事务归属与此处不同。排空读取与租约读取仍各自执行，不以缓存改变原时序；本批不能视为并发问题已解决。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2404 passed**，25.60 秒，保留一项现有 Starlette/httpx 警告。状态/租约/仓储/CLI/架构定向 **138 passed**。新增状态测试 **8 项**覆盖 draining、live_enabled、halted、completed、缺失与未知状态，以及查询失败、取消传播；新增独立进程无 sqlalchemy/persistence 导入检查。session_state、lease_recovery 两模块定向 mypy --follow-imports=skip，核心文件/测试完整 Ruff、编排/单次计划/CLI F/I 和 git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍未验收，运行编排其他 SQL 与不同语义的上下文查询继续按实际职责核查。
 
 ## 后续实施顺序
 

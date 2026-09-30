@@ -8,19 +8,12 @@ from uuid import uuid4
 
 import structlog
 
+import crypto_momentum_lab.live_rollout.session_state as session_state
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 
 log = structlog.get_logger(__name__)
-
-
-class LiveSessionStateReader(Protocol):
-    async def load_latest_operating_state(
-        self, session_id: str
-    ) -> str | None:
-        """Latest transition excluding preflight and shadow preflight."""
-        ...
 
 
 class LiveLeaseAcquirer(Protocol):
@@ -46,7 +39,7 @@ def should_auto_reacquire_live_lease(
 
 async def maybe_auto_reacquire_live_lease(
     *,
-    session_state_reader: LiveSessionStateReader,
+    session_state_reader: session_state.LiveSessionStateReader,
     risk_repository: LiveLeaseAcquirer,
     gate_context: LiveGateContext,
     session_id: str,

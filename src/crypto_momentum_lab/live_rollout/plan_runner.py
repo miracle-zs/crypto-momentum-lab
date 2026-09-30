@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import crypto_momentum_lab.live_rollout.session_state as session_state
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -68,10 +69,6 @@ ApprovedIntentNotionalLoader = Callable[
     [async_sessionmaker[AsyncSession], str],
     Awaitable[Decimal | None],
 ]
-SessionDrainingLoader = Callable[
-    [async_sessionmaker[AsyncSession], str],
-    Awaitable[bool],
-]
 ShadowPreflightWarning = Callable[..., Awaitable[None]]
 
 
@@ -96,7 +93,6 @@ async def run_live_plan(
     load_latest_risk_config: LatestRiskConfigLoader,
     load_latest_account_state: LatestAccountStateLoader,
     load_approved_intent_notional: ApprovedIntentNotionalLoader,
-    session_is_draining: SessionDrainingLoader,
     warn_if_shadow_preflight_missing: ShadowPreflightWarning,
 ) -> LiveSessionResult:
     """Validate and execute one approved plan with live safety barriers."""
@@ -186,7 +182,9 @@ async def run_live_plan(
             lease_owner=lease_owner,
             code_generation=git_commit_hash,
             active_lease=lambda: context.active_lease,
-            is_draining=lambda: session_is_draining(factory, session_id),
+            is_draining=lambda: session_state.session_is_draining(
+                live_repository, session_id
+            ),
         )
         machine = OrderExecutionStateMachine(
             event_repository=order_event_repository,
