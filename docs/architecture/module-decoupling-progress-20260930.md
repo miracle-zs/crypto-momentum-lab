@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百一十八批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百一十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1500,6 +1500,20 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 不增加忽略、类型强转、事务或适配器。
 
 验证：执行领域定向 **322 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，30.35 秒，一项现有 Starlette/httpx 警告。前批十四文件联合 mypy --follow-imports=skip 通过，关闭该范围六项错误；两个核心文件 F/I、git diff --check 通过，不代表所有跳过依赖、Postgres 实现或全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百一十九批：Postgres 事务事实写入类型衔接
+
+第一百一十八批提交为 `570cfdc`；第一百一十九批继续本地实施，未部署生产。
+
+- ExecutionTransaction.persist_facts 参数明确为 AccountFactStreamScope、AccountFacts、PositionRecoveryCheckpoint、JournalFactDelta，返回 JournalPersistResult；直接读取 AccountFacts.recovery_checkpoint，删除属性探测。
+- 事实写入与 checkpoint 一致性检查、独立 checkpoint 保存顺序不变。底层 journal_store 保留 Any，结果局部注解不证明其所有实现返回类型均已静态校验。
+- 决策位置 JSON 的已有字典条件显式包含 position_view，修复同一文件的 None.get 类型错误；原 position_data 只能由字典 position_view 提取，原合法输入及错误文本保持。
+
+验证：Postgres execution_unit_of_work、执行 ports、恢复模型、ledger 模型四文件联合 mypy --follow-imports=skip 通过；临时接口探针 `def accept_transaction(tx: ExecutionTransaction) -> ExecutionTransactionPort: return tx` 联合检查通过并清理。未纳入所有底层适配所有者，不代表全仓类型验收。
+
+执行领域及位置修复定向 **343 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，32.14 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

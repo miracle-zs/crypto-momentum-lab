@@ -43,8 +43,14 @@ from crypto_momentum_lab.domain.execution.ports import (
     ExecutionWatermark as _ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFacts,
     AccountFactStreamScope,
+    JournalFactDelta,
     PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    JournalPersistResult,
+    PositionRecoveryCheckpoint,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
@@ -108,20 +114,20 @@ class ExecutionTransaction:
     async def persist_facts(
         self,
         *,
-        scope: Any,
-        facts: Any,
+        scope: AccountFactStreamScope,
+        facts: AccountFacts,
         revision: int,
-        checkpoint: Any | None = None,
-        delta: Any | None = None,
-    ) -> Any:
-        result = await self._journal_store.persist_facts_in_session(
+        checkpoint: PositionRecoveryCheckpoint | None = None,
+        delta: JournalFactDelta | None = None,
+    ) -> JournalPersistResult:
+        result: JournalPersistResult = await self._journal_store.persist_facts_in_session(
             self.session,
             scope=scope,
             facts=facts,
             revision=revision,
             delta=delta,
         )
-        fact_checkpoint = getattr(facts, "recovery_checkpoint", None)
+        fact_checkpoint = facts.recovery_checkpoint
         if checkpoint is not None and fact_checkpoint is not None and (
             checkpoint != fact_checkpoint
         ):
@@ -864,7 +870,7 @@ class AsyncPostgresDecisionUnitOfWork:
             if isinstance(position_view, dict)
             else None
         )
-        if not isinstance(position_data, dict):
+        if not isinstance(position_view, dict) or not isinstance(position_data, dict):
             raise _DecisionCommitConflict(
                 "decision trace is missing its complete position identity"
             )
