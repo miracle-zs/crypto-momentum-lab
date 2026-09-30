@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
-from crypto_momentum_lab.domain.account.models import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import (
+    AccountBalanceSnapshot,
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.order_status import (
@@ -109,4 +113,53 @@ def order_snapshot_from_response(
         executed_quantity=executed_quantity,
         average_price=average_price,
         entry_leverage=entry_leverage,
+    )
+
+
+def balances_from_response(
+    payload: object,
+    *,
+    environment: str,
+    account_label: str,
+    observed_at: datetime,
+) -> tuple[AccountBalanceSnapshot, ...]:
+    return tuple(
+        AccountBalanceSnapshot(
+            environment=environment,
+            account_label=account_label,
+            asset=str(item.get("asset", "")),
+            wallet_balance=decimal_value(item.get("balance", "0")),
+            available_balance=decimal_value(item.get("availableBalance", "0")),
+            unrealized_pnl=decimal_value(item.get("crossUnPnl", "0")),
+            observed_at=observed_at,
+            raw_payload=json_mapping(item),
+        )
+        for item in rest_require_sequence_of_mappings(payload)
+    )
+
+
+def positions_from_response(
+    payload: object,
+    *,
+    environment: str,
+    account_label: str,
+    observed_at: datetime,
+) -> tuple[AccountPositionSnapshot, ...]:
+    return tuple(
+        AccountPositionSnapshot(
+            environment=environment,
+            account_label=account_label,
+            symbol=str(item.get("symbol", "")),
+            position_side=str(item.get("positionSide", "BOTH")),
+            position_amt=decimal_value(item.get("positionAmt", "0")),
+            entry_price=decimal_value(item.get("entryPrice", "0")),
+            mark_price=decimal_value(item.get("markPrice", "0")),
+            unrealized_pnl=decimal_value(item.get("unRealizedProfit", "0")),
+            notional=decimal_value(item.get("notional", "0")),
+            leverage=rest_optional_int(item.get("leverage")),
+            margin_type=rest_optional_str(item.get("marginType")),
+            observed_at=observed_at,
+            raw_payload=json_mapping(item),
+        )
+        for item in rest_require_sequence_of_mappings(payload)
     )

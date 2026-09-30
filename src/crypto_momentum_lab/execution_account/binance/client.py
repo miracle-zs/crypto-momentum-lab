@@ -56,9 +56,11 @@ from crypto_momentum_lab.execution_account.binance.response_rules import (
 )
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
+    balances_from_response,
     decimal_value,
     json_mapping,
     order_snapshot_from_response,
+    positions_from_response,
     rest_optional_int,
     rest_optional_str,
     rest_require_mapping,
@@ -404,18 +406,11 @@ class BinanceUsdMPrivateReadClient:
     async def fetch_balances(self) -> tuple[AccountBalanceSnapshot, ...]:
         payload = await self._signed_get("/fapi/v3/balance")
         observed_at = self._now()
-        return tuple(
-            AccountBalanceSnapshot(
-                environment=self._environment,
-                account_label=self._account_label,
-                asset=str(item.get("asset", "")),
-                wallet_balance=decimal_value(item.get("balance", "0")),
-                available_balance=decimal_value(item.get("availableBalance", "0")),
-                unrealized_pnl=decimal_value(item.get("crossUnPnl", "0")),
-                observed_at=observed_at,
-                raw_payload=json_mapping(item),
-            )
-            for item in rest_require_sequence_of_mappings(payload)
+        return balances_from_response(
+            payload,
+            environment=self._environment,
+            account_label=self._account_label,
+            observed_at=observed_at,
         )
 
     async def fetch_positions(
@@ -429,23 +424,11 @@ class BinanceUsdMPrivateReadClient:
         path = "/fapi/v2/positionRisk" if include_flat else "/fapi/v3/positionRisk"
         payload = await self._signed_get(path)
         observed_at = self._now()
-        return tuple(
-            AccountPositionSnapshot(
-                environment=self._environment,
-                account_label=self._account_label,
-                symbol=str(item.get("symbol", "")),
-                position_side=str(item.get("positionSide", "BOTH")),
-                position_amt=decimal_value(item.get("positionAmt", "0")),
-                entry_price=decimal_value(item.get("entryPrice", "0")),
-                mark_price=decimal_value(item.get("markPrice", "0")),
-                unrealized_pnl=decimal_value(item.get("unRealizedProfit", "0")),
-                notional=decimal_value(item.get("notional", "0")),
-                leverage=rest_optional_int(item.get("leverage")),
-                margin_type=rest_optional_str(item.get("marginType")),
-                observed_at=observed_at,
-                raw_payload=json_mapping(item),
-            )
-            for item in rest_require_sequence_of_mappings(payload)
+        return positions_from_response(
+            payload,
+            environment=self._environment,
+            account_label=self._account_label,
+            observed_at=observed_at,
         )
 
     async def fetch_symbol_margin_type(self, symbol: str) -> str | None:

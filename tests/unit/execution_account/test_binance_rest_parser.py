@@ -5,9 +5,11 @@ import pytest
 
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
+    balances_from_response,
     decimal_value,
     json_mapping,
     order_snapshot_from_response,
+    positions_from_response,
     rest_optional_int,
     rest_optional_str,
     rest_require_mapping,
@@ -209,3 +211,90 @@ def test_order_response_keeps_status_and_domain_validation(field, value):
         order_snapshot_from_response(
             data, observed_at=datetime(2026, 10, 1, tzinfo=UTC)
         )
+
+
+def account_scope():
+    return {
+        "environment": "live",
+        "account_label": "primary",
+        "observed_at": datetime(2026, 10, 1, tzinfo=UTC),
+    }
+
+
+def test_balance_response_keeps_order_values_and_raw_payload():
+    rows = [
+        {
+            "asset": "USDT",
+            "balance": "100.00",
+            "availableBalance": "80",
+            "crossUnPnl": "-2",
+        },
+        {"asset": "BTC"},
+    ]
+    result = balances_from_response(rows, **account_scope())
+    assert [item.asset for item in result] == ["USDT", "BTC"]
+    assert str(result[0].wallet_balance) == "100.00"
+    assert result[0].available_balance == 80 and result[0].unrealized_pnl == -2
+    assert (
+        result[1].wallet_balance
+        == result[1].available_balance
+        == result[1].unrealized_pnl
+        == 0
+    )
+    assert result[0].raw_payload == rows[0] and result[0].raw_payload is not rows[0]
+    assert result[0].observed_at == account_scope()["observed_at"]
+    assert result[0].environment == "live" and result[0].account_label == "primary"
+
+
+def test_position_response_keeps_flat_rows_order_and_optional_fields():
+    rows = [
+        {
+            "symbol": "ETHUSDT",
+            "positionSide": "SHORT",
+            "positionAmt": "-2",
+            "entryPrice": "10.00",
+            "markPrice": "11",
+            "unRealizedProfit": "-2",
+            "notional": "-22",
+            "leverage": "5",
+            "marginType": "cross",
+        },
+        {"symbol": "BTCUSDT"},
+    ]
+    result = positions_from_response(rows, **account_scope())
+    assert [item.symbol for item in result] == ["ETHUSDT", "BTCUSDT"]
+    assert result[0].position_side == "SHORT" and result[0].position_amt == -2
+    assert str(result[0].entry_price) == "10.00"
+    assert (
+        result[0].mark_price == 11
+        and result[0].unrealized_pnl == -2
+        and result[0].notional == -22
+    )
+    assert result[0].leverage == 5 and result[0].margin_type == "cross"
+    assert result[0].raw_payload == rows[0]
+    assert result[1].position_side == "BOTH" and result[1].position_amt == 0
+    assert result[1].leverage is None and result[1].margin_type is None
+    assert result[1].observed_at == account_scope()["observed_at"]
+
+
+@pytest.mark.parametrize("parse", [balances_from_response, positions_from_response])
+def test_account_response_empty_rows_stay_empty(parse):
+    assert parse([], **account_scope()) == ()
+
+
+@pytest.mark.parametrize("parse", [balances_from_response, positions_from_response])
+def test_account_response_shape_validation_is_shared(parse):
+    with pytest.raises(ValueError, match="expected JSON array"):
+        parse({}, **account_scope())
+
+
+@pytest.mark.parametrize(
+    "parse,row",
+    [
+        (balances_from_response, {"asset": "USDT", "balance": "-1"}),
+        (positions_from_response, {"symbol": "BTCUSDT", "leverage": "-1"}),
+    ],
+)
+def test_account_response_keeps_domain_validation(parse, row):
+    with pytest.raises(ValueError):
+        parse([row], **account_scope())
