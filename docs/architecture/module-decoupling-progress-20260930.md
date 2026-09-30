@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1278,6 +1278,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：上下文提供者定向 **48 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2508 passed**，29.91 秒，一项现有 Starlette/httpx 警告。新接口完整 Ruff、provider F/I、git diff --check 通过。
 
 类型检查未通过：新接口/position_repair/position_ledger_models 三文件联合 mypy --follow-imports=skip 报告原领域模型的 8 项错误及 position_repair 构造缺少返回注解 1 项；provider/新接口两文件窄检查则因跳过协议父类导入报 2 项 Any 父类错误。未增加忽略，不宣称接口适配器或全仓类型验收完成。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零一批：仓位上下文接口领域依赖类型验收
+
+第一百批提交为 `7f8cbd0`；第一百零一批修复上一批领域依赖类型错误，未部署生产。
+
+- compose_fact_coverage 防御分支引用不存在的 HYPOTHETICAL，修正为证据不完整时的 PENDING。原生 proves_complete 已排除缺边界情况；新增三个防御路径测试，模拟完整性检查误报成功时分别缺失加载起点、成交检查截止、checkpoint 截止，确认仍不授予 CONFIRMED。
+- AccountFillLoadProvenance 时间校验循环使用独立 timestamp 变量，避免和整数游标循环混用类型；字段名缓存处将 dataclass 类型收窄为 type，摘要缓存直接读已有 str | None 字段。摘要计算、字段排序及编码规则保持。
+- PositionRepairRequest.__post_init__ 补齐 None 返回注解，无新忽略或转发接口。
+
+验证：执行领域及运行上下文定向 **356 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2511 passed**，29.39 秒，一项现有 Starlette/httpx 警告。PositionContextBook、position_repair、position_ledger_models 三文件联合 mypy --follow-imports=skip 通过，关闭上一批这三文件范围的 9 项错误；不代表 provider、具体 ExecutionBook 适配或全仓类型验收。修复模型/覆盖测试完整 Ruff、ledger 模型 F/I、git diff --check 通过；ledger 模型现有 UP033 缓存风格提示保留。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

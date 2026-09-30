@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -152,7 +152,7 @@ def compose_fact_coverage(
                 start_at=start,
                 end_at=end,
                 source_cursor=evidence.fill_cursor_id,
-                status=FactCoverageStatus.HYPOTHETICAL,
+                status=FactCoverageStatus.PENDING,
                 confirmed_revision=None,
                 stream_scope=evidence.stream_scope,
                 evidence_observed_at=evidence.evidence_observed_at,
@@ -420,11 +420,11 @@ class AccountFillLoadProvenance:
             or self.checked_through.utcoffset() is None
         ):
             raise ValueError("fill scan checked_through must be timezone-aware")
-        for name, value in (
+        for name, timestamp in (
             ("observed_at", self.observed_at),
             ("source_anchor_event_cut", self.source_anchor_event_cut),
         ):
-            if value.tzinfo is None or value.utcoffset() is None:
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
                 raise ValueError(f"fill scan {name} must be timezone-aware")
         if self.checked_through is not None and self.checked_through > self.observed_at:
             raise ValueError("fill scan checked_through is after its observation")
@@ -643,7 +643,7 @@ def _canonical_value(value: object) -> object:
     if is_dataclass(value):
         return {
             name: _canonical_value(getattr(value, name))
-            for name in _dataclass_field_names(type(value))
+            for name in _dataclass_field_names(cast(type, type(value)))
         }
     if isinstance(value, dict):
         return {
@@ -763,7 +763,7 @@ class AccountFacts:
 
     def compute_facts_hash(self) -> str:
         """Hash every input field that can change identity or projection."""
-        cached = getattr(self, "_cached_facts_hash", None)
+        cached = self._cached_facts_hash
         if cached is not None:
             return cached
 

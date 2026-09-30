@@ -41,7 +41,7 @@ class PositionRepairRequest:
     expected_quantity: Decimal
     observed_at: datetime
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.scope.matches(self.key) or not self.run_id.strip():
             raise ValueError("exact position, run and stream identities are required")
         if not self.expected_quantity.is_finite() or self.expected_quantity <= 0:

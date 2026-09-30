@@ -157,3 +157,26 @@ def test_compose_rejects_naive_bounds() -> None:
             start=datetime(2026, 9, 25, 7, 0),
             end=END,
         )
+
+
+@pytest.mark.parametrize(
+    "missing_field", ["fill_load_start", "fill_checked_through", "checkpoint_event_cut"]
+)
+def test_incomplete_bounds_remain_pending_when_completion_check_claims_success(
+    missing_field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = CoverageEvidence(
+        fill_load_start=START,
+        fill_checked_through=END,
+        checkpoint_event_cut=END,
+    )
+    evidence = replace(evidence, **{missing_field: None})
+    monkeypatch.setattr(
+        CoverageEvidence, "proves_complete", lambda *args, **kwargs: True
+    )
+
+    coverage = compose_fact_coverage(evidence, start=START, end=END)
+
+    assert coverage.status == FactCoverageStatus.PENDING
+    assert coverage.start_at == START
+    assert coverage.end_at == END
