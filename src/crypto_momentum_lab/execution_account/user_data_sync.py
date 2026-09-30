@@ -34,6 +34,9 @@ from crypto_momentum_lab.execution_account.user_data_models import (
     AccountUserDataUpdate,
     UserDataStateError,
 )
+from crypto_momentum_lab.execution_account.user_data_sequence import (
+    validate_exchange_update_watermark,
+)
 
 
 class AccountUserDataState:
@@ -100,7 +103,9 @@ class AccountUserDataState:
                 delta=diff_account_snapshots(previous_snapshot, snapshot),
             )
 
-        self._validate_exchange_update_watermark(event)
+        validate_exchange_update_watermark(
+            event, self._last_exchange_update_id.get(event.event_type)
+        )
         needs_reconciliation = False
         reason: str | None = None
         fills: tuple[AccountFillEvent, ...] = ()
@@ -371,26 +376,6 @@ class AccountUserDataState:
         )
         self._remember_trade(trade_key)
         return True, (fill,), None
-
-    def _validate_exchange_update_watermark(
-        self,
-        event: BinanceUserDataEvent,
-    ) -> None:
-        update_id = event.exchange_update_id
-        if update_id is None:
-            return
-        last_update_id = self._last_exchange_update_id.get(event.event_type)
-        if last_update_id is None:
-            return
-        previous_update_id = event.exchange_previous_update_id
-        if previous_update_id is not None and previous_update_id != last_update_id:
-            raise UserDataStateError(
-                "exchange user-data update sequence is not contiguous"
-            )
-        if update_id <= last_update_id:
-            raise UserDataStateError(
-                "exchange user-data update watermark moved backwards"
-            )
 
     def _remember_exchange_update_watermark(
         self,

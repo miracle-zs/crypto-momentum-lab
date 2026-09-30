@@ -575,6 +575,7 @@ importlib.import_module(sys.argv[1])
     [
         "crypto_momentum_lab.execution_account.user_data_models",
         "crypto_momentum_lab.execution_account.user_data_fields",
+        "crypto_momentum_lab.execution_account.user_data_sequence",
     ],
 )
 def test_user_data_update_models_import_without_merge_state(module):
