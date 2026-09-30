@@ -14,6 +14,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     DurableJournalCut,
+    JournalPersistResult,
     PositionRecoveryCheckpoint,
 )
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
@@ -80,7 +81,7 @@ class ExecutionTransactionPort(Protocol):
         revision: int,
         checkpoint: PositionRecoveryCheckpoint | None = None,
         delta: JournalFactDelta | None = None,
-    ) -> object: ...
+    ) -> JournalPersistResult: ...
 
     async def load_recovery(
         self,

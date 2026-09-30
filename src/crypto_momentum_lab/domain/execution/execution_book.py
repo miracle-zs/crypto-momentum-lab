@@ -2237,15 +2237,14 @@ class ExecutionBook:
                         checkpoint=checkpoint,
                         delta=journal.pending_fact_delta(),
                     )
-                    if getattr(persist_result, "has_conflicts", False):
+                    if persist_result.has_conflicts:
                         raise _AbortObservation(
                             EvidenceConflict(
                                 evidence_id=evidence.evidence_id,
                                 reason="durable account journal reported a fact conflict",
                             )
                         )
-                    if hasattr(persist_result, "revision"):
-                        candidate._journal_revisions[canon] = persist_result.revision
+                    candidate._journal_revisions[canon] = persist_result.revision
                     if evidence.sequence is not None:
                         candidate._last_sequences[canon] = evidence.sequence
 
