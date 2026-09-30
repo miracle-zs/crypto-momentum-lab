@@ -3,8 +3,10 @@ from datetime import UTC, datetime
 
 import crypto_momentum_lab.strategy_runner.live_source as live_source
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
-from crypto_momentum_lab.strategy_runner.live_source import (
+from crypto_momentum_lab.persistence.postgres.runtime_state_loader import (
     AsyncPostgresRuntimeStateLoader,
+)
+from crypto_momentum_lab.strategy_runner.live_source import (
     PaperLiveSourceConfig,
     PostgresPaperMarketStateSource,
 )

@@ -36,6 +36,9 @@ from crypto_momentum_lab.persistence.postgres import (
     PostgresUniverseRepository,
     create_async_database_engine,
 )
+from crypto_momentum_lab.persistence.postgres.runtime_state_loader import (
+    AsyncPostgresRuntimeStateLoader,
+)
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
@@ -62,7 +65,6 @@ from crypto_momentum_lab.strategy_runner.entry_policy_observation import (
     write_paper_entry_policy_observation_report,
 )
 from crypto_momentum_lab.strategy_runner.live_source import (
-    AsyncPostgresRuntimeStateLoader,
     PaperLiveSourceConfig,
     PostgresPaperMarketStateSource,
 )
