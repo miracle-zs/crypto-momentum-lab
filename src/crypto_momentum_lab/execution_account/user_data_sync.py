@@ -19,9 +19,9 @@ from crypto_momentum_lab.execution_account.expectations import (
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+    AccountSnapshotDelta,
 )
 from crypto_momentum_lab.execution_account.sync import (
-    AccountSnapshotDelta,
     diff_account_snapshots,
 )
 

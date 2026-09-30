@@ -41,9 +41,9 @@ from crypto_momentum_lab.execution_account.expectations import (
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+    AccountSnapshotDelta,
 )
 from crypto_momentum_lab.execution_account.sync import (
-    AccountSnapshotDelta,
     apply_account_snapshot_delta,
 )
 from crypto_momentum_lab.health.stream_availability import (

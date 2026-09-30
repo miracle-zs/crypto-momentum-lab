@@ -26,7 +26,10 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
-from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
+from crypto_momentum_lab.execution_account.snapshot_models import (
+    AccountSnapshot,
+    AccountSnapshotDelta,
+)
 
 type FillKey = tuple[str, str]
 type BalanceValue = tuple[Decimal, Decimal, Decimal]
@@ -218,38 +221,6 @@ class ExecutionAccountSyncConfig:
                 anchor.position_side.strip().upper(),
             ):
                 raise ValueError("fill_source_anchors keys must match anchor identity")
-
-
-@dataclass(frozen=True, slots=True)
-class AccountSnapshotDelta:
-    """Transport-independent changes from one account snapshot to the next."""
-
-    observed_at: datetime
-    config: AccountConfigSnapshot | None = None
-    balances: tuple[AccountBalanceSnapshot, ...] = ()
-    removed_balance_assets: tuple[str, ...] = ()
-    positions: tuple[AccountPositionSnapshot, ...] = ()
-    removed_positions: tuple[tuple[str, str], ...] = ()
-    open_orders: tuple[AccountOpenOrderSnapshot, ...] = ()
-    removed_open_orders: tuple[tuple[str, str], ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
-            raise ValueError("observed_at must be timezone-aware")
-
-    @property
-    def is_empty(self) -> bool:
-        return not any(
-            (
-                self.config is not None,
-                self.balances,
-                self.removed_balance_assets,
-                self.positions,
-                self.removed_positions,
-                self.open_orders,
-                self.removed_open_orders,
-            )
-        )
 
 
 @dataclass(frozen=True, slots=True)
