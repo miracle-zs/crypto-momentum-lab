@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Protocol
 
 import structlog
 
@@ -20,15 +22,21 @@ from crypto_momentum_lab.domain.execution.order_read_models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
+    ExchangeOrderState,
     OrderExecutionPlan,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
 )
 
 log = structlog.get_logger()
 
-CancelOrder = Callable[[OrderExecutionPlan], Awaitable[OrderExecutionResult]]
+class EntryOrderProgress(Protocol):
+    @property
+    def state(self) -> ExchangeOrderState: ...
+
+    @property
+    def executed_quantity(self) -> Decimal: ...
+
+
+CancelOrder = Callable[[OrderExecutionPlan], Awaitable[EntryOrderProgress]]
 Clock = Callable[[], datetime]
 
 
@@ -50,12 +58,12 @@ class LiveLimitOrderLifecycle:
         """Start expiry timers for unresolved GTD entry orders."""
 
         for order in orders:
-            await self.track(order.plan, _result_from_persisted(order))
+            await self.track(order.plan, order)
 
     async def track(
         self,
         plan: OrderExecutionPlan,
-        result: OrderExecutionResult,
+        result: EntryOrderProgress,
     ) -> None:
         """Track one newly submitted/restored order if it can still rest."""
 
@@ -152,14 +160,6 @@ class LiveLimitOrderLifecycle:
                 error_type=type(error).__name__,
             )
 
-
-def _result_from_persisted(order: PersistedExchangeOrder) -> OrderExecutionResult:
-    return OrderExecutionResult(
-        client_order_id=order.plan.client_order_id,
-        state=order.state,
-        exchange_order_id=order.exchange_order_id,
-        executed_quantity=order.executed_quantity,
-    )
 
 
 __all__ = ["LiveLimitOrderLifecycle"]

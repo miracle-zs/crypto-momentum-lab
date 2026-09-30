@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十八批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -882,6 +882,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 去除参数/属性注解后原 runtime 类 AST 完全一致。先尽力记录 telemetry，再 finally 内依次更新限价生命周期和 daemon 的顺序保持；观察者错误传播规则与可选装配时机不变。
 
 验证：订单事件/架构定向 **69 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2479 passed**，28.56 秒，一项现有 Starlette/httpx 警告。新增 order_event_runtime 禁止 sqlalchemy/persistence 导入检查，并独立进程验证同时禁止三个具体协作者模块时仍可导入。order_event_runtime 与 telemetry_ports 两文件定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十八批：限价生命周期消费订单进度
+
+第六十七批提交为 `9407f94`；第六十八批继续本地实施，未部署生产。
+
+- entry_orders 定义只读 EntryOrderProgress，仅暴露 ExchangeOrderState 与 executed_quantity。track 和撤单回调返回值依赖该能力，删除具体 OrderExecutionResult/状态机导入；原状态机结果与持久化订单直接满足能力。
+- restore 直接将持久化订单传给 track，删除仅为读取两个字段而构造完整执行结果的 _result_from_persisted。track 同步读取这两个属性后创建原计时任务，不保留进度对象，恢复判断与任务所有权保持。
+- GTD 到期判断、reduce-only 排除、terminal/已全部成交排除、撤单日志与停止/观察者取消顺序保持。未新增撤单转发实现，实际撤单仍使用原回调。
+
+验证：限价生命周期/架构定向 **72 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2480 passed**，28.67 秒，一项现有 Starlette/httpx 警告。新增 entry_orders 禁止 sqlalchemy/persistence 导入检查，并独立进程验证禁止具体 state_machine 时仍可导入。entry_orders 定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
