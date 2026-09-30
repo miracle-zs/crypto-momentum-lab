@@ -2623,3 +2623,54 @@ def test_active_reservation_query_preserves_order_and_scope(query) -> None:
     assert [r.reservation_id for r in owner.get_active_reservations(eth)] == ["b"]
     missing = PositionKey("live", "other", "BTCUSDT", FuturesPositionSide.LONG)
     assert owner.get_active_reservations(missing) == ()
+
+
+@pytest.mark.parametrize(
+    ("policy_version", "schema_version"), [("policy-custom", "v1"), ("v1", "schema-custom")]
+)
+def test_historical_view_preserves_configuration_and_current_state(
+    policy_version, schema_version
+) -> None:
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="accounts", stream_epoch="epoch-1"
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        as_of=_dt(10, 0),
+        facts=AccountFacts(position_key=key, stream_scope=scope),
+        revision=1,
+    )
+    book = PositionBook(
+        AccountJournal.from_durable_cut(cut),
+        policy_version=policy_version,
+        schema_version=schema_version,
+    )
+    book.use_durable_projection_version("live-token", event_cut=cut.as_of)
+    before = book.get_view(now=cut.as_of)
+    historical = book.get_historical_view(cut, event_cut=cut.as_of, now=cut.as_of)
+    expected = PositionBook(
+        AccountJournal.from_durable_cut(cut),
+        policy_version=policy_version,
+        schema_version=schema_version,
+    ).get_view(cut=cut.as_of, now=cut.as_of)
+    default = PositionBook(AccountJournal.from_durable_cut(cut)).get_view(
+        cut=cut.as_of, now=cut.as_of
+    )
+    assert historical == expected
+    assert historical.policy_version == policy_version
+    assert historical.schema_version == schema_version
+    assert (historical.policy_version, historical.schema_version) != (
+        default.policy_version, default.schema_version
+    )
+    assert historical.projection_version != "live-token"
+    assert book.get_view(now=cut.as_of) == before
