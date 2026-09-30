@@ -2929,6 +2929,15 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
         "command": "entry", "status": "prepared", "requested_at": _dt(10, 0),
         "details": details,
     }]
+    from copy import deepcopy
+
+    first_valid = deepcopy(repository.load_active_execution_commands.return_value[0])
+    first_valid["command_id"] = "first-valid-command"
+    first_valid["client_order_id"] = "first-valid-command"
+    first_valid["details"][field] = None
+    first_valid["details"]["reservations"] = ["reservation-before-failure"]
+    first_valid["status"] = "unknown"
+    repository.load_active_execution_commands.return_value.insert(0, first_valid)
     book = ExecutionBook(command_repository=repository)
     with pytest.raises(RuntimeError, match="restore active execution commands") as error:
         await book.restore(account_label="primary")
@@ -2936,6 +2945,8 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     assert "unparseable-command" in str(error.value.__cause__)
     assert book._persistence_failed is True
     assert not book._outbox_by_command_id
+    assert not book._command_reservations
+    assert not book._dispatch_reconciliation_required_commands
     repository.load_seen_event_ids.assert_not_awaited()
     repository.load_seen_fill_trade_ids.assert_not_awaited()
     repository.load_execution_order_watermarks.assert_not_awaited()
@@ -2963,6 +2974,10 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     assert entry.state is DispatchState.PREPARED
     assert entry.scope == _scope()
     assert entry.command.requested_quantity == Decimal("1")
+    first = book.get_outbox("first-valid-command")
+    assert first is not None and first.state is DispatchState.UNKNOWN
+    assert book._command_reservations[first.command_id] == ["reservation-before-failure"]
+    assert book._dispatch_reconciliation_required_commands == {first.command_id}
     repository.load_seen_event_ids.assert_awaited_once()
     repository.load_seen_fill_trade_ids.assert_awaited_once()
     repository.load_execution_order_watermarks.assert_awaited_once()

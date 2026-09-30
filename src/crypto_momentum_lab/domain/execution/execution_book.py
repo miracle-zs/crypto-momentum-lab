@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
 )
 from crypto_momentum_lab.domain.execution.command_codec import (
+    RestoredCommand,
     SkippedCommand,
     decode_active_command,
     decode_order_watermark,
@@ -701,6 +702,7 @@ class ExecutionBook:
                 active_cmds = await command_repository.load_active_execution_commands(
                     account_label=account_label
                 )
+                parsed_commands: list[RestoredCommand] = []
                 for cmd_data in active_cmds:
                     recovered = decode_active_command(
                         cmd_data,
@@ -714,6 +716,8 @@ class ExecutionBook:
                             f"active execution command {recovered.command_id} "
                             f"cannot be restored: {recovered.reason}"
                         )
+                    parsed_commands.append(recovered)
+                for recovered in parsed_commands:
                     entry = recovered.entry
                     cid = entry.command_id
                     self._outbox_by_command_id[cid] = entry
