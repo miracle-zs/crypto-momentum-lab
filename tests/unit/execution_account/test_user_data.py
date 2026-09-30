@@ -1,5 +1,6 @@
 import json
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 
 import pytest
@@ -20,6 +21,7 @@ from crypto_momentum_lab.execution_account.expectations import (
 )
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     apply_account_snapshot_delta,
+    build_account_snapshot,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -506,3 +508,87 @@ def _initial_snapshot() -> AccountSnapshot:
             ),
         ),
     )
+
+
+@pytest.mark.parametrize("zone", [UTC, timezone(timedelta(hours=8))])
+def test_snapshot_builder_orders_values_and_preserves_original_records(zone):
+    source = _initial_snapshot()
+    balance = source.balances[0]
+    position = source.positions[0]
+    order = source.open_orders[0]
+    balances = [balance, replace(balance, asset="BTC")]
+    positions = [
+        replace(position, symbol="ETHUSDT"),
+        replace(position, position_side="SHORT"),
+        replace(position, position_side="LONG"),
+    ]
+    orders = [
+        replace(order, symbol="ETHUSDT"),
+        replace(order, order_id="2"),
+        replace(order, order_id="10"),
+    ]
+    original = (tuple(balances), tuple(positions), tuple(orders))
+    observed_at = datetime(2026, 10, 1, tzinfo=zone)
+    result = build_account_snapshot(
+        source.config,
+        balances=iter(balances),
+        positions=iter(positions),
+        open_orders=iter(orders),
+        observed_at=observed_at,
+    )
+    assert [item.asset for item in result.balances] == ["BTC", "USDT"]
+    assert [(item.symbol, item.position_side) for item in result.positions] == [
+        ("BTCUSDT", "LONG"),
+        ("BTCUSDT", "SHORT"),
+        ("ETHUSDT", "BOTH"),
+    ]
+    assert [(item.symbol, item.order_id) for item in result.open_orders] == [
+        ("BTCUSDT", "10"),
+        ("BTCUSDT", "2"),
+        ("ETHUSDT", "1001"),
+    ]
+    assert result.config.observed_at == observed_at
+    for item in (*result.balances, *result.positions, *result.open_orders):
+        assert item.observed_at == observed_at
+        assert item.observed_at.tzinfo is zone
+    assert result.positions[0].position_amt == position.position_amt
+    assert result.open_orders[0].original_quantity == order.original_quantity
+    assert result.balances[1].raw_payload is balance.raw_payload
+    assert result.config is not source.config
+    assert (tuple(balances), tuple(positions), tuple(orders)) == original
+    assert source.config.observed_at == datetime(2026, 7, 4, tzinfo=UTC)
+
+
+def test_snapshot_builder_accepts_empty_values():
+    source = _initial_snapshot()
+    observed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    result = build_account_snapshot(
+        source.config,
+        balances=(),
+        positions=(),
+        open_orders=(),
+        observed_at=observed_at,
+    )
+    assert result.balances == result.positions == result.open_orders == ()
+    assert result.config.observed_at == observed_at
+
+
+class _NoUtcOffset(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+
+@pytest.mark.parametrize("zone", [None, _NoUtcOffset()])
+def test_snapshot_builder_rejects_missing_timezone_before_consuming_values(zone):
+    def unexpected_values():
+        raise AssertionError("invalid time must fail before consuming account values")
+        yield
+
+    with pytest.raises(ValueError, match="observed_at must be timezone-aware"):
+        build_account_snapshot(
+            _initial_snapshot().config,
+            balances=unexpected_values(),
+            positions=unexpected_values(),
+            open_orders=unexpected_values(),
+            observed_at=datetime(2026, 10, 1, tzinfo=zone),
+        )

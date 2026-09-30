@@ -1,5 +1,4 @@
 from collections import deque
-from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -16,6 +15,7 @@ from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.execution_account.snapshot_changes import (
+    build_account_snapshot,
     diff_account_snapshots,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
@@ -138,28 +138,12 @@ class AccountUserDataState:
         )
 
     def snapshot(self, observed_at: datetime) -> AccountSnapshot:
-        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
-            raise ValueError("observed_at must be timezone-aware")
-        return AccountSnapshot(
-            config=replace(self._config, observed_at=observed_at),
-            balances=tuple(
-                replace(item, observed_at=observed_at)
-                for item in sorted(self._balances.values(), key=lambda item: item.asset)
-            ),
-            positions=tuple(
-                replace(item, observed_at=observed_at)
-                for item in sorted(
-                    self._positions.values(),
-                    key=lambda item: (item.symbol, item.position_side),
-                )
-            ),
-            open_orders=tuple(
-                replace(item, observed_at=observed_at)
-                for item in sorted(
-                    self._open_orders.values(),
-                    key=lambda item: (item.symbol, item.order_id),
-                )
-            ),
+        return build_account_snapshot(
+            self._config,
+            balances=self._balances.values(),
+            positions=self._positions.values(),
+            open_orders=self._open_orders.values(),
+            observed_at=observed_at,
         )
 
     def _apply_account_update(

@@ -1,6 +1,8 @@
-"""Pure account snapshot comparison and delta application."""
+"""Pure account snapshot construction, comparison and delta application."""
 
+from collections.abc import Iterable
 from dataclasses import replace
+from datetime import datetime
 
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
@@ -107,28 +109,42 @@ def apply_account_snapshot_delta(
     for key in delta.removed_open_orders:
         open_orders.pop(key, None)
     config = snapshot.config if delta.config is None else delta.config
-    config = replace(config, observed_at=delta.observed_at)
+    return build_account_snapshot(
+        config,
+        balances=balances.values(),
+        positions=positions.values(),
+        open_orders=open_orders.values(),
+        observed_at=delta.observed_at,
+    )
+
+
+def build_account_snapshot(
+    config: AccountConfigSnapshot,
+    *,
+    balances: Iterable[AccountBalanceSnapshot],
+    positions: Iterable[AccountPositionSnapshot],
+    open_orders: Iterable[AccountOpenOrderSnapshot],
+    observed_at: datetime,
+) -> AccountSnapshot:
+    """Sort account values and copy them onto a shared observation time."""
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must be timezone-aware")
     return AccountSnapshot(
-        config=config,
+        config=replace(config, observed_at=observed_at),
         balances=tuple(
-            replace(item, observed_at=delta.observed_at)
-            for item in sorted(balances.values(), key=lambda item: item.asset)
+            replace(item, observed_at=observed_at)
+            for item in sorted(balances, key=lambda item: item.asset)
         ),
         positions=tuple(
-            replace(
-                item,
-                observed_at=delta.observed_at,
-            )
+            replace(item, observed_at=observed_at)
             for item in sorted(
-                positions.values(),
-                key=lambda item: (item.symbol, item.position_side),
+                positions, key=lambda item: (item.symbol, item.position_side)
             )
         ),
         open_orders=tuple(
-            replace(item, observed_at=delta.observed_at)
+            replace(item, observed_at=observed_at)
             for item in sorted(
-                open_orders.values(),
-                key=lambda item: (item.symbol, item.order_id),
+                open_orders, key=lambda item: (item.symbol, item.order_id)
             )
         ),
     )
