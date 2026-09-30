@@ -12,7 +12,6 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
-    Mapping,
 )
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
@@ -117,6 +116,11 @@ from crypto_momentum_lab.live_rollout.gates import (
     evaluate_live_gate,
 )
 from crypto_momentum_lab.live_rollout.health_monitor import LiveHealthMonitor
+from crypto_momentum_lab.live_rollout.hub_cursor import (
+    LiveHubCursorState,
+    hub_cursor_for_startup,
+    hub_cursor_from_checkpoint_payload,
+)
 from crypto_momentum_lab.live_rollout.lease import (
     LeaseHeartbeatConfig,
     LiveLeaseHeartbeat,
@@ -232,7 +236,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 )
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.hub import (
-    MarketStateBatch,
     WebSocketMarketStateSource,
 )
 from crypto_momentum_lab.market_data.quote_hub import (
@@ -1061,10 +1064,10 @@ async def run_live_daemon(
         requires_market_recovery = checkpoint is not None and (
             _checkpoint_needs_market_recovery(checkpoint)
         )
-        hub_cursor_state = _LiveHubCursorState()
+        hub_cursor_state = LiveHubCursorState()
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
-            restored_hub_cursor = _hub_cursor_for_startup(
+            restored_hub_cursor = hub_cursor_for_startup(
                 checkpoint,
                 requires_market_recovery=requires_market_recovery,
             )
@@ -1072,7 +1075,7 @@ async def run_live_daemon(
                 hub_cursor_state.restore(restored_hub_cursor)
             elif (
                 requires_market_recovery
-                and _hub_cursor_from_checkpoint_payload(checkpoint) is not None
+                and hub_cursor_from_checkpoint_payload(checkpoint) is not None
             ):
                 log.info(
                     "live_hub_cursor_discarded_before_durable_rewarm",
@@ -2022,128 +2025,6 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if cause is not None and isinstance(cause, Exception):
         return _is_order_identity_conflict(cause)
     return False
-
-
-def _hub_cursor_from_checkpoint(
-    checkpoint: StrategyCheckpoint,
-) -> dict[str, str | int] | None:
-    raw_cursor = _hub_cursor_from_checkpoint_payload(checkpoint)
-    if raw_cursor is None:
-        return None
-    stream_id = raw_cursor.get("stream_id")
-    sequence = raw_cursor.get("sequence")
-    if not isinstance(stream_id, str) or not stream_id.strip():
-        log.warning("live_hub_cursor_checkpoint_ignored", reason="invalid_stream_id")
-        return None
-    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
-        log.warning("live_hub_cursor_checkpoint_ignored", reason="invalid_sequence")
-        return None
-    return {"stream_id": stream_id, "sequence": sequence}
-
-
-def _hub_cursor_from_checkpoint_payload(
-    checkpoint: StrategyCheckpoint,
-) -> Mapping[str, object] | None:
-    raw_cursor = checkpoint.payload.get("market_state_hub_cursor")
-    if not isinstance(raw_cursor, Mapping):
-        return None
-    return raw_cursor
-
-
-def _hub_cursor_for_startup(
-    checkpoint: StrategyCheckpoint | None,
-    *,
-    requires_market_recovery: bool,
-) -> dict[str, str | int] | None:
-    """Only resume a Hub cursor when its epoch remains authoritative.
-
-    A restart that requires durable rewarm must start from the current Hub
-    epoch.  Reusing the old cursor would turn the expected stream reset into a
-    restart loop because the old in-memory Hub history no longer exists.
-    """
-
-    if checkpoint is None or requires_market_recovery:
-        return None
-    return _hub_cursor_from_checkpoint(checkpoint)
-
-
-class _LiveHubCursorState:
-    """Commit a Hub cursor only after every state in its batch is processed."""
-
-    def __init__(self) -> None:
-        self.stream_id: str | None = None
-        self.sequence: int | None = None
-        self._batch_by_state: dict[tuple[str, datetime], tuple[str, int]] = {}
-        self._remaining_by_batch: dict[tuple[str, int], int] = {}
-        # Symbols the publisher reported as newly entering the monitored pool.
-        # Consumed on first report so one entry is announced exactly once.
-        self._entered_symbols: frozenset[str] = frozenset()
-
-    def consume_entered_symbol(self, symbol: str) -> bool:
-        """Report, once, whether `symbol` just entered the monitored pool."""
-
-        if symbol in self._entered_symbols:
-            self._entered_symbols = self._entered_symbols - {symbol}
-            return True
-        return False
-
-    @property
-    def has_cursor(self) -> bool:
-        return self.stream_id is not None and self.sequence is not None
-
-    def restore(self, cursor: Mapping[str, str | int]) -> None:
-        stream_id = cursor.get("stream_id")
-        sequence = cursor.get("sequence")
-        if not isinstance(stream_id, str) or not stream_id.strip():
-            raise ValueError("hub cursor stream_id must be a non-empty string")
-        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
-            raise ValueError("hub cursor sequence must be a non-negative integer")
-        self.stream_id = stream_id
-        self.sequence = sequence
-
-    def observe_batch(self, batch: MarketStateBatch) -> None:
-        if batch.stream_id is None:
-            return
-        if batch.entered_symbols:
-            # Carried across batches so a symbol is still recognised as a fresh
-            # entry even if its first bucket is not processed in this batch.
-            self._entered_symbols = self._entered_symbols | batch.entered_symbols
-        batch_key = (batch.stream_id, batch.sequence)
-        self._remaining_by_batch[batch_key] = len(batch.states)
-        for state in batch.states:
-            self._batch_by_state[(state.symbol, state.bucket_start)] = batch_key
-
-    def acknowledge_state(self, state: MarketState15s) -> None:
-        batch_key = self._batch_by_state.pop(
-            (state.symbol, state.bucket_start),
-            None,
-        )
-        if batch_key is None:
-            return
-        remaining = self._remaining_by_batch.get(batch_key)
-        if remaining is None:
-            return
-        if remaining > 1:
-            self._remaining_by_batch[batch_key] = remaining - 1
-            return
-        self._remaining_by_batch.pop(batch_key, None)
-        stream_id, sequence = batch_key
-        if (
-            self.stream_id is None
-            or self.sequence is None
-            or stream_id != self.stream_id
-            or sequence > self.sequence
-        ):
-            self.stream_id = stream_id
-            self.sequence = sequence
-
-    def snapshot(self) -> dict[str, str | int] | None:
-        if not self.has_cursor or self.stream_id is None or self.sequence is None:
-            return None
-        return {
-            "stream_id": self.stream_id,
-            "sequence": self.sequence,
-        }
 
 
 class _LiveDaemonRepositoryAdapter:

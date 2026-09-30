@@ -10,6 +10,7 @@ import pytest
     "module",
     [
         "crypto_momentum_lab.live_rollout.decision_facts",
+        "crypto_momentum_lab.live_rollout.hub_cursor",
         "crypto_momentum_lab.live_rollout.position_classification",
         "crypto_momentum_lab.operator_dashboard.ports",
         "crypto_momentum_lab.live_rollout.position_self_healing",

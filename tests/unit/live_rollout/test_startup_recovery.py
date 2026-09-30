@@ -4,14 +4,14 @@ from types import SimpleNamespace
 import pytest
 
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.live_rollout.hub_cursor import (
+    LiveHubCursorState,
+    hub_cursor_for_startup,
+)
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveMarketLoop,
     LiveMarketStateContinuityError,
     _validate_market_state_continuity,
-)
-from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
-    _hub_cursor_for_startup,
-    _LiveHubCursorState,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     load_live_market_state_gap,
@@ -153,7 +153,7 @@ def test_hub_cursor_is_committed_only_after_the_entire_batch_is_processed() -> N
         symbol="XPINUSDT",
         bucket_start=start,
     )
-    cursor = _LiveHubCursorState()
+    cursor = LiveHubCursorState()
     cursor.observe_batch(
         MarketStateBatch(
             sequence=17,
@@ -179,7 +179,7 @@ def test_hub_cursor_reports_a_symbol_entry_exactly_once() -> None:
 
     start = datetime(2026, 9, 13, 5, 53, 15, tzinfo=UTC)
     state = SimpleNamespace(symbol="4USDT", bucket_start=start)
-    cursor = _LiveHubCursorState()
+    cursor = LiveHubCursorState()
 
     # Nothing entered yet.
     assert cursor.consume_entered_symbol("4USDT") is False
@@ -206,7 +206,7 @@ def test_hub_cursor_entry_survives_across_batches() -> None:
     """The entry is kept until it is consumed, not dropped with its batch."""
 
     start = datetime(2026, 9, 13, 5, 53, 15, tzinfo=UTC)
-    cursor = _LiveHubCursorState()
+    cursor = LiveHubCursorState()
     cursor.observe_batch(
         MarketStateBatch(
             sequence=1,
@@ -274,13 +274,13 @@ def test_hub_cursor_is_discarded_before_durable_market_rewarm() -> None:
     )
 
     assert (
-        _hub_cursor_for_startup(
+        hub_cursor_for_startup(
             checkpoint,
             requires_market_recovery=True,
         )
         is None
     )
-    assert _hub_cursor_for_startup(
+    assert hub_cursor_for_startup(
         checkpoint,
         requires_market_recovery=False,
     ) == {"stream_id": "old-stream", "sequence": 42}
