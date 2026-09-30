@@ -17,6 +17,17 @@ from crypto_momentum_lab.domain.account.models import (
 )
 
 
+class AccountFillProvenanceFetcher(Protocol):
+    async def __call__(
+        self,
+        symbol: str,
+        *,
+        start_time_ms: int,
+        checked_through: datetime,
+        max_pages_per_window: int = 10,
+    ) -> tuple[tuple[AccountFillEvent, ...], AccountFillPageScan]: ...
+
+
 class ReadOnlyAccountClient(Protocol):
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         pass

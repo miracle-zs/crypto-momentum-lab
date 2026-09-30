@@ -23,6 +23,8 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
 )
 from crypto_momentum_lab.execution_account.client_compat import (
     fetch_positions_for_reconciliation,
+    incomplete_fill_symbols,
+    optional_fill_provenance_fetcher,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -327,8 +329,8 @@ class ExecutionAccountSyncService:
                     start_time_by_symbol[symbol] = historical_start_at
             fills_by_key: dict[FillKey, AccountFillEvent] = {}
             fill_load_scans: list[AccountFillLoadScan] = []
-            scan_fetcher = getattr(self._client, "fetch_fills_with_provenance", None)
-            if include_fills and callable(scan_fetcher):
+            scan_fetcher = optional_fill_provenance_fetcher(self._client)
+            if include_fills and scan_fetcher is not None:
                 for position in positions:
                     symbol = position.symbol.strip().upper()
                     side = position.position_side.strip().upper()
@@ -422,10 +424,10 @@ class ExecutionAccountSyncService:
                     key=lambda item: (item.trade_at, item.symbol, item.trade_id),
                 )
             )
-            incomplete_fill_symbols: set[str] = set(
-                getattr(self._client, "incomplete_fill_symbols", frozenset())
+            incomplete_symbols: set[str] = set(
+                incomplete_fill_symbols(self._client)
             )
-            fills_catching_up = bool(incomplete_fill_symbols) or any(
+            fills_catching_up = bool(incomplete_symbols) or any(
                 not scan.page_scan.page_exhausted or scan.page_scan.truncated
                 for scan in fill_load_scans
             )
@@ -565,9 +567,9 @@ class ExecutionAccountSyncService:
             details["source"] = source
         if result.fills_catching_up:
             details["fills_catching_up"] = True
-            details["incomplete_symbols"] = sorted(
-                getattr(self._client, "incomplete_fill_symbols", ())
-            )
+            details["incomplete_symbols"] = [
+                symbol for symbol in sorted(incomplete_fill_symbols(self._client))
+            ]
         details.update(_position_state_details(snapshot.positions))
         # Same sparsify rule as snapshot_once / user-data persist: the in-memory
         # snapshot keeps every asset, but durable history only stores non-zero
