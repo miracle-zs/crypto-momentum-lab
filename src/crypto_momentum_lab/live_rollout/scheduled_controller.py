@@ -34,15 +34,23 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 )
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.orders.coordinator import (
-        OrderExecutionPort,
-    )
     from crypto_momentum_lab.live_rollout.context import (
         LiveContextProvider,
         LiveDaemonRuntimeContext,
     )
 
 log = structlog.get_logger()
+
+
+class ScheduledCancellationResult(Protocol):
+    @property
+    def state(self) -> ExchangeOrderState: ...
+
+
+class ScheduledOrderCanceller(Protocol):
+    async def cancel_order(
+        self, plan: OrderExecutionPlan
+    ) -> ScheduledCancellationResult: ...
 
 
 class ScheduledEntryGate(Protocol):
@@ -83,7 +91,7 @@ class ScheduledRiskWindowController:
         *,
         config: ScheduledRiskWindowControllerConfig,
         exit_manager: LiveExitManager | None,
-        state_machine: OrderExecutionPort,
+        state_machine: ScheduledOrderCanceller,
         context_provider: LiveContextProvider,
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
         publish_managed_position_symbols: ScheduledContextPublisher,
