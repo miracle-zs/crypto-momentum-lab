@@ -382,7 +382,10 @@ async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
     )
 
 
-@pytest.mark.parametrize("mismatch", ["projection", "not_ready", "epoch"])
+@pytest.mark.parametrize(
+    "mismatch",
+    ["projection", "not_ready", "epoch", "dispatch_recovery", "dispatch_unknown"],
+)
 async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     mismatch: str,
 ) -> None:
@@ -391,10 +394,17 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
         view.projection_version = "pv_newer"
     elif mismatch == "not_ready":
         view.is_ready_for_trade = False
-    else:
+    elif mismatch == "epoch":
         book.read.side_effect = ValueError(
             "requested account stream does not match the restored position"
         )
+    elif mismatch == "dispatch_recovery":
+        handler.side_effect = RuntimeError(
+            "ExecutionBook applied order facts but reservation settlement "
+            "requires recovery: Filled terminal lacks complete account trade facts"
+        )
+    else:
+        handler.side_effect = OSError("exchange response is unknown")
     uow.commit_decision.return_value = SimpleNamespace(
         policy_revision=1,
         next_state_digest="next_digest",
@@ -426,11 +436,16 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     assert receipt.decision_id == "incident-decision"
     assert source.current_policy_state == next_state
     assert source.policy_revision == 1
-    handler.assert_not_awaited()
+    if mismatch.startswith("dispatch_"):
+        handler.assert_awaited_once_with(command)
+    else:
+        handler.assert_not_awaited()
     uow.mark_exit_dispatched.assert_not_awaited()
     uow.mark_exit_superseded.assert_not_awaited()
 
     book.read.side_effect = None
+    handler.side_effect = None
+    handler.reset_mock()
     view.projection_version = "pv_expected"
     view.is_ready_for_trade = True
     await source.recover_pending_exits()
@@ -487,6 +502,25 @@ async def test_unrelated_book_corruption_is_not_swallowed_as_epoch_recovery() ->
     with pytest.raises(ValueError, match="invalid recovery payload"):
         await source.recover_pending_exits()
     handler.assert_not_awaited()
+
+
+async def test_dispatch_does_not_swallow_book_corruption() -> None:
+    source, uow, book, _, handler, command = _pending_exit_case()
+    book.read.side_effect = ValueError("invalid recovery payload")
+    with pytest.raises(ValueError, match="invalid recovery payload"):
+        await source._dispatch_exit("incident-decision", command)
+    handler.assert_not_awaited()
+    uow.mark_exit_dispatched.assert_not_awaited()
+
+
+async def test_dispatch_cancellation_still_stops_the_task() -> None:
+    import asyncio
+
+    source, uow, _, _, handler, command = _pending_exit_case()
+    handler.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await source._dispatch_exit("incident-decision", command)
+    uow.mark_exit_dispatched.assert_not_awaited()
 
 
 async def test_fact_source_commit_decision_heals_diverged_prior_digest() -> None:

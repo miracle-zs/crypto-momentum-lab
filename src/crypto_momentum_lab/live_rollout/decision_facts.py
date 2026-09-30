@@ -554,9 +554,22 @@ class LiveDecisionFactSource:
                 stream_epoch=self._stream_epoch,
             )
             return
-        result = handler(command)
-        if asyncio.iscoroutine(result):
-            result = await result
+        try:
+            result = handler(command)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A submitted exit can await account facts or have an unknown POST
+            # outcome. Retain its durable row and reservation for reconciliation;
+            # stopping consumption here prevents that recovery from completing.
+            log.exception(
+                "durable_decision_exit_dispatch_deferred",
+                decision_id=decision_id,
+                command_id=command.command_id,
+            )
+            return
         state = getattr(result, "state", None)
         state_value = getattr(state, "value", state)
         if state_value not in {
