@@ -185,9 +185,7 @@ class LiveMarketLoop:
             state = prefetched.state
             self._active_state_at = state.bucket_start
             if state.is_backfill:
-                warm = getattr(self._strategy, "warm_market_state", None)
-                if callable(warm):
-                    warm(state)
+                self._strategy.warm_market_state(state)
                 self._record_processed_state(state, saved_at=state.bucket_end)
                 processed += 1
                 final_state_at = state.bucket_start
@@ -217,9 +215,7 @@ class LiveMarketLoop:
                 # plain `pop(..., None)` and is a no-op for symbols the strategy
                 # holds no state for.  Revisit if pool membership ever stops
                 # implying that.
-                reset = getattr(self._strategy, "reset_symbol", None)
-                if callable(reset):
-                    reset(state.symbol)
+                self._strategy.reset_symbol(state.symbol)
                 self._checkpoint_coordinator.forget_symbol(state.symbol)
                 log.info(
                     "live_strategy_symbol_entry_baseline",
@@ -246,9 +242,7 @@ class LiveMarketLoop:
                     # Treating the gap as a process-wide fatal error makes one
                     # illiquid symbol restart every live account and
                     # unnecessarily interrupts exits for unrelated symbols.
-                    reset = getattr(self._strategy, "reset_symbol", None)
-                    if callable(reset):
-                        reset(state.symbol)
+                    self._strategy.reset_symbol(state.symbol)
                     self._checkpoint_coordinator.forget_symbol(state.symbol)
                     log.warning(
                         "live_strategy_symbol_reset_after_market_state_gap",
@@ -344,16 +338,14 @@ class LiveMarketLoop:
                 state.symbol,
                 0,
             ):
-                reset = getattr(self._strategy, "reset_symbol", None)
-                if callable(reset):
-                    reset(state.symbol)
-                    self._checkpoint_coordinator.forget_symbol(state.symbol)
-                    log.info(
-                        "live_strategy_symbol_reset_after_market_gap",
-                        run_id=self._run_id,
-                        symbol=state.symbol,
-                        generation=gap_generation,
-                    )
+                self._strategy.reset_symbol(state.symbol)
+                self._checkpoint_coordinator.forget_symbol(state.symbol)
+                log.info(
+                    "live_strategy_symbol_reset_after_market_gap",
+                    run_id=self._run_id,
+                    symbol=state.symbol,
+                    generation=gap_generation,
+                )
                 self._strategy_gap_reset_generation_by_symbol[state.symbol] = (
                     gap_generation
                 )
@@ -664,12 +656,9 @@ class LiveMarketLoop:
             return ()
         if not _is_complete_gap_recovery(error, states, self._strategy):
             return ()
-        warm_market_state = getattr(self._strategy, "warm_market_state", None)
-        if not callable(warm_market_state):
-            return ()
         try:
             for recovered in states:
-                warm_market_state(recovered)
+                self._strategy.warm_market_state(recovered)
                 self._checkpoint_coordinator.record_recovered_state(
                     recovered,
                     saved_at=self._clock(),
@@ -677,9 +666,7 @@ class LiveMarketLoop:
         except asyncio.CancelledError:
             raise
         except Exception as recovery_error:
-            reset = getattr(self._strategy, "reset_symbol", None)
-            if callable(reset):
-                reset(error.symbol)
+            self._strategy.reset_symbol(error.symbol)
             self._checkpoint_coordinator.forget_symbol(error.symbol)
             log.warning(
                 "live_strategy_market_state_gap_recovery_failed",
@@ -818,9 +805,7 @@ def _reset_strategy_for_gap(
         return
     if (current_at - last_processed_at).total_seconds() <= max_gap_seconds:
         return
-    reset = getattr(strategy, "reset_symbol", None)
-    if callable(reset):
-        reset(symbol)
+    strategy.reset_symbol(symbol)
 
 
 def _is_complete_gap_recovery(
@@ -850,10 +835,8 @@ def _is_complete_gap_recovery(
         return False
     if any(not bool(getattr(state, "data_complete", False)) for state in ordered):
         return False
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
-        return True
-    required_fields = tuple(getattr(required_data(), "required_fields", ()))
+    requirement = strategy.required_data()
+    required_fields = () if requirement is None else requirement.required_fields
     return all(
         all(getattr(state, field, None) is not None for field in required_fields)
         for state in ordered

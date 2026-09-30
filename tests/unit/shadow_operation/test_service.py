@@ -127,6 +127,12 @@ def _service() -> tuple[
 
 
 class FakeStrategy:
+    def warm_market_state(self, state) -> None:
+        pass
+
+    def reset_symbol(self, symbol: str) -> None:
+        pass
+
     def required_data(self) -> None:
         return None
 

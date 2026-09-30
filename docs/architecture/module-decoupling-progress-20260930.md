@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -554,6 +554,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2442 passed**，25.82 秒，一项现有 Starlette/httpx 警告。daemon 单独 **61 passed**。契约及新增测试完整 Ruff、行情循环及迁移替身 F/I、契约定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 同时检查真实数据库验收环境：docker version 守护进程探针三秒超时；PATH 未找到 postgres/initdb/pg_ctl，常见 Homebrew PostgreSQL 目录也未找到。本批未连接生产或重复探测已知握手异常的 54329 数据库，未取得真实 Postgres 验收证据。真实通知、并发、原子回滚与完整重启仍待补齐。
+
+## 第四十一批：显式策略预热与单币恢复能力
+
+第四十批提交为 `40843b6`；第四十一批继续本地实施，未部署生产。
+
+- LiveRuntimeStrategy 增加 reset_symbol；既有 warm_market_state 接口在行情回补与 gap 恢复中改为直接调用。生产三种策略原本均具备这些方法，删除对方法的 getattr/callable 探测，缺失能力不再静默跳过。
+- 入池重置、行情连续性缺口、market gap generation、预热失败清理与最大 gap 重置统一直接调用实际策略方法。原阈值、单币范围、checkpoint forget/record 的先后关系与生产有效实现路径保持；不满足接口的外部旧实现现在失败，是明确调用契约变化。
+- gap 恢复完整性校验直接读取 required_data；显式 None 仍没有额外字段要求，正式模型使用 required_fields。按字段名检查行情值的 getattr 保留，因为字段列表是数据要求本身；没有把它误当方法能力探测移除。
+- 共享 shadow FakeStrategy 显式提供原默认场景的无操作预热/重置；原 production 与 fake E2E 流程通过完整回归。没有新 SQL、写入事务或生产数据修改。
+
+验证：修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2442 passed**，25.53 秒，一项现有 Starlette/httpx 警告；daemon **61 passed**。随后补充三项重置契约测试，契约文件合计 **6 passed**，覆盖阈值等于/超过、缺失 reset 失败；新增三项未重新计入完整回归的数量。契约/新增测试完整 Ruff、行情循环及迁移替身 F/I、契约定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
 ## 后续实施顺序
 

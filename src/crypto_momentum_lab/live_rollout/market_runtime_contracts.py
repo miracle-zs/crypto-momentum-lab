@@ -34,6 +34,8 @@ class LiveRuntimeStrategy(Protocol):
 
     def clear_market_state_buffers(self) -> None: ...
 
+    def reset_symbol(self, symbol: str) -> None: ...
+
 
 class LiveMarketStateContinuityError(RuntimeError):
     """Raised when an ordered live state stream skips a required bucket."""
