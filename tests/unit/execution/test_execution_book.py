@@ -2762,7 +2762,8 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_position", [True, False])
-async def test_outbox_scope_controls_flat_stream_fast_path(same_position) -> None:
+@pytest.mark.parametrize("dispatch_state", list(DispatchState))
+async def test_outbox_scope_controls_flat_stream_fast_path(same_position, dispatch_state) -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.observation_models import (
         Applied,
@@ -2797,7 +2798,7 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position) -> Non
     )
     book._outbox_by_command_id[command.command_id] = OutboxEntry(
         command_id=command.command_id, request_id="request", scope=command_scope,
-        command=command,
+        command=command, state=dispatch_state,
     )
 
     def reject_copy(*, key):
@@ -2853,7 +2854,8 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position) -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command_location", ["same", "other-account", "other-side"])
-async def test_outbox_scope_controls_cross_stream_read(command_location) -> None:
+@pytest.mark.parametrize("dispatch_state", list(DispatchState))
+async def test_outbox_scope_controls_cross_stream_read(command_location, dispatch_state) -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -2884,7 +2886,7 @@ async def test_outbox_scope_controls_cross_stream_read(command_location) -> None
     )
     book._outbox_by_command_id[command.command_id] = OutboxEntry(
         command_id=command.command_id, request_id="request", scope=command_scope,
-        command=command,
+        command=command, state=dispatch_state,
     )
 
     book.register_active_stream(
