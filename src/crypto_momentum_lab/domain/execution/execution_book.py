@@ -2387,12 +2387,7 @@ class ExecutionBook:
             journal = self._ensure_journal(key)
         book = self._ensure_book(key)
         if evidence.fill_load_provenance is not None:
-            recorder = getattr(journal, "record_fill_load_provenance", None)
-            if not callable(recorder):
-                raise RuntimeError(
-                    "account journal cannot persist fill-load provenance"
-                )
-            recorder(evidence.fill_load_provenance)
+            journal.record_fill_load_provenance(evidence.fill_load_provenance)
 
         consumed_qty = Decimal("0")
         released_qty = Decimal("0")
@@ -2555,7 +2550,7 @@ class ExecutionBook:
             journal.record_snapshot(evidence.snapshot)
 
         # 2b. Process Coverage
-        if getattr(evidence, "coverage", None) is not None:
+        if evidence.coverage is not None:
             journal.set_coverage(evidence.coverage)
 
         # 3. Process Boundary
