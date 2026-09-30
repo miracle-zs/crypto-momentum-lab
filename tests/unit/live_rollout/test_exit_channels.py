@@ -27,6 +27,8 @@ async def test_quote_channel_updates_cache_and_reports_success() -> None:
             return (state,)
 
     class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
         async def process_market_quote(self, value, market_state):
             processed.append((value, market_state))
             return None
@@ -79,6 +81,8 @@ async def test_closed_candle_channel_retries_pending_position_sync(
             return ()
 
     class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
         def __init__(self) -> None:
             self.calls = 0
 
@@ -130,6 +134,8 @@ async def test_quote_conflict_uses_only_injected_notifier(notify: bool) -> None:
     calls = []
 
     class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
         async def process_market_quote(self, quote, state):
             raise ValueError("identity conflict")
 
@@ -160,3 +166,23 @@ async def test_quote_conflict_uses_only_injected_notifier(notify: bool) -> None:
         if notify
         else [("failure", "BTCUSDT")]
     )
+
+
+async def test_quote_channel_requires_managed_position_symbols() -> None:
+    class Source:
+        def __aiter__(self):
+            async def stream():
+                yield SimpleNamespace(symbol="BTCUSDT")
+
+            return stream()
+
+    runtime = LiveExitChannelRuntime(
+        daemon=SimpleNamespace(),
+        latest_market_quotes=SimpleNamespace(
+            observe=lambda quote: pytest.fail("must reject before cache mutation")
+        ),
+        latest_market_states=SimpleNamespace(),
+        is_transient_error=lambda error: False,
+    )
+    with pytest.raises(AttributeError, match="managed_position_symbols"):
+        await runtime.run_quote_channel(source=Source())

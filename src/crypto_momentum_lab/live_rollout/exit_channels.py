@@ -93,8 +93,8 @@ class LiveExitChannelRuntime:
         retry_delay_by_symbol: dict[str, float] = {}
         async for quote in source:
             loop_time = asyncio.get_running_loop().time()
-            managed_symbols = getattr(self._daemon, "managed_position_symbols", None)
-            if managed_symbols is not None and quote.symbol not in managed_symbols:
+            managed_symbols = self._daemon.managed_position_symbols
+            if quote.symbol not in managed_symbols:
                 if (
                     quote.symbol in retry_at_by_symbol
                     or quote.symbol in retry_delay_by_symbol
@@ -259,11 +259,7 @@ class LiveExitChannelRuntime:
         while True:
             now = datetime.now(tz=UTC)
             loop_time = asyncio.get_running_loop().time()
-            managed_symbols = (
-                self._daemon.managed_position_symbols
-                if hasattr(self._daemon, "managed_position_symbols")
-                else frozenset()
-            )
+            managed_symbols = self._daemon.managed_position_symbols
             for symbol in list(retry_at_by_symbol.keys()):
                 if symbol not in managed_symbols:
                     retry_at_by_symbol.pop(symbol, None)

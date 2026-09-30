@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -822,6 +822,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 去除参数注解后 risk_control 全部函数 AST 与上一批一致。风控事件派发、耐久命令 claim/complete、消费者可用性与 gate 刷新顺序、恢复任务与重试规则保持。
 
 验证：风控/架构定向 **68 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2473 passed**，26.91 秒，一项现有 Starlette/httpx 警告。新增 risk_control 独立进程禁止 sqlalchemy/persistence 导入检查。risk_control 与 telemetry_ports 两文件定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十三批：退出通道直接读取托管持仓能力
+
+第六十二批提交为 `ccd4f77`；第六十三批继续本地实施，未部署生产。
+
+- ExitChannelProcessor 已要求 managed_position_symbols；quote 和 grace 通道改为直接读取，删除 getattr/hasattr 与缺失能力默认分支。grace 每轮只读取一次该属性，不再先 hasattr 后再次取值。
+- 保留真实 daemon 的动态集合读取，不在构造时冻结 symbols；托管持仓撤除后的 retry 清理、失败状态清除和原缓存选择行为保持。显式空集合沿用原缓存查询语义，本批未修改空集合所代表的读取行为。
+- 旧 quote 替身补齐必需集合。接口不完整的调用者现在明确抛出 AttributeError；新增检查证明缺失能力时在 quote 缓存写入前拒绝，停止用静默默认值掩盖装配错误。无新增接口或转发实现。
+
+验证：退出通道/CLI/架构定向 **138 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2474 passed**，27.60 秒，一项现有 Starlette/httpx 警告。exit_channels 与 exit_channel_ports 两文件定向 mypy --follow-imports=skip、核心文件与退出测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
