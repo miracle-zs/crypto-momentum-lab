@@ -295,3 +295,24 @@ importlib.import_module('crypto_momentum_lab.live_rollout.account_channel')
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_volume_consumer_does_not_load_quote_hub() -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class QuoteHubGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'crypto_momentum_lab.market_data.quote_hub':
+            raise RuntimeError('volume consumer imported quote hub: ' + fullname)
+sys.meta_path.insert(0, QuoteHubGuard())
+importlib.import_module('crypto_momentum_lab.live_rollout.volume')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

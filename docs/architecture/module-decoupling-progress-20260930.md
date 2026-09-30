@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -846,6 +846,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 扩展账户导入隔离检查，同时禁止退出循环模块及无关 Hub；新增纯规则模块禁止 sqlalchemy/persistence 导入检查。
 
 验证：账户/退出通道/架构定向 **77 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2475 passed**，27.49 秒，一项现有 Starlette/httpx 警告。exit_failure_policy、exit_channels 与 exit_channel_ports 三文件定向 mypy --follow-imports=skip、三核心文件与相关测试完整 Ruff、git diff --check 通过，不代表账户通道或全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十五批：成交量快照源消费能力
+
+第六十四批提交为 `3094d33`；第六十五批继续本地实施，未部署生产。
+
+- volume 定义 QuoteVolumeSnapshotSource，组合 AsyncIterable[QuoteVolume24hSnapshot] 与同步 stop()；WebSocketQuoteVolumeProvider 删除具体 WebSocketMarketQuoteVolumeSource 类型依赖，原源与现有测试替身直接满足接口，无新增转发适配器。
+- 原成交量类去除参数注解后的 AST 完全一致。先 source.stop()、后取消并等待后台任务的顺序、因果快照选择、缓存指标与一秒重连保持。具体源创建与连接生命周期继续归运行装配。
+- 新增独立进程检查，禁止导入 quote_hub 后 volume 消费模块仍可加载。原 REST ticker 类型依赖保留，本批不宣称所有行情适配依赖均移除。
+
+验证：成交量/架构定向 **68 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2476 passed**，27.85 秒，一项现有 Starlette/httpx 警告。volume 定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

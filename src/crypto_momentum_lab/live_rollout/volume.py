@@ -9,7 +9,7 @@ not an execution capability.
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -17,9 +17,6 @@ import structlog
 
 from crypto_momentum_lab.market_data.binance.rest import (
     Binance24hTicker,
-)
-from crypto_momentum_lab.market_data.quote_hub import (
-    WebSocketMarketQuoteVolumeSource,
 )
 from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 
@@ -270,12 +267,18 @@ class Binance24hQuoteVolumeCache:
             await asyncio.sleep(self._refresh_interval_seconds)
 
 
+class QuoteVolumeSnapshotSource(AsyncIterable[QuoteVolume24hSnapshot], Protocol):
+    """A shared snapshot stream whose owner can stop delivery synchronously."""
+
+    def stop(self) -> None: ...
+
+
 class WebSocketQuoteVolumeProvider:
     """Consume the market-data hub's shared volume snapshots."""
 
     def __init__(
         self,
-        source: WebSocketMarketQuoteVolumeSource,
+        source: QuoteVolumeSnapshotSource,
         *,
         history_size: int = _DEFAULT_HISTORY_SIZE,
     ) -> None:
