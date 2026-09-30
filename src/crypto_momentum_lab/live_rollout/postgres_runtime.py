@@ -321,6 +321,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         book: PositionContextBook | None = getattr(self, "_execution_book", None)
         if book is None:
             return context
+        if context.open_position_symbols is None:
+            # Unknown account exposure cannot authorize exits or position repair.
+            return replace(context, managed_positions=())
         if context.open_position_symbols == frozenset():
             # A confirmed flat account has no lots to allocate or exit. Reading
             # every historical Book scope at each market cut can replay hundreds
@@ -344,8 +347,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         # Only scopes that can still represent current exposure need a read.
         # Replaying every historical Book scope at each market cut dominated
         # this path; the drift scan below keeps the Book-only diagnostic. When
-        # the account snapshot is unavailable the filter is dropped, so an
-        # uncertain account view still reads every scope and fails closed.
+        # the account snapshot is unavailable but symbol exposure is known,
+        # the filter is dropped and every scope is read.
         # Operational exposure is current account state, not a historical
         # market decision. Reading an earlier cut hides fills already visible
         # in the current snapshot and falsely triggers repeated self-healing.
@@ -488,6 +491,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         of once per market cut; the trade path only reads the scopes that can
         still represent current exposure.
         """
+        if context.open_position_symbols is None:
+            return
         now = datetime.now(tz=UTC)
         last_scan = getattr(self, "_last_book_drift_scan_at", None)
         if (

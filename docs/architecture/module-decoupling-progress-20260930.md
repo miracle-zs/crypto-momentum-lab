@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1290,6 +1290,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - PositionRepairRequest.__post_init__ 补齐 None 返回注解，无新忽略或转发接口。
 
 验证：执行领域及运行上下文定向 **356 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2511 passed**，29.39 秒，一项现有 Starlette/httpx 警告。PositionContextBook、position_repair、position_ledger_models 三文件联合 mypy --follow-imports=skip 通过，关闭上一批这三文件范围的 9 项错误；不代表 provider、具体 ExecutionBook 适配或全仓类型验收。修复模型/覆盖测试完整 Ruff、ledger 模型 F/I、git diff --check 通过；ledger 模型现有 UP033 缓存风格提示保留。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零二批：未知账户敞口保护与上下文类型衔接
+
+第一百零一批提交为 `d1d8907`；第一百零二批继续本地实施，未部署生产。
+
+- provider/context/仓位上下文接口/修复模型/ledger 模型五文件联合检查暴露六项 None 集合运算错误：open_position_symbols 的契约允许未知，旧路径却执行成员测试、并集及差集。
+- _with_execution_book 在敞口未知时保留 None、清空 managed_positions，早于旧执行簿结果缓存读取返回；不执行仓位扫描或自愈，不把未知当作空仓。已有 unmanaged_position_symbols 及其余上下文保持。
+- _observe_book_drift 遇到未知敞口跳过扫描及状态记录，避免把缺少账户事实解释为执行簿残留仓位。已知敞口的过滤、修复、缓存及漂移节流规则不变；账户快照缺失但符号敞口已知时仍保留原全范围读取。
+- 两项参数化测试覆盖上下文与漂移路径，确保旧缓存仓位不泄漏、未触发 Book 读取/修复、未记录扫描截止及残留告警状态。首轮测试收集因新增装饰器缺少 pytest 导入失败，补齐后定向与完整回归通过。
+
+验证：上下文提供者定向 **50 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2513 passed**，29.60 秒，一项现有 Starlette/httpx 警告。上述五文件联合 mypy --follow-imports=skip 通过，关闭本范围类型衔接错误；不代表具体执行簿适配、全部依赖或全仓类型验收。provider/测试 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

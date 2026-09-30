@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -2128,3 +2130,43 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
         event_cut=NOW,
     )
     assert historical[0].total_quantity == Decimal("0")
+
+
+@pytest.mark.parametrize("operation", ["context", "drift"])
+async def test_unknown_account_exposure_does_not_authorize_book_actions(operation) -> None:
+    class Book:
+        async def list_position_views(self, **_kwargs):
+            raise AssertionError("unknown exposure must not trigger a Book scan")
+
+        def get_active_stream(self, *_args):
+            raise AssertionError("unknown exposure must not trigger repair")
+
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._execution_book = Book()
+    stale_position = SimpleNamespace(symbol="BTCUSDT")
+    context = replace(
+        _runtime_context(),
+        account_snapshot=None,
+        open_position_symbols=None,
+        managed_positions=(stale_position,),
+        unmanaged_position_symbols=frozenset({"ETHUSDT"}),
+    )
+    provider._cached_book_result = (
+        frozenset({"BTCUSDT"}),
+        (stale_position,),
+        frozenset(),
+    )
+    provider._cached_book_bucket_end = NOW
+    provider._cached_book_unresolved = context.unresolved_orders
+
+    if operation == "context":
+        result = await provider._with_execution_book(
+            context, SimpleNamespace(bucket_end=NOW)
+        )
+        assert result.open_position_symbols is None
+        assert result.managed_positions == ()
+        assert result.unmanaged_position_symbols == frozenset({"ETHUSDT"})
+    else:
+        await provider._observe_book_drift(book=provider._execution_book, context=context)
+    assert not hasattr(provider, "_last_book_drift_scan_at")
+    assert not hasattr(provider, "_reported_stale_book_symbols")
