@@ -138,3 +138,19 @@ rtk proxy .venv/bin/python -m pytest -q   tests/unit/live_rollout/test_context_p
 本次验收结论：发布、当前行情消费、checkpoint 持续性和原有持仓退出分别核验；全系统健康与账本一致性仍未全部通过。没有修改 SQL 持仓/成交事实，没有跳过 epoch 或事实完整性保护，没有手工发起测试交易。
 
 11:53:04 第二次独立数据库采样：四账户 saved_at 与行情水位均较 11:51:37 严格前进，checkpoint 年龄 4.0–49.0 秒、行情水位年龄 19.5–64.5 秒，全部满足小于 180 秒的验收阈值。这是约 9 分钟运行观察中的两次持续性采样，不代表无限时长稳定性保证。
+
+### 账户 3 三条待处理退出的定点恢复（北京时间 12:01:49）
+
+用户要求处理剩余三条退出记录后，先建立只读验收断言：账户 3 PENDING 数量必须为 0；处理前该断言失败。三条记录都绑定同一 LONG 批次 `ep_PHAROSUSDT_20260930013716_3_b1`、退出量 132。当前进程 stream epoch 与该旧账本 head 的 epoch 不同，自动恢复无法取得匹配视图，持续 deferred。这次只恢复退出单终态，未解决 source-anchored fill scan 的覆盖冲突。
+
+使用既有 Binance 查询客户端与 `AsyncPostgresDecisionUnitOfWork` 做定点恢复，脚本为 `deploy/ops/reconcile_account3_exits_20260930.py`（默认只读，必须显式 --apply 才写回，交易提交功能关闭）。写入前完成所有校验：交易所 V2 明确 LONG 数量为 0、PHAROS 无挂单、账户成交事实 SELL 共 132、reservation 未结算数量为 0、前两条无本地订单且确定性 client ID 在交易所不存在；最后一条的实际 client ID 对应订单 201148019，交易所再次确认 FILLED、executedQty=132。
+
+| decision 后缀 | 交易所证据 | 写回状态 |
+| --- | --- | --- |
+| 4e49289bcf7bbced | cml_e83b7ae14d777d7a528b9643fc9ebfe6 不存在 | SUPERSEDED |
+| 68de065b55de733c | cml_cc9a1e1096b8bd8ee69b9411085bc23b 不存在 | SUPERSEDED |
+| 5ee41e9b75650f1c | cml_7333c2e2178ce394076e7785a42fae95，订单 201148019 已成交 | DISPATCHED（补记派发回执） |
+
+前两条保留处置原因 `exchange_absence_reconciled_original_batch_closed_201148019`；最后一条补记 command 回执，dispatched_at 是回执补写时间，不是原始交易所提交时间。没有把实际成交的第三条误标为未派发或失效，没有删除记录、改写持仓/成交事实或直接执行 UPDATE SQL。处理后的独立只读验收断言通过：账户 3 PENDING=0，对账 ready，持仓/挂单/不匹配均为 0。服务未重启、未额外下单。
+
+12:03 复验三条终态与交易所证据仍一致，PENDING 仍为 0；四账户 checkpoint 和行情水位继续前进，采样年龄均小于 180 秒。
