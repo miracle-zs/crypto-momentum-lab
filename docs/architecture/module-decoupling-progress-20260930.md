@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -918,6 +918,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 保留 context_ready 可选 SourceIngress 参数，该模型仍在 telemetry 所有者，仅 TYPE_CHECKING 引用；本批不宣称所有类型引用已脱离 telemetry。上下文失效的既有动态探测未在本批迁移。
 
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2482 passed**，28.53 秒，一项现有 Starlette/httpx 警告。新增 market_admission 独立进程禁止 sqlalchemy/persistence 导入检查。telemetry_ports、market_admission 与 context 三文件定向 mypy --follow-imports=skip 通过；尝试同时纳入 context_prefetch 时发现原 AsyncGenerator 三类型参数错误，该文件未修改，仍属类型验收缺口。核心文件与架构测试完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十一批：上下文预取类型验收闭合
+
+第七十批提交为 `1c5e71d`；第七十一批继续本地实施，未部署生产。
+
+- 修正 LiveContextPrefetcher.stream 的 AsyncGenerator 返回注解，从错误的三个参数改为 PrefetchedContext/None 两个参数。Python 异步生成器没有同步 Generator 的 return 类型参数。
+- 除返回注解外，整个预取模块 AST 与上一批一致。generation 捕获、backfill 跳过上下文读取、容量二队列、状态顺序、错误随状态传递与所有任务取消/等待保持。无新增运行接口或测试镜像。
+- 第七十批记录的 context_prefetch 类型验收缺口已关闭；不修改该批的历史验收记录。
+
+验证：预取顺序/取消定向 **2 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2482 passed**，28.29 秒，一项现有 Starlette/httpx 警告。telemetry_ports、market_admission、context、context_prefetch 四文件一起定向 mypy --follow-imports=skip 通过，核心文件完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

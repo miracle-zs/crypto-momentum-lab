@@ -56,7 +56,7 @@ class LiveContextPrefetcher:
     async def stream(
         self,
         states: AsyncIterable[MarketState15s],
-    ) -> AsyncGenerator[PrefetchedContext, None, None]:
+    ) -> AsyncGenerator[PrefetchedContext, None]:
         """Yield states in source order with their prefetched context.
 
         Provider failures are carried with the corresponding state so the
