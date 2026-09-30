@@ -43,6 +43,10 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.order_status import (
     exchange_order_state,
 )
+from crypto_momentum_lab.execution_account.binance.request_rules import (
+    normalize_fill_cursors,
+    normalize_symbols,
+)
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryInspectionUnknownError,
     ExitRecoveryObservation,
@@ -433,7 +437,7 @@ class BinanceUsdMPrivateReadClient:
 
     async def fetch_symbol_margin_type(self, symbol: str) -> str | None:
         """Read the exchange's symbol-level futures margin mode."""
-        normalized_symbol = _normalize_symbols((symbol,))[0]
+        normalized_symbol = normalize_symbols((symbol,))[0]
         payload = await self._signed_get(
             "/fapi/v1/symbolConfig",
             {"symbol": normalized_symbol},
@@ -457,7 +461,7 @@ class BinanceUsdMPrivateReadClient:
             raw_symbol = _optional_str(item.get("symbol"))
             if raw_symbol is None:
                 continue
-            symbol = _normalize_symbols((raw_symbol,))[0]
+            symbol = normalize_symbols((raw_symbol,))[0]
             raw_margin_type = _optional_str(item.get("marginType"))
             margin_types[symbol] = (
                 None
@@ -509,9 +513,9 @@ class BinanceUsdMPrivateReadClient:
         start_time_by_symbol: Mapping[str, int] | None = None,
         max_pages_per_symbol: int = 10,
     ) -> tuple[AccountFillEvent, ...]:
-        normalized_symbols = _normalize_symbols(symbols)
-        normalized_from_ids = _normalize_fill_cursors(from_id_by_symbol)
-        normalized_start_times = _normalize_fill_cursors(start_time_by_symbol)
+        normalized_symbols = normalize_symbols(symbols)
+        normalized_from_ids = normalize_fill_cursors(from_id_by_symbol)
+        normalized_start_times = normalize_fill_cursors(start_time_by_symbol)
         fills: dict[tuple[str, str], AccountFillEvent] = {}
         incomplete_symbols: set[str] = set()
         for symbol in normalized_symbols:
@@ -607,7 +611,7 @@ class BinanceUsdMPrivateReadClient:
         bounded window is not enough to claim earlier account history; callers
         must supply a previously verified position anchor at ``start_time_ms``.
         """
-        normalized_symbol = _normalize_symbols((symbol,))[0]
+        normalized_symbol = normalize_symbols((symbol,))[0]
         if type(start_time_ms) is not int or start_time_ms < 0:
             raise ValueError("start_time_ms must be a non-negative integer")
         if checked_through.tzinfo is None or checked_through.utcoffset() is None:
@@ -956,7 +960,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             )
         if self._entry_leverage is None:
             return
-        normalized_symbols = _normalize_symbols(symbols)
+        normalized_symbols = normalize_symbols(symbols)
         for offset in range(
             0,
             len(normalized_symbols),
@@ -985,7 +989,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             )
         if self._entry_margin_type is None:
             return
-        normalized_symbols = _normalize_symbols(symbols)
+        normalized_symbols = normalize_symbols(symbols)
         desired_margin_type = self._entry_margin_type
         try:
             all_margin_types = await self.fetch_symbol_margin_types()
@@ -1211,7 +1215,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         desired_margin_type = self._entry_margin_type
         if desired_margin_type is None:
             return None
-        normalized_symbol = _normalize_symbols((symbol,))[0]
+        normalized_symbol = normalize_symbols((symbol,))[0]
         async with self._margin_type_lock:
             configured = self._configured_margin_type_by_symbol.get(normalized_symbol)
             if configured is not None:
@@ -1574,33 +1578,6 @@ def _normalize_margin_type(value: str) -> str:
     except KeyError as exc:
         allowed = ", ".join(sorted(set(_MARGIN_TYPE_ALIASES.values())))
         raise ValueError(f"margin_type must be one of: {allowed}") from exc
-
-
-def _normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
-    normalized = tuple(sorted({symbol.strip().upper() for symbol in symbols}))
-    if any(not symbol for symbol in normalized):
-        raise ValueError("fill symbols must not be empty")
-    if any("/" in symbol or "\\" in symbol for symbol in normalized):
-        raise ValueError("fill symbols must be valid Binance symbols")
-    return normalized
-
-
-def _normalize_fill_cursors(
-    cursors: Mapping[str, int] | None,
-) -> dict[str, int]:
-    if cursors is None:
-        return {}
-    normalized: dict[str, int] = {}
-    for raw_symbol, raw_cursor in cursors.items():
-        symbol = str(raw_symbol).strip().upper()
-        if not symbol or "/" in symbol or "\\" in symbol:
-            raise ValueError("fill cursor symbols must be valid Binance symbols")
-        if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int):
-            raise ValueError("fill cursors must be integer values")
-        if raw_cursor < 0:
-            raise ValueError("fill cursors must be non-negative")
-        normalized[symbol] = raw_cursor
-    return normalized
 
 
 def _account_fill_from_trade_item(
