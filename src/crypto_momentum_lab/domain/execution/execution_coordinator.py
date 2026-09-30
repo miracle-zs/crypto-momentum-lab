@@ -177,6 +177,22 @@ class ExecutionCoordinator:
         self._reservations_by_id: dict[str, PositionReservation] = {}
         self.recover()
 
+    def copy_for_transaction(self) -> ExecutionCoordinator:
+        """Stage reservation changes without writing the live repository."""
+        candidate = ExecutionCoordinator(
+            repository=InMemoryPositionReservationRepository()
+        )
+        candidate._reservations_by_id = dict(self._reservations_by_id)
+        return candidate
+
+    def publish_from(self, candidate: ExecutionCoordinator) -> None:
+        """Take over staged tracking after commit; the candidate is then retired."""
+        self._reservations_by_id = candidate._reservations_by_id
+
+    def clear_reservations(self) -> None:
+        """Clear tracked state before authoritative durable restoration."""
+        self._reservations_by_id.clear()
+
     def recover(self, key: PositionKey | None = None) -> int:
         """Restores in-flight active reservations from repository upon startup."""
         active = self._repo.load_active_reservations(key)

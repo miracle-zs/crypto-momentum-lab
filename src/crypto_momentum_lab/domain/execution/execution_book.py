@@ -62,7 +62,6 @@ from crypto_momentum_lab.domain.execution.evidence_settlement import (
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
     ExecutionReadinessError,
-    InMemoryPositionReservationRepository,
     ReservationConflictError,
     VersionConflictError,
 )
@@ -485,12 +484,7 @@ class ExecutionBook:
         candidate._journal_revisions = dict(self._journal_revisions)
         candidate._last_sequences = dict(self._last_sequences)
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
-        candidate._coordinator = ExecutionCoordinator(
-            repository=InMemoryPositionReservationRepository()
-        )
-        candidate._coordinator._reservations_by_id = dict(
-            getattr(self._coordinator, "_reservations_by_id", {})
-        )
+        candidate._coordinator = self._coordinator.copy_for_transaction()
         candidate._reservation_repo = None
         candidate._active_transaction = None
         candidate._global_mutation_lock = self._global_mutation_lock
@@ -521,9 +515,7 @@ class ExecutionBook:
             "_recovery_adoption_scope",
         ):
             setattr(self, name, getattr(candidate, name))
-        self._coordinator._reservations_by_id = (
-            candidate._coordinator._reservations_by_id
-        )
+        self._coordinator.publish_from(candidate._coordinator)
         # The candidate's append-only delta is now durable, so it must not be
         # re-sent by the next observation. A candidate that rolled back is
         # never published, which keeps its pending events queued for retry.
@@ -707,7 +699,7 @@ class ExecutionBook:
             self._receipts_by_id.clear()
             self._recovery_required_commands.clear()
             self._dispatch_reconciliation_required_commands.clear()
-            self._coordinator._reservations_by_id.clear()
+            self._coordinator.clear_reservations()
             await self._restore_durable_positions(
                 unit_of_work=self._execution_unit_of_work,
                 account_label=account_label,
