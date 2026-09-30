@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import structlog
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountConfigSnapshot,
     AccountFillEvent,
     AccountPositionSnapshot,
@@ -470,6 +470,7 @@ class OrderExecutionCoordinator:
             )
         if stream_id and stream_epoch:
             self._active_stream = (stream_id, stream_epoch)
+        positions: tuple[AccountPositionSnapshot, ...]
         if snapshot is None:
             positions = ()
         elif isinstance(snapshot, AccountPositionSnapshot):
@@ -501,28 +502,28 @@ class OrderExecutionCoordinator:
         # `symbols` describes event context, not proof that an omitted position
         # is flat. Only explicit exchange position rows are ingested here.
         positions_by_key: dict[PositionKey, AccountPositionSnapshot] = {}
-        for pos in positions:
-            if not isinstance(pos, AccountPositionSnapshot):
+        for position in positions:
+            if not isinstance(position, AccountPositionSnapshot):
                 raise TypeError(
                     "AccountSnapshot.positions must contain AccountPositionSnapshot"
                 )
-            if pos.environment != self._environment:
+            if position.environment != self._environment:
                 raise ValueError(
                     "AccountPositionSnapshot environment must match coordinator "
                     f"({self._environment})"
                 )
-            if pos.account_label != self._account_label:
+            if position.account_label != self._account_label:
                 raise ValueError(
                     "AccountPositionSnapshot account_label does not match coordinator"
                 )
-            side_str = pos.position_side.upper()
+            side_str = position.position_side.upper()
             scope = ExecutionScope(
                 environment=self._environment,
                 account_label=self._account_label,
-                symbol=pos.symbol,
+                symbol=position.symbol,
                 position_side=FuturesPositionSide(side_str),
             )
-            positions_by_key[scope.to_position_key()] = pos
+            positions_by_key[scope.to_position_key()] = position
 
         fills_by_key: dict[PositionKey, list[AccountFillEvent]] = {}
         for fill in fills:
