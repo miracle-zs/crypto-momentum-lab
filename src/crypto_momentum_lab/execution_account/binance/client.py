@@ -47,6 +47,7 @@ from crypto_momentum_lab.execution_account.binance.request_rules import (
     normalize_fill_cursors,
     normalize_symbols,
 )
+from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryInspectionUnknownError,
     ExitRecoveryObservation,
@@ -625,7 +626,7 @@ class BinanceUsdMPrivateReadClient:
         if start_time_ms < end_time_ms - _FILL_SCAN_RETENTION_MS:
             return (), AccountFillPageScan(
                 symbol=normalized_symbol,
-                load_id=_fill_scan_load_id(
+                load_id=fill_scan_load_id(
                     normalized_symbol, start_time_ms, end_time_ms, ()
                 ),
                 scan_origin_start_time_ms=start_time_ms,
@@ -736,7 +737,7 @@ class BinanceUsdMPrivateReadClient:
         )
         scan = AccountFillPageScan(
             symbol=normalized_symbol,
-            load_id=_fill_scan_load_id(
+            load_id=fill_scan_load_id(
                 normalized_symbol,
                 start_time_ms,
                 end_time_ms,
@@ -1608,26 +1609,6 @@ def _account_fill_from_trade_item(
         ),
         raw_payload=_json_mapping(item),
     )
-
-
-def _fill_scan_load_id(
-    symbol: str,
-    start_time_ms: int,
-    end_time_ms: int,
-    fills: tuple[AccountFillEvent, ...],
-) -> str:
-    payload = "\x1f".join(
-        (
-            symbol,
-            str(start_time_ms),
-            str(end_time_ms),
-            *(
-                f"{fill.trade_id}:{fill.order_id}:{fill.quantity}:{fill.price}"
-                for fill in fills
-            ),
-        )
-    )
-    return "fillscan_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _require_mapping(value: object) -> dict[str, object]:

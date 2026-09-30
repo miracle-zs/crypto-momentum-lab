@@ -1,5 +1,6 @@
 """Pure fill identities, counts and next polling cursor calculation."""
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -162,9 +163,28 @@ def select_fill_reconciliation_symbols(
     historical_symbols = sorted(
         due_historical_symbols,
         key=lambda symbol: (
-            checked_at.get(symbol)
-            or datetime.min.replace(tzinfo=UTC),
+            checked_at.get(symbol) or datetime.min.replace(tzinfo=UTC),
             symbol,
         ),
-    )[: historical_batch_size]
+    )[:historical_batch_size]
     return tuple(sorted(active_fill_symbols | set(historical_symbols)))
+
+
+def fill_scan_load_id(
+    symbol: str,
+    start_time_ms: int,
+    end_time_ms: int,
+    fills: tuple[AccountFillEvent, ...],
+) -> str:
+    payload = "\x1f".join(
+        (
+            symbol,
+            str(start_time_ms),
+            str(end_time_ms),
+            *(
+                f"{fill.trade_id}:{fill.order_id}:{fill.quantity}:{fill.price}"
+                for fill in fills
+            ),
+        )
+    )
+    return "fillscan_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
