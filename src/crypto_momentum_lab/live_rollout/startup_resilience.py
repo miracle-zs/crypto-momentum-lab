@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
-from sqlalchemy.exc import SQLAlchemyError
 
+import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 from crypto_momentum_lab.execution_account.binance import BinanceRateLimitError
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 
@@ -73,7 +73,7 @@ def is_retryable_live_startup_error(error: Exception) -> bool:
             isinstance(error, RuntimeError)
             and str(error).startswith("live gate blocked:")
         )
-        or isinstance(error, (SQLAlchemyError, TimeoutError, ConnectionError, OSError))
+        or runtime_errors.is_transient_runtime_error(error)
     )
 
 

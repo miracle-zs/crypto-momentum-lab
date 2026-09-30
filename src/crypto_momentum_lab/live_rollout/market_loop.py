@@ -21,9 +21,9 @@ from collections.abc import (
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy.exc import SQLAlchemyError
 
 import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
+import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
@@ -319,7 +319,7 @@ class LiveMarketLoop:
                     await self._reconcile_orders()
                     last_reconciled_bucket = state.bucket_start
                 except Exception as error:
-                    if _is_transient_runtime_error(error):
+                    if runtime_errors.is_transient_runtime_error(error):
                         # Reconciliation is an eventual-consistency safety
                         # net. A temporary database outage must not tear down
                         # the live process; the next bucket retries it.
@@ -368,7 +368,7 @@ class LiveMarketLoop:
             admission = await self._market_admission.prepare(prefetched)
             if admission.error is not None:
                 admission_error = admission.error
-                if not _is_transient_runtime_error(admission_error):
+                if not runtime_errors.is_transient_runtime_error(admission_error):
                     raise admission_error
                 # Keep indicators moving but never authorize without a fresh
                 # context. The next state retries the full context read.
@@ -743,13 +743,6 @@ def _strategy_decision_details(
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
         details["hub_sequence"] = sequence
     return details
-
-
-def _is_transient_runtime_error(error: Exception) -> bool:
-    return isinstance(
-        error,
-        (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
-    )
 
 
 def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:

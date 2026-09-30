@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十八批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -514,6 +514,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 两个函数在名称及递归引用归一化后 AST 与原实现一致。现有基于错误消息/类名的分类没有改为新的异常体系，本批不宣称解决所有错误分类或并发问题。
 
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2422 passed**，26.11 秒，一项现有 Starlette/httpx 警告。规则/退出处理器/身份 epoch/架构定向 **68 passed**。新增 **5 项**覆盖 reservation 类名及嵌套 cause 仅影响运行通道、三类嵌套耐久消息同时被两套规则识别；新增独立进程无 sqlalchemy/persistence 导入检查。规则及新增测试完整 Ruff、迁移文件 F/I、规则定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第三十八批：共用瞬时运行异常分类
+
+第三十七批提交为 `da12a7d`；第三十八批继续本地实施，未部署生产。
+
+- live_rollout/runtime_errors.py 拥有共用 is_transient_runtime_error，统一 SQLAlchemyError、TimeoutError、ConnectionError 与 OSError 四类原规则。模块明确依赖原生数据库异常类型，不标记为无数据库依赖的纯领域模块。
+- market_loop 与 runtime_orchestrator 删除重复私有分类函数，直接使用共享规则；通道回调注入仍保持。startup_resilience 引用同一规则，启动专属 BinanceRateLimitError 和 live gate blocked 前缀仍保留原分支。
+- 两个原运行期函数体与共享实现 AST 一致。分类不递归扩展 cause，不把 gate/configuration 错误引入运行期重试，也不改变现有重试预算、通道终止或启动退避行为。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2430 passed**，25.73 秒，一项现有 Starlette/httpx 警告。规则/启动/daemon/CLI 定向 **140 passed**；新增 **8 项**覆盖四类共用瞬时异常、三个运行期不可重试错误与包裹 cause 不扩大分类。规则及新增测试完整 Ruff、迁移文件 F/I、规则定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

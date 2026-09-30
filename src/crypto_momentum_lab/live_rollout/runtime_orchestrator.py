@@ -21,10 +21,10 @@ from time import perf_counter
 from typing import Any
 
 import structlog
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
+import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 import crypto_momentum_lab.live_rollout.session_state as session_state
 import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
@@ -1559,7 +1559,7 @@ async def run_live_daemon(
             daemon=daemon,
             latest_market_quotes=latest_market_quotes,
             latest_market_states=latest_market_states,
-            is_transient_error=_is_transient_live_runtime_error,
+            is_transient_error=runtime_errors.is_transient_runtime_error,
             is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
@@ -1603,7 +1603,7 @@ async def run_live_daemon(
             order_reconciliation=order_reconciliation,
             run_id=session_id,
             telemetry=telemetry,
-            is_transient_error=_is_transient_live_runtime_error,
+            is_transient_error=runtime_errors.is_transient_runtime_error,
             is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             on_account_snapshot=_on_account_snapshot_combined,
@@ -1962,7 +1962,7 @@ async def _run_account_event_channel(
         order_reconciliation=order_reconciliation,
         run_id=run_id,
         telemetry=telemetry,
-        is_transient_error=_is_transient_live_runtime_error,
+        is_transient_error=runtime_errors.is_transient_runtime_error,
         is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         on_account_snapshot=on_account_snapshot,
@@ -1986,16 +1986,9 @@ async def _run_grace_timeout_channel(
         daemon=daemon,
         latest_market_quotes=latest_market_quotes,
         latest_market_states=latest_market_states,
-        is_transient_error=_is_transient_live_runtime_error,
+        is_transient_error=runtime_errors.is_transient_runtime_error,
         is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
-
-
-def _is_transient_live_runtime_error(error: Exception) -> bool:
-    return isinstance(
-        error,
-        (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
-    )
