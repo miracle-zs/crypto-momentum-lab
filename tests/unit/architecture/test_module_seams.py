@@ -467,6 +467,7 @@ importlib.import_module(sys.argv[1])
         "crypto_momentum_lab.execution_account.balance_history",
         "crypto_momentum_lab.execution_account.position_history",
         "crypto_momentum_lab.execution_account.reconciliation_records",
+        "crypto_momentum_lab.execution_account.fill_scan_plan",
     ],
 )
 def test_account_snapshot_imports_without_sync_service(module):

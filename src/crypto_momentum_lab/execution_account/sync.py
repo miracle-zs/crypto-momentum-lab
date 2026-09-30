@@ -14,7 +14,6 @@ from crypto_momentum_lab.domain.account.models import (
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.balance_history import (
     BalanceValue,
@@ -36,6 +35,7 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     fill_counts_by_symbol,
     merge_fill_cursor,
 )
+from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.execution_account.position_history import (
     PositionSignature,
     should_persist_position,
@@ -342,38 +342,13 @@ class ExecutionAccountSyncService:
                     symbol = position.symbol.strip().upper()
                     side = position.position_side.strip().upper()
                     source_anchor = self._config.fill_source_anchors.get((symbol, side))
-                    if source_anchor is not None:
-                        source_anchor_id = source_anchor.checkpoint_id
-                        source_anchor_cut = source_anchor.event_cut
-                        source_anchor_kind = "recovery_checkpoint"
-                        source_stream_id = source_anchor.stream_id
-                        source_stream_epoch = source_anchor.stream_epoch
-                    elif position.position_amt == Decimal("0"):
-                        source_anchor_id = (
-                            PositionRecoveryCodec.stable_snapshot_anchor_id(position)
-                        )
-                        source_anchor_cut = position.observed_at
-                        source_anchor_kind = "zero_snapshot"
-                        source_stream_id = None
-                        source_stream_epoch = None
-                    else:
-                        # A non-flat snapshot alone cannot invent the missing
-                        # cost basis, batch identities, or fill history.
-                        continue
-                    # A zero snapshot is its own recovery cut. Scanning fills
-                    # from that timestamp through the same timestamp has no
-                    # interval to reconcile, so treat the anchor as complete
-                    # locally instead of issuing one private REST request per
-                    # flat position row (Binance V2 returns hundreds of them).
-                    if source_anchor_cut >= position.observed_at:
-                        continue
-                    origin_ms = int(source_anchor_cut.timestamp() * 1000)
-                    if origin_ms > int(position.observed_at.timestamp() * 1000):
+                    plan = plan_fill_scan(position, source_anchor)
+                    if plan is None:
                         continue
                     scoped_fills, page_scan = await scan_fetcher(
                         symbol,
-                        start_time_ms=origin_ms,
-                        checked_through=position.observed_at,
+                        start_time_ms=plan.start_time_ms,
+                        checked_through=plan.checked_through,
                     )
                     for fill in scoped_fills:
                         if fill.trade_at <= position.observed_at:
@@ -386,11 +361,11 @@ class ExecutionAccountSyncService:
                             position_side=side,
                             page_scan=page_scan,
                             observed_at=position.observed_at,
-                            source_anchor_id=source_anchor_id,
-                            source_anchor_event_cut=source_anchor_cut,
-                            source_anchor_kind=source_anchor_kind,
-                            source_stream_id=source_stream_id,
-                            source_stream_epoch=source_stream_epoch,
+                            source_anchor_id=plan.source_anchor_id,
+                            source_anchor_event_cut=plan.source_anchor_event_cut,
+                            source_anchor_kind=plan.source_anchor_kind,
+                            source_stream_id=plan.source_stream_id,
+                            source_stream_epoch=plan.source_stream_epoch,
                         )
                     )
 
