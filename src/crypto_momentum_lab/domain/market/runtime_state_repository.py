@@ -1,4 +1,4 @@
-"""Durable market-state reading capabilities required by startup recovery."""
+"""Durable paging and recovery reads consumed by market-state use cases."""
 
 from collections.abc import Collection, Mapping
 from datetime import datetime
@@ -8,7 +8,7 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 
 
-class RuntimeMarketStateReadRepository(Protocol):
+class RuntimeMarketStatePageReader(Protocol):
     """Read committed states; persistence and session ownership stay in adapters."""
 
     async def load_latest_bucket(self, *, environment: str) -> datetime | None: ...
@@ -28,6 +28,10 @@ class RuntimeMarketStateReadRepository(Protocol):
         whereas an empty symbol collection selects none.
         """
         ...
+
+
+class RuntimeMarketStateReadRepository(RuntimeMarketStatePageReader, Protocol):
+    """Paging and per-checkpoint recovery reads required by strategy startup."""
 
     async def load_recovery_window(
         self,

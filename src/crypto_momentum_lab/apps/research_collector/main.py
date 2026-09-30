@@ -46,7 +46,7 @@ from crypto_momentum_lab.research_collector.service import (
     ResearchStateCollector,
 )
 from crypto_momentum_lab.research_collector.source import (
-    PostgresMarketStateBackfillSource,
+    RuntimeMarketStateBackfillSource,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -356,7 +356,7 @@ async def _run_collector(
         source=source,
         selector=selector,
         startup_timer=startup_timer,
-        backfill_source=PostgresMarketStateBackfillSource(
+        backfill_source=RuntimeMarketStateBackfillSource(
             runtime_repository,
             environment=environment,
         ),

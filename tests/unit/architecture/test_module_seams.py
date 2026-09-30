@@ -10,6 +10,9 @@ import pytest
     "module",
     [
         "crypto_momentum_lab.live_rollout.decision_facts",
+        "crypto_momentum_lab.research_collector.source",
+        "crypto_momentum_lab.research_collector",
+        "crypto_momentum_lab.research_collector.models",
         "crypto_momentum_lab.live_rollout.hub_cursor",
         "crypto_momentum_lab.live_rollout.market_runtime_contracts",
         "crypto_momentum_lab.live_rollout.startup_recovery",

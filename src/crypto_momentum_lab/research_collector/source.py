@@ -7,17 +7,17 @@ from datetime import UTC, datetime
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
-from crypto_momentum_lab.market_data.hub import MarketStateBatch
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    PostgresRuntimeMarketStateRepository,
+from crypto_momentum_lab.domain.market.runtime_state_repository import (
+    RuntimeMarketStatePageReader,
 )
+from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.research_collector.models import require_utc
 
 
-class PostgresMarketStateBackfillSource:
-    """Read the short-retention runtime table in cursor order.
+class RuntimeMarketStateBackfillSource:
+    """Read retained durable market states in cursor order.
 
-    PostgreSQL rows are grouped by bucket where possible.  A large database
+    Durable rows are grouped by bucket where possible.  A large database
     page can split one bucket into two batches; the collector's natural-key
     deduplication makes that case safe and avoids loading the entire recovery
     window into memory.
@@ -25,7 +25,7 @@ class PostgresMarketStateBackfillSource:
 
     def __init__(
         self,
-        repository: PostgresRuntimeMarketStateRepository,
+        repository: RuntimeMarketStatePageReader,
         *,
         environment: str,
         page_size: int = 500,

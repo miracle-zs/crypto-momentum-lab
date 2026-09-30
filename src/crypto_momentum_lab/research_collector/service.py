@@ -46,7 +46,7 @@ from crypto_momentum_lab.research_collector.models import (
     require_utc,
 )
 from crypto_momentum_lab.research_collector.source import (
-    PostgresMarketStateBackfillSource,
+    RuntimeMarketStateBackfillSource,
 )
 from crypto_momentum_lab.research_collector.storage import (
     CapacityGuard,
@@ -78,7 +78,7 @@ class ResearchStateCollector:
         journal: ArchiveJournal | None = None,
         materializer: WindowMaterializer | None = None,
         checkpoint_store: CheckpointStore | None = None,
-        backfill_source: PostgresMarketStateBackfillSource | None = None,
+        backfill_source: RuntimeMarketStateBackfillSource | None = None,
         startup_timer: StartupPhaseTimer | None = None,
     ) -> None:
         config.root.mkdir(parents=True, exist_ok=True)
