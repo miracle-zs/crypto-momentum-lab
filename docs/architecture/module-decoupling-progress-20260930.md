@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百一十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1514,6 +1514,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：Postgres execution_unit_of_work、执行 ports、恢复模型、ledger 模型四文件联合 mypy --follow-imports=skip 通过；临时接口探针 `def accept_transaction(tx: ExecutionTransaction) -> ExecutionTransactionPort: return tx` 联合检查通过并清理。未纳入所有底层适配所有者，不代表全仓类型验收。
 
 执行领域及位置修复定向 **343 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，32.14 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十批：执行事务与恢复使用明确 journal store 接口
+
+第一百一十九批提交为 `106e416`；第一百二十批继续本地实施，未部署生产。
+
+- 新增 Postgres 层 ExecutionJournalStore，包含消费路径实际使用的五项 session 方法：事实持久化、checkpoint 保存/按 ID 读取、恢复切点读取、账户流列表。参数与返回使用领域模型，未向领域层引入 SQL session。
+- ExecutionTransaction 与 AsyncPostgresExecutionUnitOfWork 的 journal_store 参数由 Any 改为该接口；原实现与替身仍由既有装配注入，不新增转发适配器。
+- 类型检查暴露 load_positions 复用流变量的可空查找结果；使用 matched_scope 表示查找，最终 scope 在原 head 匹配/构造或单流分支赋值，选择规则与错误文本保持。
+
+验证：执行领域及位置修复定向 **343 passed**；最终修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，31.20 秒，一项现有 Starlette/httpx 警告。execution_unit_of_work、新接口、领域执行 ports、恢复模型、ledger 模型五文件联合 mypy --follow-imports=skip 通过，新接口完整 Ruff、UoW F/I、git diff --check 通过。具体 PostgresAccountJournalStore 所有者未纳入该类型范围，原生实现静态适配与真实数据库验收仍待补齐。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

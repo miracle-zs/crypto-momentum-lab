@@ -80,6 +80,9 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
     ExecutionOrderWatermarkRow,
     ExecutionTradeIdentityRow,
 )
+from crypto_momentum_lab.persistence.postgres.journal_store_ports import (
+    ExecutionJournalStore,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     DecisionTraceRow,
     MarketRevisionRefRow,
@@ -102,7 +105,7 @@ class ExecutionTransaction:
         self,
         session: AsyncSession,
         *,
-        journal_store: Any,
+        journal_store: ExecutionJournalStore,
         command_repository: PostgresCommandRepository,
         reservation_repository: AsyncPostgresPositionReservationRepository,
     ) -> None:
@@ -496,7 +499,7 @@ class AsyncPostgresExecutionUnitOfWork:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        journal_store: Any,
+        journal_store: ExecutionJournalStore,
         command_repository: PostgresCommandRepository,
         reservation_repository: AsyncPostgresPositionReservationRepository,
     ) -> None:
@@ -583,7 +586,7 @@ class AsyncPostgresExecutionUnitOfWork:
                     else None
                 )
                 if head is not None:
-                    scope = next(
+                    matched_scope = next(
                         (
                             candidate
                             for candidate in scoped_rows
@@ -592,12 +595,14 @@ class AsyncPostgresExecutionUnitOfWork:
                         ),
                         None,
                     )
-                    if scope is None:
+                    if matched_scope is None:
                         scope = AccountFactStreamScope.for_position_key(
                             key,
                             stream_id=head.stream_id,
                             stream_epoch=head.stream_epoch,
                         )
+                    else:
+                        scope = matched_scope
                 elif len(scoped_rows) == 1:
                     scope = scoped_rows[0]
                 else:
