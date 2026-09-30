@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.execution_book import ExecutionScope
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     CapabilityEvaluator,
     CapabilityEvidence,

@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 
 import structlog
@@ -18,6 +17,16 @@ from crypto_momentum_lab.domain.account import (
 )
 from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
+)
+from crypto_momentum_lab.domain.execution.command_lifecycle import (
+    plan_command_transition,
+    plan_reservation_release,
+    plan_reservation_settlement,
+)
+from crypto_momentum_lab.domain.execution.command_models import (
+    DispatchState,
+    ExecutionScope,
+    OutboxEntry,
 )
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     _digest_json_payload,
@@ -255,49 +264,6 @@ def _required_text(values: Mapping[str, Any], field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"execution command {field_name} is missing or invalid")
     return value
-
-
-class DispatchState(StrEnum):
-    """Authoritative lifecycle states for outbound trade commands."""
-
-    PREPARED = "prepared"
-    DISPATCHING = "dispatching"
-    ACKNOWLEDGED = "acknowledged"
-    REJECTED = "rejected"
-    UNKNOWN = "unknown"
-    TERMINAL = "terminal"
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionScope:
-    environment: str
-    account_label: str
-    symbol: str
-    position_side: FuturesPositionSide = FuturesPositionSide.BOTH
-
-    def to_position_key(self) -> PositionKey:
-        return PositionKey(
-            environment=self.environment,
-            account_label=self.account_label,
-            symbol=self.symbol,
-            position_side=self.position_side,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class OutboxEntry:
-    """Immutable dispatch record tracking external order submission attempt."""
-
-    command_id: str
-    request_id: str
-    scope: ExecutionScope
-    command: TradeCommand
-    state: DispatchState = DispatchState.PREPARED
-    attempt_count: int = 0
-    external_order_id: str | None = None
-    last_error: str | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1324,9 +1290,8 @@ class ExecutionBook:
         self._persistence_failed = False
         if self._execution_unit_of_work is not None:
             for command_id in deferred_unknown_commands:
-                await self._durable_command_mutation(
+                await self.mark_unknown(
                     command_id,
-                    "_mark_unknown_mutating",
                     "restored dispatch requires reconciliation",
                     datetime.now(UTC),
                 )
@@ -2098,10 +2063,12 @@ class ExecutionBook:
     async def _durable_command_mutation(
         self,
         command_id: str,
-        mutator_name: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+        target: DispatchState,
+        *,
+        at: datetime | None = None,
+        external_order_id: str | None = None,
+        reason: str = "",
+    ) -> OutboxEntry:
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
@@ -2129,8 +2096,12 @@ class ExecutionBook:
                             "durable execution stream changed; restore is required"
                         )
                     candidate._active_transaction = tx
-                    result = await getattr(candidate, mutator_name)(
-                        command_id, *args, **kwargs
+                    result = await candidate._apply_command_transition(
+                        command_id,
+                        target,
+                        at=at,
+                        external_order_id=external_order_id,
+                        reason=reason,
                     )
                     facts = candidate._ensure_journal(key).read_cut()
                     head_payload = _execution_head_payload(
@@ -2160,32 +2131,9 @@ class ExecutionBook:
     async def mark_dispatching(
         self, command_id: str, dispatched_at: datetime | None = None
     ) -> OutboxEntry:
-        """Transition PREPARED to DISPATCHING; UNKNOWN requires reconciliation."""
-        if self._execution_unit_of_work is not None:
-            return await self._durable_command_mutation(
-                command_id, "_mark_dispatching_mutating", dispatched_at
-            )
-        return await self._mark_dispatching_mutating(command_id, dispatched_at)
-
-    async def _mark_dispatching_mutating(
-        self, command_id: str, dispatched_at: datetime | None = None
-    ) -> OutboxEntry:
-        entry = self._outbox_by_command_id.get(command_id)
-        if entry is None:
-            raise KeyError(f"Outbox entry {command_id} not found")
-        if entry.state != DispatchState.PREPARED:
-            raise ValueError(
-                f"Cannot dispatch outbox entry in state {entry.state.value}"
-            )
-        now = dispatched_at or datetime.now(UTC)
-        updated = replace(
-            entry,
-            state=DispatchState.DISPATCHING,
-            attempt_count=entry.attempt_count + 1,
-            updated_at=now,
+        return await self._transition_command(
+            command_id, DispatchState.DISPATCHING, at=dispatched_at
         )
-        await self._persist_transition(entry, updated)
-        return self._outbox_by_command_id[command_id]
 
     async def mark_acknowledged(
         self,
@@ -2193,36 +2141,12 @@ class ExecutionBook:
         external_order_id: str,
         acknowledged_at: datetime | None = None,
     ) -> OutboxEntry:
-        """Transitions outbox to ACKNOWLEDGED with external exchange order ID."""
-        if self._execution_unit_of_work is not None:
-            return await self._durable_command_mutation(
-                command_id,
-                "_mark_acknowledged_mutating",
-                external_order_id,
-                acknowledged_at,
-            )
-        return await self._mark_acknowledged_mutating(
-            command_id, external_order_id, acknowledged_at
-        )
-
-    async def _mark_acknowledged_mutating(
-        self,
-        command_id: str,
-        external_order_id: str,
-        acknowledged_at: datetime | None = None,
-    ) -> OutboxEntry:
-        entry = self._outbox_by_command_id.get(command_id)
-        if entry is None:
-            raise KeyError(f"Outbox entry {command_id} not found")
-        now = acknowledged_at or datetime.now(UTC)
-        updated = replace(
-            entry,
-            state=DispatchState.ACKNOWLEDGED,
+        return await self._transition_command(
+            command_id,
+            DispatchState.ACKNOWLEDGED,
             external_order_id=external_order_id,
-            updated_at=now,
+            at=acknowledged_at,
         )
-        await self._persist_transition(entry, updated)
-        return self._outbox_by_command_id[command_id]
 
     async def mark_unknown(
         self,
@@ -2230,41 +2154,12 @@ class ExecutionBook:
         reason: str,
         unknown_at: datetime | None = None,
     ) -> OutboxEntry:
-        """Transitions outbox to UNKNOWN while preserving active reservations."""
-        if self._execution_unit_of_work is not None:
-            return await self._durable_command_mutation(
-                command_id, "_mark_unknown_mutating", reason, unknown_at
-            )
-        return await self._mark_unknown_mutating(command_id, reason, unknown_at)
-
-    async def _mark_unknown_mutating(
-        self,
-        command_id: str,
-        reason: str,
-        unknown_at: datetime | None = None,
-    ) -> OutboxEntry:
-        entry = self._outbox_by_command_id.get(command_id)
-        if entry is None:
-            raise KeyError(f"Outbox entry {command_id} not found")
-        if entry.state in (DispatchState.TERMINAL, DispatchState.REJECTED):
-            return entry
-        now = unknown_at or datetime.now(UTC)
-        updated = replace(
-            entry,
-            state=DispatchState.UNKNOWN,
-            last_error=reason,
-            updated_at=now,
+        return await self._transition_command(
+            command_id,
+            DispatchState.UNKNOWN,
+            reason=reason,
+            at=unknown_at,
         )
-        self._dispatch_reconciliation_required_commands.add(command_id)
-        try:
-            await self._persist_transition(entry, updated)
-        except Exception:
-            # Once a submit may have reached the exchange, a failed durable
-            # UNKNOWN write must still seal this process against resubmission.
-            self._outbox_by_command_id[command_id] = updated
-            self._persistence_failed = True
-            raise
-        return self._outbox_by_command_id[command_id]
 
     async def mark_rejected(
         self,
@@ -2272,32 +2167,12 @@ class ExecutionBook:
         reason: str,
         rejected_at: datetime | None = None,
     ) -> OutboxEntry:
-        """Transitions outbox to REJECTED and releases all active reservations."""
-        if self._execution_unit_of_work is not None:
-            return await self._durable_command_mutation(
-                command_id, "_mark_rejected_mutating", reason, rejected_at
-            )
-        return await self._mark_rejected_mutating(command_id, reason, rejected_at)
-
-    async def _mark_rejected_mutating(
-        self,
-        command_id: str,
-        reason: str,
-        rejected_at: datetime | None = None,
-    ) -> OutboxEntry:
-        entry = self._outbox_by_command_id.get(command_id)
-        if entry is None:
-            raise KeyError(f"Outbox entry {command_id} not found")
-        now = rejected_at or datetime.now(UTC)
-        updated = replace(
-            entry,
-            state=DispatchState.REJECTED,
-            last_error=reason,
-            updated_at=now,
+        return await self._transition_command(
+            command_id,
+            DispatchState.REJECTED,
+            reason=reason,
+            at=rejected_at,
         )
-        await self._persist_transition(entry, updated)
-        await self._release_command_reservations(command_id, reason="command_rejected")
-        return self._outbox_by_command_id[command_id]
 
     async def mark_terminal(
         self,
@@ -2305,33 +2180,75 @@ class ExecutionBook:
         reason: str = "",
         terminal_at: datetime | None = None,
     ) -> OutboxEntry:
-        """Transitions outbox to TERMINAL and releases remaining reservations."""
-        if self._execution_unit_of_work is not None:
-            return await self._durable_command_mutation(
-                command_id, "_mark_terminal_mutating", reason, terminal_at
-            )
-        return await self._mark_terminal_mutating(command_id, reason, terminal_at)
+        return await self._transition_command(
+            command_id,
+            DispatchState.TERMINAL,
+            reason=reason,
+            at=terminal_at,
+        )
 
-    async def _mark_terminal_mutating(
+    async def _transition_command(
         self,
         command_id: str,
+        target: DispatchState,
+        *,
+        at: datetime | None = None,
+        external_order_id: str | None = None,
         reason: str = "",
-        terminal_at: datetime | None = None,
+    ) -> OutboxEntry:
+        if self._execution_unit_of_work is not None:
+            return await self._durable_command_mutation(
+                command_id,
+                target,
+                at=at,
+                external_order_id=external_order_id,
+                reason=reason,
+            )
+        return await self._apply_command_transition(
+            command_id,
+            target,
+            at=at,
+            external_order_id=external_order_id,
+            reason=reason,
+        )
+
+    async def _apply_command_transition(
+        self,
+        command_id: str,
+        target: DispatchState,
+        *,
+        at: datetime | None = None,
+        external_order_id: str | None = None,
+        reason: str = "",
     ) -> OutboxEntry:
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
             raise KeyError(f"Outbox entry {command_id} not found")
-        now = terminal_at or datetime.now(UTC)
-        updated = replace(
+        plan = plan_command_transition(
             entry,
-            state=DispatchState.TERMINAL,
-            last_error=reason if reason else entry.last_error,
-            updated_at=now,
+            target,
+            at=at or datetime.now(UTC),
+            external_order_id=external_order_id,
+            reason=reason,
         )
-        await self._persist_transition(entry, updated)
-        await self._release_command_reservations(
-            command_id, reason=reason or "command_terminal"
-        )
+        if plan.updated is entry:
+            return entry
+        if plan.requires_reconciliation:
+            self._dispatch_reconciliation_required_commands.add(command_id)
+        try:
+            await self._persist_transition(entry, plan.updated)
+        except Exception:
+            if plan.requires_reconciliation:
+                # A submit may have reached the exchange. Seal against resubmit
+                # even when the durable UNKNOWN write fails.
+                self._outbox_by_command_id[command_id] = plan.updated
+                self._persistence_failed = True
+            raise
+        if plan.release_reason is not None:
+            await self._release_command_reservations(
+                command_id,
+                reason=plan.release_reason,
+            )
         return self._outbox_by_command_id[command_id]
 
     async def _persist_transition(
@@ -2348,12 +2265,12 @@ class ExecutionBook:
         *,
         reason: str,
     ) -> Decimal:
-        released_total = Decimal("0")
-        for reservation in self._find_active_reservations_for_command(command_id):
-            released = reservation.release(reservation.active_quantity)
+        plan = plan_reservation_release(
+            tuple(self._find_active_reservations_for_command(command_id))
+        )
+        for released in plan.updates:
             await self._persist_reservation_update(released, release_reason=reason)
-            released_total += released.released_quantity - reservation.released_quantity
-        return released_total
+        return plan.released_quantity
 
     async def _persist_reservation_update(
         self,
@@ -2393,36 +2310,17 @@ class ExecutionBook:
         *,
         reported_quantity: Decimal,
     ) -> tuple[Decimal, bool, str | None]:
-        if quantity <= Decimal("0"):
-            return Decimal("0"), False, None
-        linked = self._find_active_reservations_for_command(order_id)
-        if not linked:
+        plan = plan_reservation_settlement(
+            tuple(self._find_active_reservations_for_command(order_id)),
+            order_id=order_id,
+            quantity=quantity,
+            reported_quantity=reported_quantity,
+        )
+        for updated in plan.updates:
+            await self._persist_reservation_update(updated)
+        if plan.recovery_required:
             self._recovery_required_commands.add(order_id)
-            return (
-                Decimal("0"),
-                True,
-                f"No active reservation is linked to filled command {order_id}",
-            )
-        remaining = quantity
-        consumed_total = Decimal("0")
-        for reservation in linked:
-            if remaining <= Decimal("0"):
-                break
-            consumed = min(remaining, reservation.active_quantity)
-            if consumed <= Decimal("0"):
-                continue
-            await self._persist_reservation_update(reservation.consume(consumed))
-            consumed_total += consumed
-            remaining -= consumed
-        if remaining > Decimal("0"):
-            self._recovery_required_commands.add(order_id)
-            return (
-                consumed_total,
-                True,
-                f"Cumulative fill {reported_quantity} exceeds linked active "
-                f"reservations by {remaining}",
-            )
-        return consumed_total, False, None
+        return plan.consumed_quantity, plan.recovery_required, plan.diagnostic
 
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
         """Atomically accept source evidence and publish its projection."""

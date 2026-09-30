@@ -67,7 +67,7 @@ async def test_bootstrap_real_flat_hedge_rows_ready_both_execution_scopes() -> N
     from decimal import Decimal
 
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionScope
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
     from crypto_momentum_lab.domain.execution.trade_command import FuturesPositionSide
     from crypto_momentum_lab.execution_account.orders.coordinator import (
         OrderExecutionCoordinator,

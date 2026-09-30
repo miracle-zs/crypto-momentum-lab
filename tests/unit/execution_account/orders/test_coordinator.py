@@ -11,15 +11,15 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionKey,
     _KeyCommandScheduler,
-)
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -1447,10 +1447,8 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
 
 @pytest.mark.asyncio
 async def test_coordinator_execution_book_integration() -> None:
-    from crypto_momentum_lab.domain.execution.execution_book import (
-        ExecutionBook,
-        ExecutionScope,
-    )
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )

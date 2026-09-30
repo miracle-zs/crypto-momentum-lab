@@ -6,10 +6,10 @@ from decimal import Decimal
 import pytest
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
     ExecutionEvidence,
-    ExecutionScope,
 )
 
 

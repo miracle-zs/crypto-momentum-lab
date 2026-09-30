@@ -29,10 +29,8 @@ from crypto_momentum_lab.domain.decision.ports import (
     DecisionUnitOfWorkPort,
     ExitDispatchHandler,
 )
-from crypto_momentum_lab.domain.execution.execution_book import (
-    ExecutionBook,
-    ExecutionScope,
-)
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,

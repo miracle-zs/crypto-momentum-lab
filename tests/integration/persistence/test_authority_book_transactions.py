@@ -9,12 +9,12 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.execution_book import (
     Applied,
     Duplicate,
     ExecutionBook,
     ExecutionEvidence,
-    ExecutionScope,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,

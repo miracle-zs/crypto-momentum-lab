@@ -11,11 +11,11 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.execution_book import (
     EvidenceConflict,
     ExecutionBook,
     ExecutionEvidence,
-    ExecutionScope,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
@@ -210,10 +210,11 @@ async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
     """
     from contextlib import asynccontextmanager
     from typing import Any
+
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
     from crypto_momentum_lab.domain.execution.recovery_models import (
         JournalPersistResult,
     )
-    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class _DurableTx:
         def __init__(self) -> None:
