@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1578,6 +1578,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：实际 store、journal_store_ports、execution_unit_of_work、领域 ports、恢复模型、ledger 模型、recovery_codec 七文件联合 mypy --follow-imports=skip 通过，关闭前批十二项错误；临时 `def accept_store(store: PostgresAccountJournalStore) -> ExecutionJournalStore: return store` 探针联合检查通过并清理，确认具体 store 的静态接口适配。不代表跳过依赖、全部调用者或全仓类型验收。
 
 布尔修正阶段执行领域定向 **322 passed**；全部修正后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，29.90 秒，一项现有 Starlette/httpx 警告。两个修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十五批：Postgres 包与 journal store 接口导入边界
+
+第一百二十四批提交为 `8719e80`；第一百二十五批于 2026-10-01 继续本地实施，未部署生产。
+
+- 清理 Postgres 包门面的全部急切重导出；策略运行与账户执行两个活跃应用入口直接从实现所有者导入所需仓储和引擎工厂，不增加延迟兼容别名。现有 models/session 子模块导入继续保留。
+- journal_store_ports 使用延后注解与 TYPE_CHECKING 导入 AsyncSession，接口运行时无需加载 SQLAlchemy。五方法签名和执行事务的 session 所有权保持。
+- 增加两个独立进程导入守卫，禁止导入 SQLAlchemy、其他 Postgres 实现以及执行 Book/协调器/恢复 codec；覆盖包初始化与 journal store 接口，避免隐式加载再次出现。
+
+验证：架构验收 **80 passed**；原七文件联合 mypy --follow-imports=skip 通过。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2531 passed**，29.46 秒，一项现有 Starlette/httpx 警告。接口、包初始化与架构测试完整 Ruff，两个应用入口 F/I，以及 git diff --check 通过。全仓 Python 搜索确认无剩余旧包级实现导入；这属于内部导入 API 迁移，不为未纳入仓库的外部调用者保留旧重导出。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

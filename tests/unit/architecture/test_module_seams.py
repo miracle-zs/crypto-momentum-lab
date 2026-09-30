@@ -395,3 +395,42 @@ importlib.import_module('crypto_momentum_lab.live_rollout.decision_facts')
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.persistence.postgres",
+        "crypto_momentum_lab.persistence.postgres.journal_store_ports",
+    ],
+)
+def test_postgres_contract_imports_without_storage_implementations(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class StorageGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        allowed = {
+            'crypto_momentum_lab.persistence.postgres',
+            'crypto_momentum_lab.persistence.postgres.journal_store_ports',
+        }
+        if (fullname == 'sqlalchemy' or fullname.startswith('sqlalchemy.')
+            or (fullname.startswith('crypto_momentum_lab.persistence.postgres.')
+                and fullname not in allowed)
+            or fullname in {
+                'crypto_momentum_lab.domain.execution.execution_book',
+                'crypto_momentum_lab.domain.execution.execution_coordinator',
+                'crypto_momentum_lab.domain.execution.recovery_codec',
+            }):
+            raise RuntimeError('contract imported storage implementation: ' + fullname)
+sys.meta_path.insert(0, StorageGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

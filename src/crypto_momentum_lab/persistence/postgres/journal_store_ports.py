@@ -1,9 +1,9 @@
 """Journal operations performed within an execution-owned SQL session."""
 
-from datetime import datetime
-from typing import Protocol
+from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime
+from typing import TYPE_CHECKING, Protocol
 
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     JournalPersistResult,
     PositionRecoveryCheckpoint,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ExecutionJournalStore(Protocol):

@@ -57,15 +57,19 @@ from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncService,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
-from crypto_momentum_lab.persistence.postgres import (
+from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
-    PostgresOperationalRetentionRepository,
-    create_account_database_engine,
-    create_maintenance_database_engine,
 )
 from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
+from crypto_momentum_lab.persistence.postgres.operational_retention import (
+    PostgresOperationalRetentionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
+)
+from crypto_momentum_lab.persistence.postgres.session import (
+    create_account_database_engine,
+    create_maintenance_database_engine,
 )
 
 app = typer.Typer(no_args_is_help=True)

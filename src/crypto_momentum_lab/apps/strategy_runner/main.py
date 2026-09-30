@@ -29,15 +29,23 @@ from crypto_momentum_lab.domain.strategy.paper_models import (
 )
 from crypto_momentum_lab.health import LocalHealthWriter, StartupPhaseTimer
 from crypto_momentum_lab.persistence.parquet import read_market_states_15s_dataset
-from crypto_momentum_lab.persistence.postgres import (
+from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
-    PostgresRuntimeMarketStateRepository,
-    PostgresStrategyRunRepository,
+)
+from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
-    create_async_database_engine,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_loader import (
     AsyncPostgresRuntimeStateLoader,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
+    PostgresRuntimeMarketStateRepository,
+)
+from crypto_momentum_lab.persistence.postgres.session import (
+    create_async_database_engine,
+)
+from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
+    PostgresStrategyRunRepository,
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
