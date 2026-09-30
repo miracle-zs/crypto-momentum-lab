@@ -22,6 +22,7 @@ async def test_shadow_submit_policy_records_suppression_without_submit() -> None
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        shadow_repository=repository,
         event_repository=repository,
         submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
         live_submit_enabled=False,
@@ -60,6 +61,7 @@ async def test_shadow_policy_still_requires_quantized_order_plan() -> None:
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        shadow_repository=repository,
         event_repository=repository,
         submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
         live_submit_enabled=False,

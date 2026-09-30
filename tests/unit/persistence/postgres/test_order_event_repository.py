@@ -13,8 +13,8 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
 )
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
@@ -117,5 +117,5 @@ async def test_fill_conflict_result_is_returned_without_updating_order(inserted)
 
 
 def test_order_repository_no_longer_owns_events_or_fills():
-    assert not hasattr(PostgresOrderRepository, "append_order_event")
-    assert not hasattr(PostgresOrderRepository, "save_fill")
+    assert not hasattr(PostgresOrderPlanRepository, "append_order_event")
+    assert not hasattr(PostgresOrderPlanRepository, "save_fill")

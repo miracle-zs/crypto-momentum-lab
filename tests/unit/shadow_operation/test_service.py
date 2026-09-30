@@ -98,6 +98,7 @@ def _service() -> tuple[
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_state_repository,
+        shadow_repository=order_state_repository,
         event_repository=order_state_repository,
         submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
         live_submit_enabled=False,

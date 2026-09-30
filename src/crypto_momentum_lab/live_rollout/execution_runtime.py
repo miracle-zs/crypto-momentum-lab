@@ -23,8 +23,8 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExchangeClient,
     OrderExchangeSubmitGuard,
     OrderExecutionStateMachine,
+    OrderPlanRepository,
     OrderPreSubmissionCallback,
-    OrderStateRepository,
     SubmitPolicy,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
@@ -60,7 +60,7 @@ async def build_live_execution_runtime(
     *,
     sessions: async_sessionmaker[AsyncSession],
     exchange: OrderExchangeClient,
-    order_repository: OrderStateRepository,
+    order_repository: OrderPlanRepository,
     event_repository: OrderEventRepository,
     account_label: str,
     strategy_name: str,

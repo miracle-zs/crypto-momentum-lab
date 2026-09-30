@@ -12,7 +12,6 @@ from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
     OrderExecutionPlan,
-    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import (
@@ -27,8 +26,8 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
@@ -179,7 +178,7 @@ async def _run_from_database(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         risk_repository = PostgresRiskRepository(factory)
         shadow_repository = PostgresShadowRepository(factory)
-        order_repository = PostgresOrderRepository(factory)
+        order_repository = PostgresOrderPlanRepository(factory)
         order_event_repository = PostgresOrderEventRepository(factory)
         submission_repository = PostgresOrderSubmissionRepository(factory)
         lease = await risk_repository.load_active_lease("live", account_label, now)
@@ -224,10 +223,8 @@ async def _run_from_database(
         state_machine = OrderExecutionStateMachine(
             event_repository=order_event_repository,
             exchange=guarded_exchange,
-            repository=_ShadowOrderRepositoryAdapter(
-                order_repository,
-                shadow_repository,
-            ),
+            repository=order_repository,
+            shadow_repository=shadow_repository,
             submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
             live_submit_enabled=False,
             clock=lambda: now,
@@ -266,25 +263,6 @@ async def _run_from_database(
         )
     finally:
         await engine.dispose()
-
-
-class _ShadowOrderRepositoryAdapter:
-    def __init__(
-        self,
-        order_repository: PostgresOrderRepository,
-        shadow_repository: PostgresShadowRepository,
-    ) -> None:
-        self._orders = order_repository
-        self._shadow = shadow_repository
-
-    async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
-        await self._orders.save_planned_order(plan)
-
-    async def save_shadow_suppression(
-        self,
-        event: ShadowSuppressionEvent,
-    ) -> None:
-        await self._shadow.save_shadow_suppression(event)
 
 
 class _WriteRejectingExchange:

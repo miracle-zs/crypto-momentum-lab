@@ -40,11 +40,11 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -111,7 +111,7 @@ async def run_live_plan(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         live_repository = PostgresLiveRolloutRepository(factory)
         risk_repository = PostgresRiskRepository(factory)
-        order_repository = PostgresOrderRepository(factory)
+        order_repository = PostgresOrderPlanRepository(factory)
         order_read_repository = PostgresOrderReadRepository(factory)
         order_event_repository = PostgresOrderEventRepository(factory)
         risk_config = await load_latest_risk_config(factory, account_label)

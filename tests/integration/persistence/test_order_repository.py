@@ -43,11 +43,11 @@ from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
@@ -64,7 +64,7 @@ async def order_repository(
     async_database_url: str,
 ) -> AsyncIterator[
     tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,
@@ -91,7 +91,7 @@ async def order_repository(
             ):
                 await session.execute(delete(model))
     yield (
-        PostgresOrderRepository(factory),
+        PostgresOrderPlanRepository(factory),
         PostgresOrderAdoptionRepository(factory),
         PostgresOrderReadRepository(factory),
         PostgresOrderEventRepository(factory),
@@ -103,7 +103,7 @@ async def order_repository(
 
 async def test_claim_intent_allows_one_worker(
     order_repository: tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,
@@ -128,7 +128,7 @@ async def test_claim_intent_allows_one_worker(
 
 async def test_save_exchange_order_event_is_idempotent(
     order_repository: tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,
@@ -190,7 +190,7 @@ async def test_external_order_adoption_uses_normal_cancel_event_journal(
 
 async def test_save_fill_deduplicates_exchange_trade_identity(
     order_repository: tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,
@@ -224,7 +224,7 @@ async def test_save_fill_deduplicates_exchange_trade_identity(
 
 async def test_prepare_submission_journals_intent_order_and_event_together(
     order_repository: tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,
@@ -790,7 +790,7 @@ async def test_exit_batch_binding_loads_from_durable_intent(order_repository) ->
 
 async def test_load_unresolved_orders_returns_unknown_state(
     order_repository: tuple[
-        PostgresOrderRepository,
+        PostgresOrderPlanRepository,
         PostgresOrderAdoptionRepository,
         PostgresOrderReadRepository,
         PostgresOrderEventRepository,

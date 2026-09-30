@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -207,11 +207,25 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 
 没有数据库 schema 变更、生产发布或服务器采样。剩余计划/suppression 写入接口、复杂成交归因及其他运行装配仍需按实际调用关系检查；真实数据库与进程重启验收仍待补齐。
 
+## 第十五批：订单计划与 shadow suppression 接口分离
+
+第十四批提交为 `f956820`；第十五批继续本地实施，未部署生产。
+
+- 原聚合订单仓储已只剩 plan/suppression 写入。本批将其收敛为 `order_plan_repository.py` 的 PostgresOrderPlanRepository，仅保存计划并更新 PLANNED 意图状态；两项写入仍在同一 session.begin，方法 AST 与原实现一致。原 order_repository.py 删除，仓库内引用和 package 显式导出同步改名，不保留旧类或模块门面。
+- 状态机的 OrderStateRepository 收缩并改名为 OrderPlanRepository，只有 save_planned_order；独立 ShadowSuppressionRepository 只有 save_shadow_suppression。实盘不需要提供 shadow 仓储；选择 SHADOW_SUPPRESS 时构造器必须显式提供，缺失立即失败，不再通过订单接口探测/获取 shadow 能力。
+- 删除订单仓储中的重复 suppression 保存及其 private insert helper；suppression SQL 继续由原 PostgresShadowRepository 所有，未改变已有序列化、唯一约束或数据库表。
+- Shadow 装配直接注入计划、事件与 shadow 三项仓储，删除只负责转发计划/suppression 的 _ShadowOrderRepositoryAdapter。Shadow 执行保持保存计划→保存 suppression→追加 SUPPRESSED 事件→直接返回的顺序，不调用交易所；失败继续按 pre-submission 失败向上传播。三项写入的原事务划分未合并，不宣称 shadow 全路径原子性。
+- 实盘 factory/single-plan/runtime 及数据库/旧内存测试装配同步迁移，旧测试替身明确注入 shadow 能力。历史审计代码基线保持原文，不因仓储改名改写旧版本结论。
+
+验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2203 passed**，21.94 秒。新增接口/仓储测试 **6 passed**，覆盖缺失 shadow 能力时构造拒绝、独立 suppression 接口成功/失败均不访问交易所、计划与意图状态的同事务成功/失败传播，以及计划仓储不暴露 suppression 能力。计划仓储和运行 factory 定向 `mypy --follow-imports=skip`、核心受影响生产代码/新增测试 Ruff、其他迁移文件 F/I 检查及 git diff --check 通过。订单集成、Golden-path 与 shadow suppression 数据库用例合计 **21 tests collected**，仅收集未执行；真实数据库并发/原子回滚/重启仍未验收。
+
+第九至十五批已将原订单聚合的命令、提交、事件/成交、读取、接管、计划与 shadow 写入归至各自接口和实现；跨表状态约束仍由相应写入事务负责。后续重点回到 ExecutionBook 的复杂成交归因及其他运行用例，模块解耦整体尚未完成；没有生产发布或服务器采样。
+
 ## 后续实施顺序
 
 1. 补齐真实 Postgres 并发、原子回滚与完整进程重启验收；第二批已完成自愈事务迁移及提交后重载契约。
 2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；复杂成交归因及状态协调仍保留在 Book，按风险继续简化。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
-3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，继续检查订单计划/suppression 与运行用例的接口，第十批已提取实盘执行 runtime factory，继续处理其他运行子系统与可调用的 CLI 用例。
+3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，继续处理其他运行子系统与可调用的 CLI 用例。
 4. 恢复模型/codec 的静态环：集中摘要计算与投影编码职责，保留既有 checkpoint digest 与跨 epoch 保护。
 
 生产账户事实覆盖冲突和策略状态发布缺失属于尚未关闭的运行问题；本次结构迁移不能作为这些问题已经修复的证据。

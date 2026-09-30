@@ -105,10 +105,12 @@ class OrderExchangeClient(Protocol):
         pass
 
 
-class OrderStateRepository(Protocol):
+class OrderPlanRepository(Protocol):
     async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
         pass
 
+
+class ShadowSuppressionRepository(Protocol):
     async def save_shadow_suppression(
         self,
         event: ShadowSuppressionEvent,
@@ -167,8 +169,9 @@ class OrderExecutionStateMachine:
         self,
         *,
         exchange: OrderExchangeClient,
-        repository: OrderStateRepository,
+        repository: OrderPlanRepository,
         event_repository: OrderEventRepository,
+        shadow_repository: ShadowSuppressionRepository | None = None,
         submit_policy: SubmitPolicy,
         live_submit_enabled: bool,
         clock: Callable[[], datetime] | None = None,
@@ -188,6 +191,9 @@ class OrderExecutionStateMachine:
     ) -> None:
         if any(delay < 0 for delay in reconciliation_retry_delays):
             raise ValueError("reconciliation retry delays must not be negative")
+        if submit_policy is SubmitPolicy.SHADOW_SUPPRESS and shadow_repository is None:
+            raise ValueError("shadow submit requires a suppression repository")
+        self._shadow_repository = shadow_repository
         self._exchange = exchange
         self._repository = repository
         self._event_repository = event_repository
@@ -246,7 +252,8 @@ class OrderExecutionStateMachine:
             else:
                 await self._repository.save_planned_order(plan)
             if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                await self._repository.save_shadow_suppression(
+                assert self._shadow_repository is not None
+                await self._shadow_repository.save_shadow_suppression(
                     ShadowSuppressionEvent(
                         order_plan_id=plan.client_order_id,
                         client_order_id=plan.client_order_id,

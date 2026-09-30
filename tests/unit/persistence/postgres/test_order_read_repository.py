@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState, FuturesPositionSide
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
@@ -103,5 +103,5 @@ async def test_read_failure_is_not_reported_as_empty_order_set():
 
 
 def test_write_repository_no_longer_exposes_order_reads():
-    assert not hasattr(PostgresOrderRepository, "load_order")
-    assert not hasattr(PostgresOrderRepository, "load_unresolved_orders")
+    assert not hasattr(PostgresOrderPlanRepository, "load_order")
+    assert not hasattr(PostgresOrderPlanRepository, "load_unresolved_orders")

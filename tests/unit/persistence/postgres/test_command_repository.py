@@ -366,8 +366,8 @@ async def test_execution_transaction_uses_command_repository_with_same_session()
 
 
 def test_order_repository_no_longer_exposes_execution_command_methods():
-    from crypto_momentum_lab.persistence.postgres.order_repository import (
-        PostgresOrderRepository,
+    from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+        PostgresOrderPlanRepository,
     )
 
     for name in (
@@ -380,4 +380,4 @@ def test_order_repository_no_longer_exposes_execution_command_methods():
         "save_execution_command",
         "save_reconciliation_event",
     ):
-        assert not hasattr(PostgresOrderRepository, name)
+        assert not hasattr(PostgresOrderPlanRepository, name)

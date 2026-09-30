@@ -260,11 +260,11 @@ from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
@@ -539,7 +539,7 @@ async def run_live_daemon(
             expire_on_commit=False,
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
-        order_repository = PostgresOrderRepository(execution_factory)
+        order_repository = PostgresOrderPlanRepository(execution_factory)
         order_adoption_repository = PostgresOrderAdoptionRepository(execution_factory)
         order_read_repository = PostgresOrderReadRepository(execution_factory)
         order_event_repository = PostgresOrderEventRepository(execution_factory)

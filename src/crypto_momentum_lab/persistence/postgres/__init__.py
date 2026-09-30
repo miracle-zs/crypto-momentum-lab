@@ -11,8 +11,8 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
@@ -54,7 +54,7 @@ __all__ = [
     "Base",
     "PostgresAccountRepository",
     "PostgresDecisionTraceRepository",
-    "PostgresOrderRepository",
+    "PostgresOrderPlanRepository",
     "PostgresOperationalRetentionRepository",
     "PostgresLiveRolloutRepository",
     "PostgresRuntimeMarketStateRepository",

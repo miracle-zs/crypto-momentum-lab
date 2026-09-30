@@ -68,11 +68,11 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
+    PostgresOrderPlanRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
@@ -211,7 +211,7 @@ class DynamicFillingFakeExchange(FakeExchange):
 
 def _build_submission_service(
     *,
-    order_repo: PostgresOrderRepository,
+    order_repo: PostgresOrderPlanRepository,
     sessions: async_sessionmaker[AsyncSession],
     exchange: FakeExchange,
     limits: FixedLiveLimits | None = None,
@@ -318,7 +318,7 @@ async def _seed_live_session(
 
 async def test_golden_path_full_trading_lifecycle(
     repository: PostgresUniverseRepository,
-    order_repository: tuple[PostgresOrderRepository, async_sessionmaker[AsyncSession]],
+    order_repository: tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]],
 ) -> None:
     """End-to-end golden path:
 
@@ -535,7 +535,7 @@ async def test_golden_path_full_trading_lifecycle(
 
 
 async def test_golden_path_risk_gate_blocks_excessive_exposure(
-    order_repository: tuple[PostgresOrderRepository, async_sessionmaker[AsyncSession]],
+    order_repository: tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]],
 ) -> None:
     """Verifies that the Golden Path correctly blocks candidates that violate risk bounds."""
     order_repo, session_factory = order_repository

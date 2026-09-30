@@ -1,5 +1,4 @@
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import (
     update,
@@ -10,17 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     OrderExecutionPlan,
-    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
     OrderIntentExecutionRow,
-    ShadowSuppressionEventRow,
 )
-from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
-class PostgresOrderRepository:
+class PostgresOrderPlanRepository:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -56,30 +52,4 @@ class PostgresOrderRepository:
                     update(OrderIntentExecutionRow)
                     .where(OrderIntentExecutionRow.intent_id == plan.intent_id)
                     .values(state=ExchangeOrderState.PLANNED.value)
-                )
-
-    async def save_shadow_suppression(
-        self,
-        event: ShadowSuppressionEvent,
-    ) -> None:
-        await self._insert_immutable(
-            ShadowSuppressionEventRow,
-            {
-                "order_plan_id": event.order_plan_id,
-                "client_order_id": event.client_order_id,
-                "suppressed_at": event.suppressed_at,
-                "reason": event.reason,
-                "order_payload": jsonable(event.order_payload),
-            },
-        )
-
-    async def _insert_immutable(
-        self,
-        model: Any,
-        values: dict[str, object],
-    ) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                await session.execute(
-                    insert(model).values(values).on_conflict_do_nothing()
                 )
