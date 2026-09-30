@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
@@ -12,7 +11,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillLoadScan,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,
-    AccountReconciliationRun,
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
@@ -41,6 +39,12 @@ from crypto_momentum_lab.execution_account.fill_progress import (
 from crypto_momentum_lab.execution_account.position_history import (
     PositionSignature,
     should_persist_position,
+)
+from crypto_momentum_lab.execution_account.reconciliation_records import (
+    account_reconciliation_id,
+    position_state_details,
+    reconciliation_run,
+    user_data_reconciliation_id,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -231,7 +235,7 @@ class ExecutionAccountSyncService:
         try:
             account_config = await self._client.fetch_account_config()
             self._latest_rest_account_config = account_config
-            reconciliation_id = _reconciliation_id(config)
+            reconciliation_id = account_reconciliation_id(config)
             mismatches: list[str] = []
             if account_config.multi_assets_mode != (config.expected_multi_assets_mode):
                 mismatches.append("multi_assets_mode_mismatch")
@@ -247,7 +251,7 @@ class ExecutionAccountSyncService:
                     positions=(),
                     open_orders=(),
                     fills=(),
-                    run=_reconciliation_run(
+                    run=reconciliation_run(
                         config,
                         reconciliation_id=reconciliation_id,
                         status="halted",
@@ -573,7 +577,7 @@ class ExecutionAccountSyncService:
             details["incomplete_symbols"] = [
                 symbol for symbol in sorted(incomplete_fill_symbols(self._client))
             ]
-        details.update(_position_state_details(snapshot.positions))
+        details.update(position_state_details(snapshot.positions))
         # Same sparsify rule as snapshot_once / user-data persist: the in-memory
         # snapshot keeps every asset, but durable history only stores non-zero
         # balances and the zero that closes a previously non-zero asset.
@@ -591,7 +595,7 @@ class ExecutionAccountSyncService:
             open_orders=snapshot.open_orders,
             fills=result.fills,
             cursors=result.fill_cursor_updates,
-            run=_reconciliation_run(
+            run=reconciliation_run(
                 config,
                 reconciliation_id=result.reconciliation_id,
                 status="catching_up" if result.fills_catching_up else "ready",
@@ -664,7 +668,7 @@ class ExecutionAccountSyncService:
             position for position in snapshot.positions if position.position_amt != 0
         )
         self._active_position_keys = _position_keys(active_positions)
-        reconciliation_id = _user_data_reconciliation_id(
+        reconciliation_id = user_data_reconciliation_id(
             config,
             event.event_id,
         )
@@ -702,7 +706,7 @@ class ExecutionAccountSyncService:
             positions=persisted_positions,
             open_orders=snapshot.open_orders,
             fills=fills,
-            run=_reconciliation_run(
+            run=reconciliation_run(
                 config,
                 reconciliation_id=reconciliation_id,
                 status="ready",
@@ -712,7 +716,7 @@ class ExecutionAccountSyncService:
                     "event_id": event.event_id,
                     "event_type": event.event_type,
                     "event_at": event.event_at.isoformat(),
-                    **_position_state_details(snapshot.positions),
+                    **position_state_details(snapshot.positions),
                 },
                 balance_count=len(persisted_balances),
                 position_count=len(active_positions),
@@ -910,82 +914,7 @@ def _position_cut_for_trade_scan(
     return replace(snapshot, observed_at=cut)
 
 
-def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:
-    return str(
-        uuid5(
-            NAMESPACE_URL,
-            "account-reconciliation:"
-            f"{config.environment}:{config.account_label}:"
-            f"{config.observed_at.isoformat()}",
-        )
-    )
-
-
 def _position_keys(
     positions: tuple[AccountPositionSnapshot, ...],
 ) -> set[tuple[str, str]]:
     return {(position.symbol, position.position_side) for position in positions}
-
-
-def _position_state_details(
-    positions: tuple[AccountPositionSnapshot, ...],
-) -> dict[str, JsonValue]:
-    """Persist the complete current position-key set beside each run.
-
-    Position history remains sparse, so readers must not infer the current
-    account state from rows sharing one observation timestamp.
-    """
-    active_keys = [
-        (position.symbol.strip().upper(), position.position_side.strip().upper())
-        for position in positions
-        if position.position_amt != Decimal("0")
-    ]
-    if len(set(active_keys)) != len(active_keys):
-        raise ValueError("account snapshot contains duplicate active position keys")
-    return {
-        "position_state_schema_version": 1,
-        "position_keys": [
-            {"symbol": symbol, "position_side": position_side}
-            for symbol, position_side in sorted(active_keys)
-        ],
-    }
-
-
-def _user_data_reconciliation_id(
-    config: ExecutionAccountSyncConfig,
-    event_id: str,
-) -> str:
-    return str(
-        uuid5(
-            NAMESPACE_URL,
-            "account-user-data-event:"
-            f"{config.environment}:{config.account_label}:{event_id}",
-        )
-    )
-
-
-def _reconciliation_run(
-    config: ExecutionAccountSyncConfig,
-    *,
-    reconciliation_id: str,
-    status: str,
-    mismatch_count: int,
-    details: dict[str, JsonValue],
-    balance_count: int = 0,
-    position_count: int = 0,
-    open_order_count: int = 0,
-    fill_count: int = 0,
-) -> AccountReconciliationRun:
-    return AccountReconciliationRun(
-        reconciliation_id=reconciliation_id,
-        environment=config.environment,
-        account_label=config.account_label,
-        status=status,
-        observed_at=config.observed_at,
-        balance_count=balance_count,
-        position_count=position_count,
-        open_order_count=open_order_count,
-        fill_count=fill_count,
-        mismatch_count=mismatch_count,
-        details=details,
-    )
