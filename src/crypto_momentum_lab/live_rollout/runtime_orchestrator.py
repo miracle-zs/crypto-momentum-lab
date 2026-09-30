@@ -109,6 +109,7 @@ from crypto_momentum_lab.live_rollout.execution_runtime import (
     LiveExecutionCallbacks,
     build_live_execution_runtime,
 )
+from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -1986,15 +1987,15 @@ async def _run_account_event_channel(
 
 async def _run_grace_timeout_channel(
     *,
-    daemon: LiveStrategyDaemon,
+    daemon: ExitChannelProcessor,
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
     interval_seconds: float = 1.0,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
+    on_order_identity_conflict: Callable[[str], None] | None = None,
 ) -> None:
     """Keep the historical test/CLI seam backed by the extracted runtime."""
 
-    identity_conflict_notifier = getattr(daemon, "note_order_identity_conflict", None)
     runtime = LiveExitChannelRuntime(
         daemon=daemon,
         latest_market_quotes=latest_market_quotes,
@@ -2002,7 +2003,7 @@ async def _run_grace_timeout_channel(
         is_transient_error=runtime_errors.is_transient_runtime_error,
         is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
-        on_order_identity_conflict=identity_conflict_notifier,
+        on_order_identity_conflict=on_order_identity_conflict,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
