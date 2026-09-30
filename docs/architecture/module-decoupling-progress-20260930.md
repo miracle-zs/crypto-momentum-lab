@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1538,6 +1538,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 六文件检查错误降至两项 codec 返回 Any。初次将 recovery_codec 纳入七文件检查暴露 28 项旧错误（包含当时 store 的四项及 codec/导出问题）；本批未修复 codec，不宣称具体 store 完整静态适配或扩大检查通过。
 
 验证：执行领域定向 **322 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，32.20 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十二批：成交加载证明解码保留校验后的类型
+
+第一百二十一批提交为 `b5c3f74`；第一百二十二批继续本地实施，未部署生产。
+
+- decode_fill_load_provenance 将四个可空整数及两个布尔字段经原精确 type 校验后保存为明确类型的局部映射；page_count 使用校验后的局部值构造 AccountFillLoadProvenance。
+- required keys、字段检查顺序、错误文本、时间解码及领域构造校验保持，不新增转换、强转或忽略；bool 不能混作 int 的规则继续保留。
+
+验证：执行领域定向 **322 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，31.35 秒，一项现有 Starlette/httpx 警告。codec F/I、git diff --check 通过。
+
+实际 store/UoW/新接口/领域 ports/恢复模型/ledger 模型/recovery_codec 七文件 mypy --follow-imports=skip 从 25 项降至 18 项，本批关闭七个成交证明字段错误。其余覆盖/批次/episode/父链字段类型与 RecoverySchemaError 所有者导入仍待处理，未完成扩大范围静态验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

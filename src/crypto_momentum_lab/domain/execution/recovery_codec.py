@@ -184,27 +184,34 @@ class PositionRecoveryCodec:
             "request_from_id",
             "next_from_id",
         )
+        parsed_ints: dict[str, int | None] = {}
         for name in nullable_ints:
-            if data.get(name) is not None and type(data[name]) is not int:
+            raw_int = data.get(name)
+            if raw_int is not None and type(raw_int) is not int:
                 raise RecoverySchemaError(f"{name} must be an integer or null")
-        if type(data.get("page_count")) is not int:
+            parsed_ints[name] = raw_int
+        page_count = data.get("page_count")
+        if type(page_count) is not int:
             raise RecoverySchemaError("page_count must be an integer")
+        parsed_flags: dict[str, bool] = {}
         for name in ("page_exhausted", "truncated"):
-            if type(data.get(name)) is not bool:
+            raw_flag = data.get(name)
+            if type(raw_flag) is not bool:
                 raise RecoverySchemaError(f"{name} must be a boolean")
+            parsed_flags[name] = raw_flag
         checked_through = data.get("checked_through")
         if checked_through is not None and not isinstance(checked_through, str):
             raise RecoverySchemaError("checked_through must be a timestamp or null")
         return AccountFillLoadProvenance(
             stream_scope=cls.decode_scope(data.get("stream_scope")),
             load_id=_string(data, "load_id"),
-            scan_origin_from_id=data["scan_origin_from_id"],
-            scan_origin_start_time_ms=data["scan_origin_start_time_ms"],
-            request_from_id=data["request_from_id"],
-            next_from_id=data["next_from_id"],
-            page_count=data["page_count"],
-            page_exhausted=data["page_exhausted"],
-            truncated=data["truncated"],
+            scan_origin_from_id=parsed_ints["scan_origin_from_id"],
+            scan_origin_start_time_ms=parsed_ints["scan_origin_start_time_ms"],
+            request_from_id=parsed_ints["request_from_id"],
+            next_from_id=parsed_ints["next_from_id"],
+            page_count=page_count,
+            page_exhausted=parsed_flags["page_exhausted"],
+            truncated=parsed_flags["truncated"],
             checked_through=(
                 _datetime_value({"value": checked_through}, "value")
                 if checked_through is not None
