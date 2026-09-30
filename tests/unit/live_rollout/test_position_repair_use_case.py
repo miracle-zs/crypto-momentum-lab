@@ -304,7 +304,9 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
         )
         assert view.total_quantity == Decimal("2")
         assert book._head_revisions[request.key.canonical_id] == 1
-        assert "durable-evidence" in book._seen_evidence_ids
+        assert book._seen_evidence_ids == {
+            f"{request.key.canonical_id}\x1fhub\x1fepoch\x1fdurable-evidence"
+        }
 
 
 async def test_postgres_adapter_uses_normal_trade_fact_and_head_cas_contract():

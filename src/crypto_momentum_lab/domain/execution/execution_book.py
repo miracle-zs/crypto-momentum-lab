@@ -62,6 +62,10 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
     compose_fact_coverage,
 )
+from crypto_momentum_lab.domain.execution.position_recovery import (
+    create_verified_recovery_checkpoint,
+    recover_durable_position,
+)
 from crypto_momentum_lab.domain.execution.position_repair import (
     validate_repaired_position,
 )
@@ -670,7 +674,10 @@ class ExecutionBook:
             self._stream_scopes[canon] = scope
             self._journal_revisions[canon] = target_state.cut.revision
             self._seen_trade_ids.update(target_state.trade_ids)
-            self._seen_evidence_ids.update(target_state.evidence_ids)
+            self._seen_evidence_ids.update(
+                _scoped_evidence_identity(scope, identity)
+                for identity in target_state.evidence_ids
+            )
             for watermark in target_state.watermarks:
                 watermark_key = self._order_watermark_key(key, watermark.order_id)
                 self._order_cumulative_fills[watermark_key] = (
@@ -824,143 +831,6 @@ class ExecutionBook:
         self._stream_scopes[canon] = scope
         return journal
 
-    def _create_verified_recovery_checkpoint(
-        self,
-        *,
-        key: PositionKey,
-        scope: AccountFactStreamScope,
-        evidence: ExecutionEvidence,
-        adopting_epoch: bool,
-    ) -> PositionRecoveryCheckpoint | None:
-        proof = evidence.coverage_evidence
-        provenance = evidence.fill_load_provenance
-        if proof is None or provenance is None:
-            return None
-        coverage_start = provenance.source_anchor_event_cut
-        if (
-            proof.load_provenance != provenance
-            or proof.stream_scope != scope
-            or provenance.stream_scope != scope
-            or not provenance.is_complete
-            or not proof.page_exhausted
-            or not proof.not_truncated
-            or proof.fill_load_start is None
-            or proof.checkpoint_event_cut is None
-            or not proof.proves_complete(
-                coverage_start,
-                proof.checkpoint_event_cut,
-                expected_scope=scope,
-            )
-        ):
-            return None
-
-        journal = self._ensure_journal(key)
-        facts = journal.read_cut()
-        previous_checkpoint = facts.recovery_checkpoint
-        if previous_checkpoint is not None and (
-            previous_checkpoint.event_cut >= proof.checkpoint_event_cut
-        ):
-            return None
-        if provenance.source_anchor_kind == "recovery_checkpoint":
-            adoption = evidence.stream_checkpoint_adoption
-            if adoption is not None:
-                parent = adoption.parent_checkpoint
-                if (
-                    parent.checkpoint_id != provenance.source_anchor_id
-                    or parent.event_cut != provenance.source_anchor_event_cut
-                    or parent.key.canonical_id != key.canonical_id
-                ):
-                    return None
-            elif (
-                previous_checkpoint is None
-                or previous_checkpoint.checkpoint_id != provenance.source_anchor_id
-                or previous_checkpoint.event_cut != provenance.source_anchor_event_cut
-            ):
-                return None
-        elif provenance.source_anchor_kind == "zero_snapshot":
-            if adopting_epoch and previous_checkpoint is not None:
-                return None
-        else:
-            return None
-
-        checkpoint = PositionLedger(key).create_recovery_checkpoint(
-            replace(
-                facts,
-                prefix_facts_complete=False,
-            )
-            if evidence.stream_checkpoint_adoption is not None
-            else facts,
-            source_revision=journal.revision,
-            event_cut=proof.checkpoint_event_cut,
-            stream_adoption=evidence.stream_checkpoint_adoption,
-        )
-        if (
-            checkpoint.coverage is None
-            or checkpoint.coverage.status != FactCoverageStatus.CONFIRMED
-            or checkpoint.coverage.stream_scope != scope
-            or not checkpoint.coverage.covers_range(
-                coverage_start,
-                proof.checkpoint_event_cut,
-            )
-            or checkpoint.has_conflicts
-            or checkpoint.has_synthetic_fills
-            or checkpoint.has_late_events
-            or checkpoint.integrity_issues
-            or not checkpoint.projection.is_comparable
-            or checkpoint.projection.health_status.value != "READY"
-            or checkpoint.projection.reconciliation_gap != Decimal("0")
-        ):
-            return None
-
-        facts_at_cut = journal.read_cut(proof.checkpoint_event_cut)
-        anchor_snapshots = tuple(
-            snapshot
-            for snapshot in facts_at_cut.snapshots
-            if snapshot.observed_at == provenance.source_anchor_event_cut
-            and snapshot.environment == key.environment
-            and snapshot.account_label == key.account_label
-            and snapshot.symbol == key.symbol
-            and snapshot.position_side == key.position_side.value
-        )
-        if provenance.source_anchor_kind == "zero_snapshot":
-            if (
-                provenance.source_anchor_event_cut != proof.fill_load_start
-                or not any(snapshot.position_amt == Decimal("0") for snapshot in anchor_snapshots)
-            ):
-                return None
-        elif evidence.stream_checkpoint_adoption is not None:
-            adoption = evidence.stream_checkpoint_adoption
-            if (
-                adoption.target_scope != scope
-                or adoption.fill_load_provenance != provenance
-                or adoption.target_event_cut != proof.checkpoint_event_cut
-                or adoption.parent_checkpoint.event_cut
-                != provenance.source_anchor_event_cut
-                or adoption.parent_checkpoint.checkpoint_id
-                != provenance.source_anchor_id
-            ):
-                return None
-        elif not anchor_snapshots and previous_checkpoint is None:
-            return None
-
-        latest_snapshot = max(
-            facts_at_cut.snapshots,
-            key=lambda snapshot: snapshot.observed_at,
-            default=None,
-        )
-        if latest_snapshot is None or latest_snapshot.observed_at != proof.checkpoint_event_cut:
-            return None
-        if latest_snapshot.position_amt == Decimal("0"):
-            if checkpoint.projection.total_active_quantity != Decimal("0"):
-                return None
-        elif (
-            checkpoint.projection.total_active_quantity
-            != abs(latest_snapshot.position_amt)
-            or not checkpoint.projection.active_batches
-        ):
-            return None
-        return checkpoint
-
     async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
         if self._command_repo is None and self._active_transaction is None:
             return
@@ -1076,118 +946,16 @@ class ExecutionBook:
                 position_side=scope.position_side,
             )
             canon = key.canonical_id
-            if state.cut.scope != scope or state.cut.facts.position_key != key:
-                raise RuntimeError("durable position recovery identity mismatch")
-            journal = AccountJournal.from_durable_cut(state.cut)
-            book = PositionBook(journal)
-            head = state.head
-            if head is not None:
-                payload = head.state_payload
-                expected_key = {
-                    "environment": key.environment,
-                    "account_label": key.account_label,
-                    "symbol": key.symbol,
-                    "position_side": key.position_side.value,
-                }
-                expected_scope = {
-                    "stream_id": scope.stream_id,
-                    "stream_epoch": scope.stream_epoch,
-                }
-                if (
-                    head.revision < 1
-                    or payload.get("schema_version") != 1
-                    or payload.get("position_key") != expected_key
-                    or payload.get("stream_scope") != expected_scope
-                    or not isinstance(payload.get("facts_hash"), str)
-                    or not isinstance(payload.get("projection_digest"), str)
-                    or not isinstance(payload.get("view_digest"), str)
-                    or type(payload.get("journal_revision")) is not int
-                    or payload.get("journal_revision") != journal.revision
-                    or not isinstance(payload.get("active_reservation_ids"), list)
-                    or any(
-                        not isinstance(value, str) or not value
-                        for value in payload.get("active_reservation_ids", ())
-                    )
-                ):
-                    raise RuntimeError("durable execution head is malformed")
-
-                facts = journal.read_cut()
-                expected_checkpoint = _recovery_checkpoint_head_binding(
-                    facts.recovery_checkpoint
-                )
-                if payload.get("recovery_checkpoint") != expected_checkpoint:
-                    log.warning(
-                        "execution_head_recovery_checkpoint_migrated",
-                        account_label=key.account_label,
-                        symbol=key.symbol,
-                        position_side=key.position_side.value,
-                        old_checkpoint=payload.get("recovery_checkpoint"),
-                        new_checkpoint=expected_checkpoint,
-                    )
-                if facts.prefix_facts_complete and (
-                    payload["facts_hash"] != facts.compute_facts_hash()
-                ):
-                    log.warning(
-                        "execution_head_facts_migrated",
-                        account_label=key.account_label,
-                        symbol=key.symbol,
-                        position_side=key.position_side.value,
-                        old_facts_hash=payload["facts_hash"],
-                        new_facts_hash=facts.compute_facts_hash(),
-                        has_active_reservations=bool(payload.get("active_reservation_ids")),
-                    )
-                projection = PositionLedger(key).project(facts)
-                projection_digest = (
-                    PositionRecoveryCodec.compute_projection_digest(projection)
-                )
-                if payload["projection_digest"] != projection_digest:
-                    log.warning(
-                        "execution_head_projection_migrated",
-                        account_label=key.account_label,
-                        symbol=key.symbol,
-                        position_side=key.position_side.value,
-                        old_projection_digest=payload["projection_digest"],
-                        new_projection_digest=projection_digest,
-                        has_active_reservations=bool(payload.get("active_reservation_ids")),
-                    )
-                view = book.get_view()
-                if payload["view_digest"] != _view_projection_digest(view):
-                    log.warning(
-                        "execution_head_view_migrated",
-                        account_label=key.account_label,
-                        symbol=key.symbol,
-                        position_side=key.position_side.value,
-                        old_view_digest=payload["view_digest"],
-                        new_view_digest=_view_projection_digest(view),
-                        has_active_reservations=bool(payload.get("active_reservation_ids")),
-                    )
-                projection_version = (
-                    head.projection_version.strip()
-                    if head.projection_version and head.projection_version.strip()
-                    else view.projection_version
-                )
-                book.use_durable_projection_version(
-                    projection_version,
-                    event_cut=view.event_cut,
-                )
-                last_sequence = payload.get("last_sequence")
-                if last_sequence is not None and (
-                    type(last_sequence) is not int or last_sequence < 0
-                ):
-                    log.warning(
-                        "durable_execution_head_sequence_invalid",
-                        sequence=last_sequence,
-                    )
-                    last_sequence = 0
-                self._head_revisions[canon] = head.revision
-                self._head_projection_digests[canon] = projection_digest
-                self._head_expected_reservation_ids[canon] = set(
-                    payload["active_reservation_ids"]
-                )
-                if last_sequence is not None:
-                    self._last_sequences[canon] = last_sequence
-            else:
-                self._head_revisions[canon] = 0
+            recovered = recover_durable_position(state)
+            journal, book = recovered.journal, recovered.book
+            for event, values in recovered.diagnostics:
+                log.warning(event, **values)
+            self._head_revisions[canon] = recovered.head_revision
+            if state.head is not None:
+                self._head_projection_digests[canon] = recovered.projection_digest
+                self._head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
+                if recovered.last_sequence is not None:
+                    self._last_sequences[canon] = recovered.last_sequence
 
             self._journals[canon] = journal
             self._books[canon] = book
@@ -3070,10 +2838,13 @@ class ExecutionBook:
                         evidence.coverage_evidence is not None
                         and evidence.fill_load_provenance is not None
                     ):
-                        checkpoint = candidate._create_verified_recovery_checkpoint(
+                        checkpoint = create_verified_recovery_checkpoint(
                             key=key,
                             scope=scope,
-                            evidence=evidence,
+                            journal=candidate._ensure_journal(key),
+                            proof=evidence.coverage_evidence,
+                            provenance=evidence.fill_load_provenance,
+                            adoption=evidence.stream_checkpoint_adoption,
                             adopting_epoch=adopting_epoch,
                         )
                     if adopting_epoch and not can_rollover and checkpoint is None:
