@@ -274,7 +274,7 @@ class PostgresCommandRepository:
     async def load_active_execution_commands(
         self,
         account_label: str | None = None,
-    ) -> tuple[dict[str, Any], ...]:
+    ) -> tuple[dict[str, object], ...]:
         async with self._session_factory() as session:
             query = (
                 select(ExecutionCommandRow)
@@ -340,7 +340,7 @@ class PostgresCommandRepository:
     async def load_execution_order_watermarks(
         self,
         account_label: str | None = None,
-    ) -> tuple[dict[str, Any], ...]:
+    ) -> tuple[dict[str, object], ...]:
         """Load cumulative quantity/quote cuts for every persisted command.
 
         Terminal commands are included because a later order response can be
@@ -411,7 +411,7 @@ class PostgresCommandRepository:
                 for fill in fill_rows:
                     fills_by_client.setdefault(fill.client_order_id, []).append(fill)
 
-        result: list[dict[str, Any]] = []
+        result: list[dict[str, object]] = []
         for row in rows:
             if getattr(row, "command", None) in (
                 "resolve_unknown_order",

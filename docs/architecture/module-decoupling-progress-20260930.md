@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百五十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百五十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1895,6 +1895,17 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 验收不创建 ExecutionBook 或仓储，本批仅补接口验收，不改变生产实现。
 
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2638 passed**，32.11 秒，一项现有 Starlette/httpx 警告。新增四项直接接口验收通过，修改测试完整 Ruff 与 git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百五十二批：原生命令仓储恢复记录类型对齐
+
+第一百五十一批提交为 `6143056`；第一百五十二批于 2026-10-01 继续本地实施，未部署生产。
+
+- PostgresCommandRepository.load_active_execution_commands/load_execution_order_watermarks 返回 tuple[dict[str, object], ...]，水位构造列表同样明确对象映射，与领域 CommandRepository 和 codec 输入契约对齐。
+- SQL 查询、字段构造、去重/水位规则及返回顺序保持；其他嵌套 payload 内部 Any 本批未声称全部消除。
+
+验证：具体仓储、领域命令仓储、codec 与实际 command/交易/ledger/order state 七个所有者文件及临时原生仓储接口赋值探针联合 mypy --follow-imports=skip **八文件通过**，探针清理。不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2638 passed**，31.53 秒，一项现有 Starlette/httpx 警告。修改文件 F/I 与 git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
