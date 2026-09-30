@@ -577,11 +577,7 @@ class ExecutionBook:
                 await self._active_transaction.upsert_outbox(
                     command_id=entry.command_id,
                     client_order_id=entry.command.command_id,
-                    command=(
-                        entry.command.command_type.value
-                        if hasattr(entry.command.command_type, "value")
-                        else str(entry.command.command_type)
-                    ),
+                    command=entry.command.command_type.value,
                     status=entry.state.value,
                     requested_at=entry.created_at,
                     details=details,
@@ -590,11 +586,7 @@ class ExecutionBook:
                 await command_repository.upsert_execution_command(
                     command_id=entry.command_id,
                     client_order_id=entry.command.command_id,
-                    command=(
-                        entry.command.command_type.value
-                        if hasattr(entry.command.command_type, "value")
-                        else str(entry.command.command_type)
-                    ),
+                    command=entry.command.command_type.value,
                     status=entry.state.value,
                     requested_at=entry.created_at,
                     details=details,
