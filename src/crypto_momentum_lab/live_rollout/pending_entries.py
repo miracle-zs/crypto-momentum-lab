@@ -6,12 +6,12 @@ from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderEvent,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
+)
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,

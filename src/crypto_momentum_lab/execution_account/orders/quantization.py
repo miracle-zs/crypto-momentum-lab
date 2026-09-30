@@ -1,14 +1,14 @@
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
-from crypto_momentum_lab.domain.execution import (
-    ExitAllocation,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.execution.order_rules import (
     SymbolTradingRules as _SymbolTradingRules,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.trade_command import ExitAllocation
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,

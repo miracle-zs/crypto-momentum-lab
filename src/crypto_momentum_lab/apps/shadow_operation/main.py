@@ -9,7 +9,7 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.config import resolve_database_url
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     OrderExecutionPlan,
 )

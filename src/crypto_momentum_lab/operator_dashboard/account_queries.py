@@ -15,7 +15,7 @@ from typing import Literal, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
     AccountEquityPoint,

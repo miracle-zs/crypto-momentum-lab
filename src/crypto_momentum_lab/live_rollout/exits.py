@@ -10,17 +10,23 @@ from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import (
-    ExitAllocator,
-    ExitPolicyMode,
+from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
-    ManagedLivePositionBatch,
     OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.position_batches import (
+    ManagedLivePositionBatch,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionEpisode,
     PositionKey,
     PositionLedgerBatch,
     PositionLedgerProjection,
     PositionView,
+)
+from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocator,
+    ExitPolicyMode,
 )
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -233,10 +239,13 @@ def managed_live_positions_from_views(
         quantity = sum((batch.quantity for batch in managed_batches), Decimal("0"))
         if quantity <= 0:
             continue
-        entry_price = sum(
-            (batch.entry_price * batch.quantity for batch in managed_batches),
-            Decimal("0"),
-        ) / quantity
+        entry_price = (
+            sum(
+                (batch.entry_price * batch.quantity for batch in managed_batches),
+                Decimal("0"),
+            )
+            / quantity
+        )
         positions.append(
             ManagedLivePosition(
                 symbol=view.key.symbol,
@@ -247,9 +256,7 @@ def managed_live_positions_from_views(
                 opened_at=min(batch.opened_at for batch in managed_batches),
                 account_label=view.key.account_label,
                 batch_id=(
-                    managed_batches[0].batch_id
-                    if len(managed_batches) == 1
-                    else None
+                    managed_batches[0].batch_id if len(managed_batches) == 1 else None
                 ),
                 batches=tuple(managed_batches),
                 projection_version=view.projection_version,

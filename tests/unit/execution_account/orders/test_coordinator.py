@@ -5,17 +5,17 @@ from typing import Any
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderEvent,
-    ExchangeOrderState,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.execution.legacy_command_repository import (
     LegacyCommandRepositoryAdapter,
 )
 from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
     assemble_legacy_execution_book,
+)
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
@@ -40,7 +40,9 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if plan.projection_version is None and self._execution_book is not None:
-            from crypto_momentum_lab.domain.execution import ExecutionScope
+            from crypto_momentum_lab.domain.execution.command_models import (
+                ExecutionScope,
+            )
 
             scope = ExecutionScope(
                 environment=self._environment,
@@ -63,8 +65,11 @@ def _register_execution_command_with_reservations(
     reservations: tuple[Any, ...] | list[Any],
 ) -> None:
     """Build the same explicit command-to-allocation link used by live flow."""
-    from crypto_momentum_lab.domain.execution import ExecutionScope, TradeCommandType
-    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
     scope = ExecutionScope(
@@ -996,7 +1001,7 @@ async def test_reservation_save_receives_projection_version() -> None:
         account_label="primary",
         reservation_repository=CaptureRepo(),
     )
-    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 
     scope = ExecutionScope(
         environment=coordinator._environment,
@@ -1199,7 +1204,7 @@ async def test_reconcile_order_consumes_filled_reservation() -> None:
 
 
 async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
-    from crypto_momentum_lab.domain.execution import ExchangeOrderSnapshot
+    from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
@@ -1556,7 +1561,7 @@ async def test_account_4_prohibits_synthetic_batches() -> None:
 
 @pytest.mark.asyncio
 async def test_account_4_authoritative_reservation_and_outbox_lifecycle() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1610,7 +1615,7 @@ async def test_account_4_authoritative_reservation_and_outbox_lifecycle() -> Non
 
 @pytest.mark.asyncio
 async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1663,7 +1668,7 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
     from crypto_momentum_lab.domain.account import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution import ExecutionBook
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1716,7 +1721,7 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
             raw_payload={},
         )
     )
-    from crypto_momentum_lab.domain.execution import (
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
         FactCoverageInterval,
         FactCoverageStatus,
         PositionKey,
@@ -1749,7 +1754,7 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
 
 @pytest.mark.asyncio
 async def test_observation_failure_after_post_keeps_unknown_reservation() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1812,7 +1817,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
 
 @pytest.mark.asyncio
 async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1943,7 +1948,8 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
 
 async def test_cumulative_executed_quantity_settlement_watermark() -> None:
     """Verifies §7.2: cumulative fill reports 3 -> 3 -> 5 only consume 5, not 11."""
-    from crypto_momentum_lab.domain.execution import PositionKey, PositionReservation
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
     key = PositionKey(
         environment="live",
@@ -2064,7 +2070,9 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
     backend = BlockingBackend()
     repo = InMemoryReservationRepo()
     domain_coord = ExecutionCoordinator()
-    book = assemble_legacy_execution_book(coordinator=domain_coord, reservation_repository=repo)
+    book = assemble_legacy_execution_book(
+        coordinator=domain_coord, reservation_repository=repo
+    )
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -2088,7 +2096,7 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
         raw_payload={},
     )
     await coord.observe_account_snapshot(snap)
-    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 
     scope = ExecutionScope(
         environment=coord._environment,
@@ -2126,7 +2134,7 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_ingestion_requires_typed_facts_without_inferred_flat() -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
     book = ExecutionBook()
@@ -2280,7 +2288,7 @@ async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_evidence_identity_keeps_position_sides_distinct() -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution import ExecutionScope
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
     book = ExecutionBook()
@@ -2446,15 +2454,17 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
         AccountFillEvent,
         AccountPositionSnapshot,
     )
-    from crypto_momentum_lab.domain.execution import (
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.execution_book import (
         ExecutionBook,
-        ExecutionEvidence,
         ExecutionRequest,
-        ExecutionScope,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
         FactCoverageInterval,
         FactCoverageStatus,
-        TradeCommandType,
     )
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 
     book = ExecutionBook()
     scope = ExecutionScope(

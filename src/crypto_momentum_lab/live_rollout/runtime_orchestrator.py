@@ -29,22 +29,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    OrderExecutionPlan,
-    TradeCommand,
-)
 from crypto_momentum_lab.domain.execution.order_read_repository import (
     OrderReadRepository,
 )
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    OrderExecutionPlan,
     deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.operational.runtime_metadata import (
@@ -826,13 +824,10 @@ async def run_live_daemon(
             allocs = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
-            exit_client_order_id = (
-                cmd.idempotency_key
-                or (
-                    cmd.command_id
-                    if len(cmd.command_id) <= 36
-                    else deterministic_client_order_id(session_id, cmd.command_id)
-                )
+            exit_client_order_id = cmd.idempotency_key or (
+                cmd.command_id
+                if len(cmd.command_id) <= 36
+                else deterministic_client_order_id(session_id, cmd.command_id)
             )
             candidate_id = f"intent_exit_{cmd.command_id}"
             signal_id = f"sig_exit_{cmd.command_id}"

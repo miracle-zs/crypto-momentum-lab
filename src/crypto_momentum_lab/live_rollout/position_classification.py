@@ -13,17 +13,17 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    FuturesPositionSide,
-    PositionOrderFact,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     OrderIdentityEvent,
     OrderObservation,
     PersistedExchangeOrder,
     PositionObservation,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
+from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 from crypto_momentum_lab.domain.execution.position_ledger_models import CoverageEvidence
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
@@ -107,6 +107,7 @@ def _classify_live_positions(
         coverage_by_symbol=coverage_by_symbol,
     )
     return managed, unmanaged
+
 
 def _classify_live_positions_detailed(
     positions: Sequence[AccountPositionSnapshot | PositionObservation],
@@ -400,6 +401,7 @@ def _classify_live_positions_detailed(
         frozenset(unmanaged),
     )
 
+
 def _has_recent_pending_entry_order(
     position: AccountPositionSnapshot | PositionObservation,
     matching_orders: Sequence[_PositionOrder],
@@ -432,6 +434,7 @@ def _has_recent_pending_entry_order(
         if 0 <= age_seconds <= _PENDING_POSITION_MAX_AGE_SECONDS:
             return True
     return False
+
 
 def _normalise_position_orders(
     orders: Sequence[OrderObservation],
@@ -500,6 +503,7 @@ def _normalise_position_orders(
         seen_keys.add(key)
         normalised.append(order)
     return tuple(normalised)
+
 
 def _repair_legacy_exit_batch_bindings(
     orders: Sequence[_PositionOrder],
@@ -573,6 +577,7 @@ def _repair_legacy_exit_batch_bindings(
         )
     return tuple(repaired), frozenset(unresolved)
 
+
 def _strategy_side(
     position: AccountPositionSnapshot | PositionObservation,
     position_side: FuturesPositionSide,
@@ -583,8 +588,10 @@ def _strategy_side(
         return StrategySide.SHORT
     return StrategySide.LONG if position.position_amt > 0 else StrategySide.SHORT
 
+
 def _opening_order_matches_side(order_side: str, side: StrategySide) -> bool:
     return (order_side == "BUY") is (side is StrategySide.LONG)
+
 
 def _filled_order_quantity(order: object) -> Decimal:
     executed_quantity = getattr(order, "executed_quantity", None)
@@ -606,4 +613,3 @@ def _filled_order_quantity(order: object) -> Decimal:
         return max(Decimal("0"), Decimal(str(quantity)))
     except (ArithmeticError, TypeError, ValueError):
         return Decimal("0")
-

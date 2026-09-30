@@ -5,19 +5,19 @@ from typing import Any, cast
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
-)
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
-from crypto_momentum_lab.domain.execution.order_submission import (
-    PreparedOrderSubmission,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -580,4 +580,3 @@ async def test_submission_entry_trade_command_carries_projection_version() -> No
     )
     assert command is not None
     assert command.expected_projection_version == "pv_entry_token_123"
-

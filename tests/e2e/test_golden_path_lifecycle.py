@@ -22,14 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.config.models import UniverseConfig
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderFill,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
@@ -180,7 +180,9 @@ class GoldenMarketData:
 class DynamicFillingFakeExchange(FakeExchange):
     """Simulates an exchange that assigns matching client_order_id and generates fills."""
 
-    def __init__(self, *, state: ExchangeOrderState = ExchangeOrderState.FILLED) -> None:
+    def __init__(
+        self, *, state: ExchangeOrderState = ExchangeOrderState.FILLED
+    ) -> None:
         super().__init__(submit_result=None)  # type: ignore[arg-type]
         self.state = state
 
@@ -254,7 +256,9 @@ def _build_submission_service(
     )
 
 
-def _build_runtime_context(*, trading_rules: SymbolTradingRules) -> LiveDaemonRuntimeContext:
+def _build_runtime_context(
+    *, trading_rules: SymbolTradingRules
+) -> LiveDaemonRuntimeContext:
     gate = gate_context()
     return LiveDaemonRuntimeContext(
         now=NOW,
@@ -318,7 +322,9 @@ async def _seed_live_session(
 
 async def test_golden_path_full_trading_lifecycle(
     repository: PostgresUniverseRepository,
-    order_repository: tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]],
+    order_repository: tuple[
+        PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]
+    ],
 ) -> None:
     """End-to-end golden path:
 
@@ -427,7 +433,9 @@ async def test_golden_path_full_trading_lifecycle(
     # -------------------------------------------------------------------------
     # Step 5: Verify Order & Fill Persistence in PostgreSQL
     # -------------------------------------------------------------------------
-    persisted_entry = await PostgresOrderReadRepository(session_factory).load_order(entry_result.client_order_id)
+    persisted_entry = await PostgresOrderReadRepository(session_factory).load_order(
+        entry_result.client_order_id
+    )
     assert persisted_entry is not None
     assert persisted_entry.state is ExchangeOrderState.FILLED
     assert persisted_entry.exchange_order_id == entry_result.exchange_order_id
@@ -453,8 +461,7 @@ async def test_golden_path_full_trading_lifecycle(
         fills = (
             await session.scalars(
                 select(ExchangeFillRow).where(
-                    ExchangeFillRow.client_order_id
-                    == entry_result.client_order_id
+                    ExchangeFillRow.client_order_id == entry_result.client_order_id
                 )
             )
         ).all()
@@ -523,7 +530,9 @@ async def test_golden_path_full_trading_lifecycle(
     closed_position = replace(position, closing_order_filled=True)
     assert closed_position.closing_order_filled is True
 
-    persisted_exit = await PostgresOrderReadRepository(session_factory).load_order(exit_result.client_order_id)
+    persisted_exit = await PostgresOrderReadRepository(session_factory).load_order(
+        exit_result.client_order_id
+    )
     assert persisted_exit is not None
     assert persisted_exit.state is ExchangeOrderState.FILLED
     assert persisted_exit.plan.reduce_only is True
@@ -535,7 +544,9 @@ async def test_golden_path_full_trading_lifecycle(
 
 
 async def test_golden_path_risk_gate_blocks_excessive_exposure(
-    order_repository: tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]],
+    order_repository: tuple[
+        PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]
+    ],
 ) -> None:
     """Verifies that the Golden Path correctly blocks candidates that violate risk bounds."""
     order_repo, session_factory = order_repository

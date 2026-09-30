@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 import fcntl
 import hashlib
 import heapq
@@ -7,6 +6,7 @@ import hmac
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -26,11 +26,14 @@ from crypto_momentum_lab.domain.account import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.live_rollout.authorization import (
@@ -41,9 +44,6 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryInspectionUnknownError,
     ExitRecoveryObservation,
-)
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
@@ -619,7 +619,9 @@ class BinanceUsdMPrivateReadClient:
         if start_time_ms < end_time_ms - _FILL_SCAN_RETENTION_MS:
             return (), AccountFillPageScan(
                 symbol=normalized_symbol,
-                load_id=_fill_scan_load_id(normalized_symbol, start_time_ms, end_time_ms, ()),
+                load_id=_fill_scan_load_id(
+                    normalized_symbol, start_time_ms, end_time_ms, ()
+                ),
                 scan_origin_start_time_ms=start_time_ms,
                 next_from_id=None,
                 page_count=0,
@@ -711,10 +713,14 @@ class BinanceUsdMPrivateReadClient:
             window_start_ms = window_end_ms + 1
 
         page_exhausted = not truncated and last_complete_cut_ms == end_time_ms
-        checked_cut = checked_through if page_exhausted else (
-            None
-            if last_complete_cut_ms is None
-            else datetime.fromtimestamp(last_complete_cut_ms / 1000, tz=UTC)
+        checked_cut = (
+            checked_through
+            if page_exhausted
+            else (
+                None
+                if last_complete_cut_ms is None
+                else datetime.fromtimestamp(last_complete_cut_ms / 1000, tz=UTC)
+            )
         )
         ordered_fills = tuple(
             sorted(
@@ -1636,7 +1642,10 @@ def _fill_scan_load_id(
             symbol,
             str(start_time_ms),
             str(end_time_ms),
-            *(f"{fill.trade_id}:{fill.order_id}:{fill.quantity}:{fill.price}" for fill in fills),
+            *(
+                f"{fill.trade_id}:{fill.order_id}:{fill.quantity}:{fill.price}"
+                for fill in fills
+            ),
         )
     )
     return "fillscan_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -6,7 +6,8 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -17,12 +18,16 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
     TradingLeaseState,
 )
+from crypto_momentum_lab.domain.shadow_operation.models import (
+    ShadowDecisionMetric,
+    ShadowOrderPlan,
+    ShadowSession,
+)
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyDecision,
     StrategySide,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
     quantize_order_plan,
@@ -31,11 +36,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
-from crypto_momentum_lab.domain.shadow_operation.models import (
-    ShadowDecisionMetric,
-    ShadowOrderPlan,
-    ShadowSession,
-)
 
 
 class ShadowRuntimeStrategy(Protocol):

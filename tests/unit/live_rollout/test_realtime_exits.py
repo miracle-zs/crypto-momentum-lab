@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.exits import (

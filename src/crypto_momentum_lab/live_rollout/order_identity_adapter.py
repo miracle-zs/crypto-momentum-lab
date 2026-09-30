@@ -14,16 +14,14 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
-    PositionObservation,
-    PositionOrderFact,
-)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_batches import (
     _EXIT_SUBMITTED_STATES,
+    PositionObservation,
+    PositionOrderFact,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,

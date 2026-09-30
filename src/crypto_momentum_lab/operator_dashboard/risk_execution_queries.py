@@ -17,7 +17,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.universe.models import MembershipStatus
 from crypto_momentum_lab.operator_dashboard.schemas import RiskExecutionResponse
@@ -257,10 +257,14 @@ class RiskExecutionQueries:
                                 func.max(RuntimeMarketState15sRow.bucket_end),
                             )
                             .where(
-                                RuntimeMarketState15sRow.environment == self._market_environment,
+                                RuntimeMarketState15sRow.environment
+                                == self._market_environment,
                                 RuntimeMarketState15sRow.data_complete.is_(True),
-                                RuntimeMarketState15sRow.symbol.in_(missing_from_recent),
-                                RuntimeMarketState15sRow.bucket_start >= fallback_cutoff,
+                                RuntimeMarketState15sRow.symbol.in_(
+                                    missing_from_recent
+                                ),
+                                RuntimeMarketState15sRow.bucket_start
+                                >= fallback_cutoff,
                             )
                             .group_by(RuntimeMarketState15sRow.symbol)
                         )
@@ -276,7 +280,8 @@ class RiskExecutionQueries:
                             func.max(RuntimeMarketState15sRow.bucket_end),
                         )
                         .where(
-                            RuntimeMarketState15sRow.environment == self._market_environment,
+                            RuntimeMarketState15sRow.environment
+                            == self._market_environment,
                             RuntimeMarketState15sRow.data_complete.is_(True),
                             RuntimeMarketState15sRow.bucket_start >= fallback_cutoff,
                         )

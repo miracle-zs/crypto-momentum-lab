@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
 )

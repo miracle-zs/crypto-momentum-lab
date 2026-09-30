@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.live_rollout import (
     LiveGateDecision,
     LiveGateStatus,

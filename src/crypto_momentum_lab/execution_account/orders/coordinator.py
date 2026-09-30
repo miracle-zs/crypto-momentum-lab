@@ -26,18 +26,13 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
-    ExchangeOrderEvent,
-    ExchangeOrderSnapshot,
-    ExecutionEvidence,
     ExecutionScope,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-    TradeCommandType,
 )
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionCumulativeOrderReport,
+    ExecutionEvidence,
 )
 from crypto_momentum_lab.domain.execution.execution_book import (
     Blocked,
@@ -55,6 +50,12 @@ from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
 from crypto_momentum_lab.domain.execution.observation_models import (
     EvidenceConflict,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    ExchangeOrderSnapshot,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     PreparedOrderSubmission,
@@ -63,6 +64,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import Position
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     PositionReservation,
+    TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
@@ -482,7 +484,9 @@ class OrderExecutionCoordinator:
 
             if isinstance(snapshot, AccountSnapshot):
                 if not isinstance(snapshot.config, AccountConfigSnapshot):
-                    raise TypeError("AccountSnapshot.config must be AccountConfigSnapshot")
+                    raise TypeError(
+                        "AccountSnapshot.config must be AccountConfigSnapshot"
+                    )
                 if (
                     snapshot.config.environment != self._environment
                     or snapshot.config.account_label != self._account_label
@@ -570,8 +574,7 @@ class OrderExecutionCoordinator:
                 and not scoped_fills
                 and stream_id is not None
                 and stream_epoch is not None
-                and self._confirmed_flat_streams.get(key)
-                == (stream_id, stream_epoch)
+                and self._confirmed_flat_streams.get(key) == (stream_id, stream_epoch)
             )
             if repeated_flat:
                 continue
@@ -593,8 +596,7 @@ class OrderExecutionCoordinator:
                 )
             )
             scoped_evidence_id = (
-                "account_"
-                + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                "account_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
             )
             execution_scope = ExecutionScope(
                 environment=key.environment,
@@ -962,8 +964,7 @@ class OrderExecutionCoordinator:
                     await self._execution_book.mark_unknown(
                         res.client_order_id,
                         reason=(
-                            "exchange result could not be persisted: "
-                            f"{observe_err}"
+                            f"exchange result could not be persisted: {observe_err}"
                         ),
                     )
                 except Exception as transition_err:

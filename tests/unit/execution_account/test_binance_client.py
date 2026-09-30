@@ -8,10 +8,13 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.execution_account.binance.client import (
     BinanceRateLimitError,
@@ -19,9 +22,6 @@ from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMTradeClient,
     _AsyncRequestPacer,
     _FileRequestPacer,
-)
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
@@ -1868,7 +1868,9 @@ async def test_submit_order_resolves_zero_avg_price_via_query_retry() -> None:
 
 
 async def test_submit_order_falls_back_to_plan_price_when_query_remains_zero() -> None:
-    plan = replace(_order_plan(), order_type="LIMIT", price=Decimal("12.5"), time_in_force="GTC")
+    plan = replace(
+        _order_plan(), order_type="LIMIT", price=Decimal("12.5"), time_in_force="GTC"
+    )
 
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -1902,4 +1904,3 @@ async def test_submit_order_falls_back_to_plan_price_when_query_remains_zero() -
         assert snapshot.average_price == Decimal("12.5")
     finally:
         await client.aclose()
-

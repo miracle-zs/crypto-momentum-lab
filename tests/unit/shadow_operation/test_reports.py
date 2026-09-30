@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from crypto_momentum_lab.domain.execution import ShadowSuppressionEvent
+from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
 from crypto_momentum_lab.domain.shadow_operation.models import (
     ShadowDecisionMetric,
     ShadowOrderPlan,

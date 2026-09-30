@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -151,8 +151,9 @@ async def test_process_requests_delegates_one_exit_and_reports_submission_counts
 
 
 @pytest.mark.asyncio
-async def test_process_requests_counts_suppressed_exit_without_exchange_submission(
-) -> None:
+async def test_process_requests_counts_suppressed_exit_without_exchange_submission() -> (
+    None
+):
     submission = RecordingSubmission(_acknowledged_result(suppressed=True))
     processor = _processor(submission)
     candidate = replace(_intent(), candidate_id="exit-suppressed", reduce_only=True)

@@ -1,7 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
     LiveSessionTransition,

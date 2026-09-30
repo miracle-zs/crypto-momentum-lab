@@ -2,7 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -11,7 +12,6 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
     quantize_order_plan,
@@ -147,7 +147,7 @@ def test_limit_price_rounds_outward_for_exchange_side() -> None:
 
 
 def test_quantize_forwards_allocations_and_projection_version() -> None:
-    from crypto_momentum_lab.domain.execution import ExitAllocation
+    from crypto_momentum_lab.domain.execution.trade_command import ExitAllocation
 
     allocs = (
         ExitAllocation(batch_id="b1", allocated_quantity=Decimal("0.001")),

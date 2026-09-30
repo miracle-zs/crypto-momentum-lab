@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import projection_codec
+import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 
 
@@ -80,16 +80,11 @@ def test_naive_datetime_remains_rejected(baseline):
         )
 
 
-def test_recovery_models_reload_without_recovery_codec():
+def test_recovery_models_import_without_recovery_codec():
     script = """
 import importlib
 import sys
 from importlib.abc import MetaPathFinder
-# The existing package facade eagerly imports Book; isolate the model edge
-# after package initialization rather than claiming the facade is decoupled.
-importlib.import_module("crypto_momentum_lab.domain.execution")
-sys.modules.pop("crypto_momentum_lab.domain.execution.recovery_models")
-sys.modules.pop("crypto_momentum_lab.domain.execution.recovery_codec")
 class CodecGuard(MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.endswith('.recovery_codec'):

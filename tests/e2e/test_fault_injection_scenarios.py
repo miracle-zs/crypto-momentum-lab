@@ -8,7 +8,7 @@ import pytest
 
 import crypto_momentum_lab.execution_account.hub as account_hub_module
 import crypto_momentum_lab.market_data.hub as market_hub_module
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
 )
@@ -131,11 +131,7 @@ async def test_fault_injection_market_hub_gap_and_replay_window_fail_closed(
                 ),
             )
         ),
-        FakeConnection(
-            (
-                ready(replay_available=False, oldest_sequence=20),
-            )
-        ),
+        FakeConnection((ready(replay_available=False, oldest_sequence=20),)),
     ]
     monkeypatch.setattr(
         market_hub_module,

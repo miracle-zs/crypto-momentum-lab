@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 
 _DEFAULT_MARKET_EXPECTATION_TTL_SECONDS = 30.0
 _MAX_EXPECTATIONS = 4096

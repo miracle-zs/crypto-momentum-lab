@@ -17,12 +17,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
+)
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.market.models import (
     JsonValue,

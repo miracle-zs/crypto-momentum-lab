@@ -5,7 +5,11 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import ShadowSuppressionEvent
+from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
+from crypto_momentum_lab.domain.shadow_operation.models import (
+    ShadowOrderPlan,
+    ShadowSession,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ShadowDecisionMetricRow,
     ShadowDrillResultRow,
@@ -18,10 +22,6 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 from crypto_momentum_lab.persistence.postgres.shadow_repository import (
     PostgresShadowRepository,
-)
-from crypto_momentum_lab.domain.shadow_operation.models import (
-    ShadowOrderPlan,
-    ShadowSession,
 )
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)

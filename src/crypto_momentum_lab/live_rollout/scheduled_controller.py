@@ -18,7 +18,7 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.account import AccountPositionSnapshot
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )

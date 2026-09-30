@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.account import AccountOpenOrderSnapshot
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
     count_active_symbol_batch_concurrency,
 )

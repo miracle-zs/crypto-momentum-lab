@@ -26,7 +26,7 @@ from crypto_momentum_lab.config import (
     resolve_database_url,
     resolve_role_credentials,
 )
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )

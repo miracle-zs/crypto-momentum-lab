@@ -12,10 +12,10 @@ from dataclasses import dataclass
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.order_read_repository import (
     OrderReadRepository,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,

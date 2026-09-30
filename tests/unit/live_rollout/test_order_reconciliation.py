@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )

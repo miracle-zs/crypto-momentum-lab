@@ -8,10 +8,8 @@ from typing import cast
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    ExecutionReadiness,
-)
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -49,7 +47,9 @@ def _decision_for(symbol: str) -> StrategyDecision:
 
 
 @pytest.mark.asyncio
-async def test_symbol_level_isolation_allows_healthy_symbol_entry_when_other_symbol_has_gap() -> None:
+async def test_symbol_level_isolation_allows_healthy_symbol_entry_when_other_symbol_has_gap() -> (
+    None
+):
     """A reconciliation gap or stalled state on symbol A (e.g. GRASSUSDT) must NOT leak
 
     and block entry execution for an eligible, healthy symbol B (e.g. ESPORTSUSDT).

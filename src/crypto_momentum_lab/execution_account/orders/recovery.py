@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     OrderExecutionPlan,
 )

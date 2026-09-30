@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderFill, ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderFill,
+    ExchangeOrderState,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     SubmitPolicy,

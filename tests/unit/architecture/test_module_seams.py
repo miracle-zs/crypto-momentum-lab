@@ -84,3 +84,40 @@ def test_package_import_does_not_load_application_adapters(
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.domain.execution",
+        "crypto_momentum_lab.domain.execution.order_state",
+        "crypto_momentum_lab.domain.execution.command_models",
+        "crypto_momentum_lab.domain.execution.position_ledger_models",
+        "crypto_momentum_lab.domain.execution.observation_models",
+        "crypto_momentum_lab.domain.execution.recovery_models",
+        "crypto_momentum_lab.domain.execution.projection_codec",
+    ],
+)
+def test_execution_values_import_without_coordination_stack(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class CoordinationGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.domain.execution.execution_book',
+            'crypto_momentum_lab.domain.execution.execution_coordinator',
+            'crypto_momentum_lab.domain.execution.recovery_codec',
+        } or fullname.startswith('crypto_momentum_lab.persistence'):
+            raise RuntimeError('value imported execution stack: ' + fullname)
+sys.meta_path.insert(0, CoordinationGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

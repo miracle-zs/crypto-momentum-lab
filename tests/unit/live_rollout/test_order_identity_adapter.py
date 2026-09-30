@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
-    PositionOrderFact,
 )
+from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,

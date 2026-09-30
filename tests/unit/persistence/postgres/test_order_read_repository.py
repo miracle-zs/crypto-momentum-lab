@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState, FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
 from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
     PostgresOrderPlanRepository,
 )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
 )

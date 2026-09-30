@@ -8,19 +8,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
-from crypto_momentum_lab.domain.execution import (
-    ExitAllocation,
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocation,
     TradeCommand,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.ids import (
     deterministic_client_order_id,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
 )

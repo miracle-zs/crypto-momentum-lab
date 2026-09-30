@@ -25,23 +25,27 @@ from typing import Protocol, cast
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import (
-    ExitAllocation,
-    ExitAllocationPlan,
-    ExitPolicyMode,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-    PositionKey,
-    TradeCommand,
-    TradeCommandType,
-    count_active_symbol_batch_concurrency,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
+)
+from crypto_momentum_lab.domain.execution.position_batches import (
+    count_active_symbol_batch_concurrency,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocation,
+    ExitAllocationPlan,
+    ExitPolicyMode,
+    TradeCommand,
+    TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
@@ -384,7 +388,10 @@ class LiveCandidateSubmission:
             or executable_candidate.strategy_version
             or "v0"
         )
-        if plan.strategy_name != resolved_strat_name or plan.strategy_version != resolved_strat_ver:
+        if (
+            plan.strategy_name != resolved_strat_name
+            or plan.strategy_version != resolved_strat_ver
+        ):
             plan = replace(
                 plan,
                 strategy_name=resolved_strat_name,
@@ -607,7 +614,9 @@ class LiveCandidateSubmission:
         else:
             position_side = FuturesPositionSide.BOTH
 
-        account_label = getattr(candidate, "account_label", None) or self._config.account_label
+        account_label = (
+            getattr(candidate, "account_label", None) or self._config.account_label
+        )
         if not account_label or not str(account_label).strip():
             raise ValueError("account_label must not be empty")
         position_key = PositionKey(

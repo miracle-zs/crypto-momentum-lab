@@ -7,7 +7,10 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+)
 from crypto_momentum_lab.domain.risk import RiskHalt, TradingLease
 from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     CapabilityEvaluator,
@@ -15,9 +18,6 @@ from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     SystemAction,
 )
 from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
-)
 
 
 class LiveRiskStateReader(Protocol):

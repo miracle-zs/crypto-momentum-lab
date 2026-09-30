@@ -9,9 +9,11 @@ from decimal import Decimal
 import structlog
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
+)
+from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
     PositionObservation,
     PositionOrderFact,
@@ -23,7 +25,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.order_identity_adapter import (
     LegacyOrderIdentityAdapter,
 )
@@ -203,6 +204,7 @@ def _build_position_batches(
         )
         raise RuntimeError(err_msg) from exc
 
+
 def _is_entry_fill_observed(
     order: _PositionOrder,
     fill_times: Mapping[str, datetime],
@@ -217,17 +219,20 @@ def _is_entry_fill_observed(
         or order.executed_quantity > 0
     )
 
+
 def _order_entry_time(
     order: _PositionOrder,
     fill_times: Mapping[str, datetime],
 ) -> datetime:
     return _entry_fill_at(order, fill_times) or order.updated_at
 
+
 def _batch_id_for_entry(order: _PositionOrder) -> str:
     identifier = order.client_order_id or order.exchange_order_id
     if identifier is None:
         identifier = f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
     return f"{order.symbol}:{order.position_side.value}:{identifier}"
+
 
 def _position_order_key(order: _PositionOrder) -> str:
     if order.exchange_order_id is not None:
@@ -240,12 +245,14 @@ def _position_order_key(order: _PositionOrder) -> str:
         f"{order.created_at.isoformat()}:{order.quantity}"
     )
 
+
 def _exit_fill_quantity(order: _PositionOrder) -> Decimal:
     if order.state not in _EXIT_SUBMITTED_STATES:
         return Decimal("0")
     if order.executed_quantity > 0:
         return order.executed_quantity
     return order.quantity if order.state is ExchangeOrderState.FILLED else Decimal("0")
+
 
 def _entry_fill_at(
     order: object | None,
@@ -263,6 +270,7 @@ def _entry_fill_at(
                 return fill_at
     return None
 
+
 def _record_earliest_fill(
     fill_times: dict[str, datetime],
     identifier: str | None,
@@ -273,6 +281,7 @@ def _record_earliest_fill(
     previous = fill_times.get(identifier)
     if previous is None or filled_at < previous:
         fill_times[identifier] = filled_at
+
 
 def _record_fill_value(
     fill_values: dict[str, tuple[Decimal, Decimal]],
@@ -291,6 +300,7 @@ def _record_fill_value(
         previous_notional + quantity * price,
     )
 
+
 def _record_fill_quantity(
     fill_quantities: dict[str, Decimal],
     identifier: str | None,
@@ -302,6 +312,7 @@ def _record_fill_quantity(
         fill_quantities.get(identifier, Decimal("0")) + quantity
     )
 
+
 def _average_fill_prices(
     fill_values: Mapping[str, tuple[Decimal, Decimal]],
 ) -> dict[str, Decimal]:
@@ -310,4 +321,3 @@ def _average_fill_prices(
         for identifier, (quantity, notional) in fill_values.items()
         if quantity > 0 and notional > 0
     }
-

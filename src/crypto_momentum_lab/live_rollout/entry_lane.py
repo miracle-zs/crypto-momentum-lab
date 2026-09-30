@@ -16,11 +16,11 @@ from typing import Protocol
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    ExecutionReadiness,
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.position_batches import (
     count_active_symbol_batch_concurrency,
 )
+from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryPolicyComparison,

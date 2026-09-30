@@ -9,7 +9,7 @@ Verifies:
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,

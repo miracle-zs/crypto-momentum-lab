@@ -15,11 +15,6 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    FuturesPositionSide,
-    PositionOrderFact,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     OrderIdentityEvent,
     PersistedExchangeOrder,
@@ -27,6 +22,11 @@ from crypto_momentum_lab.domain.execution.order_read_models import (
 from crypto_momentum_lab.domain.execution.order_rules import (
     SymbolTradingRules as _SymbolTradingRules,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
+from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     CoverageEvidence,
@@ -245,10 +245,10 @@ class PostgresLiveContextProvider(LiveContextReader):
             ):
                 return await self._with_execution_book(
                     replace(
-                    current_context,
-                    now=now,
-                    gate_context=replace(current_context.gate_context, now=now),
-                    trading_rules={state.symbol: symbol_rules},
+                        current_context,
+                        now=now,
+                        gate_context=replace(current_context.gate_context, now=now),
+                        trading_rules={state.symbol: symbol_rules},
                     ),
                     state,
                 )
@@ -289,13 +289,13 @@ class PostgresLiveContextProvider(LiveContextReader):
                 ):
                     return await self._with_execution_book(
                         replace(
-                        current_context,
-                        now=now,
-                        gate_context=replace(
-                            current_context.gate_context,
+                            current_context,
                             now=now,
-                        ),
-                        trading_rules={state.symbol: symbol_rules},
+                            gate_context=replace(
+                                current_context.gate_context,
+                                now=now,
+                            ),
+                            trading_rules={state.symbol: symbol_rules},
                         ),
                         state,
                     )
@@ -396,7 +396,8 @@ class PostgresLiveContextProvider(LiveContextReader):
             healed_any = False
             active_stream = book.get_active_stream("live", self._account_label)
             positions_to_repair = tuple(
-                position for position in context.account_snapshot.positions
+                position
+                for position in context.account_snapshot.positions
                 if position.symbol in unmanaged and position.position_amt != 0
             )
             for position in positions_to_repair:
@@ -408,7 +409,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                         "live", self._account_label, position.symbol, pos_side
                     )
                     request = PositionRepairRequest(
-                        key=key, run_id=self._run_id,
+                        key=key,
+                        run_id=self._run_id,
                         scope=AccountFactStreamScope.for_position_key(
                             key,
                             stream_id=active_stream[0],
@@ -418,7 +420,9 @@ class PostgresLiveContextProvider(LiveContextReader):
                         observed_at=position.observed_at,
                     )
                     healed = await auto_heal_unmanaged_position(
-                        request=request, uow=self._position_repair_uow, book=book,
+                        request=request,
+                        uow=self._position_repair_uow,
+                        book=book,
                     )
                     healed_any = healed_any or healed
                 except Exception as heal_err:
@@ -498,10 +502,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             for view in drift_views
             if view.total_quantity > 0
             or view.unallocated_quantity > 0
-            or (
-                view.reconciliation_gap is not None
-                and view.reconciliation_gap != 0
-            )
+            or (view.reconciliation_gap is not None and view.reconciliation_gap != 0)
         )
         stale_book_symbols = book_position_symbols - context.open_position_symbols
         if stale_book_symbols != getattr(self, "_reported_stale_book_symbols", None):
@@ -648,9 +649,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             for task in context_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.shield(
-                asyncio.gather(*context_tasks, return_exceptions=True)
-            )
+            await asyncio.shield(asyncio.gather(*context_tasks, return_exceptions=True))
             raise
         approval = approval_task.result()
         risk_config = risk_config_task.result()
@@ -1251,8 +1250,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 select(AccountReconciliationRunRow)
                 .where(
                     AccountReconciliationRunRow.environment == "live",
-                    AccountReconciliationRunRow.account_label
-                    == self._account_label,
+                    AccountReconciliationRunRow.account_label == self._account_label,
                     AccountReconciliationRunRow.status == "ready",
                 )
                 .order_by(AccountReconciliationRunRow.observed_at.desc())

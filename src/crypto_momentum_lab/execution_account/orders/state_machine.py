@@ -7,13 +7,13 @@ from enum import StrEnum
 from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderFill,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     OrderExecutionPlan,
-    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError as _OrderPreSubmissionError,

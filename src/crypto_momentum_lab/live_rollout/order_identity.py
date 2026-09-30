@@ -11,17 +11,17 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-    PositionOrderFact,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     OrderIdentityEvent,
     OrderObservation,
     PersistedExchangeOrder,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 
 _PositionOrder = PositionOrderFact
 
@@ -318,5 +318,3 @@ def _event_executed_quantity(
         return None
     quantity = _decimal_or_zero(value)
     return quantity if quantity >= 0 else None
-
-

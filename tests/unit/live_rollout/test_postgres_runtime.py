@@ -8,17 +8,17 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    FuturesPositionSide,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     OrderObservation,
     PersistedExchangeOrder,
     PositionObservation,
 )
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveOperatorApproval,
@@ -1162,9 +1162,7 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
     provider = object.__new__(PostgresLiveContextProvider)
     provider._account_label = "primary"
     provider._execution_book = Book()
-    context = replace(
-        _runtime_context(), open_position_symbols=frozenset({"ETHUSDT"})
-    )
+    context = replace(_runtime_context(), open_position_symbols=frozenset({"ETHUSDT"}))
 
     await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
     await provider._with_execution_book(
@@ -1231,9 +1229,7 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
     provider = object.__new__(PostgresLiveContextProvider)
     provider._account_label = "primary"
     provider._execution_book = Book()
-    context = replace(
-        _runtime_context(), open_position_symbols=frozenset({"BTCUSDT"})
-    )
+    context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}))
     assert context.account_snapshot is None
 
     await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))

@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import ShadowSuppressionEvent
+from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.shadow_operation.models import (
     ShadowDecisionMetric,

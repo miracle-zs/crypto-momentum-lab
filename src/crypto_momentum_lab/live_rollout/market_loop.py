@@ -25,9 +25,7 @@ from typing import Protocol
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-)
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,

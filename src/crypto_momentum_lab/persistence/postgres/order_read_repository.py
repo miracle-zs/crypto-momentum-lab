@@ -7,11 +7,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution import (
+import crypto_momentum_lab.domain.execution.order_read_models as order_read_models
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
-    order_read_models,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,

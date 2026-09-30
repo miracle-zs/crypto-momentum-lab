@@ -7,26 +7,19 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.command_models import (
+    DispatchState,
+    ExecutionScope,
+)
+from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+from crypto_momentum_lab.domain.execution.execution_book import (
     Accepted,
     AlreadyAccepted,
-    Applied,
     Blocked,
     CommandConflict,
-    DispatchState,
-    Duplicate,
-    ExchangeOrderEvent,
-    ExchangeOrderState,
     ExecutionBook,
-    ExecutionEvidence,
     ExecutionRequest,
-    ExecutionScope,
-    FactCoverageInterval,
-    FactCoverageStatus,
-    FuturesPositionSide,
-    PositionHealthStatus,
     StaleView,
-    TradeCommandType,
 )
 from crypto_momentum_lab.domain.execution.legacy_command_repository import (
     LegacyCommandRepositoryAdapter,
@@ -34,6 +27,18 @@ from crypto_momentum_lab.domain.execution.legacy_command_repository import (
 from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
     assemble_legacy_execution_book,
 )
+from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    FactCoverageInterval,
+    FactCoverageStatus,
+    PositionHealthStatus,
+)
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
 
 
 def _dt(hour: int, minute: int, second: int = 0) -> datetime:
@@ -52,8 +57,8 @@ def _scope() -> ExecutionScope:
 @pytest.mark.asyncio
 async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> None:
     from crypto_momentum_lab.domain.execution.observation_models import (
-    EvidenceConflict,
-)
+        EvidenceConflict,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -91,8 +96,8 @@ async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> Non
 async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.observation_models import (
-    Applied,
-)
+        Applied,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -152,12 +157,13 @@ async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> No
 
 
 @pytest.mark.asyncio
-async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is_flat(
-) -> None:
+async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is_flat() -> (
+    None
+):
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.observation_models import (
-    Applied,
-)
+        Applied,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -211,7 +217,6 @@ async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is
     )
     assert view.total_quantity == Decimal("0")
     assert view.stream_scope.stream_epoch == "active-epoch"
-
 
 
 @pytest.mark.asyncio
@@ -2006,9 +2011,17 @@ async def test_staged_copy_preserves_unrelated_positions_and_copies_target():
 
     candidate = book._staged_copy(key=key_btc)
 
-    assert candidate._journals[key_btc.canonical_id] is not book._journals[key_btc.canonical_id]
-    assert candidate._books[key_btc.canonical_id] is not book._books[key_btc.canonical_id]
-    assert candidate._journals[key_eth.canonical_id] is book._journals[key_eth.canonical_id]
+    assert (
+        candidate._journals[key_btc.canonical_id]
+        is not book._journals[key_btc.canonical_id]
+    )
+    assert (
+        candidate._books[key_btc.canonical_id] is not book._books[key_btc.canonical_id]
+    )
+    assert (
+        candidate._journals[key_eth.canonical_id]
+        is book._journals[key_eth.canonical_id]
+    )
     assert candidate._books[key_eth.canonical_id] is book._books[key_eth.canonical_id]
 
 
@@ -2200,8 +2213,9 @@ def test_account_journal_appends_fill_with_nested_position_side():
 
 
 @pytest.mark.asyncio
-async def test_restore_durable_positions_migrates_projection_digest_when_no_reservations(
-) -> None:
+async def test_restore_durable_positions_migrates_projection_digest_when_no_reservations() -> (
+    None
+):
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
@@ -2366,7 +2380,9 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restore_durable_positions_migrates_facts_hash_when_no_reservations() -> None:
+async def test_restore_durable_positions_migrates_facts_hash_when_no_reservations() -> (
+    None
+):
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
@@ -2444,7 +2460,9 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
     assert key.canonical_id in book._books
 
 
-async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations() -> None:
+async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations() -> (
+    None
+):
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,

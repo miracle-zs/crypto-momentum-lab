@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
     PositionOrderFact,

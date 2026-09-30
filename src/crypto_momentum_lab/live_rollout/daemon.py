@@ -14,7 +14,7 @@ import structlog
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
 )
@@ -261,7 +261,10 @@ class LiveStrategyDaemon:
         )
         self._context_provider = context_provider
         self._config = config
-        if exit_manager is not None and getattr(exit_manager, "_config", None) is not None:
+        if (
+            exit_manager is not None
+            and getattr(exit_manager, "_config", None) is not None
+        ):
             if getattr(exit_manager._config, "account_label", None) is None:
                 exit_manager._config = replace(
                     exit_manager._config,

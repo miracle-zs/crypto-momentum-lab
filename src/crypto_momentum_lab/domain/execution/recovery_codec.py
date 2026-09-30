@@ -8,12 +8,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution import projection_codec
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,

@@ -2,10 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
-from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderState,
-    ExecutionReadiness,
-)
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,

@@ -5,18 +5,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution import (
+from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
-    PositionKey,
-    TradeCommand,
-    TradeCommandType,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     PreparedOrderSubmission,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.trade_command import (
+    TradeCommand,
+    TradeCommandType,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
@@ -238,6 +240,7 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
 
 async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> None:
     """Pre-exchange failures must be classified as before_exchange_post and marked rejected."""
+
     class FailingRepo:
         async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
             raise RuntimeError("Database connection dropped or FK violation")
@@ -270,6 +273,8 @@ async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> Non
     with pytest.raises(OrderPreSubmissionError) as exc_info:
         await machine.execute_approved_intent(plan)
 
-    assert "pre-submission failed: Database connection dropped or FK violation" in str(exc_info.value)
+    assert "pre-submission failed: Database connection dropped or FK violation" in str(
+        exc_info.value
+    )
     # The exchange was NEVER called
     mock_exchange.submit_order.assert_not_called()
