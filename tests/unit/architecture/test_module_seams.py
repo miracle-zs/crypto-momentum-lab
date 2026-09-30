@@ -570,7 +570,14 @@ importlib.import_module(sys.argv[1])
     assert result.returncode == 0, result.stderr
 
 
-def test_user_data_update_models_import_without_merge_state():
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.execution_account.user_data_models",
+        "crypto_momentum_lab.execution_account.user_data_fields",
+    ],
+)
+def test_user_data_update_models_import_without_merge_state(module):
     script = """
 import importlib
 import sys
@@ -584,9 +591,12 @@ class StateGuard(MetaPathFinder):
         }:
             raise RuntimeError('update model imported state: ' + fullname)
 sys.meta_path.insert(0, StateGuard())
-importlib.import_module('crypto_momentum_lab.execution_account.user_data_models')
+importlib.import_module(sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 0, result.stderr

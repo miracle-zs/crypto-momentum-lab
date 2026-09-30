@@ -1,8 +1,7 @@
 from collections import deque
-from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import datetime
+from decimal import Decimal
 
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
@@ -10,7 +9,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
@@ -22,6 +20,15 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+)
+from crypto_momentum_lab.execution_account.user_data_fields import (
+    event_raw_payload,
+    parse_bool,
+    parse_decimal,
+    parse_timestamp,
+    require_mapping,
+    require_mapping_list,
+    required_text,
 )
 from crypto_momentum_lab.execution_account.user_data_models import (
     AccountUserDataUpdate,
@@ -159,18 +166,18 @@ class AccountUserDataState:
             ):
                 return False, "stale_exchange_event"
             self._last_account_exchange_event_at = event.exchange_event_at
-        account = _require_mapping(event.payload.get("a"), "ACCOUNT_UPDATE.a")
-        balance_rows = _require_mapping_list(account.get("B"), "ACCOUNT_UPDATE.a.B")
-        position_rows = _require_mapping_list(account.get("P"), "ACCOUNT_UPDATE.a.P")
+        account = require_mapping(event.payload.get("a"), "ACCOUNT_UPDATE.a")
+        balance_rows = require_mapping_list(account.get("B"), "ACCOUNT_UPDATE.a.B")
+        position_rows = require_mapping_list(account.get("P"), "ACCOUNT_UPDATE.a.P")
         reason: str | None = None
         changed = bool(balance_rows or position_rows)
 
         for row in balance_rows:
-            asset = _required_text(row.get("a"), "ACCOUNT_UPDATE balance asset")
-            wallet_balance = _decimal(row.get("wb"), "ACCOUNT_UPDATE wallet balance")
+            asset = required_text(row.get("a"), "ACCOUNT_UPDATE balance asset")
+            wallet_balance = parse_decimal(row.get("wb"), "ACCOUNT_UPDATE wallet balance")
             existing = self._balances.get(asset)
             if existing is None:
-                available_balance = _decimal(
+                available_balance = parse_decimal(
                     row.get("cw", "0"),
                     "ACCOUNT_UPDATE cross wallet balance",
                 )
@@ -187,15 +194,15 @@ class AccountUserDataState:
                     existing.unrealized_pnl if existing is not None else Decimal("0")
                 ),
                 observed_at=event.received_at,
-                raw_payload=_event_raw_payload(event, "balance", row),
+                raw_payload=event_raw_payload(event, "balance", row),
             )
 
         for row in position_rows:
-            symbol = _required_text(row.get("s"), "ACCOUNT_UPDATE position symbol")
+            symbol = required_text(row.get("s"), "ACCOUNT_UPDATE position symbol")
             position_side = str(row.get("ps", "BOTH"))
             if not position_side.strip():
                 raise UserDataStateError("ACCOUNT_UPDATE position side is empty")
-            position_amt = _decimal(row.get("pa"), "ACCOUNT_UPDATE position amount")
+            position_amt = parse_decimal(row.get("pa"), "ACCOUNT_UPDATE position amount")
             existing_position = self._positions.get((symbol, position_side))
             if existing_position is None and position_amt != 0:
                 expected_position = None
@@ -210,11 +217,11 @@ class AccountUserDataState:
                     reason = reason or "unknown_position"
             if existing_position is None and position_amt == 0:
                 continue
-            entry_price = _decimal(
+            entry_price = parse_decimal(
                 row.get("ep", "0"),
                 "ACCOUNT_UPDATE entry price",
             )
-            unrealized_pnl = _decimal(
+            unrealized_pnl = parse_decimal(
                 row.get("up", "0"),
                 "ACCOUNT_UPDATE unrealized pnl",
             )
@@ -256,7 +263,7 @@ class AccountUserDataState:
                     )
                 ),
                 observed_at=event.received_at,
-                raw_payload=_event_raw_payload(event, "position", row),
+                raw_payload=event_raw_payload(event, "position", row),
             )
         return changed, reason
 
@@ -264,9 +271,9 @@ class AccountUserDataState:
         self,
         event: BinanceUserDataEvent,
     ) -> tuple[bool, tuple[AccountFillEvent, ...], str | None]:
-        row = _require_mapping(event.payload.get("o"), "ORDER_TRADE_UPDATE.o")
-        symbol = _required_text(row.get("s"), "ORDER_TRADE_UPDATE symbol")
-        order_id = _required_text(row.get("i"), "ORDER_TRADE_UPDATE order id")
+        row = require_mapping(event.payload.get("o"), "ORDER_TRADE_UPDATE.o")
+        symbol = required_text(row.get("s"), "ORDER_TRADE_UPDATE symbol")
+        order_id = required_text(row.get("i"), "ORDER_TRADE_UPDATE order id")
         key = (symbol, order_id)
         if event.exchange_event_at is not None:
             last_exchange_event_at = self._last_order_exchange_event_at.get(key)
@@ -282,31 +289,31 @@ class AccountUserDataState:
                 return False, (), "stale_local_event"
             self._last_order_received_at[key] = event.received_at
 
-        status = _required_text(row.get("X"), "ORDER_TRADE_UPDATE status")
+        status = required_text(row.get("X"), "ORDER_TRADE_UPDATE status")
         order = AccountOpenOrderSnapshot(
             environment=self._config.environment,
             account_label=self._config.account_label,
             symbol=symbol,
             order_id=order_id,
-            client_order_id=_required_text(
+            client_order_id=required_text(
                 row.get("c"),
                 "ORDER_TRADE_UPDATE client order id",
             ),
-            side=_required_text(row.get("S"), "ORDER_TRADE_UPDATE side"),
-            order_type=_required_text(row.get("o"), "ORDER_TRADE_UPDATE order type"),
+            side=required_text(row.get("S"), "ORDER_TRADE_UPDATE side"),
+            order_type=required_text(row.get("o"), "ORDER_TRADE_UPDATE order type"),
             status=status,
-            price=_decimal(row.get("p", "0"), "ORDER_TRADE_UPDATE price"),
-            original_quantity=_decimal(
+            price=parse_decimal(row.get("p", "0"), "ORDER_TRADE_UPDATE price"),
+            original_quantity=parse_decimal(
                 row.get("q", "0"),
                 "ORDER_TRADE_UPDATE original quantity",
             ),
-            executed_quantity=_decimal(
+            executed_quantity=parse_decimal(
                 row.get("z", "0"),
                 "ORDER_TRADE_UPDATE executed quantity",
             ),
-            reduce_only=_bool(row.get("R", False)),
+            reduce_only=parse_bool(row.get("R", False)),
             observed_at=event.received_at,
-            raw_payload=_event_raw_payload(event, "order", row),
+            raw_payload=event_raw_payload(event, "order", row),
         )
         if (
             self._expected_position_registry is not None
@@ -320,7 +327,7 @@ class AccountUserDataState:
             self._open_orders.pop(key, None)
 
         execution_type = str(row.get("x", ""))
-        last_quantity = _decimal(
+        last_quantity = parse_decimal(
             row.get("l", "0"),
             "ORDER_TRADE_UPDATE last fill quantity",
         )
@@ -334,7 +341,7 @@ class AccountUserDataState:
         trade_key = (symbol, trade_id)
         if trade_key in self._seen_trade_id_set:
             return True, (), None
-        fee = _decimal(row.get("n", "0"), "ORDER_TRADE_UPDATE fee")
+        fee = parse_decimal(row.get("n", "0"), "ORDER_TRADE_UPDATE fee")
         if fee < 0:
             raise UserDataStateError("trade event contains a negative commission")
         fill = AccountFillEvent(
@@ -343,24 +350,24 @@ class AccountUserDataState:
             symbol=symbol,
             trade_id=trade_id,
             order_id=order_id,
-            side=_required_text(row.get("S"), "ORDER_TRADE_UPDATE side"),
-            price=_decimal(
+            side=required_text(row.get("S"), "ORDER_TRADE_UPDATE side"),
+            price=parse_decimal(
                 row.get("L", row.get("p", "0")),
                 "ORDER_TRADE_UPDATE last fill price",
             ),
             quantity=last_quantity,
-            realized_pnl=_decimal(
+            realized_pnl=parse_decimal(
                 row.get("rp", "0"),
                 "ORDER_TRADE_UPDATE realized pnl",
             ),
             fee=fee,
             fee_asset=fee_asset,
-            trade_at=_timestamp(
+            trade_at=parse_timestamp(
                 row.get("T"),
                 fallback=event.event_at,
                 field_name="ORDER_TRADE_UPDATE trade time",
             ),
-            raw_payload=_event_raw_payload(event, "fill", row),
+            raw_payload=event_raw_payload(event, "fill", row),
         )
         self._remember_trade(trade_key)
         return True, (fill,), None
@@ -427,81 +434,3 @@ def _initial_mark_price(
         if derived > 0:
             return derived
     return entry_price if entry_price > 0 else Decimal("0")
-
-
-def _require_mapping(value: object, field_name: str) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise UserDataStateError(f"{field_name} must be an object")
-    return {str(key): item for key, item in value.items()}
-
-
-def _require_mapping_list(
-    value: object,
-    field_name: str,
-) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        raise UserDataStateError(f"{field_name} must be an array")
-    return tuple(_require_mapping(item, field_name) for item in value)
-
-
-def _required_text(value: object, field_name: str) -> str:
-    text = str(value).strip() if value is not None else ""
-    if not text:
-        raise UserDataStateError(f"{field_name} must not be empty")
-    return text
-
-
-def _decimal(value: object, field_name: str) -> Decimal:
-    if value is None:
-        raise UserDataStateError(f"{field_name} is missing")
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError) as error:
-        raise UserDataStateError(f"{field_name} is not numeric") from error
-
-
-def _bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in {"1", "true", "yes"}
-    return bool(value)
-
-
-def _timestamp(
-    value: object,
-    *,
-    fallback: datetime,
-    field_name: str,
-) -> datetime:
-    if value is None:
-        return fallback
-    try:
-        result = datetime.fromtimestamp(float(str(value)) / 1000, tz=UTC)
-    except (TypeError, ValueError, OverflowError, OSError) as error:
-        raise UserDataStateError(f"{field_name} is not a valid timestamp") from error
-    return result
-
-
-def _event_raw_payload(
-    event: BinanceUserDataEvent,
-    section: str,
-    row: Mapping[str, object],
-) -> dict[str, JsonValue]:
-    return {
-        "source": "user_data_stream",
-        "section": section,
-        "event_id": event.event_id,
-        "event": event.payload,
-        "row": {str(key): _json_value(item) for key, item in row.items()},
-    }
-
-
-def _json_value(value: object) -> JsonValue:
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_json_value(item) for item in value]
-    return str(value)
