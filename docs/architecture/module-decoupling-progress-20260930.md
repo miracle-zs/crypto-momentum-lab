@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百一十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1393,6 +1393,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 不新增接口或类型迁移；该测试验证内存生命周期契约，不替代真实数据库事务回滚与完整重启验收。
 
 验证：reservation 仓储定向 **8 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2524 passed**，30.09 秒，一项现有 Starlette/httpx 警告。测试完整 Ruff、git diff --check 通过，本批未扩大类型验收范围。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百一十批：历史仓位视图重建归属 PositionBook
+
+第一百零九批提交为 `8088027`；第一百一十批继续本地实施，未部署生产。
+
+- PositionBook.get_historical_view 接收原持久化 DurableJournalCut，使用已有 ledger/policy/schema 配置与 AccountJournal.from_durable_cut 重建历史视图，并保留 event_cut、requirement、now 传递。
+- ExecutionBook.read 原历史读取分支调用该方法，不再读取 PositionBook._ledger、_policy_version、_schema_version；数据库切点加载与触发历史分支条件不变。
+- 历史视图仍新建独立 PositionBook，保留原 ledger 引用关系，缓存和耐久版本状态不从当前视图复制；无新增查询、事务或转发适配器。
+
+验证：执行领域定向 **319 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2524 passed**，29.50 秒，一项现有 Starlette/httpx 警告。前批十文件联合 mypy --follow-imports=skip、两个核心文件 F/I、git diff --check 通过，不代表全仓类型或真实数据库历史读取验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -988,13 +988,9 @@ class ExecutionBook:
             cut = await self._execution_unit_of_work.load_journal_cut(
                 scope=source_scope, as_of=event_cut
             )
-            historical_book = PositionBook(
-                AccountJournal.from_durable_cut(cut),
-                ledger=book._ledger,
-                policy_version=book._policy_version,
-                schema_version=book._schema_version,
+            return book.get_historical_view(
+                cut, event_cut=event_cut, requirement=requirement, now=now
             )
-            return historical_book.get_view(cut=event_cut, requirement=requirement, now=now)
         return book.get_view(cut=event_cut, requirement=requirement, now=now)
 
     async def load_recovery_checkpoint(

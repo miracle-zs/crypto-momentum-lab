@@ -10,7 +10,6 @@ Obays RFC 2026-09-25:
 from __future__ import annotations
 
 import copy
-
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -28,6 +27,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
     PositionView,
 )
+from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +95,23 @@ class PositionBook:
         self._durable_projection_facts_hash = (
             self._journal.read_cut().compute_facts_hash()
         )
+
+    def get_historical_view(
+        self,
+        durable_cut: DurableJournalCut,
+        *,
+        event_cut: datetime,
+        requirement: FreshnessRequirement | None = None,
+        now: datetime | None = None,
+    ) -> PositionView:
+        """Project a persisted cut with this book's rules and independent view state."""
+        historical = PositionBook(
+            AccountJournal.from_durable_cut(durable_cut),
+            ledger=self._ledger,
+            policy_version=self._policy_version,
+            schema_version=self._schema_version,
+        )
+        return historical.get_view(cut=event_cut, requirement=requirement, now=now)
 
     def copy_for_transaction(self, journal: AccountJournal | None = None) -> PositionBook:
         """Copy publication state for a transaction candidate.
