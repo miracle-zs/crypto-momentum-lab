@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
@@ -114,7 +114,12 @@ class PositionLedger:
             if not facts.prefix_facts_complete
             else None
         )
-        parent_fields: dict[str, object] = {}
+        parent_checkpoint_id: str | None = None
+        parent_stream_scope: AccountFactStreamScope | None = None
+        parent_facts_hash: str | None = None
+        parent_projection_digest: str | None = None
+        parent_event_cut: datetime | None = None
+        checkpoint_suffix_hash: str | None = None
         if not facts.prefix_facts_complete:
             if parent is None:
                 raise ValueError(
@@ -177,14 +182,12 @@ class PositionLedger:
                 parent_event_cut=parent.event_cut,
                 suffix_facts_hash=suffix_facts_hash,
             )
-            parent_fields = {
-                "parent_checkpoint_id": parent.checkpoint_id,
-                "parent_stream_scope": parent.stream_scope,
-                "parent_facts_hash": parent.facts_hash,
-                "parent_projection_digest": parent.projection_digest,
-                "parent_event_cut": parent.event_cut,
-                "suffix_facts_hash": suffix_facts_hash,
-            }
+            parent_checkpoint_id = parent.checkpoint_id
+            parent_stream_scope = parent.stream_scope
+            parent_facts_hash = parent.facts_hash
+            parent_projection_digest = parent.projection_digest
+            parent_event_cut = parent.event_cut
+            checkpoint_suffix_hash = suffix_facts_hash
         else:
             facts_hash = prefix.compute_facts_hash()
         projection_facts = (
@@ -235,7 +238,12 @@ class PositionLedger:
             has_synthetic_fills=has_synthetic,
             has_late_events=prefix.has_late_events,
             integrity_issues=prefix.integrity_issues,
-            **parent_fields,
+            parent_checkpoint_id=parent_checkpoint_id,
+            parent_stream_scope=parent_stream_scope,
+            parent_facts_hash=parent_facts_hash,
+            parent_projection_digest=parent_projection_digest,
+            parent_event_cut=parent_event_cut,
+            suffix_facts_hash=checkpoint_suffix_hash,
         )
 
     def project(

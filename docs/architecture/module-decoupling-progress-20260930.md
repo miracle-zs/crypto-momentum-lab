@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1708,6 +1708,17 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - recovery_checkpoint_head_binding 成为共享公共接口，执行簿、修复、恢复计算与相关测试更新直接调用。父链 scope 使用已声明的 checkpoint 字段，删除 getattr 回退。绑定字段、UTC 编码、摘要算法与排除 projection_version 的规则保持。
 
 验证：摘要、evidence codec、修复计算/模型、账户模型、ledger/恢复模型与恢复 codec 八文件 mypy --follow-imports=skip 通过。纳入 position_recovery 的九文件检查出现一项跳过 ledger 导致的 Any 返回；继续纳入实际 ledger、journal、position_book 后，十二文件检查剩 ledger 六项错误（checkpoint **dict 参数五项与布尔 Any 返回一项），本批未声称该扩大范围通过，后续待处理。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，31.09 秒，一项现有 Starlette/httpx 警告。摘要、evidence codec、修复、恢复和相关测试完整 Ruff，ExecutionBook F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十六批：ledger checkpoint 父链与成交模型类型闭合
+
+第一百三十五批提交为 `232a760`；第一百三十六批于 2026-10-01 继续本地实施，未部署生产。
+
+- checkpoint 构造删除 dict[str, object] 的 **parent_fields，改为六个明确可空局部参数；完整前缀保持六项 None，滚动/跨 epoch 父链使用原父 checkpoint 字段和 suffix hash。既有事实校验、计算顺序和 checkpoint 标识规则保持。
+- ledger 从账户模型实际所有者导入 AccountFillEvent/AccountPositionSnapshot，避免跳过包门面后模型变为 Any，关闭 _same_fill 布尔返回错误。未新增强转或忽略。
+
+验证：evidence_digest、evidence_codec、position_repair、position_recovery、position_repair_models、account/models、position_ledger_models、recovery_models、recovery_codec、position_ledger、account_journal、position_book 十二文件 mypy --follow-imports=skip 通过，关闭上批六项错误；不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，31.08 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
