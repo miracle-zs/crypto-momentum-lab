@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1590,6 +1590,17 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 增加两个独立进程导入守卫，禁止导入 SQLAlchemy、其他 Postgres 实现以及执行 Book/协调器/恢复 codec；覆盖包初始化与 journal store 接口，避免隐式加载再次出现。
 
 验证：架构验收 **80 passed**；原七文件联合 mypy --follow-imports=skip 通过。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2531 passed**，29.46 秒，一项现有 Starlette/httpx 警告。接口、包初始化与架构测试完整 Ruff，两个应用入口 F/I，以及 git diff --check 通过。全仓 Python 搜索确认无剩余旧包级实现导入；这属于内部导入 API 迁移，不为未纳入仓库的外部调用者保留旧重导出。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十六批：Postgres 恢复读取返回类型闭合
+
+第一百二十五批提交为 `b64f281`；第一百二十六批于 2026-10-01 继续本地实施，未部署生产。
+
+- ExecutionTransaction.load_recovery 和 AsyncPostgresExecutionUnitOfWork.load_journal_cut 返回 DurableJournalCut，事务 load_checkpoint_by_id 返回 PositionRecoveryCheckpoint | None，删除三处 Any 返回声明。
+- 类型沿用实际 journal store 端口的返回契约；历史读取的时区校验、Postgres 方言检查、事务内 session 及 checkpoint 查询顺序保持。
+
+验证：原七文件联合 mypy --follow-imports=skip 通过；临时探针将原生 ExecutionTransaction 赋值给 ExecutionTransactionPort，并将原生 UoW 的历史读取结果返回为 DurableJournalCut，联合八文件检查通过后清理。该检查不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2531 passed**，30.63 秒，一项现有 Starlette/httpx 警告。修改文件 F/I 与 git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

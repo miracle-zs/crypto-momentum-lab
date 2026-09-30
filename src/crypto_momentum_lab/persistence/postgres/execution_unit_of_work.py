@@ -49,6 +49,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,
 )
@@ -148,7 +149,7 @@ class ExecutionTransaction:
         *,
         scope: AccountFactStreamScope,
         as_of: datetime,
-    ) -> Any:
+    ) -> DurableJournalCut:
         """Load a target stream inside the current mutation transaction."""
         return await self._journal_store.load_recovery_in_session(
             self.session,
@@ -161,7 +162,7 @@ class ExecutionTransaction:
         *,
         scope: AccountFactStreamScope,
         checkpoint_id: str,
-    ) -> Any | None:
+    ) -> PositionRecoveryCheckpoint | None:
         """Verify an immutable parent checkpoint in the active transaction."""
         return await self._journal_store.load_checkpoint_by_id_in_session(
             self.session,
@@ -513,7 +514,7 @@ class AsyncPostgresExecutionUnitOfWork:
         *,
         scope: AccountFactStreamScope,
         as_of: datetime,
-    ) -> Any:
+    ) -> DurableJournalCut:
         """Load one exact historical stream cut without consulting the head.
 
         Historical reads must not borrow the current head's projection token or
