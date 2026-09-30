@@ -33,6 +33,11 @@ from crypto_momentum_lab.domain.execution.cumulative_report import (
     plan_cumulative_report,
     plan_watermark_publication,
 )
+from crypto_momentum_lab.domain.execution.durable_evidence import (
+    DurableEvidenceConflict,
+    changed_order_watermarks,
+    prepare_durable_evidence,
+)
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     _digest_json_payload,
     _recovery_checkpoint_head_binding,
@@ -48,7 +53,6 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
 )
 from crypto_momentum_lab.domain.execution.evidence_rules import (
     _canonical_evidence_payload,
-    _coverage_for_scope,
     _evidence_identity,
     _scoped_evidence_identity,
 )
@@ -82,7 +86,6 @@ from crypto_momentum_lab.domain.execution.ports import (
     ExecutionTradeIdentity,
     ExecutionTransactionPort,
     ExecutionUnitOfWorkPort,
-    ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
     PositionBook,
@@ -90,7 +93,6 @@ from crypto_momentum_lab.domain.execution.position_book import (
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    FactCoverageStatus,
     FreshnessRequirement,
     PositionKey,
     PositionView,
@@ -1849,53 +1851,14 @@ class ExecutionBook:
             for journal in self._journals.values():
                 journal.mark_facts_persisted()
             return result
-        if evidence.stream_id is None or evidence.stream_epoch is None:
-            return EvidenceConflict(
-                evidence_id=evidence.evidence_id,
-                reason="durable execution evidence requires stream identity",
-            )
-        cumulative_fill = evidence.fill
-        fills = evidence.fills or ((cumulative_fill,) if cumulative_fill else ())
-        if any(
-            bool(
-                isinstance(fill.raw_payload, dict)
-                and (
-                    fill.raw_payload.get("is_cumulative")
-                    or "cum_qty" in fill.raw_payload
-                )
-            )
-            for fill in fills
-        ):
-            return EvidenceConflict(
-                evidence_id=evidence.evidence_id,
-                reason=(
-                    "cumulative order reports cannot be recorded as account trades; "
-                    "use cumulative_order"
-                ),
-            )
-
+        try:
+            durable_input = prepare_durable_evidence(evidence)
+        except DurableEvidenceConflict as err:
+            return EvidenceConflict(evidence_id=evidence.evidence_id, reason=str(err))
+        evidence = durable_input.evidence
+        scope = durable_input.scope
         key = evidence.scope.to_position_key()
         canon = key.canonical_id
-        scope = AccountFactStreamScope.for_position_key(
-            key,
-            stream_id=evidence.stream_id,
-            stream_epoch=evidence.stream_epoch,
-        )
-        try:
-            evidence = _coverage_for_scope(evidence, scope)
-        except ValueError as err:
-            return EvidenceConflict(evidence_id=evidence.evidence_id, reason=str(err))
-        if (
-            evidence.coverage is not None
-            and evidence.coverage.status == FactCoverageStatus.CONFIRMED
-            and evidence.coverage_evidence is None
-            and evidence.coverage.stream_scope is not None
-            and evidence.coverage.stream_scope.environment == "live"
-        ):
-            return EvidenceConflict(
-                evidence_id=evidence.evidence_id,
-                reason="durable live coverage requires typed pagination provenance",
-            )
         if evidence.stream_id and evidence.stream_epoch:
             self._active_streams.add(
                 (
@@ -2299,40 +2262,20 @@ class ExecutionBook:
                     if evidence.sequence is not None:
                         candidate._last_sequences[canon] = evidence.sequence
 
-                    watermark_prefix = f"{key.canonical_id}\x1f"
-                    changed_orders = {
-                        watermark_key[len(watermark_prefix) :]
-                        for watermark_key, quantity in candidate._order_cumulative_fills.items()
-                        if watermark_key.startswith(watermark_prefix)
-                        and (
-                            quantity
-                            != self._order_cumulative_fills.get(
-                                watermark_key, Decimal("0")
-                            )
-                            or candidate._order_cumulative_quotes.get(
-                                watermark_key, Decimal("0")
-                            )
-                            != self._order_cumulative_quotes.get(
-                                watermark_key, Decimal("0")
-                            )
-                        )
-                    }
-                    for order_id in sorted(changed_orders):
-                        watermark_key = self._order_watermark_key(key, order_id)
+                    watermarks = changed_order_watermarks(
+                        key,
+                        before_quantities=self._order_cumulative_fills,
+                        before_quotes=self._order_cumulative_quotes,
+                        after_quantities=candidate._order_cumulative_fills,
+                        after_quotes=candidate._order_cumulative_quotes,
+                        observed_at=evidence.observed_at,
+                    )
+                    for watermark in watermarks:
                         await tx.persist_watermark(
                             key=key,
                             stream_id=scope.stream_id,
                             stream_epoch=scope.stream_epoch,
-                            watermark=ExecutionWatermark(
-                                order_id=order_id,
-                                cumulative_quantity=candidate._order_cumulative_fills[
-                                    watermark_key
-                                ],
-                                cumulative_quote=candidate._order_cumulative_quotes.get(
-                                    watermark_key, Decimal("0")
-                                ),
-                                updated_at=evidence.observed_at,
-                            ),
+                            watermark=watermark,
                         )
                     head_payload = _execution_head_payload(
                         candidate, key, facts.compute_facts_hash()

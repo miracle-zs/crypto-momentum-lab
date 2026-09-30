@@ -27,6 +27,7 @@ import pytest
         "crypto_momentum_lab.domain.execution.cumulative_report",
         "crypto_momentum_lab.domain.execution.evidence_grouping",
         "crypto_momentum_lab.domain.execution.observation_models",
+        "crypto_momentum_lab.domain.execution.durable_evidence",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:
