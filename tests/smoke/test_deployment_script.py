@@ -2,9 +2,68 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[2]
 DEPLOY_SCRIPT = ROOT / "deploy/ops/update_server.sh"
 DOCKERFILE = ROOT / "Dockerfile"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_attempts"),
+    [
+        ("transient", 0, 2),
+        ("persistent", 1, 3),
+        ("mismatch", 1, 1),
+        ("unknown", 1, 1),
+        ("timeout", 124, 1),
+    ],
+)
+def test_preflight_retries_only_transient_account_syncing(
+    tmp_path: Path, mode: str, expected_status: int, expected_attempts: int
+) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("run_with_timeout() {")
+    end = script.index("\nlog_service_timing()", start)
+    functions = script[start:end]
+    runner = (
+        "run_with_account_ready_retry"
+        if "run_with_account_ready_retry()" in functions
+        else "run_with_timeout"
+    )
+    command = tmp_path / "preflight.py"
+    counter = tmp_path / "attempts"
+    command.write_text(
+        "import json,sys\nfrom pathlib import Path\n"
+        "counter=Path(sys.argv[1]); mode=sys.argv[2]\n"
+        "attempt=int(counter.read_text())+1 if counter.exists() else 1\n"
+        "counter.write_text(str(attempt))\n"
+        "ready=mode=='transient' and attempt>1\n"
+        "errors=[] if ready else ['account_ready']\n"
+        "checks={'account_ready':ready,'approval_present':True}\n"
+        "if mode=='mismatch':\n"
+        " errors.append('approval_git_commit_matches_expected')\n"
+        " checks['approval_git_commit_matches_expected']=False\n"
+        "payload={'account_state':'ready_readonly' if ready else 'syncing',"
+        "'preflight_errors':errors,'preflight_checks':checks,'preflight_ok':ready}\n"
+        "print(json.dumps({} if mode=='unknown' else payload))\n"
+        "sys.exit(124 if mode=='timeout' else 0 if ready else 1)\n",
+        encoding="utf-8",
+    )
+    # Exercise the deployment's real Bash helpers; only skip retry delays.
+    invocation = (
+        f"set -Eeuo pipefail\n{functions}\nsleep() {{ :; }}\n"
+        'timeout() { shift 3; "$@"; }\n'
+        f'{runner} preflight 5 python3 "$1" "$2" "$3"\n'
+    )
+    result = subprocess.run(
+        ["bash", "-c", invocation, "test", str(command), str(counter), mode],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == expected_status, result.stdout + result.stderr
+    assert int(counter.read_text()) == expected_attempts
 
 
 def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:

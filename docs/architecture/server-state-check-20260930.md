@@ -74,7 +74,7 @@ research collector 为 DEGRADED / capacity_state=warning，因为 disk_free_byte
 4. 再按模块审查的事务约束推进结构重构，避免用健康提示变化代替业务一致性验收。
 
 
-## 后续诊断与本地修复（尚未发布）
+## 后续诊断与代码修复
 
 继续检查发现：`strategy_checkpoint_persisted` / `live_checkpoint_persisted` 日志持续出现，但表中 saved_at 保持启动时刻。Postgres 仓储 UPSERT 使用 `existing.saved_at <= excluded.saved_at`，旧回放的 saved_at 可能被忽略，因此“写入成功”日志不能独立证明持久进度推进。前文 checkpoint 停滞指数据库记录及业务进度，不等于 checkpoint writer 已停止运行。当前没有放宽时间比较或用当前时间覆盖旧进度以制造健康状态。
 
@@ -94,4 +94,47 @@ rtk proxy .venv/bin/python -m pytest -q   tests/unit/live_rollout/test_context_p
 # 242 passed in 2.38s
 ```
 
-这些测试确认代码缺陷及修复行为，尚不能证明线上队列溢出、CPU 延迟或所有重复自愈均已消除。生产代码未更新；发布后应观察实际消费水位与 checkpoint 持续推进、自愈次数收敛、队列恢复及真实退出保护。清理 SQL/ORM 边界和 ExecutionBook 的内部拆分仍属于后续结构工作，未在这次故障修复中全部实施。
+这些测试确认代码缺陷及修复行为，不能单独证明线上队列溢出、CPU 延迟或所有重复自愈均已消除。清理 SQL/ORM 边界和 ExecutionBook 的内部拆分仍属于后续结构工作，未在这次故障修复中全部实施。
+
+### 首次发布后发现的消费中断
+
+用户明确批准生产发布后，先发布 `ed7ec747a15c5fedfaae6758bcf1e65a9205669a`。第一次预检因账户 2、3 的瞬时 `syncing` 失败，脚本没有重启实盘服务；审批版本已刷新。降低控制操作并发到 1，从失败阶段恢复后，四账户全部通过严格预检，脚本完成镜像、租约和服务更新。审批风险配置与限额保持原值，租约原来的更晚到期时间未缩短。
+
+容器和结构化就绪检查通过，但后续业务验收发现 `live_runtime_market_task_failed` / `session_run_failed`。异常为：退出决策已持久化，派发前当前 Book 的投影或就绪状态已变化，`LiveDecisionFactSource._dispatch_exit` 抛出 RuntimeError，导致行情消费任务退出。此前重启后的 healthy 和 `entry_enabled=true` 快照没有证明消费链持续工作。
+
+补充修复 `aa776cd06b650c0bc1748216fd650c38a4ab6e2c`：当前 Book 与退出单绑定的投影、epoch 或就绪状态不匹配时，保持 durable outbox 为 PENDING，不派发、不确认，也不终止行情消费；由既有恢复循环重新校验。缺失派发处理器和无关 Book 数据损坏仍抛错，没有放宽交易校验。新增三个回归用例在修复前因同一 RuntimeError 失败，修复后验证持续消费的调用可以返回、策略状态正常推进，以及 Book 恢复后原待处理退出单可以派发。相关测试合计 **245 passed**。
+
+同一观察窗口还出现 `stream epoch changed without a complete source-anchored fill scan` 的账户快照冲突；不能把该日志与上述 RuntimeError 的直接原因混为一谈。只读重建也发现部分 Book 尚未跟随账户平仓状态，需单独验收事实恢复，不能通过跳过 epoch 校验或把未知覆盖标成完整来解决。
+
+### 已确认的真实退出成交
+
+发布后的数据库成交与订单证据如下，均为 PHAROSUSDT 的系统 reduce-only SELL 订单，state=filled、quantity=executed_quantity=132。
+
+| 账户 | 订单成交状态更新时间（北京时间） | 交易所订单 ID |
+| --- | --- | --- |
+| account-4 | 11:00:09 | 201133468 |
+| account-3 | 11:09:45 | 201148019 |
+| account-2 | 11:22:38 | 201177707 |
+| primary | 11:22:47 | 201177962 |
+
+后续只读查询确认四账户对账均为 ready、position_count=0、open_order_count=0、mismatch_count=0，账户成交表也各记录 SELL 合计 132。这确认采样时四账户原有持仓的实际退出均已发生，不能推广为未来所有退出路径或账本恢复均已正确。没有手工提交测试交易或修改持仓事实。
+
+### 连续验收发现的成交结算等待
+
+`aa776cd` 发布后，新进程首先完成了四账户 checkpoint 写入，但 primary / account-2 随后再次终止消费。11:25 左右连续采样的失败断言为 account-2 的 market watermark age=207.6s（要求小于 180s）。日志明确指出：`ExecutionBook applied order facts but reservation settlement requires recovery: Filled terminal lacks complete account trade facts; active reservation is retained for recovery`。此时交易所成交已经发生，领域层保留 reservation 等待账户真实成交事实是保护措施；消费进程不应因此终止，阻断所等待的事实到达。
+
+补充修复 `259c8e0`：durable 退出单派发处理器报告结算等待或提交结果未知时，记录 deferred，保留待处理行及 reservation，继续消费，由既有恢复路径校验。Book 读取损坏、缺失退出处理器、取消任务仍保留原来的失败/取消语义。新增结算等待与未知响应的红绿回归，并验证 Book 损坏和任务取消没有被吞掉。连同执行协调器测试共 **290 passed in 2.78s**。该修复没有用订单累计量伪造完整账户成交事实，也没有直接清除 reservation。
+
+### 最终发布与验收（北京时间 11:51 起）
+
+最终运行版本为 `259c8e02896ef3d954f228cb5743afe5c7d473d5`，四策略于 11:43:55 启动。12 个常驻容器全部 healthy，重启计数为 0、未被 OOM 杀死。部署脚本另外增加严格有界重试：仅当预检唯一失败项为 account_ready、账户状态为 syncing 且其他检查全通过时，最多尝试三次；配置不匹配、未知失败和超时立即失败。部署 smoke 38 项通过，连同业务测试 **328 passed in 5.00s**，shell 语法检查通过。
+
+11:51:37 的只读数据库采样确认四账户 checkpoint 年龄 7.4–35.4 秒，消费水位年龄 22.9–37.9 秒。启动至该时刻四策略均未出现重复自愈成功、队列溢出、候选过期、market task failed 或 session failed；各已持久化 19–22 次 checkpoint。账户 3 的退出派发仍因 Book 未就绪而 deferred，消费任务保持工作。CPU 后续三秒采样空闲 71–91%，一分钟负载 1.07，较初查明显下降；market-data 最近三分钟仍记录 1 次 event-loop lag，不能声称延迟完全消失。
+
+交易与账本验收分开：四账户最新对账均 ready、持仓数/挂单数/不匹配数均为 0；PHAROSUSDT reservation 均 COMMITTED，未结算数量为 0。账户 3 仍有 **3 条 PENDING** durable 退出，其余账户无 PENDING。四账户仍持续出现“stream epoch changed without a complete source-anchored fill scan”，事实恢复不能判定为通过。
+
+面板 API 健康为 UP，但 readiness 仍 DEGRADED、strategy_state_unconfirmed，事实完整性 UNKNOWN。四策略自身快照 entry_enabled=true、FULLY_TRADEABLE，面板的 EXIT_ONLY 是缺少状态证据时的读模型判断，**不能当作实盘入场已被关闭的证明**。策略状态发布与账户事实覆盖仍需修复，磁盘初查容量警告也未通过本次修复消除。
+
+本次验收结论：发布、当前行情消费、checkpoint 持续性和原有持仓退出分别核验；全系统健康与账本一致性仍未全部通过。没有修改 SQL 持仓/成交事实，没有跳过 epoch 或事实完整性保护，没有手工发起测试交易。
+
+11:53:04 第二次独立数据库采样：四账户 saved_at 与行情水位均较 11:51:37 严格前进，checkpoint 年龄 4.0–49.0 秒、行情水位年龄 19.5–64.5 秒，全部满足小于 180 秒的验收阈值。这是约 9 分钟运行观察中的两次持续性采样，不代表无限时长稳定性保证。

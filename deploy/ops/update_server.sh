@@ -352,6 +352,58 @@ run_with_timeout() {
   return "$status"
 }
 
+run_with_account_ready_retry() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  local attempt status output_file
+  for attempt in 1 2 3; do
+    output_file="$(mktemp)"
+    if run_with_timeout "$label" "$timeout_seconds" "$@" 2>&1 | tee "$output_file"; then
+      rm -f "$output_file"
+      return 0
+    else
+      status=$?
+    fi
+    # Only the explicit transient account state is retryable. Approval,
+    # configuration, database, timeout and unstructured failures still stop.
+    if [[ "$status" != 1 || "$attempt" == 3 ]] || ! python3 - "$output_file" <<'PREFLIGHT_RETRY'
+import json
+from pathlib import Path
+import sys
+
+summaries = []
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    try:
+        value = json.loads(line)
+    except (ValueError, TypeError):
+        continue
+    if isinstance(value, dict) and "preflight_errors" in value:
+        summaries.append(value)
+if not summaries:
+    raise SystemExit(1)
+summary = summaries[-1]
+checks = summary.get("preflight_checks")
+retryable = (
+    summary.get("account_state") == "syncing"
+    and summary.get("preflight_ok") is False
+    and summary.get("preflight_errors") == ["account_ready"]
+    and isinstance(checks, dict)
+    and len(checks) > 1
+    and checks.get("account_ready") is False
+    and all(value is True for key, value in checks.items() if key != "account_ready")
+)
+raise SystemExit(0 if retryable else 1)
+PREFLIGHT_RETRY
+    then
+      rm -f "$output_file"
+      return "$status"
+    fi
+    rm -f "$output_file"
+    echo "operation=retry name=$label reason=account_syncing attempt=$attempt max_attempts=3"
+    sleep 3
+  done
+}
+
 log_service_timing() {
   local operation="$1"
   local service="$2"
@@ -1307,7 +1359,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     local account execution_service strategy_service
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     echo "refresh approval $account"
-    run_with_timeout "refresh-approval:$account" "$deploy_operation_timeout" \
+    run_with_account_ready_retry "refresh-approval:$account" "$deploy_operation_timeout" \
       "${compose[@]}" run --rm --no-deps -T "$strategy_service" \
         refresh-approval-runtime \
         --account-label "$account" \
@@ -1339,7 +1391,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     local account execution_service strategy_service
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     echo "preflight $account"
-    run_with_timeout "preflight:$account" "$deploy_operation_timeout" \
+    run_with_account_ready_retry "preflight:$account" "$deploy_operation_timeout" \
       "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
         --account-label "$account" \
         --strategy orderflow_impulse \
