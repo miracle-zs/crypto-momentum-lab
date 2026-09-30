@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -30,7 +31,6 @@ from crypto_momentum_lab.domain.decision.ports import (
     ExitDispatchHandler,
 )
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -45,7 +45,10 @@ from crypto_momentum_lab.domain.operational.retention_models import (
 )
 from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 
 log = structlog.get_logger(__name__)
 

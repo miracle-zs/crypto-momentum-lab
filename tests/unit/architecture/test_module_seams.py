@@ -369,3 +369,27 @@ importlib.import_module('crypto_momentum_lab.live_rollout.scheduled_controller')
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_decision_facts_does_not_load_execution_book_or_context() -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class FactGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.domain.execution.execution_book',
+            'crypto_momentum_lab.live_rollout.context',
+        }:
+            raise RuntimeError('decision facts imported implementation: ' + fullname)
+sys.meta_path.insert(0, FactGuard())
+importlib.import_module('crypto_momentum_lab.live_rollout.decision_facts')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
