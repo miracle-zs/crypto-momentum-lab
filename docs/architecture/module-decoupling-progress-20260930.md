@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1637,6 +1637,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 联合检查真实 journal/command/reservation 仓储、三个同 session 端口、原生执行 UoW、领域事务/UoW 接口及 ExecutionBook 协作者，验证生产构造参数与领域消费契约相容。未新增适配器、运行探测或生命周期变化。
 
 验证：先运行十三文件装配检查，再纳入实际 Book、codec 与协作者，mypy --follow-imports=skip **二十四文件通过**。具体范围为 execution_runtime、execution_unit_of_work、command_store_ports、reservation_store_ports、journal_store_ports、command_repository、position_reservation_repository、account_journal_store、领域 ports、position_ledger_models、trade_command、recovery_models、recovery_codec、execution_book、position_context_ports、position_repair、position_book、execution_coordinator、command_lifecycle、account_journal、reservation_repository、account/models、evidence_models、command_codec。其他跳过依赖、全仓类型和真实数据库不在验收范围。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2533 passed**，29.54 秒，一项现有 Starlette/httpx 警告；包含恢复完成前不创建提交 coordinator、恢复失败或取消不暴露提交的既有装配验收。修改文件完整 Ruff 与 git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十批：持仓上下文接口与修复计算解耦
+
+第一百二十九批提交为 `6213743`；第一百三十批于 2026-10-01 继续本地实施，未部署生产。
+
+- 为领域事务 ports 与 position_context_ports 各增加数据库导入和执行协调栈导入守卫；后者揭示 PositionRepairBook 放在修复计算模块，导致接口经 evidence_codec 加载 recovery_codec。
+- 将单方法 PositionRepairBook 移至 position_context_ports，与 PositionContextBook 的读能力同归接口所有者。自愈调用方更新为所有者直接导入；position_repair 不保留兼容重导出，原计算、事务和重载顺序保持。
+- 执行值导入守卫额外禁止 SQLAlchemy 与 live_rollout 运行模块，新增四项参数验收，既有模型、AccountJournal 和 PositionBook 同时受强化约束。
+
+验证：新增守卫先复现接口隐式 codec 导入失败，修复后新增四项导入守卫全部通过。六文件联合 mypy --follow-imports=skip 通过（position_context_ports、position_repair、position_self_healing、position_ledger_models、ports、recovery_models），不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2537 passed**，29.95 秒，一项现有 Starlette/httpx 警告。四个修改文件完整 Ruff、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -60,6 +60,8 @@ import pytest
         "crypto_momentum_lab.domain.execution.observation_models",
         "crypto_momentum_lab.domain.execution.durable_evidence",
         "crypto_momentum_lab.domain.execution.projection_codec",
+        "crypto_momentum_lab.domain.execution.ports",
+        "crypto_momentum_lab.domain.execution.position_context_ports",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:
@@ -127,6 +129,8 @@ def test_package_import_does_not_load_application_adapters(
         "crypto_momentum_lab.domain.execution.observation_models",
         "crypto_momentum_lab.domain.execution.recovery_models",
         "crypto_momentum_lab.domain.execution.projection_codec",
+        "crypto_momentum_lab.domain.execution.ports",
+        "crypto_momentum_lab.domain.execution.position_context_ports",
         "crypto_momentum_lab.domain.execution.account_journal",
         "crypto_momentum_lab.domain.execution.position_book",
     ],
@@ -142,7 +146,10 @@ class CoordinationGuard(MetaPathFinder):
             'crypto_momentum_lab.domain.execution.execution_book',
             'crypto_momentum_lab.domain.execution.execution_coordinator',
             'crypto_momentum_lab.domain.execution.recovery_codec',
-        } or fullname.startswith('crypto_momentum_lab.persistence'):
+        } or fullname.startswith('crypto_momentum_lab.persistence') or (
+            fullname == 'sqlalchemy' or fullname.startswith('sqlalchemy.')
+            or fullname.startswith('crypto_momentum_lab.live_rollout')
+        ):
             raise RuntimeError('value imported execution stack: ' + fullname)
 sys.meta_path.insert(0, CoordinationGuard())
 importlib.import_module(sys.argv[1])

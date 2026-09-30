@@ -3,9 +3,11 @@
 import structlog
 
 from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
+from crypto_momentum_lab.domain.execution.position_context_ports import (
+    PositionRepairBook,
+)
 from crypto_momentum_lab.domain.execution.position_repair import (
     PositionRepairBlocked,
-    PositionRepairBook,
     PositionRepairRequest,
     PositionRepairUnitOfWork,
     build_position_repair,

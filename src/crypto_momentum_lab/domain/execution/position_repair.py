@@ -23,7 +23,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
-    PositionView,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
@@ -92,16 +91,6 @@ class PositionRepairUnitOfWork(Protocol):
     def transaction(
         self, key: PositionKey
     ) -> AbstractAsyncContextManager[PositionRepairTransaction]: ...
-
-
-class PositionRepairBook(Protocol):
-    async def reload_position(
-        self,
-        key: PositionKey,
-        *,
-        expected_scope: AccountFactStreamScope,
-        expected_quantity: Decimal,
-    ) -> PositionView | None: ...
 
 
 def build_position_repair(
