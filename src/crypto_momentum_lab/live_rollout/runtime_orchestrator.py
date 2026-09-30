@@ -1899,7 +1899,7 @@ async def _observe_market_states(
 
 async def _collect_startup_market_states(
     *,
-    source: WebSocketMarketStateSource,
+    source: AsyncIterable[MarketState15s],
     buffer: StartupMarketStateBuffer,
 ) -> None:
     """Consume Hub data during DB warmup and hand the same stream forward."""
@@ -1918,7 +1918,7 @@ async def _collect_startup_market_states(
 
 async def _run_risk_control_channel(
     *,
-    source: WebSocketRiskControlSource,
+    source: AsyncIterable[RiskControlEvent],
     on_event: Callable[[RiskControlEvent], Awaitable[None]],
 ) -> None:
     async for event in _resilient_risk_control_stream(source):
@@ -1938,7 +1938,7 @@ async def _bootstrap_execution_position_facts(
 
 async def _run_account_event_channel(
     *,
-    source: WebSocketAccountEventSource,
+    source: AsyncIterable[AccountEvent],
     daemon: LiveStrategyDaemon,
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
