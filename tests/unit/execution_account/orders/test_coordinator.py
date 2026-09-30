@@ -245,11 +245,15 @@ async def test_scheduler_close_releases_queued_submitters() -> None:
 async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel() -> (
     None
 ):
+    from unittest.mock import AsyncMock
+
     backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
     )
+    drain = AsyncMock()
+    coordinator.execution_book.drain = drain
     submit_task = asyncio.create_task(
         coordinator.submit(_plan("BTCUSDT", reduce_only=False))
     )
@@ -262,9 +266,13 @@ async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel()
     close_task = asyncio.create_task(coordinator.aclose())
     await asyncio.sleep(0)
     assert close_task.done() is False
+    drain.assert_not_awaited()
     backend.release_submit.set()
     await close_task
     assert backend.calls == ["submit:BTCUSDT:entry"]
+    drain.assert_awaited_once_with()
+    await coordinator.aclose()
+    drain.assert_awaited_once_with()
 
 
 async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> None:

@@ -1243,8 +1243,7 @@ class OrderExecutionCoordinator:
             self._schedulers.clear()
         if schedulers:
             await asyncio.gather(*(scheduler.close() for scheduler in schedulers))
-        if self._execution_book is not None and hasattr(self._execution_book, "drain"):
-            await self._execution_book.drain()
+        await self._execution_book.drain()
 
     def _remove_idle_scheduler(self, key: OrderExecutionKey) -> None:
         self._schedulers.pop(key, None)
