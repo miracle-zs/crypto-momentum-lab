@@ -13,7 +13,7 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.domain.strategy.models import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
 
 log = structlog.get_logger()
@@ -70,10 +70,9 @@ class LiveCheckpointCoordinator:
         self._dirty = False
         self._last_saved_at: datetime | None = None
         self._last_checkpoint_cycle: int | None = None
-        if hasattr(writer, "attach_clock"):
-            writer.attach_clock(perf_counter)
-        self._last_persisted_token: int = getattr(writer, "last_persisted_token", 0)
-        writer_mono = getattr(writer, "last_persisted_monotonic", None)
+        writer.attach_clock(perf_counter)
+        self._last_persisted_token: int = writer.last_persisted_token
+        writer_mono = writer.last_persisted_monotonic
         self._last_persisted_monotonic: float = (
             writer_mono if writer_mono is not None else perf_counter()
         )
@@ -94,10 +93,9 @@ class LiveCheckpointCoordinator:
         self._dirty = False
         self._last_saved_at = None
         self._last_checkpoint_cycle = None
-        if hasattr(self._writer, "attach_clock"):
-            self._writer.attach_clock(perf_counter)
-        self._last_persisted_token = getattr(self._writer, "last_persisted_token", 0)
-        writer_mono = getattr(self._writer, "last_persisted_monotonic", None)
+        self._writer.attach_clock(perf_counter)
+        self._last_persisted_token = self._writer.last_persisted_token
+        writer_mono = self._writer.last_persisted_monotonic
         self._last_persisted_monotonic = (
             writer_mono if writer_mono is not None else perf_counter()
         )
@@ -133,10 +131,10 @@ class LiveCheckpointCoordinator:
         return self._dirty
 
     def _sync_persisted_progress(self) -> None:
-        token = getattr(self._writer, "last_persisted_token", 0)
+        token = self._writer.last_persisted_token
         if token > self._last_persisted_token:
             self._last_persisted_token = token
-            writer_mono = getattr(self._writer, "last_persisted_monotonic", None)
+            writer_mono = self._writer.last_persisted_monotonic
             if writer_mono is not None:
                 self._last_persisted_monotonic = writer_mono
 
@@ -264,8 +262,9 @@ class LiveCheckpointCoordinator:
                 self._sync_persisted_progress()
                 self._dirty = False
                 self._dirty_since_monotonic = None
-                self._last_persisted_monotonic = getattr(
-                    self._writer, "last_persisted_monotonic", perf_counter()
+                writer_mono = self._writer.last_persisted_monotonic
+                self._last_persisted_monotonic = (
+                    writer_mono if writer_mono is not None else perf_counter()
                 )
                 self._last_saved_at = None
             return saved

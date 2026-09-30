@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -616,6 +616,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。恢复能力/启动恢复/CLI/架构定向 **131 passed**；新增三项能力测试覆盖预热入口缺失、checkpoint 恢复缺失、缺少清空能力均在查询/重放前拒绝。五文件定向 mypy --follow-imports=skip（恢复、运行策略契约及实际 strategy/market 模型与读取接口）通过；核心文件和新增测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；结构性接口迁移不能代替生产异常验收。
+
+## 第四十六批：checkpoint writer 进度接口直接消费
+
+第四十五批提交为 `70a8d5a`；第四十六批继续本地实施，未部署生产。
+
+- LiveCheckpointCoordinator 原构造契约已要求 CheckpointWriter，现在直接调用 attach_clock 并读取 last_persisted_token、last_persisted_monotonic，删除 hasattr/getattr 能力探测。没有创建新转发接口或改变 writer 所有权。
+- writer 仍在耐久持久化完成后发布 token/完成时间；协调器只在 token 前进时同步进度。初始化/重置中的 None 时间回退保持，保存成功后也明确处理 None 回退当前 perf_counter，避免把可空时间赋给 float。原生 writer 保存成功本来提供完成时间，因此正常成功路径不变。
+- 协调器的 checkpoint 模型注解直接引用实际 models 所有者。缺失 writer 能力不再静默降级；writer coalescing、重试、同步保存、提交后回调与关闭未改。策略 checkpoint 参数签名探测仍保留，本批不宣称所有兼容探测均移除。
+
+验证：协调器既有回归 **13 passed**，涵盖耐久进度、dirty 预算和保存/失败场景；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。checkpoint_coordinator、checkpoint_writer、domain/strategy/models 三文件定向 mypy --follow-imports=skip 通过，未禁用错误码；核心文件完整 Ruff、git diff --check 通过，不代表全仓类型验收。本批没有新增镜像实现的测试，沿用真实 writer 的既有回归。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
 ## 后续实施顺序
 
