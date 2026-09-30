@@ -317,6 +317,11 @@ class LiveStrategyDaemon:
             context_generation=lambda: self._context_runtime.generation,
             clock=self._clock,
         )
+        context_invalidator = getattr(self._context_provider, "invalidate_cache", None)
+        if not callable(context_invalidator):
+            context_invalidator = getattr(self._context_provider, "invalidate", None)
+        if not callable(context_invalidator):
+            context_invalidator = None
         self._market_admission = LiveMarketStateAdmission(
             context_provider=self._context_provider,
             context_generation=lambda: self._context_runtime.generation,
@@ -326,6 +331,7 @@ class LiveStrategyDaemon:
             ),
             telemetry=self._telemetry,
             clock=self._clock,
+            invalidate_context=context_invalidator,
         )
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,

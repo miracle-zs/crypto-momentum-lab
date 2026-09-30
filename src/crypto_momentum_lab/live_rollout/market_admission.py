@@ -42,6 +42,7 @@ class LiveMarketStateAdmission:
         ],
         telemetry: MarketAdmissionSink | None,
         clock: Callable[[], datetime],
+        invalidate_context: Callable[[], None] | None = None,
     ) -> None:
         self._context_provider = context_provider
         self._context_generation = context_generation
@@ -49,16 +50,12 @@ class LiveMarketStateAdmission:
         self._publish_managed_position_symbols = publish_managed_position_symbols
         self._telemetry = telemetry
         self._clock = clock
+        self._invalidate_context = invalidate_context
 
     def invalidate_context_cache(self) -> None:
-        """Invalidate the underlying context provider cache if supported."""
-        invalidator = getattr(self._context_provider, "invalidate_cache", None)
-        if callable(invalidator):
-            invalidator()
-        else:
-            invalidator = getattr(self._context_provider, "invalidate", None)
-            if callable(invalidator):
-                invalidator()
+        """Invoke the optional invalidation capability bound at assembly."""
+        if self._invalidate_context is not None:
+            self._invalidate_context()
 
     async def prepare(
         self,
