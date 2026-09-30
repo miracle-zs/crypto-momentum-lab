@@ -39,10 +39,12 @@ from crypto_momentum_lab.domain.execution.durable_evidence import (
     prepare_durable_evidence,
 )
 from crypto_momentum_lab.domain.execution.evidence_codec import (
-    _digest_json_payload,
     _recovery_checkpoint_head_binding,
-    _trade_payload_digest,
     _view_projection_digest,
+)
+from crypto_momentum_lab.domain.execution.evidence_digest import (
+    digest_json_payload,
+    trade_payload_digest,
 )
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
@@ -2104,7 +2106,7 @@ class ExecutionBook:
                             stream_epoch=scope.stream_epoch,
                             evidence=ExecutionEvidenceIdentity(
                                 evidence_id=evidence.evidence_id,
-                                payload_digest=_digest_json_payload(_canonical_evidence_payload(evidence)),
+                                payload_digest=digest_json_payload(_canonical_evidence_payload(evidence)),
                                 accepted_at=evidence.observed_at,
                                 sequence=evidence.sequence,
                             ),
@@ -2161,7 +2163,7 @@ class ExecutionBook:
                                     quantity=fill.quantity,
                                     price=fill.price,
                                     side=fill.side,
-                                    payload_digest=_trade_payload_digest(fill),
+                                    payload_digest=trade_payload_digest(fill),
                                     first_seen_at=fill.trade_at,
                                 ),
                             )

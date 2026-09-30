@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1685,6 +1685,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 账户/run/hedge side 修复读取验收改为真实 AccountFillEventRow 输入，删除转换函数 monkeypatch，覆盖原生成 SQL 约束和实际转换后的方向过滤。
 
 验证：转换、journal store、修复适配器、接口、原生执行 UoW、账户/修复/ledger/恢复模型与 codec 十二文件联合 mypy --follow-imports=skip 通过，不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2541 passed**，31.19 秒，一项现有 Starlette/httpx 警告。新模块、修复适配器和两个测试文件完整 Ruff，journal store F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十四批：共享证据摘要与恢复 codec 解耦
+
+第一百三十三批提交为 `c5d624d`；第一百三十四批于 2026-10-01 继续本地实施，未部署生产。
+
+- 将 JSON 规范化摘要与成交摘要移至 evidence_digest，以公共 digest_json_payload/trade_payload_digest 表达共享能力。ExecutionBook、修复适配器和 evidence_codec 直接导入实际所有者，删除跨模块私有函数依赖。
+- 摘要模块不依赖恢复 codec；新增两项独立进程导入守卫。规范 JSON 排序、UTC 时间、Decimal 文本、SHA256 与成交字段集合保持。
+- 新增迁移前成交摘要固定值验收，覆盖时区等价、嵌套键顺序等价和成交数量变化；防止耐久成交去重身份因迁移改变。
+
+验证：摘要、evidence codec、账户模型、ledger/恢复模型与恢复 codec 六文件 mypy --follow-imports=skip 通过，不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，30.99 秒，一项现有 Starlette/httpx 警告。新模块、evidence codec、修复适配器和两个测试文件完整 Ruff，ExecutionBook F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

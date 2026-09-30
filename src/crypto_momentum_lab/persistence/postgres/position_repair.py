@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution.evidence_codec import _trade_payload_digest
+from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
 from crypto_momentum_lab.domain.execution.ports import ExecutionTradeIdentity
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.position_repair_models import (
@@ -109,7 +109,7 @@ class PostgresPositionRepairTransaction:
                     quantity=fill.quantity,
                     price=fill.price,
                     side=fill.side,
-                    payload_digest=_trade_payload_digest(fill),
+                    payload_digest=trade_payload_digest(fill),
                     first_seen_at=fill.trade_at,
                 ),
             )

@@ -1,37 +1,14 @@
 """Canonical execution evidence and head digests shared by writers/recovery."""
 
-import hashlib
-import json
 from dataclasses import asdict
-from datetime import UTC, datetime
-from decimal import Decimal
-from enum import StrEnum
+from datetime import UTC
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.execution.evidence_digest import digest_json_payload
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionView
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
 )
-
-
-def _digest_json_payload(payload: object) -> str:
-    def encode(value: object) -> object:
-        if isinstance(value, datetime):
-            return value.astimezone(UTC).isoformat()
-        if isinstance(value, Decimal):
-            return format(value, "f")
-        if isinstance(value, StrEnum):
-            return value.value
-        raise TypeError(f"unsupported execution evidence value {type(value).__name__}")
-
-    canonical = json.dumps(
-        payload,
-        default=encode,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _recovery_checkpoint_head_binding(
@@ -66,9 +43,4 @@ def _recovery_checkpoint_head_binding(
 def _view_projection_digest(view: PositionView) -> str:
     payload = asdict(view)
     payload.pop("projection_version", None)
-    return _digest_json_payload(payload)
-
-
-def _trade_payload_digest(fill: AccountFillEvent) -> str:
-    """Hash global trade identity independently of the transport stream epoch."""
-    return _digest_json_payload(asdict(fill))
+    return digest_json_payload(payload)
