@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crypto_momentum_lab.live_rollout import exit_channels
+from crypto_momentum_lab.live_rollout import exit_channels, exit_failure_policy
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 
 
@@ -118,11 +118,11 @@ async def test_closed_candle_channel_retries_pending_position_sync(
 
 
 def test_pending_position_failure_is_promoted_after_retries() -> None:
-    assert exit_channels.is_pending_position_sync_failure(
+    assert exit_failure_policy.is_pending_position_sync_failure(
         "pending_live_positions:BTCUSDT"
     )
     assert (
-        exit_channels.promote_pending_position_failure("pending_live_positions:BTCUSDT")
+        exit_failure_policy.promote_pending_position_failure("pending_live_positions:BTCUSDT")
         == "unmanaged_live_positions:BTCUSDT"
     )
 

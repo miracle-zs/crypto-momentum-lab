@@ -12,7 +12,7 @@ from crypto_momentum_lab.live_rollout.account_event_ports import (
     AccountEventExitProcessor,
     AccountEventOrderReconciler,
 )
-from crypto_momentum_lab.live_rollout.exit_channels import (
+from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     ORDER_IDENTITY_CONFLICT_REASON,
     is_pending_position_sync_failure,

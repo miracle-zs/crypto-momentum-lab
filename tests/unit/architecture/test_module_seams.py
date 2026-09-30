@@ -14,6 +14,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.session_state",
         "crypto_momentum_lab.live_rollout.lease_recovery",
         "crypto_momentum_lab.live_rollout.exit_channel_ports",
+        "crypto_momentum_lab.live_rollout.exit_failure_policy",
         "crypto_momentum_lab.live_rollout.account_event_ports",
         "crypto_momentum_lab.live_rollout.telemetry_ports",
         "crypto_momentum_lab.live_rollout.control_plane",
@@ -281,6 +282,7 @@ class UnrelatedHubGuard(MetaPathFinder):
             'crypto_momentum_lab.market_data.hub',
             'crypto_momentum_lab.market_data.quote_hub',
             'crypto_momentum_lab.execution_account.risk_control_hub',
+            'crypto_momentum_lab.live_rollout.exit_channels',
         }:
             raise RuntimeError('account channel imported unrelated hub: ' + fullname)
 sys.meta_path.insert(0, UnrelatedHubGuard())
