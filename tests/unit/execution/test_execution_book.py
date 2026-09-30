@@ -2544,3 +2544,41 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
         as_of=datetime.now(UTC),
     )
     assert key.canonical_id in book._books
+
+
+@pytest.mark.parametrize("operation", ["read", "list"])
+@pytest.mark.parametrize(
+    ("stream_id", "stream_epoch", "reason"),
+    [
+        ("accounts", None, "must be supplied together"),
+        (None, "epoch", "must be supplied together"),
+        (" ", "epoch", "must not be empty"),
+        ("accounts", " ", "must not be empty"),
+    ],
+)
+async def test_position_reads_reject_incomplete_account_stream(
+    operation, stream_id, stream_epoch, reason
+) -> None:
+    book = ExecutionBook()
+    with pytest.raises(ValueError, match=reason):
+        if operation == "read":
+            await book.read(
+                ExecutionScope(
+                    environment="live",
+                    account_label="primary",
+                    symbol="BTCUSDT",
+                    position_side=FuturesPositionSide.BOTH,
+                ),
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+            )
+        else:
+            await book.list_position_views(
+                environment="live",
+                account_label="primary",
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+            )
+    assert (
+        await book.list_position_views(environment="live", account_label="primary") == ()
+    )

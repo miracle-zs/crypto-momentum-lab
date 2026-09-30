@@ -898,7 +898,11 @@ class ExecutionBook:
         """Read a published position, or a persisted historical cut, without mutation."""
         if (stream_id is None) != (stream_epoch is None):
             raise ValueError("stream_id and stream_epoch must be supplied together")
-        if stream_id is not None and (not stream_id.strip() or not stream_epoch.strip()):
+        if (
+            stream_id is not None
+            and stream_epoch is not None
+            and (not stream_id.strip() or not stream_epoch.strip())
+        ):
             raise ValueError("stream_id and stream_epoch must not be empty")
         if event_cut is not None and (
             event_cut.tzinfo is None or event_cut.utcoffset() is None
@@ -914,10 +918,14 @@ class ExecutionBook:
         )
         canon = key.canonical_id
         source_scope = self._stream_scopes.get(canon)
-        if stream_id is not None and (
-            source_scope is None
-            or source_scope.stream_id != stream_id
-            or source_scope.stream_epoch != stream_epoch
+        if (
+            stream_id is not None
+            and stream_epoch is not None
+            and (
+                source_scope is None
+                or source_scope.stream_id != stream_id
+                or source_scope.stream_epoch != stream_epoch
+            )
         ):
             current_book = self._books.get(canon)
             is_flat = (
@@ -1066,7 +1074,11 @@ class ExecutionBook:
             raise ValueError("environment and account_label must not be empty")
         if (stream_id is None) != (stream_epoch is None):
             raise ValueError("stream_id and stream_epoch must be supplied together")
-        if stream_id is not None and (not stream_id.strip() or not stream_epoch.strip()):
+        if (
+            stream_id is not None
+            and stream_epoch is not None
+            and (not stream_id.strip() or not stream_epoch.strip())
+        ):
             raise ValueError("stream_id and stream_epoch must not be empty")
         if event_cut is not None and (
             event_cut.tzinfo is None or event_cut.utcoffset() is None
