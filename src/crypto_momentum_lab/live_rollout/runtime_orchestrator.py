@@ -254,6 +254,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     ShadowSessionRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
+    PostgresOrderAdoptionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
@@ -537,6 +540,7 @@ async def run_live_daemon(
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
+        order_adoption_repository = PostgresOrderAdoptionRepository(execution_factory)
         order_read_repository = PostgresOrderReadRepository(execution_factory)
         order_event_repository = PostgresOrderEventRepository(execution_factory)
         submission_repository = PostgresOrderSubmissionRepository(execution_factory)
@@ -938,7 +942,7 @@ async def run_live_daemon(
         entry_order_canceller = LiveEntryOrderCanceller(
             exchange=client,
             state_machine=execution_coordinator,
-            repository=order_repository,
+            repository=order_adoption_repository,
             run_id=session_id,
         )
         order_reconciliation = LiveOrderReconciliation(
