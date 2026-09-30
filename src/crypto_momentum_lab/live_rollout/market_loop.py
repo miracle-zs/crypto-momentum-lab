@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 
 import structlog
 
+import crypto_momentum_lab.live_rollout.gates as gates
 import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
@@ -410,7 +411,7 @@ class LiveMarketLoop:
             context = admission.context
             gate = admission.gate
             if not gate.approved:
-                if _is_transient_live_gate(gate.reasons):
+                if gates.is_transient_live_gate(gate.reasons):
                     if self._last_transient_gate_reasons != gate.reasons:
                         log.warning(
                             "live_gate_temporarily_blocked",
@@ -743,15 +744,6 @@ def _strategy_decision_details(
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
         details["hub_sequence"] = sequence
     return details
-
-
-def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
-    return bool(reasons) and set(reasons) <= {
-        "missing_active_lease",
-        "inactive_or_expired_lease",
-        "account_not_ready",
-        "unresolved_order_uncertainty",
-    }
 
 
 def _strategy_max_gap_seconds(

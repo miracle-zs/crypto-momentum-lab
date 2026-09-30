@@ -57,7 +57,6 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
-from crypto_momentum_lab.live_rollout.market_loop import _is_transient_live_gate
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
@@ -707,11 +706,6 @@ async def test_live_daemon_survives_temporary_lease_gate_block() -> None:
     assert result.processed_state_count == 2
     assert result.submitted_order_count == 1
     assert exchange.calls == ["submit"]
-
-
-def test_unresolved_order_gate_is_transient_until_reconciliation_finishes() -> None:
-    assert _is_transient_live_gate(("unresolved_order_uncertainty",))
-    assert not _is_transient_live_gate(("active_risk_halt",))
 
 
 async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> None:

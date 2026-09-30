@@ -62,6 +62,15 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
     )
 
 
+def is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
+    return bool(reasons) and set(reasons) <= {
+        "missing_active_lease",
+        "inactive_or_expired_lease",
+        "account_not_ready",
+        "unresolved_order_uncertainty",
+    }
+
+
 def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
     """Known resting orders are safe; only ambiguous lifecycle states halt.
 

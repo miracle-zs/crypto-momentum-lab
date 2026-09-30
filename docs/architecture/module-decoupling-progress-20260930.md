@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十八批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十九批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -526,6 +526,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 两个原运行期函数体与共享实现 AST 一致。分类不递归扩展 cause，不把 gate/configuration 错误引入运行期重试，也不改变现有重试预算、通道终止或启动退避行为。
 
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2430 passed**，25.73 秒，一项现有 Starlette/httpx 警告。规则/启动/daemon/CLI 定向 **140 passed**；新增 **8 项**覆盖四类共用瞬时异常、三个运行期不可重试错误与包裹 cause 不扩大分类。规则及新增测试完整 Ruff、迁移文件 F/I、规则定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第三十九批：可恢复 gate 阻塞规则归属
+
+第三十八批提交为 `3f19b51`；第三十九批继续本地实施，未部署生产。
+
+- 既有 live_rollout/gates.py 拥有 is_transient_live_gate，行情循环通过模块命名空间消费；删除 market_loop 私有判定及 daemon 测试对其导入，不新增转发模块。
+- 规则保持非空 reasons 且全部属于 missing_active_lease、inactive_or_expired_lease、account_not_ready、unresolved_order_uncertainty 才允许原等待恢复分支。空、未知或混合 active_risk_halt 均返回 False；重复原因保持原 set 语义。
+- 函数在名称归一化后 AST 与原实现一致，行情暂停、checkpoint、租约恢复、实际订单提交及重试时序未改。此处只明确 gate 规则的所有者，不代表所有 gate 阻塞都会自动恢复。
+- 原 daemon 私有函数测试迁至 gate 所有者并扩大为十组判定；既有 daemon pending reconciliation 的真实运行替身测试继续保留。
+
+验证：gate/daemon 定向 **82 passed**；最终完整本地回归 **2439 passed**。十组判定覆盖四种单原因、组合、重复、空集合、风险停机及未知原因。gate 模块及其测试完整 Ruff、行情循环/daemon 测试 F/I、gate 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

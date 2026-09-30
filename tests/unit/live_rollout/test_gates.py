@@ -2,6 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
@@ -203,3 +205,26 @@ def _risk_config() -> RiskConfigSnapshot:
         allow_reduce_only_while_draining=True,
         created_at=NOW,
     )
+
+
+@pytest.mark.parametrize(
+    "reasons, expected",
+    [
+        ((), False),
+        (("missing_active_lease",), True),
+        (("inactive_or_expired_lease",), True),
+        (("account_not_ready",), True),
+        (("unresolved_order_uncertainty",), True),
+        (("missing_active_lease", "account_not_ready"), True),
+        (("unresolved_order_uncertainty", "unresolved_order_uncertainty"), True),
+        (("active_risk_halt",), False),
+        (("unresolved_order_uncertainty", "active_risk_halt"), False),
+        (("unknown_gate_reason",), False),
+    ],
+)
+def test_transient_gate_requires_only_known_recoverable_reasons(
+    reasons: tuple[str, ...], expected: bool
+) -> None:
+    from crypto_momentum_lab.live_rollout.gates import is_transient_live_gate
+
+    assert is_transient_live_gate(reasons) is expected
