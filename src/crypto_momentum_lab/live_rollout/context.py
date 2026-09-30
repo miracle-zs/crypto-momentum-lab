@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import structlog
 
@@ -33,9 +33,11 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
 )
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
-from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+    from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成八十五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成八十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1097,6 +1097,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 配置回调时验证身份通知先于失败上报；未配置只发布原失败原因。保留单轮后 CancelledError 停止循环的验收，验证原降级结果不变。
 
 验证：grace 入口定向 **2 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2496 passed**。测试 F/I、git diff --check 通过，本批不新增类型验收或运行结构迁移。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第八十六批：上下文模型注解导入隔离
+
+第八十五批提交为 `4a55669`；第八十六批继续本地实施，未部署生产。
+
+- context 的 ManagedLivePosition 与 AccountSnapshot 仅 TYPE_CHECKING 引用，不再为了两个字段注解急切加载退出管理和账户同步实现。字段默认值、运行上下文模型和失效逻辑未改。
+- 独立进程同时禁止 exits 与 execution_account.sync 后 context 可加载；新增 context 禁止 sqlalchemy/persistence 导入检查。
+- LiveContextRuntime 对旧 provider 的 currentness/失效兼容探测仍保留，本批不收窄旧接口或改变 generation、异常日志规则。
+
+验证：上下文/架构定向 **80 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2497 passed**，29.41 秒，一项现有 Starlette/httpx 警告。context、context_prefetch、market_admission、telemetry_ports 四文件联合定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
