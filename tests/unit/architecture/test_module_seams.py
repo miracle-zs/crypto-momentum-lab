@@ -493,3 +493,47 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "test_checkpoint_plus_suffix_restores_nonzero_batches_and_cost_basis",
+        "test_checkpoint_id_is_deterministic_for_same_cut_and_contents",
+        "test_durable_projection_token_survives_unchanged_later_cut",
+        "test_verified_flat_snapshot_can_seed_a_scoped_stream",
+    ],
+)
+def test_ledger_recovery_executes_without_recovery_codec(scenario):
+    script = """
+import importlib
+import runpy
+import sys
+from importlib.abc import MetaPathFinder
+
+# Load existing scenario definitions, then remove their codec import so any
+# remaining lazy dependency in the execution path must cross the guard.
+scenarios = runpy.run_path('tests/unit/execution/test_position_recovery.py')
+codec = 'crypto_momentum_lab.domain.execution.recovery_codec'
+sys.modules.pop(codec, None)
+class CodecGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == codec:
+            raise RuntimeError('execution reloaded recovery codec')
+sys.meta_path.insert(0, CodecGuard())
+try:
+    importlib.import_module(codec)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('codec guard is not active')
+scenarios[sys.argv[1]]()
+assert codec not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, scenario],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
