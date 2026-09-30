@@ -20,6 +20,9 @@ from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
     _fill_from_row,
 )
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
+)
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
     ExecutionTransaction,
@@ -27,9 +30,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     ExchangeOrderRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -134,7 +134,7 @@ class PostgresPositionRepairUnitOfWork:
         self._execution = AsyncPostgresExecutionUnitOfWork(
             sessions,
             journal_store=PostgresAccountJournalStore(),
-            order_repository=PostgresOrderRepository(sessions),
+            command_repository=PostgresCommandRepository(sessions),
             reservation_repository=AsyncPostgresPositionReservationRepository(sessions),
         )
 

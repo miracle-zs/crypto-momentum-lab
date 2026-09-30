@@ -7,13 +7,13 @@ from typing import Any
 import pytest
 from sqlalchemy.sql import Select
 
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeFillRow,
     ExchangeOrderEventRow,
     ExecutionCommandRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 
 
@@ -90,8 +90,8 @@ class _FakeSessionFactory:
         return _FakeSession(**self._rows)
 
 
-def _repository(**rows: list[object]) -> PostgresOrderRepository:
-    return PostgresOrderRepository(_FakeSessionFactory(**rows))  # type: ignore[arg-type]
+def _repository(**rows: list[object]) -> PostgresCommandRepository:
+    return PostgresCommandRepository(_FakeSessionFactory(**rows))  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -277,3 +277,107 @@ async def test_matching_fill_and_event_with_rounding_difference_reconciles() -> 
     # Prefers the fill watermark (3 * 100.001 = 300.003)
     assert rows[0]["cumulative_filled_quote"] == Decimal("300.003")
 
+
+@pytest.mark.asyncio
+async def test_in_session_outbox_insert_preserves_caller_transaction():
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, Mock
+
+    session = AsyncMock()
+    session.get.return_value = None
+    session.add = Mock()
+    repository = PostgresCommandRepository(None)
+    await repository.upsert_execution_command_in_session(
+        session,
+        command_id="command-1",
+        client_order_id="command-1",
+        command="exit",
+        status="prepared",
+        requested_at=datetime(2026, 9, 30, tzinfo=UTC),
+        details={"reservations": ["r1"]},
+    )
+    session.get.assert_awaited_once_with(
+        ExecutionCommandRow, "command-1", with_for_update=True
+    )
+    inserted = session.add.call_args.args[0]
+    assert inserted.command_id == "command-1"
+    assert inserted.details == {"reservations": ["r1"]}
+    session.commit.assert_not_awaited()
+    session.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_in_session_outbox_identity_conflict_does_not_mutate_row():
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock
+
+    existing = ExecutionCommandRow(
+        command_id="command-1",
+        client_order_id="other-order",
+        command="exit",
+        status="prepared",
+        details={},
+    )
+    session = AsyncMock()
+    session.get.return_value = existing
+    with pytest.raises(ValueError, match="durable identity"):
+        await PostgresCommandRepository(None).upsert_execution_command_in_session(
+            session,
+            command_id="command-1",
+            client_order_id="command-1",
+            command="exit",
+            status="unknown",
+            requested_at=datetime(2026, 9, 30, tzinfo=UTC),
+            details={},
+        )
+    assert existing.status == "prepared"
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execution_transaction_uses_command_repository_with_same_session():
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
+        ExecutionTransaction,
+    )
+
+    session, commands = AsyncMock(), AsyncMock()
+    tx = ExecutionTransaction(
+        session,
+        journal_store=AsyncMock(),
+        command_repository=commands,
+        reservation_repository=AsyncMock(),
+    )
+    values = dict(
+        command_id="command-1",
+        client_order_id="command-1",
+        command="exit",
+        status="unknown",
+        requested_at=datetime(2026, 9, 30, tzinfo=UTC),
+        details={},
+    )
+    await tx.upsert_outbox(**values)
+    commands.upsert_execution_command_in_session.assert_awaited_once_with(
+        session, **values
+    )
+    session.commit.assert_not_awaited()
+
+
+def test_order_repository_no_longer_exposes_execution_command_methods():
+    from crypto_momentum_lab.persistence.postgres.order_repository import (
+        PostgresOrderRepository,
+    )
+
+    for name in (
+        "upsert_execution_command",
+        "upsert_execution_command_in_session",
+        "load_active_execution_commands",
+        "load_execution_order_watermarks",
+        "load_seen_event_ids",
+        "load_seen_fill_trade_ids",
+        "save_execution_command",
+        "save_reconciliation_event",
+    ):
+        assert not hasattr(PostgresOrderRepository, name)

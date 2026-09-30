@@ -12,6 +12,9 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -80,6 +83,7 @@ async def resolve_missing_live_order(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         order_repository = PostgresOrderRepository(factory)
+        command_repository = PostgresCommandRepository(factory)
         order = await order_repository.load_order(client_order_id)
         if order is None:
             raise RuntimeError(f"order {client_order_id} does not exist")
@@ -167,7 +171,7 @@ async def resolve_missing_live_order(
             "operator": operator.strip(),
             "verification_id": verification_id,
         }
-        await order_repository.save_execution_command(
+        await command_repository.save_execution_command(
             command_id=f"operator-resolve-{verification_id}",
             client_order_id=client_order_id,
             command="resolve_unknown_order",
@@ -175,7 +179,7 @@ async def resolve_missing_live_order(
             requested_at=now,
             details=evidence,
         )
-        await order_repository.save_reconciliation_event(
+        await command_repository.save_reconciliation_event(
             reconciliation_event_id=f"operator-reconcile-{verification_id}",
             client_order_id=client_order_id,
             outcome="operator_confirmed_absent",

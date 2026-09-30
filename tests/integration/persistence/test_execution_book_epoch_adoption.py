@@ -29,11 +29,11 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
 )
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
+)
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -44,18 +44,18 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 
 def _book(factory):
-    orders = PostgresOrderRepository(factory)
+    commands = PostgresCommandRepository(factory)
     reservations = AsyncPostgresPositionReservationRepository(
         factory, strategy_name="epoch-adoption-test"
     )
     uow = AsyncPostgresExecutionUnitOfWork(
         factory,
         journal_store=PostgresAccountJournalStore(),
-        order_repository=orders,
+        command_repository=commands,
         reservation_repository=reservations,
     )
     return ExecutionBook(
-        command_repository=orders,
+        command_repository=commands,
         reservation_repository=reservations,
         execution_unit_of_work=uow,
     )

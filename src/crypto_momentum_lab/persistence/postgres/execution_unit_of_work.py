@@ -59,6 +59,9 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 from crypto_momentum_lab.domain.operational.retention_models import ConsumerDependency
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
+)
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
@@ -74,9 +77,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.models import (
     DecisionTraceRow,
     MarketRevisionRefRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionRecoveryCheckpointRow,
@@ -97,12 +97,12 @@ class ExecutionTransaction:
         session: AsyncSession,
         *,
         journal_store: Any,
-        order_repository: PostgresOrderRepository,
+        command_repository: PostgresCommandRepository,
         reservation_repository: AsyncPostgresPositionReservationRepository,
     ) -> None:
         self.session = session
         self._journal_store = journal_store
-        self._order_repository = order_repository
+        self._command_repository = command_repository
         self._reservation_repository = reservation_repository
 
     async def persist_facts(
@@ -189,7 +189,7 @@ class ExecutionTransaction:
         )
 
     async def upsert_outbox(self, **values: Any) -> None:
-        await self._order_repository.upsert_execution_command_in_session(
+        await self._command_repository.upsert_execution_command_in_session(
             self.session, **values
         )
 
@@ -491,12 +491,12 @@ class AsyncPostgresExecutionUnitOfWork:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         journal_store: Any,
-        order_repository: PostgresOrderRepository,
+        command_repository: PostgresCommandRepository,
         reservation_repository: AsyncPostgresPositionReservationRepository,
     ) -> None:
         self._session_factory = session_factory
         self._journal_store = journal_store
-        self._order_repository = order_repository
+        self._command_repository = command_repository
         self._reservation_repository = reservation_repository
 
     async def load_journal_cut(
@@ -674,7 +674,7 @@ class AsyncPostgresExecutionUnitOfWork:
                 yield ExecutionTransaction(
                     session,
                     journal_store=self._journal_store,
-                    order_repository=self._order_repository,
+                    command_repository=self._command_repository,
                     reservation_repository=self._reservation_repository,
                 )
 

@@ -19,6 +19,7 @@ from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -34,11 +35,12 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
     TradeCommand,
 )
-from crypto_momentum_lab.domain.execution.order_state import (
-    deterministic_client_order_id,
-)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
+)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_state import (
+    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
@@ -64,6 +66,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySide,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
 from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
 from crypto_momentum_lab.execution_account.hub import (
@@ -73,9 +76,6 @@ from crypto_momentum_lab.execution_account.hub import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
     OrderExecutionPort,
-)
-from crypto_momentum_lab.domain.execution.order_submission import (
-    PreparedOrderSubmission,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -107,7 +107,6 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
-from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -242,6 +241,9 @@ from crypto_momentum_lab.market_data.quote_hub import (
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
+)
+from crypto_momentum_lab.persistence.postgres.command_repository import (
+    PostgresCommandRepository,
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
@@ -807,16 +809,17 @@ async def run_live_daemon(
             execution_factory, strategy_name=strategy_name
         )
         domain_coordinator = ExecutionCoordinator()
+        command_repository = PostgresCommandRepository(execution_factory)
         execution_unit_of_work = AsyncPostgresExecutionUnitOfWork(
             execution_factory,
             journal_store=PostgresAccountJournalStore(),
-            order_repository=order_repository,
+            command_repository=command_repository,
             reservation_repository=reservation_repository,
         )
         execution_book = ExecutionBook(
             coordinator=domain_coordinator,
             reservation_repository=reservation_repository,
-            command_repository=order_repository,
+            command_repository=command_repository,
             execution_unit_of_work=execution_unit_of_work,
         )
         # An incomplete recovery must fail startup before order submission.
