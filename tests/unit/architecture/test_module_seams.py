@@ -267,3 +267,28 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_account_channel_does_not_load_unrelated_hubs() -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class UnrelatedHubGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.market_data.hub',
+            'crypto_momentum_lab.market_data.quote_hub',
+            'crypto_momentum_lab.execution_account.risk_control_hub',
+        }:
+            raise RuntimeError('account channel imported unrelated hub: ' + fullname)
+sys.meta_path.insert(0, UnrelatedHubGuard())
+importlib.import_module('crypto_momentum_lab.live_rollout.account_channel')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

@@ -4,27 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator
+from typing import TYPE_CHECKING
 
 import structlog
 
-from crypto_momentum_lab.domain.market.models import (
-    MarketState15s,
-    RealtimeMarketQuote,
-)
-from crypto_momentum_lab.execution_account.hub import (
-    AccountEvent,
-    AccountEventHubError,
-)
-from crypto_momentum_lab.execution_account.risk_control_hub import (
-    RiskControlEvent,
-    RiskControlHubError,
-)
-from crypto_momentum_lab.market_data.hub import (
-    MarketStateHubEpochError,
-    MarketStateHubError,
-    MarketStateHubReplayUnavailable,
-)
-from crypto_momentum_lab.market_data.quote_hub import MarketQuoteHubError
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.market.models import (
+        MarketState15s,
+        RealtimeMarketQuote,
+    )
+    from crypto_momentum_lab.execution_account.hub import AccountEvent
+    from crypto_momentum_lab.execution_account.risk_control_hub import RiskControlEvent
 
 log = structlog.get_logger(__name__)
 
@@ -70,6 +60,12 @@ async def resilient_market_state_stream(
 ) -> AsyncIterator[MarketState15s]:
     """Keep the live process alive while the market state Hub reconnects."""
 
+    from crypto_momentum_lab.market_data.hub import (
+        MarketStateHubEpochError,
+        MarketStateHubError,
+        MarketStateHubReplayUnavailable,
+    )
+
     async for state in _resilient_stream(
         states,
         error_type=MarketStateHubError,
@@ -90,6 +86,8 @@ async def resilient_market_quote_stream(
 ) -> AsyncIterator[RealtimeMarketQuote]:
     """Keep the quote exit lane alive while the quote Hub reconnects."""
 
+    from crypto_momentum_lab.market_data.quote_hub import MarketQuoteHubError
+
     async for quote in _resilient_stream(
         quotes,
         error_type=MarketQuoteHubError,
@@ -106,6 +104,8 @@ async def resilient_account_event_stream(
 ) -> AsyncIterator[AccountEvent]:
     """Keep account-event delivery alive while the execution Hub reconnects."""
 
+    from crypto_momentum_lab.execution_account.hub import AccountEventHubError
+
     async for event in _resilient_stream(
         events,
         error_type=AccountEventHubError,
@@ -121,6 +121,10 @@ async def resilient_risk_control_stream(
     retry_delay_seconds: float = 1.0,
 ) -> AsyncIterator[RiskControlEvent]:
     """Keep durable risk-control notifications reconnecting independently."""
+
+    from crypto_momentum_lab.execution_account.risk_control_hub import (
+        RiskControlHubError,
+    )
 
     async for event in _resilient_stream(
         events,
