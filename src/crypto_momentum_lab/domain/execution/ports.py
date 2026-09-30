@@ -18,6 +18,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
 )
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+from crypto_momentum_lab.domain.market.models import JsonValue
 
 
 class DecisionCommitConflict(RuntimeError):
@@ -113,7 +114,16 @@ class ExecutionTransactionPort(Protocol):
         release_reason: str | None = None,
     ) -> None: ...
 
-    async def upsert_outbox(self, **values: object) -> None: ...
+    async def upsert_outbox(
+        self,
+        *,
+        command_id: str,
+        client_order_id: str | None,
+        command: str,
+        status: str,
+        requested_at: datetime,
+        details: dict[str, JsonValue],
+    ) -> None: ...
 
     async def record_evidence(
         self,

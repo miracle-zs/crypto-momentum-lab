@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十七批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十八批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1614,6 +1614,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 为 reservation_store_ports 增加独立进程导入守卫，禁止加载 SQLAlchemy、具体 Postgres 实现及执行协调栈。
 
 验证：十个所有者文件与临时原生 store/transaction 接口赋值探针联合 mypy --follow-imports=skip **十一文件通过**，探针已清理；不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2532 passed**，29.96 秒，一项现有 Starlette/httpx 警告。新接口与架构测试完整 Ruff，执行 UoW F/I 与 git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十八批：执行事务的命令 outbox 写入接口
+
+第一百二十七批提交为 `99ff2d3`；第一百二十八批于 2026-10-01 继续本地实施，未部署生产。
+
+- 提取 ExecutionCommandStore 单方法同 session 写入接口，ExecutionTransaction 与 AsyncPostgresExecutionUnitOfWork 不再依赖具体 PostgresCommandRepository；原生仓储直接满足接口，无转发适配器。
+- 领域事务端口与原生事务 upsert_outbox 明确 command_id、client_order_id、command、status、requested_at、details 六字段，删除宽泛 kwargs；details 使用现有 JsonValue 字典，实际 codec 与 ExecutionBook 调用已纳入类型验收。
+- 保存原 session 注入及命令仓储身份冲突校验、状态更新与不自行提交规则。新增命令接口独立进程导入守卫，禁止 SQLAlchemy、具体 Postgres 实现和执行协调栈加载。
+
+验证：二十个所有者文件（含 ExecutionBook、codec 与领域协作者）及原生 command store/transaction 接口赋值临时探针联合 mypy --follow-imports=skip **二十一文件通过**，探针清理。最初仅六文件检查受跳过协作者影响出现两项 Any 返回，纳入实际协作者后通过；不代表全仓或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2533 passed**，29.99 秒，一项现有 Starlette/httpx 警告，包括原有同 session 命令写入验收。新接口与架构测试完整 Ruff，领域 ports 与执行 UoW F/I、git diff --check 通过；领域 ports 完整 Ruff 仍有既有 UP035（AsyncContextManager 导入），本批未修改该无关项。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -403,6 +403,7 @@ importlib.import_module('crypto_momentum_lab.live_rollout.decision_facts')
         "crypto_momentum_lab.persistence.postgres",
         "crypto_momentum_lab.persistence.postgres.journal_store_ports",
         "crypto_momentum_lab.persistence.postgres.reservation_store_ports",
+        "crypto_momentum_lab.persistence.postgres.command_store_ports",
     ],
 )
 def test_postgres_contract_imports_without_storage_implementations(module: str) -> None:
@@ -416,6 +417,7 @@ class StorageGuard(MetaPathFinder):
             'crypto_momentum_lab.persistence.postgres',
             'crypto_momentum_lab.persistence.postgres.journal_store_ports',
             'crypto_momentum_lab.persistence.postgres.reservation_store_ports',
+            'crypto_momentum_lab.persistence.postgres.command_store_ports',
         }
         if (fullname == 'sqlalchemy' or fullname.startswith('sqlalchemy.')
             or (fullname.startswith('crypto_momentum_lab.persistence.postgres.')

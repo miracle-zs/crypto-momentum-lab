@@ -60,6 +60,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
     MarketRevisionRef,
@@ -67,8 +68,8 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 from crypto_momentum_lab.domain.operational.retention_models import ConsumerDependency
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.persistence.postgres.command_repository import (
-    PostgresCommandRepository,
+from crypto_momentum_lab.persistence.postgres.command_store_ports import (
+    ExecutionCommandStore,
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
@@ -108,7 +109,7 @@ class ExecutionTransaction:
         session: AsyncSession,
         *,
         journal_store: ExecutionJournalStore,
-        command_repository: PostgresCommandRepository,
+        command_repository: ExecutionCommandStore,
         reservation_repository: ExecutionReservationStore,
     ) -> None:
         self.session = session
@@ -199,9 +200,24 @@ class ExecutionTransaction:
             release_reason=release_reason,
         )
 
-    async def upsert_outbox(self, **values: Any) -> None:
+    async def upsert_outbox(
+        self,
+        *,
+        command_id: str,
+        client_order_id: str | None,
+        command: str,
+        status: str,
+        requested_at: datetime,
+        details: dict[str, JsonValue],
+    ) -> None:
         await self._command_repository.upsert_execution_command_in_session(
-            self.session, **values
+            self.session,
+            command_id=command_id,
+            client_order_id=client_order_id,
+            command=command,
+            status=status,
+            requested_at=requested_at,
+            details=details,
         )
 
     async def record_evidence(
@@ -502,7 +518,7 @@ class AsyncPostgresExecutionUnitOfWork:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         journal_store: ExecutionJournalStore,
-        command_repository: PostgresCommandRepository,
+        command_repository: ExecutionCommandStore,
         reservation_repository: ExecutionReservationStore,
     ) -> None:
         self._session_factory = session_factory
