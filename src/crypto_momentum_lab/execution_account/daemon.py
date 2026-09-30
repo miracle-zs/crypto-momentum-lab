@@ -14,8 +14,10 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.execution_account.binance.user_data import (
-    BinanceUserDataEvent,
     UserDataEventSink,
+)
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
+    BinanceUserDataEvent,
 )
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,

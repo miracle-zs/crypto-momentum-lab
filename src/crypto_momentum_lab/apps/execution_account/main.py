@@ -25,10 +25,14 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
-from crypto_momentum_lab.execution_account.binance import (
-    DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
+from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMPrivateReadClient,
+)
+from crypto_momentum_lab.execution_account.binance.user_data import (
+    DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
     BinanceUsdMUserDataStream,
+)
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
 from crypto_momentum_lab.execution_account.daemon import (

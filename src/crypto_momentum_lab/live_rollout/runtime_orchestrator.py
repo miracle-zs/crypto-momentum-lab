@@ -66,7 +66,9 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceUsdMTradeClient,
+)
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     WebSocketAccountEventSource,

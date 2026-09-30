@@ -9,7 +9,9 @@ from typing import Any
 import structlog
 
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
-from crypto_momentum_lab.execution_account.binance import BinanceRateLimitError
+from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceRateLimitError,
+)
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 
 log = structlog.get_logger(__name__)

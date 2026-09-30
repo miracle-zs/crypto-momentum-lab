@@ -13,7 +13,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceUsdMTradeClient,
+)
 from crypto_momentum_lab.execution_account.hub import (
     WebSocketAccountPositionExpectationPublisher,
 )

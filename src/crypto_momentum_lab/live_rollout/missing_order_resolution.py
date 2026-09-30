@@ -12,7 +12,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceUsdMTradeClient,
+)
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )

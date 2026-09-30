@@ -537,3 +537,23 @@ assert codec not in sys.modules
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_user_data_event_model_imports_without_transport():
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class TransportGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if (fullname == 'crypto_momentum_lab.execution_account.binance.user_data'
+            or fullname == 'websockets' or fullname.startswith('websockets.')
+            or fullname == 'structlog' or fullname.startswith('structlog.')):
+            raise RuntimeError('event model imported transport: ' + fullname)
+sys.meta_path.insert(0, TransportGuard())
+importlib.import_module('crypto_momentum_lab.execution_account.binance.user_data_models')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr

@@ -20,7 +20,7 @@ from crypto_momentum_lab.execution_account.balance_history import (
     balance_value,
     select_balance_history,
 )
-from crypto_momentum_lab.execution_account.binance.user_data import (
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
 from crypto_momentum_lab.execution_account.client_compat import (
