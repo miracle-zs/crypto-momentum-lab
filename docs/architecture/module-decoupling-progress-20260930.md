@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成八十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1026,6 +1026,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 此范围没有纳入完整执行协调器/退出管理器实现，不能作为其结构类型兼容或全仓类型验收证明。历史批次验收口径保留。
 
 验证：定时控制器/架构定向 **77 passed**，核心文件与架构测试完整 Ruff、git diff --check 通过。本批只更新验收记录，不重复完整回归；最近一次完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归为第七十八批 **2492 passed**。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第八十批：定时风控消费平仓规划能力
+
+第七十九批提交为 `ac34076`；第八十批继续本地实施，未部署生产。
+
+- ScheduledFlattenPlanner 明确单方法 requests_for_scheduled_flatten，保留 positions、now、symbol、reference_prices、attempt 参数和默认值。控制器删除 LiveExitManager 类型引用，原管理器与现有替身直接满足所需能力，无新增转发层。
+- 请求模型和 ManagedLivePosition 仍由 exits 所有，运行时撤单请求 isinstance 判断保留，本批不宣称整个 exits 模块依赖已移除。
+- 去除参数注解后控制器类 AST 与上一批一致。规划请求、撤单分类、平仓重试、权威仓位验证和入场恢复顺序保持。wait_for_entry_submissions_idle 的既有动态探测仍是待收窄点。
+
+验证：定时控制器/架构定向 **77 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2492 passed**，29.43 秒，一项现有 Starlette/httpx 警告。scheduled_controller、context、领域行情模型三文件联合定向 mypy --follow-imports=skip、核心文件完整 Ruff、git diff --check 通过，不代表完整管理器实现或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

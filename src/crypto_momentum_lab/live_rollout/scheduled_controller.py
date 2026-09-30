@@ -9,7 +9,7 @@ The daemon supplies context, execution, and gate adapters at this seam.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -25,8 +25,8 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
-    LiveExitManager,
     LiveExitRequest,
+    ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
@@ -40,6 +40,18 @@ if TYPE_CHECKING:
     )
 
 log = structlog.get_logger()
+
+
+class ScheduledFlattenPlanner(Protocol):
+    async def requests_for_scheduled_flatten(
+        self,
+        positions: tuple[ManagedLivePosition, ...],
+        *,
+        now: datetime,
+        symbol: str | None = None,
+        reference_prices: Mapping[str, Decimal] | None = None,
+        attempt: int = 1,
+    ) -> tuple[LiveExitRequest, ...]: ...
 
 
 class ScheduledCancellationResult(Protocol):
@@ -90,7 +102,7 @@ class ScheduledRiskWindowController:
         self,
         *,
         config: ScheduledRiskWindowControllerConfig,
-        exit_manager: LiveExitManager | None,
+        exit_manager: ScheduledFlattenPlanner | None,
         state_machine: ScheduledOrderCanceller,
         context_provider: LiveContextProvider,
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
