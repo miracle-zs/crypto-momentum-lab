@@ -465,11 +465,14 @@ class PositionRecoveryCodec:
         scope = data.get("stream_scope")
         observed_at = data.get("evidence_observed_at")
         source_cursor = data.get("source_cursor")
-        if type(data.get("has_known_gaps")) is not bool:
+        has_known_gaps = data.get("has_known_gaps")
+        if type(has_known_gaps) is not bool:
             raise RecoverySchemaError("has_known_gaps must be a boolean")
-        if type(data.get("page_exhausted")) is not bool:
+        page_exhausted = data.get("page_exhausted")
+        if type(page_exhausted) is not bool:
             raise RecoverySchemaError("page_exhausted must be a boolean")
-        if type(data.get("not_truncated")) is not bool:
+        not_truncated = data.get("not_truncated")
+        if type(not_truncated) is not bool:
             raise RecoverySchemaError("not_truncated must be a boolean")
         if revision is not None and type(revision) is not int:
             raise RecoverySchemaError("confirmed_revision must be an integer or null")
@@ -486,7 +489,7 @@ class PositionRecoveryCodec:
         return FactCoverageInterval(
             start_at=_datetime_value(data, "start_at"),
             end_at=_datetime_value(data, "end_at"),
-            has_known_gaps=data["has_known_gaps"],
+            has_known_gaps=has_known_gaps,
             source_cursor=source_cursor,
             status=FactCoverageStatus(_string(data, "status")),
             confirmed_revision=revision,
@@ -507,8 +510,8 @@ class PositionRecoveryCodec:
                 if data["load_provenance"] is not None
                 else None
             ),
-            page_exhausted=data["page_exhausted"],
-            not_truncated=data["not_truncated"],
+            page_exhausted=page_exhausted,
+            not_truncated=not_truncated,
         )
 
     encode_batch = staticmethod(projection_codec.encode_batch)
@@ -535,13 +538,16 @@ class PositionRecoveryCodec:
         order_id = data.get("order_id")
         client_order_id = data.get("client_order_id")
         exit_at = data.get("exit_order_submitted_at")
+        parsed_ids: dict[str, str | None] = {}
         for name, optional_value in (
             ("order_id", order_id),
             ("client_order_id", client_order_id),
         ):
             if optional_value is not None and not isinstance(optional_value, str):
                 raise RecoverySchemaError(f"{name} must be a string or null")
-        if type(data.get("is_external")) is not bool:
+            parsed_ids[name] = optional_value
+        is_external = data.get("is_external")
+        if type(is_external) is not bool:
             raise RecoverySchemaError("is_external must be a boolean")
         return PositionLedgerBatch(
             batch_id=_string(data, "batch_id"),
@@ -550,9 +556,9 @@ class PositionRecoveryCodec:
             original_quantity=_decimal_value(data, "original_quantity"),
             entry_price=_decimal_value(data, "entry_price"),
             opened_at=_datetime_value(data, "opened_at"),
-            order_id=order_id,
-            client_order_id=client_order_id,
-            is_external=data["is_external"],
+            order_id=parsed_ids["order_id"],
+            client_order_id=parsed_ids["client_order_id"],
+            is_external=is_external,
             exit_order_submitted_at=(
                 _datetime_value({"value": exit_at}, "value")
                 if exit_at is not None
