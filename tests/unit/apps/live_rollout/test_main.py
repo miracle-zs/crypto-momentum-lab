@@ -1442,6 +1442,9 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
             )
 
     class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset()
+
         async def load_recovery_window(self, **kwargs):
             seen.update(kwargs)
             return (
@@ -1506,6 +1509,9 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
             )
 
     class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset()
+
         async def load_recovery_window(self, **kwargs):
             seen.update(kwargs)
             return tuple(
@@ -1537,6 +1543,9 @@ async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
     delays: list[float] = []
 
     class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset()
+
         async def load_unresolved_orders(self, run_id: str):
             nonlocal calls
             calls += 1
@@ -1616,6 +1625,9 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
             self.seen.append(state)
 
     class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset()
+
         async def load_after(self, **kwargs):
             assert kwargs["environment"] == "research"
             return (stale, fresh)
@@ -1719,6 +1731,9 @@ async def test_live_warmup_can_target_the_current_entry_symbols() -> None:
             assert state.symbol == "BTCUSDT"
 
     class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset()
+
         async def load_after(self, **kwargs):
             seen.update(kwargs)
             return states

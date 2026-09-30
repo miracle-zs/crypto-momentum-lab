@@ -225,10 +225,7 @@ async def load_live_warmup_symbols(
 ) -> frozenset[str]:
     if symbols is not None:
         return frozenset(symbol.strip() for symbol in symbols if symbol.strip())
-    loader = getattr(repository, "load_symbols_at", None)
-    if not callable(loader):
-        return frozenset()
-    symbols = await loader(
+    symbols = await repository.load_symbols_at(
         environment=environment,
         observed_at=observed_at,
     )

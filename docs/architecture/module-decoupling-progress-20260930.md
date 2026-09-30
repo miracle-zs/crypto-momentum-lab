@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -592,6 +592,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：五个实际类型所有者/消费者一同定向 mypy --follow-imports=skip **通过**：startup_recovery、market_runtime_contracts、domain/strategy/models、domain/market/runtime_state_repository、domain/market/runtime_state_models。第四十二批报告的三项单文件类型错误在此明确口径下关闭；不代表全仓类型验收，也不把忽略依赖的单文件检查作为完整证据。核心文件完整 Ruff、git diff --check 通过。启动契约/恢复/CLI/架构定向 **132 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2449 passed**，25.41 秒，一项现有 Starlette/httpx 警告。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十四批：启动预热 symbols 的明确读取能力
+
+第四十三批提交为 `b938ebf`；第四十四批继续本地实施，未部署生产。
+
+- RuntimeMarketStateReadRepository 增加 load_symbols_at(environment, observed_at)，表达指定时间及之前最新耐久 bucket 的 symbols。分页基础接口不变；原生 PostgresRuntimeMarketStateRepository 已具备该方法，SQL 无修改。
+- load_live_warmup_symbols 删除 getattr/callable 探测，直接使用明确读取能力。显式 symbols 包括空集合仍直接返回，不查询；未指定时按原环境和时间截点读取，过滤空白 symbol。缺失方法现在失败，不再静默当作空预热集合，这是调用契约迁移。
+- 旧 CLI 恢复替身显式实现空 symbols 查询，保持它们此前依赖缺失能力时的默认测试场景，不修改生产数据范围或引入新选币来源。原预热、cutover、checkpoint、事务和提交路径保持。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2455 passed**。新增 **6 项**覆盖精确查询截点、空白过滤、显式空/非空 symbols 跳过查询、缺失能力拒绝、连接错误和取消传播。symbols/恢复/CLI/架构定向 **134 passed**。与第四十三批相同的五文件定向 mypy --follow-imports=skip 通过；核心文件及新增测试完整 Ruff、迁移 CLI 测试 F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；既有 SQL 的替身接口验收不能替代真实数据库验收。
 
 ## 后续实施顺序
 
