@@ -7,6 +7,10 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     decimal_value,
     json_mapping,
+    rest_optional_int,
+    rest_optional_str,
+    rest_require_mapping,
+    rest_require_sequence_of_mappings,
 )
 
 
@@ -100,3 +104,49 @@ def test_rest_json_conversion_keeps_nested_values_and_stringifies_unsupported_ty
     }
     assert isinstance(raw["nested"][0]["v"], Decimal)
     assert raw["tuple"] == (1, 2)
+
+
+def test_rest_object_and_array_checks_preserve_row_identity():
+    row = {"id": 1}
+    assert rest_require_mapping(row) is row
+    rows = rest_require_sequence_of_mappings([row, {}])
+    assert isinstance(rows, tuple) and rows[0] is row and rows[1] == {}
+    assert rest_require_sequence_of_mappings([]) == ()
+
+
+@pytest.mark.parametrize("value", [None, [], "{}", 1])
+def test_rest_mapping_rejects_non_dict(value):
+    with pytest.raises(ValueError, match="expected JSON object"):
+        rest_require_mapping(value)
+
+
+@pytest.mark.parametrize("value", [None, {}, (), "[]"])
+def test_rest_rows_reject_non_list(value):
+    with pytest.raises(ValueError, match="expected JSON array"):
+        rest_require_sequence_of_mappings(value)
+
+
+@pytest.mark.parametrize("value", [[{}, None], [{}, []]])
+def test_rest_rows_validate_every_element(value):
+    with pytest.raises(ValueError, match="expected JSON object"):
+        rest_require_sequence_of_mappings(value)
+
+
+@pytest.mark.parametrize(
+    "value,expected", [(None, None), ("", None), (" ", " "), (0, "0"), (False, "False")]
+)
+def test_rest_optional_text_keeps_empty_and_whitespace_distinction(value, expected):
+    assert rest_optional_str(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,expected", [(None, None), (0, 0), (" 2 ", 2), ("-1", -1)]
+)
+def test_rest_optional_integer_keeps_zero_negative_and_whitespace(value, expected):
+    assert rest_optional_int(value) == expected
+
+
+@pytest.mark.parametrize("value", [True, "1.5"])
+def test_rest_optional_integer_preserves_conversion_errors(value):
+    with pytest.raises(ValueError):
+        rest_optional_int(value)

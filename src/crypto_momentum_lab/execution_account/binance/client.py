@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import TypedDict
 from urllib.parse import urlencode
 
 import httpx
@@ -55,6 +55,10 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
     decimal_value,
     json_mapping,
+    rest_optional_int,
+    rest_optional_str,
+    rest_require_mapping,
+    rest_require_sequence_of_mappings,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
 from crypto_momentum_lab.execution_account.orders.recovery import (
@@ -376,9 +380,9 @@ class BinanceUsdMPrivateReadClient:
 
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         payload = await self._signed_get("/fapi/v3/account")
-        data = _require_mapping(payload)
+        data = rest_require_mapping(payload)
         position_mode_payload = await self._signed_get("/fapi/v1/positionSide/dual")
-        position_mode = _require_mapping(position_mode_payload)
+        position_mode = rest_require_mapping(position_mode_payload)
         hedge_mode = bool(position_mode.get("dualSidePosition", False))
         raw_payload = json_mapping(data)
         raw_payload["dualSidePosition"] = hedge_mode
@@ -388,7 +392,7 @@ class BinanceUsdMPrivateReadClient:
             account_label=self._account_label,
             multi_assets_mode=bool(data.get("multiAssetsMargin", False)),
             hedge_mode=hedge_mode,
-            fee_tier=_optional_int(data.get("feeTier")),
+            fee_tier=rest_optional_int(data.get("feeTier")),
             observed_at=observed_at,
             raw_payload=raw_payload,
         )
@@ -407,7 +411,7 @@ class BinanceUsdMPrivateReadClient:
                 observed_at=observed_at,
                 raw_payload=json_mapping(item),
             )
-            for item in _require_sequence_of_mappings(payload)
+            for item in rest_require_sequence_of_mappings(payload)
         )
 
     async def fetch_positions(
@@ -432,12 +436,12 @@ class BinanceUsdMPrivateReadClient:
                 mark_price=decimal_value(item.get("markPrice", "0")),
                 unrealized_pnl=decimal_value(item.get("unRealizedProfit", "0")),
                 notional=decimal_value(item.get("notional", "0")),
-                leverage=_optional_int(item.get("leverage")),
-                margin_type=_optional_str(item.get("marginType")),
+                leverage=rest_optional_int(item.get("leverage")),
+                margin_type=rest_optional_str(item.get("marginType")),
                 observed_at=observed_at,
                 raw_payload=json_mapping(item),
             )
-            for item in _require_sequence_of_mappings(payload)
+            for item in rest_require_sequence_of_mappings(payload)
         )
 
     async def fetch_symbol_margin_type(self, symbol: str) -> str | None:
@@ -447,10 +451,10 @@ class BinanceUsdMPrivateReadClient:
             "/fapi/v1/symbolConfig",
             {"symbol": normalized_symbol},
         )
-        for item in _require_sequence_of_mappings(payload):
+        for item in rest_require_sequence_of_mappings(payload):
             if str(item.get("symbol", "")).upper() != normalized_symbol:
                 continue
-            raw_margin_type = _optional_str(item.get("marginType"))
+            raw_margin_type = rest_optional_str(item.get("marginType"))
             return (
                 None
                 if raw_margin_type is None
@@ -462,12 +466,12 @@ class BinanceUsdMPrivateReadClient:
         """Read all exchange symbol-level futures margin modes at once."""
         payload = await self._signed_get("/fapi/v1/symbolConfig")
         margin_types: dict[str, str | None] = {}
-        for item in _require_sequence_of_mappings(payload):
-            raw_symbol = _optional_str(item.get("symbol"))
+        for item in rest_require_sequence_of_mappings(payload):
+            raw_symbol = rest_optional_str(item.get("symbol"))
             if raw_symbol is None:
                 continue
             symbol = normalize_symbols((raw_symbol,))[0]
-            raw_margin_type = _optional_str(item.get("marginType"))
+            raw_margin_type = rest_optional_str(item.get("marginType"))
             margin_types[symbol] = (
                 None
                 if raw_margin_type is None
@@ -503,7 +507,7 @@ class BinanceUsdMPrivateReadClient:
                 observed_at=observed_at,
                 raw_payload=json_mapping(item),
             )
-            for item in _require_sequence_of_mappings(payload)
+            for item in rest_require_sequence_of_mappings(payload)
         )
 
     @property
@@ -545,7 +549,7 @@ class BinanceUsdMPrivateReadClient:
                     "/fapi/v1/userTrades",
                     params,
                 )
-                items = _require_sequence_of_mappings(payload)
+                items = rest_require_sequence_of_mappings(payload)
                 if not items:
                     reached_short_page = True
                     break
@@ -672,7 +676,7 @@ class BinanceUsdMPrivateReadClient:
                     # crossed and keep the following time window separate.
                     params["fromId"] = cursor
                 payload = await self._signed_get("/fapi/v1/userTrades", params)
-                items = _require_sequence_of_mappings(payload)
+                items = rest_require_sequence_of_mappings(payload)
                 page_count += 1
                 window_page_count += 1
                 if not items:
@@ -759,7 +763,7 @@ class BinanceUsdMPrivateReadClient:
     async def start_user_data_stream(self) -> str:
         """Create a Binance USD-M Futures listen key for account events."""
         payload = await self._user_data_request("POST", "/fapi/v1/listenKey")
-        data = _require_mapping(payload)
+        data = rest_require_mapping(payload)
         listen_key = str(data.get("listenKey", "")).strip()
         if not listen_key:
             raise ValueError("Binance listen-key response did not contain listenKey")
@@ -1097,7 +1101,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 ) from exc
             raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
         snapshot = self._order_snapshot(
-            _require_mapping(payload),
+            rest_require_mapping(payload),
             entry_leverage=entry_leverage,
         )
         if snapshot.executed_quantity > Decimal("0") and (
@@ -1291,7 +1295,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     {"symbol": symbol, "leverage": leverage},
                     priority=_COMMAND_ENTRY_PRIORITY,
                 )
-                response = _require_mapping(payload)
+                response = rest_require_mapping(payload)
                 if (
                     str(response.get("symbol", "")) != symbol
                     or int(str(response.get("leverage", 0))) != leverage
@@ -1363,7 +1367,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeOrderQueryUnknownError(
                 "Binance order lookup failed; order state requires reconciliation"
             ) from exc
-        return self._order_snapshot(_require_mapping(payload))
+        return self._order_snapshot(rest_require_mapping(payload))
 
     async def cancel_order_by_client_id(
         self,
@@ -1460,7 +1464,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeCancellationUnknownError(
                 "Binance cancel request was rejected; order state must be reconciled"
             ) from exc
-        return self._order_snapshot(_require_mapping(payload))
+        return self._order_snapshot(rest_require_mapping(payload))
 
     async def emergency_flatten(
         self,
@@ -1498,34 +1502,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             average_price=average_price,
             entry_leverage=entry_leverage,
         )
-
-
-def _optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    return int(str(value))
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
-
-
-def _require_mapping(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError("expected JSON object")
-    return cast(dict[str, object], value)
-
-
-def _require_sequence_of_mappings(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        raise ValueError("expected JSON array")
-    rows: list[dict[str, object]] = []
-    for item in value:
-        rows.append(_require_mapping(item))
-    return tuple(rows)
 
 
 def _exchange_error_code(exc: httpx.HTTPStatusError) -> int | None:
