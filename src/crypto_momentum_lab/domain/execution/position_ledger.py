@@ -440,9 +440,12 @@ class PositionLedger:
                 fill.raw_payload.get("is_system", False)
             )
             fill_side = fill.side.upper()
-            fill_client_order_id = getattr(fill, "client_order_id", None) or (
-                fill.raw_payload or {}
-            ).get("client_order_id")
+            stored_client_order_id = fill.raw_payload.get("client_order_id")
+            fill_client_order_id = (
+                stored_client_order_id
+                if isinstance(stored_client_order_id, str)
+                else None
+            )
 
             # Advance and apply boundaries that occurred before this fill
             # (or at the same time if exit fill)

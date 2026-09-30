@@ -1,6 +1,7 @@
 """Comprehensive test suite for PositionLedger domain service and models."""
 
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -460,3 +461,19 @@ def test_position_ledger_nested_raw_payload_position_side_matches_and_closes() -
     assert len(proj.active_batches) == 0
     assert not proj.diagnostics
 
+
+
+@pytest.mark.parametrize("client_id", [None, "entry-client", "", 12, True, {}, []])
+def test_payload_client_order_id_is_optional_text_without_changing_quantity(client_id):
+    key = _key()
+    fill = _fill(
+        "client-id-trade", "BUY", "2", "100", datetime(2026, 9, 30, tzinfo=UTC)
+    )
+    fill = replace(fill, raw_payload={"is_system": True, "client_order_id": client_id})
+    projection = PositionLedger(key).project(
+        AccountFacts(position_key=key, fills=(fill,))
+    )
+    assert projection.total_active_quantity == Decimal("2")
+    assert len(projection.active_batches) == 1
+    expected = client_id if isinstance(client_id, str) else None
+    assert projection.active_batches[0].client_order_id == expected
