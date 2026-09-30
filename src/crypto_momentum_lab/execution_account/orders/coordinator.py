@@ -42,7 +42,6 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
 from crypto_momentum_lab.domain.execution.execution_book import (
     Blocked,
     CommandConflict,
-    EvidenceConflict,
     ExecutionBook,
     ExecutionRequest,
     StaleView,
@@ -52,6 +51,9 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 )
 from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
     assemble_legacy_execution_book,
+)
+from crypto_momentum_lab.domain.execution.observation_models import (
+    EvidenceConflict,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,

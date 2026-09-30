@@ -51,7 +51,9 @@ def _scope() -> ExecutionScope:
 
 @pytest.mark.asyncio
 async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> None:
-    from crypto_momentum_lab.domain.execution.execution_book import EvidenceConflict
+    from crypto_momentum_lab.domain.execution.observation_models import (
+    EvidenceConflict,
+)
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -88,7 +90,9 @@ async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> Non
 @pytest.mark.asyncio
 async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.execution_book import Applied
+    from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
+)
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -151,7 +155,9 @@ async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> No
 async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is_flat(
 ) -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.execution_book import Applied
+    from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
+)
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )

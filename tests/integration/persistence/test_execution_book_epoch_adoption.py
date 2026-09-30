@@ -13,7 +13,12 @@ from crypto_momentum_lab.domain.account import (
 )
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
-from crypto_momentum_lab.domain.execution.execution_book import Applied, ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_book import (
+    ExecutionBook,
+)
+from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     AccountFillLoadProvenance,

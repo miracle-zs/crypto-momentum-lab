@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -39,6 +39,9 @@ from crypto_momentum_lab.domain.execution.evidence_codec import (
     _trade_payload_digest,
     _view_projection_digest,
 )
+from crypto_momentum_lab.domain.execution.evidence_grouping import (
+    observe_evidence_group,
+)
 from crypto_momentum_lab.domain.execution.evidence_lifecycle import plan_order_event
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionEvidence,
@@ -62,6 +65,12 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 from crypto_momentum_lab.domain.execution.fill_attribution import (
     is_exit_fill,
     plan_fill_observation,
+)
+from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
+    Duplicate,
+    EvidenceConflict,
+    ExecutionObserveResult,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
@@ -230,31 +239,6 @@ class CommandConflict:
 
 
 ExecutionActResult = Accepted | AlreadyAccepted | StaleView | Blocked | CommandConflict
-
-
-@dataclass(frozen=True, slots=True)
-class Applied:
-    evidence_id: str
-    updated_view_token: str
-    consumed_quantity: Decimal = Decimal("0")
-    released_quantity: Decimal = Decimal("0")
-    recovery_required: bool = False
-    diagnostics: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class Duplicate:
-    evidence_id: str
-    view_token: str
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceConflict:
-    evidence_id: str
-    reason: str
-
-
-ExecutionObserveResult = Applied | Duplicate | EvidenceConflict
 
 
 class ExecutionBook:
@@ -1856,7 +1840,10 @@ class ExecutionBook:
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
         """Atomically accept source evidence and publish its projection."""
         if self._execution_unit_of_work is None:
-            result = await self._observe_grouped(self, evidence)
+            result = await observe_evidence_group(
+                evidence, observe_one=self._observe_mutating,
+                forget_identity=self._seen_evidence_ids.discard,
+            )
             # Without a durable transaction there is nothing to persist, so the
             # append-only delta must not accumulate in memory.
             for journal in self._journals.values():
@@ -2259,7 +2246,10 @@ class ExecutionBook:
                             )
 
                     candidate._active_transaction = tx
-                    result = await self._observe_grouped(candidate, evidence)
+                    result = await observe_evidence_group(
+                        evidence, observe_one=candidate._observe_mutating,
+                        forget_identity=candidate._seen_evidence_ids.discard,
+                    )
                     if isinstance(result, EvidenceConflict):
                         raise _AbortObservation(result)
                     checkpoint = None
@@ -2405,75 +2395,6 @@ class ExecutionBook:
                 reason="stream checkpoint adoption requires typed source provenance",
             )
         return await self.observe(evidence)
-
-    async def _observe_grouped(
-        self,
-        target: ExecutionBook,
-        evidence: ExecutionEvidence,
-    ) -> ExecutionObserveResult:
-        fills = evidence.fills or ((evidence.fill,) if evidence.fill else ())
-        if not fills:
-            return await target._observe_mutating(evidence)
-        consumed = Decimal("0")
-        released = Decimal("0")
-        recovery_required = False
-        diagnostics: list[str] = []
-        last_result: Applied | Duplicate | None = None
-        for fill in fills:
-            internal_id = f"{evidence.evidence_id}\x1ftrade:{fill.trade_id}"
-            one_fill = replace(
-                evidence,
-                evidence_id=internal_id,
-                fill=fill,
-                fills=(),
-                snapshot=None,
-                boundary=None,
-                order_event=None,
-                coverage=None,
-                coverage_evidence=None,
-                fill_load_provenance=None,
-                stream_checkpoint_adoption=None,
-                cumulative_order=None,
-            )
-            fill_result = await target._observe_mutating(one_fill)
-            target._seen_evidence_ids.discard(_evidence_identity(one_fill))
-            if isinstance(fill_result, EvidenceConflict):
-                return replace(fill_result, evidence_id=evidence.evidence_id)
-            last_result = fill_result
-            if isinstance(fill_result, Applied):
-                consumed += fill_result.consumed_quantity
-                released += fill_result.released_quantity
-                recovery_required = recovery_required or fill_result.recovery_required
-                diagnostics.extend(fill_result.diagnostics)
-
-        remainder = replace(evidence, fill=None, fills=())
-        base_result = await target._observe_mutating(remainder)
-        if isinstance(base_result, EvidenceConflict):
-            return base_result
-        if isinstance(base_result, Duplicate):
-            return base_result
-        if isinstance(base_result, Applied):
-            consumed += base_result.consumed_quantity
-            released += base_result.released_quantity
-            recovery_required = recovery_required or base_result.recovery_required
-            diagnostics.extend(base_result.diagnostics)
-            return replace(
-                base_result,
-                consumed_quantity=consumed,
-                released_quantity=released,
-                recovery_required=recovery_required,
-                diagnostics=tuple(dict.fromkeys(diagnostics)),
-            )
-        if isinstance(last_result, Applied):
-            return replace(
-                last_result,
-                evidence_id=evidence.evidence_id,
-                consumed_quantity=consumed,
-                released_quantity=released,
-                recovery_required=recovery_required,
-                diagnostics=tuple(dict.fromkeys(diagnostics)),
-            )
-        return base_result
 
     async def _observe_mutating(
         self,

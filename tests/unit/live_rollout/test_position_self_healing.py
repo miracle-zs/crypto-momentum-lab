@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from crypto_momentum_lab.domain.execution.execution_book import (
-    Applied,
     ExecutionBook,
+)
+from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
