@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 
@@ -61,7 +62,7 @@ def encode_outbox_details(
     reservation_ids: tuple[str, ...],
     cumulative_quantity: Decimal,
     cumulative_quote: Decimal,
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     return {
         "scope": {
             "environment": entry.scope.environment,

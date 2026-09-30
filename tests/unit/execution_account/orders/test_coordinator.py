@@ -11,6 +11,9 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.legacy_command_repository import (
+    LegacyCommandRepositoryAdapter,
+)
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
@@ -1669,7 +1672,9 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
                 raise RuntimeError("dispatch write failed")
 
     backend = BlockingBackend()
-    book = ExecutionBook(command_repository=DispatchFailingRepository())
+    book = ExecutionBook(
+        command_repository=LegacyCommandRepositoryAdapter(DispatchFailingRepository())
+    )
     reservation_repo = InMemoryPositionReservationRepository()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
@@ -1765,7 +1770,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
 
     repo = InMemoryPositionReservationRepository()
     book = ExecutionBook(
-        command_repository=FailAcknowledgementOnce(),
+        command_repository=LegacyCommandRepositoryAdapter(FailAcknowledgementOnce()),
         reservation_repository=repo,
     )
     backend = AcceptedBackend()
@@ -1824,7 +1829,9 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
 
     reservation_repo = InMemoryPositionReservationRepository()
     book = ExecutionBook(
-        command_repository=FailAcknowledgementAndUnknown(),
+        command_repository=LegacyCommandRepositoryAdapter(
+            FailAcknowledgementAndUnknown()
+        ),
         reservation_repository=reservation_repo,
     )
     backend = AcceptedBackend()

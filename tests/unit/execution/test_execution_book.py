@@ -28,6 +28,9 @@ from crypto_momentum_lab.domain.execution import (
     StaleView,
     TradeCommandType,
 )
+from crypto_momentum_lab.domain.execution.legacy_command_repository import (
+    LegacyCommandRepositoryAdapter,
+)
 
 
 def _dt(hour: int, minute: int, second: int = 0) -> datetime:
@@ -365,10 +368,10 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
 
     from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         def __init__(self, projection_version: str):
@@ -465,10 +468,10 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
     from contextlib import asynccontextmanager
 
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         def __init__(self):
@@ -555,10 +558,10 @@ async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
     from contextlib import asynccontextmanager
 
     from crypto_momentum_lab.domain.execution.execution_book import Blocked
+    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 
     class FakeTx:
         async def load_head(self, key):
@@ -809,7 +812,9 @@ async def test_execution_book_fails_closed_when_acceptance_persistence_fails() -
         async def upsert_execution_command(self, **kwargs: object) -> None:
             raise RuntimeError("database unavailable")
 
-    book = ExecutionBook(command_repository=FailingCommandRepository())
+    book = ExecutionBook(
+        command_repository=LegacyCommandRepositoryAdapter(FailingCommandRepository())
+    )
     scope = _scope()
     t0 = _dt(10, 0)
     flat = AccountPositionSnapshot(
@@ -873,7 +878,9 @@ async def test_execution_book_persists_reservation_link_with_first_outbox_write(
             self.writes.append(kwargs)
 
     command_repo = RecordingCommandRepository()
-    book = ExecutionBook(command_repository=command_repo)
+    book = ExecutionBook(
+        command_repository=LegacyCommandRepositoryAdapter(command_repo)
+    )
     scope = _scope()
     t0 = _dt(10, 0)
     fill = AccountFillEvent(
@@ -966,7 +973,9 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
         async def load_execution_order_watermarks(self, **kwargs: object):
             return ()
 
-    book = ExecutionBook(command_repository=LegacyCommandRepository())
+    book = ExecutionBook(
+        command_repository=LegacyCommandRepositoryAdapter(LegacyCommandRepository())
+    )
 
     with pytest.raises(RuntimeError, match="restore active execution commands"):
         await book.restore(account_label="primary")
@@ -1286,7 +1295,7 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     reservation_repo.save_reservation(reservation)
 
     first_book = ExecutionBook(
-        command_repository=command_repo,
+        command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
     first_book.coordinator.register_reservation(reservation)
@@ -1354,7 +1363,7 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     assert first_result.consumed_quantity == Decimal("3")
 
     restored_book = ExecutionBook(
-        command_repository=command_repo,
+        command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
     await restored_book.restore(account_label="primary")
@@ -1385,7 +1394,9 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     active_details = invalid_command_repo.rows[order_command.command_id]["details"]
     assert isinstance(active_details, dict)
     active_details["cumulative_filled_quote"] = "0"
-    invalid_book = ExecutionBook(command_repository=invalid_command_repo)
+    invalid_book = ExecutionBook(
+        command_repository=LegacyCommandRepositoryAdapter(invalid_command_repo)
+    )
     with pytest.raises(RuntimeError, match="cumulative fill watermarks"):
         await invalid_book.restore(account_label="primary")
 
@@ -1494,7 +1505,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     )
     reservation_repo.save_reservation(reservation)
     first_book = ExecutionBook(
-        command_repository=command_repo,
+        command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
     first_book.coordinator.register_reservation(reservation)
@@ -1505,7 +1516,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     await first_book.mark_dispatching(command_id)
 
     book = ExecutionBook(
-        command_repository=command_repo,
+        command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
     await book.restore(account_label="primary")
@@ -2183,16 +2194,16 @@ def test_account_journal_appends_fill_with_nested_position_side():
 async def test_restore_durable_positions_migrates_projection_digest_when_no_reservations(
 ) -> None:
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.domain.execution.ports import (
-        DurableExecutionPositionState,
-        ExecutionHeadSnapshot,
-    )
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2265,6 +2276,8 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
     has_position: bool,
 ) -> None:
     from unittest.mock import create_autospec
+
+    from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFacts,
         AccountFactStreamScope,
@@ -2272,7 +2285,6 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
     from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
         AsyncPostgresExecutionUnitOfWork,
     )
@@ -2347,16 +2359,16 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
 @pytest.mark.asyncio
 async def test_restore_durable_positions_migrates_facts_hash_when_no_reservations() -> None:
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.domain.execution.ports import (
-        DurableExecutionPositionState,
-        ExecutionHeadSnapshot,
-    )
 
     key = PositionKey("live", "primary", "ZESTUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2425,16 +2437,16 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
 
 async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations() -> None:
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
-    from crypto_momentum_lab.domain.execution.ports import (
-        DurableExecutionPositionState,
-        ExecutionHeadSnapshot,
-    )
 
     key = PositionKey(
         environment="live",

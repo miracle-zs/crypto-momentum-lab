@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.execution.command_models import (
     ExecutionScope,
     OutboxEntry,
 )
+from crypto_momentum_lab.domain.execution.command_repository import CommandRepository
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     _digest_json_payload,
     _recovery_checkpoint_head_binding,
@@ -482,7 +483,7 @@ class ExecutionBook:
         journals_by_key: dict[str, AccountJournal] | None = None,
         coordinator: ExecutionCoordinator | None = None,
         reservation_repository: Any | None = None,
-        command_repository: Any | None = None,
+        command_repository: CommandRepository | None = None,
         execution_unit_of_work: ExecutionUnitOfWorkPort | None = None,
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
@@ -799,11 +800,6 @@ class ExecutionBook:
     async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
         if self._command_repo is None and self._active_transaction is None:
             return
-        upserter = getattr(self._command_repo, "upsert_execution_command", None)
-        if self._active_transaction is None and not callable(upserter):
-            raise RuntimeError(
-                "command repository does not implement upsert_execution_command"
-            )
         watermark_key = self._order_watermark_key(
             entry.scope.to_position_key(), entry.command.command_id
         )
@@ -832,19 +828,17 @@ class ExecutionBook:
                     details=details,
                 )
             else:
-                await _maybe_await(
-                    upserter(
-                        command_id=entry.command_id,
-                        client_order_id=entry.command.command_id,
-                        command=(
-                            entry.command.command_type.value
-                            if hasattr(entry.command.command_type, "value")
-                            else str(entry.command.command_type)
-                        ),
-                        status=entry.state.value,
-                        requested_at=entry.created_at,
-                        details=details,
-                    )
+                await self._command_repo.upsert_execution_command(
+                    command_id=entry.command_id,
+                    client_order_id=entry.command.command_id,
+                    command=(
+                        entry.command.command_type.value
+                        if hasattr(entry.command.command_type, "value")
+                        else str(entry.command.command_type)
+                    ),
+                    status=entry.state.value,
+                    requested_at=entry.created_at,
+                    details=details,
                 )
         except Exception as err:
             self._persistence_failed = True
@@ -952,133 +946,86 @@ class ExecutionBook:
                 as_of=as_of,
             )
         if command_repository is not None:
-            loader = getattr(command_repository, "load_active_execution_commands", None)
-            if callable(loader):
-                try:
-                    import inspect
-
-                    sig = inspect.signature(loader)
-                    if "account_label" in sig.parameters:
-                        active_cmds = await _maybe_await(
-                            loader(account_label=account_label)
-                        )
-                    else:
-                        active_cmds = await _maybe_await(loader())
-                    for cmd_data in active_cmds:
-                        recovered = decode_active_command(
-                            cmd_data,
-                            account_label=account_label,
-                            restored_at=datetime.now(UTC),
-                        )
-                        if recovered is None:
-                            continue
-                        if isinstance(recovered, SkippedCommand):
-                            log.warning(
-                                "skipping_unparseable_active_execution_command",
-                                command_id=recovered.command_id,
-                                error=recovered.reason,
-                            )
-                            continue
-                        entry = recovered.entry
-                        cid = entry.command_id
-                        self._outbox_by_command_id[cid] = entry
-                        self._command_reservations[cid] = list(
-                            recovered.reservation_ids
-                        )
-                        if recovered.requires_reconciliation:
-                            self._dispatch_reconciliation_required_commands.add(cid)
-                        if recovered.needs_unknown_write:
-                            if self._execution_unit_of_work is not None:
-                                deferred_unknown_commands.append(cid)
-                            else:
-                                await self._persist_outbox_state(entry)
-                except Exception as err:
-                    log.error("restore_active_commands_failed", error=str(err))
-                    raise RuntimeError(
-                        "Failed to restore active execution commands"
-                    ) from err
-            else:
-                raise RuntimeError(
-                    "command repository does not implement active command restore"
+            try:
+                active_cmds = await command_repository.load_active_execution_commands(
+                    account_label=account_label
                 )
+                for cmd_data in active_cmds:
+                    recovered = decode_active_command(
+                        cmd_data,
+                        account_label=account_label,
+                        restored_at=datetime.now(UTC),
+                    )
+                    if recovered is None:
+                        continue
+                    if isinstance(recovered, SkippedCommand):
+                        log.warning(
+                            "skipping_unparseable_active_execution_command",
+                            command_id=recovered.command_id,
+                            error=recovered.reason,
+                        )
+                        continue
+                    entry = recovered.entry
+                    cid = entry.command_id
+                    self._outbox_by_command_id[cid] = entry
+                    self._command_reservations[cid] = list(recovered.reservation_ids)
+                    if recovered.requires_reconciliation:
+                        self._dispatch_reconciliation_required_commands.add(cid)
+                    if recovered.needs_unknown_write:
+                        if self._execution_unit_of_work is not None:
+                            deferred_unknown_commands.append(cid)
+                        else:
+                            await self._persist_outbox_state(entry)
+            except Exception as err:
+                log.error("restore_active_commands_failed", error=str(err))
+                raise RuntimeError(
+                    "Failed to restore active execution commands"
+                ) from err
 
-            ev_loader = getattr(command_repository, "load_seen_event_ids", None)
-            if self._execution_unit_of_work is not None:
-                pass
-            elif callable(ev_loader):
+            # Durable identities and watermarks were loaded with position heads.
+            if self._execution_unit_of_work is None:
                 try:
-                    seen_events = await _maybe_await(ev_loader())
-                    self._seen_evidence_ids.update(seen_events)
+                    self._seen_evidence_ids.update(
+                        await command_repository.load_seen_event_ids()
+                    )
                 except Exception as err:
                     raise RuntimeError(
                         "Failed to restore execution event identities"
                     ) from err
-            else:
-                raise RuntimeError(
-                    "command repository does not implement event identity restore"
-                )
-
-            fill_loader = getattr(command_repository, "load_seen_fill_trade_ids", None)
-            if self._execution_unit_of_work is not None:
-                pass
-            elif callable(fill_loader):
                 try:
-                    seen_trades = await _maybe_await(fill_loader())
-                    self._seen_trade_ids.update(seen_trades)
+                    self._seen_trade_ids.update(
+                        await command_repository.load_seen_fill_trade_ids()
+                    )
                 except Exception as err:
                     raise RuntimeError("Failed to restore fill identities") from err
-            else:
-                raise RuntimeError(
-                    "command repository does not implement fill identity restore"
-                )
-
-            watermark_loader = getattr(
-                command_repository, "load_execution_order_watermarks", None
-            )
-            if self._execution_unit_of_work is not None:
-                watermark_loader = None
-            elif not callable(watermark_loader):
-                raise RuntimeError(
-                    "command repository does not implement cumulative fill "
-                    "watermark restore"
-                )
-            try:
-                if self._execution_unit_of_work is not None:
-                    raise LookupError(
-                        "durable watermarks restored with execution heads"
+                try:
+                    watermark_rows = (
+                        await command_repository.load_execution_order_watermarks(
+                            account_label=account_label
+                        )
                     )
-                import inspect
-
-                sig = inspect.signature(watermark_loader)
-                if "account_label" in sig.parameters:
-                    watermark_rows = await _maybe_await(
-                        watermark_loader(account_label=account_label)
-                    )
-                else:
-                    watermark_rows = await _maybe_await(watermark_loader())
-                for row in watermark_rows:
-                    restored = decode_order_watermark(row, account_label=account_label)
-                    if restored is None:
-                        continue
-                    scope = restored.scope
-                    order_id = restored.order_id
-                    quantity = restored.quantity
-                    quote = restored.quote
-                    key = self._order_watermark_key(scope.to_position_key(), order_id)
-                    self._order_cumulative_fills[key] = max(
-                        self._order_cumulative_fills.get(key, Decimal("0")),
-                        quantity,
-                    )
-                    self._order_cumulative_quotes[key] = max(
-                        self._order_cumulative_quotes.get(key, Decimal("0")),
-                        quote,
-                    )
-            except Exception as err:
-                if self._execution_unit_of_work is not None and isinstance(
-                    err, LookupError
-                ):
-                    pass
-                else:
+                    for row in watermark_rows:
+                        restored = decode_order_watermark(
+                            row, account_label=account_label
+                        )
+                        if restored is None:
+                            continue
+                        scope = restored.scope
+                        order_id = restored.order_id
+                        quantity = restored.quantity
+                        quote = restored.quote
+                        key = self._order_watermark_key(
+                            scope.to_position_key(), order_id
+                        )
+                        self._order_cumulative_fills[key] = max(
+                            self._order_cumulative_fills.get(key, Decimal("0")),
+                            quantity,
+                        )
+                        self._order_cumulative_quotes[key] = max(
+                            self._order_cumulative_quotes.get(key, Decimal("0")),
+                            quote,
+                        )
+                except Exception as err:
                     log.error("restore_watermarks_failed", error=str(err))
                     raise RuntimeError(
                         f"Failed to restore cumulative fill watermarks: {err}"
