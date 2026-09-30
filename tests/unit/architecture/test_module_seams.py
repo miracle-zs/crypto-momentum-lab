@@ -546,6 +546,7 @@ assert codec not in sys.modules
         "crypto_momentum_lab.execution_account.binance.user_data_parser",
         "crypto_momentum_lab.execution_account.binance.order_status",
         "crypto_momentum_lab.execution_account.binance.request_rules",
+        "crypto_momentum_lab.execution_account.binance.exit_recovery_rules",
         "crypto_momentum_lab.execution_account.user_data_sync",
     ],
 )
@@ -580,6 +581,7 @@ importlib.import_module(sys.argv[1])
         "crypto_momentum_lab.execution_account.user_data_sequence",
         "crypto_momentum_lab.execution_account.binance.order_status",
         "crypto_momentum_lab.execution_account.binance.request_rules",
+        "crypto_momentum_lab.execution_account.binance.exit_recovery_rules",
     ],
 )
 def test_user_data_update_models_import_without_merge_state(module):

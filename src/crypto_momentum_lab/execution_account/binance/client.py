@@ -28,7 +28,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
-    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
@@ -40,6 +39,10 @@ from crypto_momentum_lab.domain.live_rollout.authorization import (
     require_authorized_command,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
+    exit_position_quantity,
+    open_order_matches_exit,
+)
 from crypto_momentum_lab.execution_account.binance.order_status import (
     exchange_order_state,
 )
@@ -1186,13 +1189,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
 
         try:
             position_quantity = sum(
-                (_exit_position_quantity(position, plan) for position in positions),
+                (exit_position_quantity(position, plan) for position in positions),
                 start=Decimal("0"),
             )
             active_client_order_ids = {
                 open_order.client_order_id
                 for open_order in open_orders
-                if _open_order_matches_exit(open_order, plan)
+                if open_order_matches_exit(open_order, plan)
             }
         except ExitRecoveryInspectionUnknownError:
             raise
@@ -1495,59 +1498,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
 
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
-
-
-def _exit_position_quantity(
-    position: AccountPositionSnapshot,
-    plan: OrderExecutionPlan,
-) -> Decimal:
-    if position.symbol != plan.symbol:
-        return Decimal("0")
-    try:
-        position_side = FuturesPositionSide(position.position_side.upper())
-    except ValueError as exc:
-        raise ExitRecoveryInspectionUnknownError(
-            "Binance returned an unsupported position side"
-        ) from exc
-    if position_side is not plan.position_side:
-        return Decimal("0")
-    if position.position_amt == 0:
-        return Decimal("0")
-    if plan.position_side is FuturesPositionSide.BOTH:
-        if plan.side == "SELL" and position.position_amt <= 0:
-            return Decimal("0")
-        if plan.side == "BUY" and position.position_amt >= 0:
-            return Decimal("0")
-    return abs(position.position_amt)
-
-
-def _open_order_matches_exit(
-    order: AccountOpenOrderSnapshot,
-    plan: OrderExecutionPlan,
-) -> bool:
-    if order.symbol != plan.symbol or order.side.upper() != plan.side.upper():
-        return False
-    raw_position_side = order.raw_payload.get("positionSide")
-    if raw_position_side is None:
-        if plan.position_side is not FuturesPositionSide.BOTH:
-            raise ExitRecoveryInspectionUnknownError(
-                "Binance hedge-mode open order omitted positionSide"
-            )
-        position_side = FuturesPositionSide.BOTH
-    else:
-        try:
-            position_side = FuturesPositionSide(str(raw_position_side).upper())
-        except ValueError as exc:
-            raise ExitRecoveryInspectionUnknownError(
-                "Binance returned an unsupported open-order position side"
-            ) from exc
-    if position_side is not plan.position_side:
-        return False
-    # In one-way mode a matching side alone is not enough: an opposite-side
-    # opening order could otherwise suppress the recovery of a close order.
-    # Hedge mode scopes the order by positionSide because Binance does not
-    # accept reduceOnly there.
-    return plan.position_side is not FuturesPositionSide.BOTH or order.reduce_only
 
 
 def _optional_int(value: object) -> int | None:
