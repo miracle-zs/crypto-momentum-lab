@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -942,6 +942,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 回调属于构造生命周期绑定，不再每次失效发现后续方法替换。准入 prepare、预取、持仓发布、gate 判定顺序保持；market_loop 对 admission 方法的既有探测仍保留，不宣称所有动态探测清零。
 
 验证：准入显式有/无回调与预取定向 **4 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2484 passed**，29.67 秒，一项现有 Starlette/httpx 警告。新测试证明即使 provider 暴露两种失效方法，准入仍只调用显式回调。telemetry_ports、market_admission、context、context_prefetch 四文件一起定向 mypy --follow-imports=skip 通过，核心文件与新测试完整 Ruff、daemon F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十三批：行情循环直接调用准入失效契约
+
+第七十二批提交为 `38544d3`；第七十三批继续本地实施，未部署生产。
+
+- LiveMarketLoop 已接收 LiveMarketStateAdmission，未托管持仓防抖路径直接调用 invalidate_context_cache()，删除 getattr/callable 与方法缺失时静默跳过分支。
+- 准入自身仍拥有可选失效回调，未配置回调继续无操作；无需在循环重复判断能力。真实装配方法存在，原失效位置、错误传播、持仓防抖/过期判断和 halt 时序保持。不完整准入对象不再被默许。
+- 无新增接口、包装器或实现镜像测试，复用现有未托管持仓与回调行为验收。
+
+验证：未托管持仓/失效回调定向 **5 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2484 passed**，28.44 秒，一项现有 Starlette/httpx 警告。telemetry_ports、market_admission、context、context_prefetch 四文件联合定向 mypy --follow-imports=skip 通过，不包含 market_loop 类型验收。market_loop F/I、git diff --check 通过；完整 Ruff 发现该文件既有第 26 行长导入 E501，未改动该行，不宣称完整 Ruff 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

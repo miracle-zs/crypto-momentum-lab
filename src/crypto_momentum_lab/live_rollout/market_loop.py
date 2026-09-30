@@ -465,11 +465,7 @@ class LiveMarketLoop:
                             symbol=s,
                             debounce_seconds=self._unmanaged_halt_debounce_seconds,
                         )
-                invalidator = getattr(
-                    self._market_admission, "invalidate_context_cache", None
-                )
-                if callable(invalidator):
-                    invalidator()
+                self._market_admission.invalidate_context_cache()
 
                 expired_symbols = [
                     s
