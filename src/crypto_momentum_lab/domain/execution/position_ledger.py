@@ -1237,11 +1237,9 @@ def _checkpoint_identity(
     facts_hash: str,
     projection: PositionLedgerProjection,
 ) -> str:
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
+    from crypto_momentum_lab.domain.execution.projection_codec import encode_projection
 
-    projection_payload = PositionRecoveryCodec.encode_projection(projection)
+    projection_payload = encode_projection(projection)
     projection_bytes = json.dumps(
         projection_payload,
         sort_keys=True,
