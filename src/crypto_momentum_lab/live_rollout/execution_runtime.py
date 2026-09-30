@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
+from crypto_momentum_lab.domain.execution.ports import ExecutionUnitOfWorkPort
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
@@ -85,7 +86,7 @@ async def build_live_execution_runtime(
     )
     domain_coordinator = ExecutionCoordinator()
     commands = PostgresCommandRepository(sessions)
-    unit_of_work = AsyncPostgresExecutionUnitOfWork(
+    unit_of_work: ExecutionUnitOfWorkPort = AsyncPostgresExecutionUnitOfWork(
         sessions,
         journal_store=PostgresAccountJournalStore(),
         command_repository=commands,
