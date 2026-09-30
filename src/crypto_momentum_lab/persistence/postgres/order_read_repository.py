@@ -15,6 +15,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
+    OrderIntentExecutionRow,
 )
 
 
@@ -24,6 +25,22 @@ class PostgresOrderReadRepository:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+
+    async def load_approved_intent_notional(
+        self,
+        intent_id: str,
+    ) -> Decimal | None:
+        async with self._session_factory() as session:
+            details = await session.scalar(
+                select(OrderIntentExecutionRow.details).where(
+                    OrderIntentExecutionRow.intent_id == intent_id
+                )
+            )
+        if not isinstance(details, dict):
+            return None
+        value = details.get("desired_notional")
+        return None if value is None else Decimal(str(value))
+
 
     async def load_unresolved_orders(
         self,

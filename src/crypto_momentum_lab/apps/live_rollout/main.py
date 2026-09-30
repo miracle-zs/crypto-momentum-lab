@@ -16,8 +16,7 @@ from uuid import uuid4
 
 import structlog
 import typer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
@@ -113,9 +112,6 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
-)
-from crypto_momentum_lab.persistence.postgres.models import (
-    OrderIntentExecutionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
@@ -1159,9 +1155,6 @@ def submit_plan_command(
             api_secret=api_secret,
             entry_leverage=entry_leverage,
             margin_type=margin_type,
-            load_latest_risk_config=_latest_risk_config,
-            load_latest_account_state=_latest_account_state,
-            load_approved_intent_notional=_approved_intent_notional,
         )
     )
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
@@ -2243,22 +2236,6 @@ def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
         entry_order_type=_LIVE_ENTRY_ORDER_TYPE,
         entry_limit_ttl_seconds=_LIVE_ENTRY_LIMIT_TTL_SECONDS,
     )
-
-
-async def _approved_intent_notional(
-    factory: async_sessionmaker[AsyncSession],
-    intent_id: str,
-) -> Decimal | None:
-    async with factory() as session:
-        details = await session.scalar(
-            select(OrderIntentExecutionRow.details).where(
-                OrderIntentExecutionRow.intent_id == intent_id
-            )
-        )
-    if not isinstance(details, dict):
-        return None
-    value = details.get("desired_notional")
-    return None if value is None else Decimal(str(value))
 
 
 async def _load_transition(

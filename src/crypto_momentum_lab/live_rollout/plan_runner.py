@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import crypto_momentum_lab.live_rollout.session_state as session_state
 import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight_rules
+import crypto_momentum_lab.persistence.postgres.runtime_context as runtime_context
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -61,19 +59,6 @@ from crypto_momentum_lab.persistence.postgres.shadow_repository import (
     PostgresShadowRepository,
 )
 
-LatestRiskConfigLoader = Callable[
-    [async_sessionmaker[AsyncSession], str],
-    Awaitable[Any],
-]
-LatestAccountStateLoader = Callable[
-    [async_sessionmaker[AsyncSession], str],
-    Awaitable[Any],
-]
-ApprovedIntentNotionalLoader = Callable[
-    [async_sessionmaker[AsyncSession], str],
-    Awaitable[Decimal | None],
-]
-
 
 async def run_live_plan(
     *,
@@ -93,9 +78,6 @@ async def run_live_plan(
     api_secret: str,
     entry_leverage: int,
     margin_type: str = "CROSSED",
-    load_latest_risk_config: LatestRiskConfigLoader,
-    load_latest_account_state: LatestAccountStateLoader,
-    load_approved_intent_notional: ApprovedIntentNotionalLoader,
 ) -> LiveSessionResult:
     """Validate and execute one approved plan with live safety barriers."""
 
@@ -113,7 +95,7 @@ async def run_live_plan(
         order_repository = PostgresOrderPlanRepository(factory)
         order_read_repository = PostgresOrderReadRepository(factory)
         order_event_repository = PostgresOrderEventRepository(factory)
-        risk_config = await load_latest_risk_config(factory, account_label)
+        risk_config = await runtime_context.load_latest_risk_config(factory, account_label)
         approval = await live_repository.load_active_approval(
             account_label=account_label,
             strategy_name=strategy_name,
@@ -135,15 +117,14 @@ async def run_live_plan(
             ),
             risk_config=risk_config,
             approval=approval,
-            account_state=await load_latest_account_state(factory, account_label),
+            account_state=await runtime_context.load_latest_account_state(factory, account_label),
             active_halts=await risk_repository.load_active_halts("live", account_label),
             unresolved_order_states=tuple(item.state for item in unresolved),
         )
         gate = evaluate_live_gate(context)
         if not gate.approved:
             raise RuntimeError(f"live gate blocked: {','.join(gate.reasons)}")
-        desired_notional = await load_approved_intent_notional(
-            factory,
+        desired_notional = await order_read_repository.load_approved_intent_notional(
             plan.intent_id,
         )
         if desired_notional is None:

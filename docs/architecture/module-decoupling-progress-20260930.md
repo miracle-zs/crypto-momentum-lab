@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -490,6 +490,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2408 passed**，25.87 秒，一项现有 Starlette/httpx 警告。新增所有者测试 **6 passed**；迁移三项测试后 CLI/shadow/架构定向 **122 passed**，后续补充的三项测试已纳入完整回归。新增 shadow_preflight 独立进程无数据库导入检查。核心文件/所有者测试完整 Ruff、编排/单次计划/CLI/迁移 CLI 测试 F/I、shadow_preflight 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；shadow SQL 替身测试不替代真实数据库验收。
+
+## 第三十六批：单次实盘计划读取归属与 CLI 查询移除
+
+第三十五批提交为 `5d5fda2`；第三十六批继续本地实施，未部署生产。
+
+- PostgresOrderReadRepository.load_approved_intent_notional 承接 CLI 中的耐久批准金额查询，按 intent_id 读取 details.desired_notional。原 SQL 和解析 AST 保持：非 dict、缺失或 None 返回 None，其他值按 Decimal(str(value)) 转换；非法金额仍抛异常，不静默忽略。
+- 单次计划通过已创建的订单读取仓储获取批准金额，风险配置与账户状态直接引用既有 persistence/postgres/runtime_context 读取函数。plan_runner 本就是具体装配所有者，本批不再让 CLI 提供相同原生能力，也不新增适配转发层。
+- 删除 LatestRiskConfigLoader、LatestAccountStateLoader、ApprovedIntentNotionalLoader 三个回调参数/类型与 CLI 注入点，移除 CLI 的旧金额函数、select 和 OrderIntentExecutionRow 导入。CLI 仍保留命令入口、资源创建和其他用例装配，不宣称其全部纯化。
+- 原读取顺序、session factory、live gate、缺失批准金额拒绝、当前风险 cap 与 operator-approved cap 检查保持，不新增批准或订单提交路径，不改变提交事务。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2416 passed**，25.67 秒，一项现有 Starlette/httpx 警告。金额读取及 CLI 定向 **77 passed**；新增 **8 项**替身测试覆盖缺失/非字典/空字段、字符串/零/浮点金额、非法金额，并检查查询 intent_id。金额查询与解析 AST 等价检查通过。订单读取仓储定向 mypy --follow-imports=skip、仓储及新增测试完整 Ruff、单次计划/CLI F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实 Postgres 通知、并发、原子回滚与完整进程重启仍待补齐；新增金额替身测试不替代真实数据库或实盘执行验收。
 
 ## 后续实施顺序
 
