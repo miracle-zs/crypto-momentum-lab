@@ -202,7 +202,13 @@ class PositionRecoveryCheckpoint:
             self.suffix_facts_hash,
         )
         if any(value is not None for value in parent_fields):
-            if any(value is None for value in parent_fields):
+            if (
+                self.parent_checkpoint_id is None
+                or self.parent_facts_hash is None
+                or self.parent_projection_digest is None
+                or self.parent_event_cut is None
+                or self.suffix_facts_hash is None
+            ):
                 raise RecoverySchemaError("checkpoint parent chain is incomplete")
             if not self.parent_checkpoint_id or not self.parent_checkpoint_id.strip():
                 raise RecoverySchemaError("parent checkpoint id must not be empty")

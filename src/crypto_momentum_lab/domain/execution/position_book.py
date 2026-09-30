@@ -315,6 +315,7 @@ def _coverage_anchor_is_verified(facts: AccountFacts) -> bool:
         or provenance.stream_scope != facts.stream_scope
         or coverage.load_provenance != provenance
         or not provenance.is_complete
+        or provenance.checked_through is None
     ):
         return False
     if provenance.source_anchor_kind == "zero_snapshot":
