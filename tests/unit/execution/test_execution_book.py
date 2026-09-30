@@ -2981,3 +2981,54 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     repository.load_seen_event_ids.assert_awaited_once()
     repository.load_seen_fill_trade_ids.assert_awaited_once()
     repository.load_execution_order_watermarks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflicting", [False, True])
+@pytest.mark.parametrize("status", ["prepared", "dispatching"])
+async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
+    conflicting, status
+):
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+
+    repository = AsyncMock()
+    row = {
+        "command_id": "duplicate", "client_order_id": "duplicate",
+        "command": "entry", "status": status, "requested_at": _dt(10, 0),
+        "details": {
+            "scope": {"environment": "live", "account_label": "primary",
+                      "symbol": "BTCUSDT", "position_side": "LONG"},
+            "side": "long", "order_type": "market", "quantity": "1",
+            "reduce_only": False, "reservations": [], "request_id": "request",
+            "attempt_count": 0,
+        },
+    }
+    duplicate = deepcopy(row)
+    if conflicting:
+        duplicate["details"]["quantity"] = "2"
+    repository.load_active_execution_commands.return_value = [row, duplicate]
+    repository.load_seen_event_ids.return_value = ()
+    repository.load_seen_fill_trade_ids.return_value = ()
+    repository.load_execution_order_watermarks.return_value = ()
+    book = ExecutionBook(command_repository=repository)
+    if conflicting:
+        with pytest.raises(RuntimeError, match="restore active execution commands") as error:
+            await book.restore(account_label="primary")
+        assert "conflicting rows" in str(error.value.__cause__)
+        assert book._persistence_failed is True
+        assert not book._outbox_by_command_id
+        repository.upsert_execution_command.assert_not_awaited()
+        repository.load_seen_event_ids.assert_not_awaited()
+    else:
+        await book.restore(account_label="primary")
+        assert book._persistence_failed is False
+        assert len(book._outbox_by_command_id) == 1
+        entry = book.get_outbox("duplicate")
+        assert entry.command.requested_quantity == Decimal("1")
+        if status == "dispatching":
+            assert entry.state is DispatchState.UNKNOWN
+            repository.upsert_execution_command.assert_awaited_once()
+        else:
+            assert entry.state is DispatchState.PREPARED
+            repository.upsert_execution_command.assert_not_awaited()

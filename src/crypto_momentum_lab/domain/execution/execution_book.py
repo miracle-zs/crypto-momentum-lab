@@ -702,12 +702,13 @@ class ExecutionBook:
                 active_cmds = await command_repository.load_active_execution_commands(
                     account_label=account_label
                 )
-                parsed_commands: list[RestoredCommand] = []
+                parsed_commands: dict[str, RestoredCommand] = {}
+                restored_at = datetime.now(UTC)
                 for cmd_data in active_cmds:
                     recovered = decode_active_command(
                         cmd_data,
                         account_label=account_label,
-                        restored_at=datetime.now(UTC),
+                        restored_at=restored_at,
                     )
                     if recovered is None:
                         continue
@@ -716,8 +717,14 @@ class ExecutionBook:
                             f"active execution command {recovered.command_id} "
                             f"cannot be restored: {recovered.reason}"
                         )
-                    parsed_commands.append(recovered)
-                for recovered in parsed_commands:
+                    command_id = recovered.entry.command_id
+                    previous = parsed_commands.get(command_id)
+                    if previous is not None and previous != recovered:
+                        raise ValueError(
+                            f"active execution command {command_id} has conflicting rows"
+                        )
+                    parsed_commands[command_id] = recovered
+                for recovered in parsed_commands.values():
                     entry = recovered.entry
                     cid = entry.command_id
                     self._outbox_by_command_id[cid] = entry
