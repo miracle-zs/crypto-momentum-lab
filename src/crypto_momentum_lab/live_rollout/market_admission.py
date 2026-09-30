@@ -16,7 +16,7 @@ from crypto_momentum_lab.live_rollout.context_prefetch import (
     PrefetchedContext,
 )
 from crypto_momentum_lab.live_rollout.gates import evaluate_live_gate
-from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
+from crypto_momentum_lab.live_rollout.telemetry_ports import MarketAdmissionSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +40,7 @@ class LiveMarketStateAdmission:
         publish_managed_position_symbols: Callable[
             [LiveDaemonRuntimeContext], Awaitable[None]
         ],
-        telemetry: LiveTelemetrySink | None,
+        telemetry: MarketAdmissionSink | None,
         clock: Callable[[], datetime],
     ) -> None:
         self._context_provider = context_provider

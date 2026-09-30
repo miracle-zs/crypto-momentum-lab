@@ -29,6 +29,7 @@ from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.telemetry_ports import (
     AccountFillSink,
     ConsumerHealthSink,
+    MarketAdmissionSink,
     OrderEventSink,
 )
 
@@ -177,7 +178,9 @@ _EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
 )
 
 
-class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, OrderEventSink, Protocol):
+class LiveTelemetrySink(
+    ConsumerHealthSink, AccountFillSink, OrderEventSink, MarketAdmissionSink, Protocol
+):
     def market_state_progress(
         self,
         state: MarketState15s,
@@ -204,25 +207,6 @@ class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, OrderEventSink, Pro
         occurred_at: datetime,
         lane: str = LIVE_LANE_ENTRY,
         ingress: "SourceIngress | None" = None,
-    ) -> None: ...
-
-    async def context_ready(
-        self,
-        state: MarketState15s,
-        *,
-        occurred_at: datetime,
-        prefetched: bool,
-        reloaded: bool,
-        ingress: "SourceIngress | None" = None,
-    ) -> None: ...
-
-    async def gate_evaluated(
-        self,
-        state: MarketState15s,
-        *,
-        occurred_at: datetime,
-        approved: bool,
-        reasons: tuple[str, ...],
     ) -> None: ...
 
     async def strategy_decision(

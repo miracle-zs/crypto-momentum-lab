@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十九批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -906,6 +906,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 保留空白标识的 OrderPreSubmissionError、reduce-only 与入场分支、租约/epoch 检查、halt 读取及能力评估顺序。新增缺失身份检查证明在耐久读取前拒绝不完整计划，未新增数据库写入或提交路径。
 
 验证：提交围栏定向 **8 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2481 passed**，28.89 秒，一项现有 Starlette/httpx 警告。submission_fence 定向 mypy --follow-imports=skip、核心文件与围栏测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十批：行情准入记录能力
+
+第六十九批提交为 `eac09ab`；第七十批继续本地实施，未部署生产。
+
+- telemetry_ports 定义 MarketAdmissionSink，拥有原 context_ready 与 gate_evaluated 完整参数/default 契约；完整 LiveTelemetrySink 继承并删除重复声明，recorder 实现不变。
+- LiveMarketStateAdmission 仅依赖这两项记录能力，删除完整 telemetry 类型导入。上下文 generation 校验、同步待入场计划、上下文记录、持仓发布、gate 判定及结果记录顺序保持，无新增转发实现。
+- 保留 context_ready 可选 SourceIngress 参数，该模型仍在 telemetry 所有者，仅 TYPE_CHECKING 引用；本批不宣称所有类型引用已脱离 telemetry。上下文失效的既有动态探测未在本批迁移。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2482 passed**，28.53 秒，一项现有 Starlette/httpx 警告。新增 market_admission 独立进程禁止 sqlalchemy/persistence 导入检查。telemetry_ports、market_admission 与 context 三文件定向 mypy --follow-imports=skip 通过；尝试同时纳入 context_prefetch 时发现原 AsyncGenerator 三类型参数错误，该文件未修改，仍属类型验收缺口。核心文件与架构测试完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

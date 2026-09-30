@@ -10,7 +10,9 @@ if TYPE_CHECKING:
         ExchangeOrderEvent,
         OrderExecutionPlan,
     )
+    from crypto_momentum_lab.domain.market.models import MarketState15s
     from crypto_momentum_lab.execution_account.hub import AccountEvent
+    from crypto_momentum_lab.live_rollout.telemetry import SourceIngress
 
 
 class ConsumerHealthSink(Protocol):
@@ -41,4 +43,25 @@ class AccountFillSink(Protocol):
 class OrderEventSink(Protocol):
     async def order_event(
         self, plan: OrderExecutionPlan, event: ExchangeOrderEvent
+    ) -> None: ...
+
+
+class MarketAdmissionSink(Protocol):
+    async def context_ready(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        prefetched: bool,
+        reloaded: bool,
+        ingress: SourceIngress | None = None,
+    ) -> None: ...
+
+    async def gate_evaluated(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        approved: bool,
+        reasons: tuple[str, ...],
     ) -> None: ...
