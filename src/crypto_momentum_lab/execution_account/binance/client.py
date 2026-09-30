@@ -18,7 +18,7 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
@@ -1666,7 +1666,7 @@ def _require_sequence_of_mappings(value: object) -> tuple[dict[str, object], ...
     return tuple(rows)
 
 
-def _json_mapping(value: dict[str, object]) -> dict[str, JsonValue]:
+def _json_mapping(value: Mapping[str, object]) -> dict[str, JsonValue]:
     return {str(key): _json_value(item) for key, item in value.items()}
 
 

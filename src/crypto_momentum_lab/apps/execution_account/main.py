@@ -58,6 +58,10 @@ from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncResult,
 )
+from crypto_momentum_lab.execution_account.sync_ports import (
+    AccountSyncRepository,
+    ReadOnlyAccountClient,
+)
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
@@ -498,9 +502,11 @@ async def sync_once(
             shared_command_request_pacer_path=shared_command_request_pacer_path,
         )
         try:
+            sync_client: ReadOnlyAccountClient = client
+            sync_repository: AccountSyncRepository = repository
             service = ExecutionAccountSyncService(
-                client=client,
-                repository=repository,
+                client=sync_client,
+                repository=sync_repository,
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
                     account_label=account_label,
@@ -609,9 +615,11 @@ async def sync_continuously(
         )
         retention_task: asyncio.Task[None] | None = None
         try:
+            sync_client: ReadOnlyAccountClient = client
+            sync_repository: AccountSyncRepository = repository
             service = ExecutionAccountSyncService(
-                client=client,
-                repository=repository,
+                client=sync_client,
+                repository=sync_repository,
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
                     account_label=account_label,

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百六十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百六十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -2010,6 +2010,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 独立进程导入守卫覆盖 sync_ports，禁止契约导入同步服务、SQLAlchemy 与具体存储。
 
 验证：sync_ports 与实际账户模型两文件 mypy --follow-imports=skip 通过，不代表原生适配器联合契约或全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2642 passed**，31.75 秒，一项现有 Starlette/httpx 警告。新模块及架构测试完整 Ruff，同步服务 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百六十二批：账户同步实际适配器契约检查与生产装配
+
+第一百六十一批提交为 `d3cee69`；第一百六十二批于 2026-10-01 继续本地实施，未部署生产。
+
+- BinanceUsdMPrivateReadClient 与 PostgresAccountRepository 改从实际账户模型所有者导入值类型；客户端 JSON 转换函数接受实际调用方的 Mapping[str, object]，保持遍历与转换行为。
+- 删除仓储 reconciliation head 转换处无效 arg-type 忽略。单次同步与持续同步装配将同一客户端、仓储明确赋值给 ReadOnlyAccountClient、AccountSyncRepository，再传给同步服务；未增加实例或转发层。
+- 初始局部类型检查四项错误中，账户模型的 Any 返回与 Mapping 参数问题已关闭；HTTPStatusError 的 Any 基类来自跳过 httpx，验证时对 httpx 设置 follow_imports=normal，未用类型忽略绕过该错误。
+
+验证：实际客户端、实际仓储、sync_ports、账户模型与临时双赋值探针五文件严格 mypy 检查通过（其余依赖 follow_imports=skip，仅 httpx 正常跟随）；确认两种具体适配器对两个接口的结构适配，不代表应用主模块、ORM 依赖或全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2642 passed**，31.50 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
