@@ -22,10 +22,13 @@ if TYPE_CHECKING:
         LiveContextProvider,
         LiveDaemonRuntimeContext,
     )
-    from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
-    from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
     from crypto_momentum_lab.live_rollout.exits import LiveExitManager
     from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
+
+from crypto_momentum_lab.live_rollout.exit_event_ports import (
+    ExitEventLane,
+    ExitEventProcessor,
+)
 
 log = structlog.get_logger()
 
@@ -46,8 +49,8 @@ class LiveExitEventCoordinator:
             [LiveDaemonRuntimeContext], Awaitable[None]
         ],
         invalidate_context_cache: Callable[[], None],
-        exit_processor: LiveExitProcessor,
-        exit_lane: ExitExecutionLane,
+        exit_processor: ExitEventProcessor,
+        exit_lane: ExitEventLane,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")

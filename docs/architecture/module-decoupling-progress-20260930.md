@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -966,6 +966,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 账户/quote/candle/grace 路由、上下文读取与失效、成交处理及错误发布顺序保持。
 
 验证：退出协调/架构定向 **75 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2485 passed**，29.06 秒，一项现有 Starlette/httpx 警告。完整回归之后进一步调整 context 的纯注解导入，最终代码重新通过上述定向检查与五模块导入隔离检查。新增协调模块禁止 sqlalchemy/persistence 导入检查。核心文件与架构测试完整 Ruff、git diff --check 通过。协调模块与 context 的 mypy --follow-imports=skip 检查有四处协作者 outcome.failure 的 Any 返回错误，未忽略错误码；本批不宣称协调模块类型验收通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十五批：退出协调处理与通道能力契约
+
+第七十四批提交为 `3aac002`；第七十五批继续本地实施，未部署生产。
+
+- exit_event_ports 定义只读 ExitFailureResult.failure；ExitEventProcessor 声明协调实际调用的 state/quote/candle/grace 四方法，ExitEventLane 声明 start、submit_account 与 submit_quote，保持原参数和 wait 默认值。
+- LiveExitEventCoordinator 改为消费这些接口，删除具体处理器及通道类型引用。原 ExitLaneOutcome 仍由通道拥有，实际处理器/通道与现有替身无需新增转发实现；协调只需要失败原因，不获得队列、任务或结算状态所有权。
+- 去除参数注解后协调全部函数 AST 与上一批一致。事件路由、上下文发布、失效及结果失败原因返回顺序保持。
+
+验证：退出协调/架构定向 **76 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2486 passed**，28.91 秒，一项现有 Starlette/httpx 警告。新增接口模块禁止 sqlalchemy/persistence 导入检查。exit_event_ports、exit_event_coordinator、context 三文件联合定向 mypy --follow-imports=skip 通过，关闭上一批协调模块四处 Any 返回缺口；此范围未对完整 exit_processor/exit_lane 实现作类型验收。核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
