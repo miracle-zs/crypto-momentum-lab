@@ -18,6 +18,11 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.balance_history import (
+    BalanceValue,
+    balance_value,
+    select_balance_history,
+)
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
@@ -45,8 +50,6 @@ from crypto_momentum_lab.execution_account.sync_ports import (
     AccountSyncRepository,
     ReadOnlyAccountClient,
 )
-
-type BalanceValue = tuple[Decimal, Decimal, Decimal]
 
 _FILL_KEY_CACHE_SIZE = 8192
 _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
@@ -143,7 +146,7 @@ class ExecutionAccountSyncService:
         normalized_balances = tuple(
             replace(balance, observed_at=resolved_observed_at) for balance in balances
         )
-        persisted_balances = self._balances_to_persist(normalized_balances)
+        persisted_balances = select_balance_history(normalized_balances, self._last_balance_values)
         normalized_positions = tuple(
             replace(position, observed_at=resolved_observed_at)
             for position in positions_to_save
@@ -576,7 +579,7 @@ class ExecutionAccountSyncService:
         # balances and the zero that closes a previously non-zero asset.
         # persist_reconciliation_result is the daemon's main write path and had
         # been inserting the full multi-asset zero set every cycle.
-        persisted_balances = self._balances_to_persist(snapshot.balances)
+        persisted_balances = select_balance_history(snapshot.balances, self._last_balance_values)
         persisted_positions = self._positions_to_persist(
             snapshot.positions,
             observed_at=snapshot.config.observed_at,
@@ -665,7 +668,7 @@ class ExecutionAccountSyncService:
             config,
             event.event_id,
         )
-        persisted_balances = self._balances_to_persist(snapshot.balances)
+        persisted_balances = select_balance_history(snapshot.balances, self._last_balance_values)
         persisted_positions = self._positions_to_persist(
             snapshot.positions,
             observed_at=event.received_at,
@@ -768,24 +771,6 @@ class ExecutionAccountSyncService:
         )[: self._config.historical_fill_reconciliation_batch_size]
         return tuple(sorted(active_fill_symbols | set(historical_symbols)))
 
-    def _balances_to_persist(
-        self,
-        balances: tuple[AccountBalanceSnapshot, ...],
-    ) -> tuple[AccountBalanceSnapshot, ...]:
-        """Keep high-frequency history sparse without losing zero transitions.
-
-        Non-zero balances are retained at every observation because they feed
-        the equity curve.  A zero balance is only retained when the previous
-        observation for that asset was non-zero; later unchanged zero values
-        add no information and only amplify database writes.
-        """
-        return tuple(
-            balance
-            for balance in balances
-            if _balance_has_value(balance)
-            or _balance_value_is_nonzero(self._last_balance_values.get(balance.asset))
-        )
-
     def _positions_to_persist(
         self,
         positions: tuple[AccountPositionSnapshot, ...],
@@ -848,7 +833,7 @@ class ExecutionAccountSyncService:
         balances: tuple[AccountBalanceSnapshot, ...],
     ) -> None:
         for balance in balances:
-            self._last_balance_values[balance.asset] = _balance_value(balance)
+            self._last_balance_values[balance.asset] = balance_value(balance)
 
     def _remember_observation(self, observed_at: datetime) -> None:
         if (
@@ -939,22 +924,6 @@ def _position_cut_for_trade_scan(
     cut_ms = int(snapshot.observed_at.timestamp() * 1000)
     cut = datetime.fromtimestamp(cut_ms / 1000, tz=UTC)
     return replace(snapshot, observed_at=cut)
-
-
-def _balance_value(balance: AccountBalanceSnapshot) -> BalanceValue:
-    return (
-        balance.wallet_balance,
-        balance.available_balance,
-        balance.unrealized_pnl,
-    )
-
-
-def _balance_has_value(balance: AccountBalanceSnapshot) -> bool:
-    return _balance_value_is_nonzero(_balance_value(balance))
-
-
-def _balance_value_is_nonzero(value: BalanceValue | None) -> bool:
-    return value is not None and any(item != 0 for item in value)
 
 
 def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:

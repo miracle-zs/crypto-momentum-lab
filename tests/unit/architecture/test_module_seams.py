@@ -464,6 +464,7 @@ importlib.import_module(sys.argv[1])
         "crypto_momentum_lab.execution_account.sync_ports",
         "crypto_momentum_lab.execution_account.client_compat",
         "crypto_momentum_lab.execution_account.fill_progress",
+        "crypto_momentum_lab.execution_account.balance_history",
     ],
 )
 def test_account_snapshot_imports_without_sync_service(module):
