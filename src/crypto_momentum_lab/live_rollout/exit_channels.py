@@ -63,6 +63,7 @@ class LiveExitChannelRuntime:
         is_transient_error: Callable[[Exception], bool],
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
+        on_order_identity_conflict: Callable[[str], None] | None = None,
         pending_position_retry_delays: tuple[float, ...] = (
             DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
         ),
@@ -79,6 +80,7 @@ class LiveExitChannelRuntime:
             is_order_identity_conflict or _never_order_identity_conflict
         )
         self._on_exit_failure = on_exit_failure
+        self._on_order_identity_conflict = on_order_identity_conflict
         self._pending_position_retry_delays = pending_position_retry_delays
 
     async def run_quote_channel(
@@ -116,8 +118,8 @@ class LiveExitChannelRuntime:
                         else type(error).__name__
                     )
                     if order_identity_conflict:
-                        if hasattr(self._daemon, "note_order_identity_conflict"):
-                            self._daemon.note_order_identity_conflict(quote.symbol)
+                        if self._on_order_identity_conflict is not None:
+                            self._on_order_identity_conflict(quote.symbol)
                         if self._on_exit_failure is not None:
                             self._on_exit_failure(quote.symbol, failure)
                     log.warning(
@@ -180,8 +182,8 @@ class LiveExitChannelRuntime:
                 except Exception as error:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON
-                        if hasattr(self._daemon, "note_order_identity_conflict"):
-                            self._daemon.note_order_identity_conflict(
+                        if self._on_order_identity_conflict is not None:
+                            self._on_order_identity_conflict(
                                 event.candle.symbol
                             )
                         break
@@ -287,8 +289,8 @@ class LiveExitChannelRuntime:
                 except Exception as error:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON
-                        if hasattr(self._daemon, "note_order_identity_conflict"):
-                            self._daemon.note_order_identity_conflict(state.symbol)
+                        if self._on_order_identity_conflict is not None:
+                            self._on_order_identity_conflict(state.symbol)
                         if self._on_exit_failure is not None:
                             self._on_exit_failure(state.symbol, failure)
                         retry_delay = min(

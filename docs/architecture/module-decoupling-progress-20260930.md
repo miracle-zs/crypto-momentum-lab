@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -750,6 +750,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - note_order_identity_conflict 的既有可选 hasattr 检查保留，不在本批强制旧替身支持该能力；不宣称退出通道所有动态探测均完成迁移。
 
 验证：退出通道/CLI/架构定向 **129 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2465 passed**。包含第五十五批后补三项导入检查及本批一项新接口无 sqlalchemy/persistence 导入检查。新接口定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表消费模块或全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十七批：退出身份冲突通知显式注入
+
+第五十六批提交为 `b735aa1`；第五十七批继续本地实施，未部署生产。
+
+- LiveExitChannelRuntime 接收可选 on_order_identity_conflict 回调，quote/candle/grace 三条异常路径不再探测 daemon 的 note_order_identity_conflict。未配置仍跳过通知，通知先于原 on_exit_failure 发布。
+- 生产编排直接绑定 daemon.note_order_identity_conflict；历史 grace 测试/CLI 装配 helper 在构造时获取旧可选通知并传入，保留已有轻量替身行为。该装配处 getattr 仍存在，不宣称全仓动态探测已清零；退出循环中的方法能力探测已移除。
+- 原冲突分类、重试/降级/日志、symbol 选择与退出处理顺序保持。运行时替换 daemon 方法不再被逐事件重新发现，通知绑定属于构造生命周期契约；未新增通知实现或第二条提交路径。
+
+验证：退出通道/CLI/架构定向 **131 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2467 passed**，26.95 秒，一项现有 Starlette/httpx 警告。新增两项 quote 冲突测试覆盖有/无显式通知，验证不探测 daemon 方法和通知先于失败回调。exit_channels 与 exit_channel_ports 两文件定向 mypy --follow-imports=skip 通过；核心文件/新增测试完整 Ruff、编排 F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

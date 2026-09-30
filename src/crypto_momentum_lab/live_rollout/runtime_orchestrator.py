@@ -1562,6 +1562,7 @@ async def run_live_daemon(
             is_transient_error=runtime_errors.is_transient_runtime_error,
             is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
+            on_order_identity_conflict=daemon.note_order_identity_conflict,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
 
@@ -1982,6 +1983,7 @@ async def _run_grace_timeout_channel(
 ) -> None:
     """Keep the historical test/CLI seam backed by the extracted runtime."""
 
+    identity_conflict_notifier = getattr(daemon, "note_order_identity_conflict", None)
     runtime = LiveExitChannelRuntime(
         daemon=daemon,
         latest_market_quotes=latest_market_quotes,
@@ -1989,6 +1991,7 @@ async def _run_grace_timeout_channel(
         is_transient_error=runtime_errors.is_transient_runtime_error,
         is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
+        on_order_identity_conflict=identity_conflict_notifier,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)

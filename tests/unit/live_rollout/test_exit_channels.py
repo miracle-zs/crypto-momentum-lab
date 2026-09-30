@@ -121,3 +121,42 @@ def test_pending_position_failure_is_promoted_after_retries() -> None:
         exit_channels.promote_pending_position_failure("pending_live_positions:BTCUSDT")
         == "unmanaged_live_positions:BTCUSDT"
     )
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_quote_conflict_uses_only_injected_notifier(notify: bool) -> None:
+    quote = SimpleNamespace(symbol="BTCUSDT")
+    state = SimpleNamespace(symbol="BTCUSDT")
+    calls = []
+
+    class Daemon:
+        async def process_market_quote(self, quote, state):
+            raise ValueError("identity conflict")
+
+        def note_order_identity_conflict(self, symbol):
+            pytest.fail("runtime must not discover the daemon notification method")
+
+    class Source:
+        def __aiter__(self):
+            async def stream():
+                yield quote
+
+            return stream()
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),
+        latest_market_quotes=SimpleNamespace(observe=lambda q: None),
+        latest_market_states=SimpleNamespace(for_symbols=lambda symbols: (state,)),
+        is_transient_error=lambda error: False,
+        is_order_identity_conflict=lambda error: True,
+        on_order_identity_conflict=(
+            (lambda symbol: calls.append(("identity", symbol))) if notify else None
+        ),
+        on_exit_failure=lambda symbol, failure: calls.append(("failure", symbol)),
+    )
+    await runtime.run_quote_channel(source=Source())
+    assert calls == (
+        [("identity", "BTCUSDT"), ("failure", "BTCUSDT")]
+        if notify
+        else [("failure", "BTCUSDT")]
+    )
