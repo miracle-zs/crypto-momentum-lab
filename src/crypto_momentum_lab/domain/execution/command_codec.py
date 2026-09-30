@@ -4,7 +4,7 @@ Malformed identity fails restoration. Existing skippable payload diagnostics are
 returned explicitly, so callers preserve their logging and recovery policy.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -234,3 +234,34 @@ def decode_order_watermark(
         raise ValueError("positive cumulative quantity requires positive quote")
 
     return RestoredWatermark(scope, order_id, quantity, quote)
+
+
+def decode_active_commands(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    account_label: str | None,
+    restored_at: datetime,
+) -> tuple[RestoredCommand, ...]:
+    """Validate an entire recovery batch before exposing any command state."""
+    parsed_commands: dict[str, RestoredCommand] = {}
+    for cmd_data in rows:
+        recovered = decode_active_command(
+            cmd_data,
+            account_label=account_label,
+            restored_at=restored_at,
+        )
+        if recovered is None:
+            continue
+        if isinstance(recovered, SkippedCommand):
+            raise ValueError(
+                f"active execution command {recovered.command_id} "
+                f"cannot be restored: {recovered.reason}"
+            )
+        command_id = recovered.entry.command_id
+        previous = parsed_commands.get(command_id)
+        if previous is not None and previous != recovered:
+            raise ValueError(
+                f"active execution command {command_id} has conflicting rows"
+            )
+        parsed_commands[command_id] = recovered
+    return tuple(parsed_commands.values())

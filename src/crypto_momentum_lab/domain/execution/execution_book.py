@@ -13,9 +13,7 @@ from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
 )
 from crypto_momentum_lab.domain.execution.command_codec import (
-    RestoredCommand,
-    SkippedCommand,
-    decode_active_command,
+    decode_active_commands,
     decode_order_watermark,
     encode_outbox_details,
 )
@@ -702,29 +700,12 @@ class ExecutionBook:
                 active_cmds = await command_repository.load_active_execution_commands(
                     account_label=account_label
                 )
-                parsed_commands: dict[str, RestoredCommand] = {}
-                restored_at = datetime.now(UTC)
-                for cmd_data in active_cmds:
-                    recovered = decode_active_command(
-                        cmd_data,
-                        account_label=account_label,
-                        restored_at=restored_at,
-                    )
-                    if recovered is None:
-                        continue
-                    if isinstance(recovered, SkippedCommand):
-                        raise ValueError(
-                            f"active execution command {recovered.command_id} "
-                            f"cannot be restored: {recovered.reason}"
-                        )
-                    command_id = recovered.entry.command_id
-                    previous = parsed_commands.get(command_id)
-                    if previous is not None and previous != recovered:
-                        raise ValueError(
-                            f"active execution command {command_id} has conflicting rows"
-                        )
-                    parsed_commands[command_id] = recovered
-                for recovered in parsed_commands.values():
+                parsed_commands = decode_active_commands(
+                    active_cmds,
+                    account_label=account_label,
+                    restored_at=datetime.now(UTC),
+                )
+                for recovered in parsed_commands:
                     entry = recovered.entry
                     cid = entry.command_id
                     self._outbox_by_command_id[cid] = entry
