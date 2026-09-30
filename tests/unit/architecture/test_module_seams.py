@@ -22,6 +22,7 @@ import pytest
         "crypto_momentum_lab.domain.execution.evidence_models",
         "crypto_momentum_lab.domain.execution.evidence_rules",
         "crypto_momentum_lab.domain.execution.evidence_settlement",
+        "crypto_momentum_lab.domain.execution.fill_attribution",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:

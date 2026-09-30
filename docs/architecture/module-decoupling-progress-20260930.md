@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -221,10 +221,24 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 
 第九至十五批已将原订单聚合的命令、提交、事件/成交、读取、接管、计划与 shadow 写入归至各自接口和实现；跨表状态约束仍由相应写入事务负责。后续重点回到 ExecutionBook 的复杂成交归因及其他运行用例，模块解耦整体尚未完成；没有生产发布或服务器采样。
 
+## 第十六批：成交身份归因与真实成交水位计算
+
+第十五批提交为 `1ffc191`；第十六批继续本地实施，未部署生产。
+
+- `domain/execution/fill_attribution.py` 提供 plan_fill_observation，返回不可变 FillObservationPlan：原/增量成交、可入账数量、reservation 结算数量、累计数量/水位、累计/新 trade 与恢复前缀标志。仅依赖传入成交、同 trade journal 记录、已见 identity、历史水位与 caller 明确传入的已验证前缀条件，不访问 Book、journal、数据库或仓储。
+- 重复真实成交仍按 quantity/price/side/symbol 核对，大小写 side 保持归一化；同 journal trade 不再次结算。全局已见但 journal 缺失仍拒绝并要求恢复，只有原 UoW/stream scope 已验证条件成立的恢复前缀可重新入账，结算数量保持零。累计成交复用第八批 delta 算法，保持冲突校验与增量价格，不改变耐久 payload/digest。
+- is_exit_fill 抽离 position side、active episode、active reservation 与 reduce-only 证据判定。它只决定是否应尝试退出结算，不分配持仓批次或写 reservation；既有 BOTH/显式 LONG/SHORT 及事件/成交标志规则保持。
+- `evidence_settlement.account_trade_delta` 在模块内筛选匹配订单的真实账户成交，计算相对历史水位的剩余结算差量与下一水位。订单报告领先真实成交时不回退、不再扣一次 reservation；数量推进而金额不推进仍报冲突，不制造账户成交。
+- Book 明确读取现有状态并调用纯函数，再沿原流程 append journal、记录已见 trade、await reservation 结算和处理累计报告。真实成交水位计算仍位于 journal append 之后；候选状态、mutation lock、事务、失败封锁及提交后发布仍归 Book 所有，恢复前缀验证未移到纯函数内。
+
+验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2225 passed**，21.92 秒。新增纯归因/水位测试 **21 passed**，覆盖普通与重复真实成交、四类 payload 冲突、缺失 journal 的已见 trade、已验证恢复前缀、累计增量价格、匹配订单与报告领先水位、金额冲突，以及 position/episode/reservation/reduce-only 退出识别。与架构导入检查合计 **37 passed**；架构检查纳入 fill_attribution，验证新模块导入不加载运行装配/持久化。两个计算模块定向 `mypy --follow-imports=skip`、新模块/计算模块/新增测试 Ruff、Book 的 F/I 检查与 git diff --check 通过，不代表全仓库类型验收。
+
+本批完成成交身份/退出结算判定的纯计算提取，未将整个成交归因或证据事务协调移出 Book。批次投影仍由既有 PositionLedger 等领域模块负责；真实数据库并发、原子回滚与完整重启仍未验收，没有生产发布或服务器采样。
+
 ## 后续实施顺序
 
 1. 补齐真实 Postgres 并发、原子回滚与完整进程重启验收；第二批已完成自愈事务迁移及提交后重载契约。
-2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；复杂成交归因及状态协调仍保留在 Book，按风险继续简化。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
+2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；第十六批已提取成交 identity/恢复前缀计划、退出结算判定及真实账户成交水位增量；证据状态协调与命令/批次归因仍按风险继续简化。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
 3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，继续处理其他运行子系统与可调用的 CLI 用例。
 4. 恢复模型/codec 的静态环：集中摘要计算与投影编码职责，保留既有 checkpoint digest 与跨 epoch 保护。
 

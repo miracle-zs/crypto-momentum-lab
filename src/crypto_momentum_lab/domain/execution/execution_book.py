@@ -45,7 +45,7 @@ from crypto_momentum_lab.domain.execution.evidence_rules import (
     _scoped_evidence_identity,
 )
 from crypto_momentum_lab.domain.execution.evidence_settlement import (
-    cumulative_fill_delta,
+    account_trade_delta,
     cumulative_order_delta,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
@@ -54,6 +54,10 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
     InMemoryPositionReservationRepository,
     ReservationConflictError,
     VersionConflictError,
+)
+from crypto_momentum_lab.domain.execution.fill_attribution import (
+    is_exit_fill,
+    plan_fill_observation,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -2543,84 +2547,40 @@ class ExecutionBook:
             fill = evidence.fill
             trade_id = fill.trade_id
             order_id = fill.order_id
-            raw_payload = fill.raw_payload if isinstance(fill.raw_payload, dict) else {}
-            is_cumulative = bool(
-                raw_payload.get("is_cumulative") or "cum_qty" in raw_payload
-            )
-            delta_qty = fill.quantity
-            settlement_delta_qty = delta_qty
-            adopted_prefix_trade = False
-            applied_fill = fill
-            if is_cumulative:
-                watermark_key = self._order_watermark_key(key, order_id)
-                try:
-                    fill_delta = cumulative_fill_delta(
-                        fill,
-                        previous_quantity=self._order_cumulative_fills.get(
-                            watermark_key, Decimal("0")
-                        ),
-                        previous_quote=self._order_cumulative_quotes.get(
-                            watermark_key, Decimal("0")
-                        ),
-                        trade_seen=trade_id in self._seen_trade_ids,
-                    )
-                except ValueError as error:
-                    return EvidenceConflict(evidence.evidence_id, str(error))
-                delta_qty = fill_delta.quantity
-                cumulative_qty = fill_delta.cumulative_quantity
-                applied_fill = fill_delta.fill
-                if fill_delta.watermark is not None:
-                    pending_watermark = (watermark_key, *fill_delta.watermark)
-                settlement_delta_qty = delta_qty
-
             existing_trade = next(
-                (
-                    prior
-                    for prior in journal.read_cut().fills
-                    if prior.trade_id == trade_id
-                ),
+                (prior for prior in journal.read_cut().fills if prior.trade_id == trade_id),
                 None,
             )
-            if not is_cumulative and existing_trade is not None:
-                if (
-                    existing_trade.quantity != fill.quantity
-                    or existing_trade.price != fill.price
-                    or existing_trade.side.upper() != fill.side.upper()
-                    or existing_trade.symbol != fill.symbol
-                ):
-                    return EvidenceConflict(
-                        evidence_id=evidence.evidence_id,
-                        reason=(
-                            f"Fill {trade_id} conflicts with existing journal records"
-                        ),
-                    )
-                # A repeated exchange trade can arrive with a new transport
-                # evidence ID. The trade ID, rather than the evidence ID, owns
-                # fill quantity and reservation settlement.
-                delta_qty = Decimal("0")
-                settlement_delta_qty = Decimal("0")
-            elif not is_cumulative and trade_id in self._seen_trade_ids:
-                if (
-                    self._active_transaction is not None
-                    and self._recovery_adoption_scope == journal.stream_scope
-                    and journal.stream_scope is not None
-                ):
-                    # A complete new-epoch fill prefix can repeat globally known
-                    # trade identities. UoW identity comparison has already
-                    # verified the exact payload; it belongs in this epoch's
-                    # journal but must not settle reservations a second time.
-                    adopted_prefix_trade = True
-                    settlement_delta_qty = Decimal("0")
-                else:
-                    return EvidenceConflict(
-                        evidence_id=evidence.evidence_id,
-                        reason=(
-                            f"Fill {trade_id} was already seen but its journal facts "
-                            "are unavailable; recovery is required"
-                        ),
-                    )
+            watermark_key = self._order_watermark_key(key, order_id)
+            try:
+                fill_plan = plan_fill_observation(
+                    fill,
+                    existing_trade=existing_trade,
+                    trade_seen=trade_id in self._seen_trade_ids,
+                    previous_quantity=self._order_cumulative_fills.get(
+                        watermark_key, Decimal("0")
+                    ),
+                    previous_quote=self._order_cumulative_quotes.get(
+                        watermark_key, Decimal("0")
+                    ),
+                    can_adopt_prefix=(
+                        self._active_transaction is not None
+                        and self._recovery_adoption_scope == journal.stream_scope
+                        and journal.stream_scope is not None
+                    ),
+                )
+            except ValueError as error:
+                return EvidenceConflict(evidence.evidence_id, str(error))
+            delta_qty = fill_plan.quantity
+            settlement_delta_qty = fill_plan.settlement_quantity
+            cumulative_qty = fill_plan.cumulative_quantity
+            applied_fill = fill_plan.fill
+            is_cumulative = fill_plan.is_cumulative
+            is_new_trade = fill_plan.is_new_trade
+            adopted_prefix_trade = fill_plan.adopted_prefix_trade
+            if fill_plan.watermark is not None:
+                pending_watermark = (watermark_key, *fill_plan.watermark)
 
-            is_new_trade = trade_id not in self._seen_trade_ids or adopted_prefix_trade
             if is_new_trade:
                 if delta_qty > Decimal("0"):
                     accepted = journal.append_fill(applied_fill)
@@ -2650,67 +2610,29 @@ class ExecutionBook:
                 previous_quote = self._order_cumulative_quotes.get(
                     watermark_key, Decimal("0")
                 )
-                real_order_fills = tuple(
-                    item
-                    for item in journal.read_cut().fills
-                    if item.order_id == order_id
-                )
-                real_quantity = sum(
-                    (item.quantity for item in real_order_fills), Decimal("0")
-                )
-                real_quote = sum(
-                    (item.quantity * item.price for item in real_order_fills),
-                    Decimal("0"),
-                )
-                settlement_delta_qty = max(
-                    Decimal("0"), real_quantity - previous_quantity
-                )
-                if settlement_delta_qty > Decimal("0"):
-                    if real_quote <= previous_quote:
-                        return EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=(
-                                "real account trade quote does not advance its "
-                                "durable order watermark"
-                            ),
-                        )
-                    pending_watermark = (
-                        watermark_key,
-                        real_quantity,
-                        real_quote,
+                try:
+                    trade_delta = account_trade_delta(
+                        order_id,
+                        previous_quantity=previous_quantity,
+                        previous_quote=previous_quote,
+                        account_fills=journal.read_cut().fills,
                     )
+                except ValueError as error:
+                    return EvidenceConflict(evidence.evidence_id, str(error))
+                settlement_delta_qty = trade_delta.quantity
+                if trade_delta.watermark is not None:
+                    pending_watermark = (watermark_key, *trade_delta.watermark)
 
             active_episode = book.get_view().active_episode
-            is_exit_fill = (
-                (
-                    fill.side.upper() == "SELL"
-                    and key.position_side == FuturesPositionSide.LONG
-                )
-                or (
-                    fill.side.upper() == "BUY"
-                    and key.position_side == FuturesPositionSide.SHORT
-                )
-                or bool(self._find_active_reservations_for_command(order_id))
-                or bool(raw_payload.get("reduce_only"))
-                or (
-                    evidence.order_event is not None
-                    and bool((evidence.order_event.details or {}).get("is_reduce_only"))
-                )
-                or (
-                    active_episode is not None
-                    and (
-                        (
-                            active_episode.side == StrategySide.LONG
-                            and fill.side.upper() == "SELL"
-                        )
-                        or (
-                            active_episode.side == StrategySide.SHORT
-                            and fill.side.upper() == "BUY"
-                        )
-                    )
-                )
-            )
-            if is_exit_fill and settlement_delta_qty > Decimal("0"):
+            if is_exit_fill(
+                fill,
+                position_side=key.position_side,
+                episode_side=active_episode.side if active_episode is not None else None,
+                has_active_reservations=bool(
+                    self._find_active_reservations_for_command(order_id)
+                ),
+                order_event=evidence.order_event,
+            ) and settlement_delta_qty > Decimal("0"):
                 (
                     consumed,
                     needs_recovery,

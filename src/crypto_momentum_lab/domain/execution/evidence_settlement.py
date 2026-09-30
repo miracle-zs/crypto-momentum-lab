@@ -83,3 +83,24 @@ def cumulative_order_delta(
     return CumulativeOrderDelta(
         target_quantity - previous_quantity, (target_quantity, target_quote)
     )
+
+
+def account_trade_delta(
+    order_id: str,
+    *,
+    previous_quantity: Decimal,
+    previous_quote: Decimal,
+    account_fills: tuple[AccountFillEvent, ...],
+) -> CumulativeOrderDelta:
+    """Advance settlement from real trades without counting a report twice."""
+    fills = tuple(fill for fill in account_fills if fill.order_id == order_id)
+    quantity = sum((fill.quantity for fill in fills), Decimal("0"))
+    quote = sum((fill.quantity * fill.price for fill in fills), Decimal("0"))
+    delta = max(Decimal("0"), quantity - previous_quantity)
+    if delta <= 0:
+        return CumulativeOrderDelta(Decimal("0"), None)
+    if quote <= previous_quote:
+        raise ValueError(
+            "real account trade quote does not advance its durable order watermark"
+        )
+    return CumulativeOrderDelta(delta, (quantity, quote))
