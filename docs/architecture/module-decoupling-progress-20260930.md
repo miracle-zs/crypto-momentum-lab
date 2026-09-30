@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成八十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成八十七批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1109,6 +1109,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - LiveContextRuntime 对旧 provider 的 currentness/失效兼容探测仍保留，本批不收窄旧接口或改变 generation、异常日志规则。
 
 验证：上下文/架构定向 **80 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2497 passed**，29.41 秒，一项现有 Starlette/httpx 警告。context、context_prefetch、market_admission、telemetry_ports 四文件联合定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第八十七批：上下文失效方法构造时绑定
+
+第八十六批提交为 `3ed947c`；第八十七批继续本地实施，未部署生产。
+
+- LiveContextRuntime 构造时绑定 invalidate 或备用 invalidate_cache，优先级不变；invalidate 不再逐次 hasattr 探测 reader 方法。
+- 保留先递增 generation、主方法传 event、旧 cache 方法 TypeError 后无参重试，以及调用失败日志。未提供方法时仍无操作；构造时绑定后不再发现后续方法替换。属性描述器异常会在构造时暴露；显式 None 方法视为未配置，不再在失效时记录调用 None 的错误。
+- currentness 的旧 provider 探测保留，不宣称所有兼容探测已移除。未新增转发模块，缓存失效实现仍归 provider。
+
+验证：上下文定向 **5 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2497 passed**，30.01 秒，一项现有 Starlette/httpx 警告。context 定向 mypy --follow-imports=skip、核心文件完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

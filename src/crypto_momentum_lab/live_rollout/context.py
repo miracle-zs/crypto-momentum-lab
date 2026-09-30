@@ -170,6 +170,14 @@ class LiveContextRuntime:
         self._run_id = run_id
         self._context_reader = resolved
         self._context_provider = resolved
+        self._uses_legacy_cache_invalidator = False
+        if hasattr(resolved, "invalidate"):
+            self._context_invalidator = resolved.invalidate
+        elif hasattr(resolved, "invalidate_cache"):
+            self._context_invalidator = resolved.invalidate_cache
+            self._uses_legacy_cache_invalidator = True
+        else:
+            self._context_invalidator = None
         self._set_pending_position_symbols = set_pending_position_symbols
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
@@ -206,15 +214,16 @@ class LiveContextRuntime:
 
     def invalidate(self, event: ContextInvalidation | None = None) -> None:
         self._generation += 1
-        reader = self._context_reader
+        invalidator = self._context_invalidator
         try:
-            if hasattr(reader, "invalidate"):
-                reader.invalidate(event)
-            elif hasattr(reader, "invalidate_cache"):
-                try:
-                    reader.invalidate_cache(event)
-                except TypeError:
-                    reader.invalidate_cache()
+            if invalidator is not None:
+                if self._uses_legacy_cache_invalidator:
+                    try:
+                        invalidator(event)
+                    except TypeError:
+                        invalidator()
+                else:
+                    invalidator(event)
         except Exception as error:
             _log.warning(
                 "live_context_invalidation_failed",
