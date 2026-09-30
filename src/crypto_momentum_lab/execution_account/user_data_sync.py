@@ -36,6 +36,7 @@ from crypto_momentum_lab.execution_account.user_data_models import (
     UserDataStateError,
 )
 from crypto_momentum_lab.execution_account.user_data_sequence import (
+    stale_user_data_reason,
     validate_exchange_update_watermark,
 )
 
@@ -165,12 +166,13 @@ class AccountUserDataState:
         self,
         event: BinanceUserDataEvent,
     ) -> tuple[bool, str | None]:
+        stale_reason = stale_user_data_reason(
+            event,
+            last_exchange_event_at=self._last_account_exchange_event_at,
+        )
+        if stale_reason is not None:
+            return False, stale_reason
         if event.exchange_event_at is not None:
-            if (
-                self._last_account_exchange_event_at is not None
-                and event.exchange_event_at < self._last_account_exchange_event_at
-            ):
-                return False, "stale_exchange_event"
             self._last_account_exchange_event_at = event.exchange_event_at
         account = require_mapping(event.payload.get("a"), "ACCOUNT_UPDATE.a")
         balance_rows = require_mapping_list(account.get("B"), "ACCOUNT_UPDATE.a.B")
@@ -281,18 +283,16 @@ class AccountUserDataState:
         symbol = required_text(row.get("s"), "ORDER_TRADE_UPDATE symbol")
         order_id = required_text(row.get("i"), "ORDER_TRADE_UPDATE order id")
         key = (symbol, order_id)
+        stale_reason = stale_user_data_reason(
+            event,
+            last_exchange_event_at=self._last_order_exchange_event_at.get(key),
+            last_received_at=self._last_order_received_at.get(key),
+        )
+        if stale_reason is not None:
+            return False, (), stale_reason
         if event.exchange_event_at is not None:
-            last_exchange_event_at = self._last_order_exchange_event_at.get(key)
-            if (
-                last_exchange_event_at is not None
-                and event.exchange_event_at < last_exchange_event_at
-            ):
-                return False, (), "stale_exchange_event"
             self._last_order_exchange_event_at[key] = event.exchange_event_at
         else:
-            last_received_at = self._last_order_received_at.get(key)
-            if last_received_at is not None and event.received_at < last_received_at:
-                return False, (), "stale_local_event"
             self._last_order_received_at[key] = event.received_at
 
         status = required_text(row.get("X"), "ORDER_TRADE_UPDATE status")
