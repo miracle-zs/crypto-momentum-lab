@@ -24,9 +24,11 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
+from crypto_momentum_lab.execution_account.user_data_models import (
+    UserDataStateError,
+)
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
-    UserDataStateError,
 )
 
 

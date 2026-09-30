@@ -29,9 +29,11 @@ from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncResult,
     FillKey,
 )
+from crypto_momentum_lab.execution_account.user_data_models import (
+    AccountUserDataUpdate,
+)
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
-    AccountUserDataUpdate,
 )
 
 log = structlog.get_logger(__name__)

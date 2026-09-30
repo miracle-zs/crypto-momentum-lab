@@ -568,3 +568,25 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_user_data_update_models_import_without_merge_state():
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class StateGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.execution_account.user_data_sync',
+            'crypto_momentum_lab.execution_account.binance.user_data',
+            'crypto_momentum_lab.execution_account.sync',
+        }:
+            raise RuntimeError('update model imported state: ' + fullname)
+sys.meta_path.insert(0, StateGuard())
+importlib.import_module('crypto_momentum_lab.execution_account.user_data_models')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百八十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百八十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -2275,6 +2275,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 独立进程传输导入守卫扩展到 user_data_sync，禁止加载 user_data、websockets 及 structlog，确认合并状态无需加载连接实现。
 
 验证：上述八文件 mypy --follow-imports=skip 联合通过，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2717 passed**，32.72 秒，一项现有 Starlette/httpx 警告。架构测试完整 Ruff，合并实现 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百八十四批：用户数据更新结果与合并异常独立
+
+第一百八十三批提交为 `d942071`；第一百八十四批于 2026-10-01 继续本地实施，未部署生产。
+
+- AccountUserDataUpdate 与 UserDataStateError 移至 execution_account.user_data_models，类 AST 完全一致；合并实现、daemon 与异常测试直接导入模型所有者。
+- 保留字段默认值、不可变 dataclass 与异常类型身份；mutable 合并状态继续由 AccountUserDataState 管理，daemon 仍需实际状态实现，本批不宣称 daemon 已完全隔离。
+- 新增独立进程模型导入守卫，禁止加载 user_data_sync、同步服务和 WebSocket 流实现。
+
+验证：前批合并消费链加 user_data_models 共九文件 mypy --follow-imports=skip 联合通过，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2718 passed**，32.61 秒，一项现有 Starlette/httpx 警告。新模型及架构测试完整 Ruff，其余迁移文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

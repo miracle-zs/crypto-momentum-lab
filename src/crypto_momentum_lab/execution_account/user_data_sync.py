@@ -1,6 +1,6 @@
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -22,23 +22,11 @@ from crypto_momentum_lab.execution_account.snapshot_changes import (
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
-    AccountSnapshotDelta,
 )
-
-
-class UserDataStateError(ValueError):
-    """An event is too incomplete to apply without a REST reconciliation."""
-
-
-@dataclass(frozen=True, slots=True)
-class AccountUserDataUpdate:
-    event: BinanceUserDataEvent
-    snapshot: AccountSnapshot
-    fills: tuple[AccountFillEvent, ...]
-    needs_reconciliation: bool
-    reason: str | None
-    changed: bool
-    delta: AccountSnapshotDelta | None = None
+from crypto_momentum_lab.execution_account.user_data_models import (
+    AccountUserDataUpdate,
+    UserDataStateError,
+)
 
 
 class AccountUserDataState:
