@@ -2674,3 +2674,87 @@ def test_historical_view_preserves_configuration_and_current_state(
     )
     assert historical.projection_version != "live-token"
     assert book.get_view(now=cut.as_of) == before
+
+
+async def test_nonempty_historical_read_preserves_latest_position() -> None:
+    from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+    from crypto_momentum_lab.domain.execution.position_book import PositionBook
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+
+    scope = _scope()
+    key = scope.to_position_key()
+    stream = AccountFactStreamScope.for_position_key(
+        key, stream_id="accounts", stream_epoch="epoch-1"
+    )
+    fills = tuple(
+        AccountFillEvent(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            trade_id=f"trade-{minute}",
+            order_id=f"order-{minute}",
+            side="BUY",
+            price=Decimal("100"),
+            quantity=Decimal("1"),
+            realized_pnl=Decimal("0"),
+            fee=Decimal("0"),
+            fee_asset="USDT",
+            trade_at=_dt(10, minute),
+            raw_payload={"positionSide": "LONG"},
+        )
+        for minute in (0, 1)
+    )
+    historical_cut = DurableJournalCut(
+        scope=stream,
+        as_of=_dt(10, 0),
+        revision=1,
+        facts=AccountFacts(
+            position_key=key,
+            stream_scope=stream,
+            fills=fills[:1],
+            prefix_facts_complete=True,
+        ),
+    )
+    latest_cut = DurableJournalCut(
+        scope=stream,
+        as_of=_dt(10, 1),
+        revision=2,
+        facts=AccountFacts(
+            position_key=key,
+            stream_scope=stream,
+            fills=fills,
+            prefix_facts_complete=True,
+        ),
+    )
+
+    class Uow:
+        def __init__(self):
+            self.reads = []
+
+        async def load_journal_cut(self, *, scope, as_of):
+            self.reads.append((scope, as_of))
+            return historical_cut
+
+        def transaction(self, key):
+            raise AssertionError("historical read must not start a write transaction")
+
+    uow = Uow()
+    book = ExecutionBook(execution_unit_of_work=uow)
+    book._persistence_failed = False
+    journal = AccountJournal.from_durable_cut(latest_cut)
+    book._journals[key.canonical_id] = journal
+    book._books[key.canonical_id] = PositionBook(journal)
+    book._stream_scopes[key.canonical_id] = stream
+    before = await book.read(scope, now=_dt(10, 1))
+    historical = await book.read(scope, event_cut=_dt(10, 0), now=_dt(10, 1))
+    after = await book.read(scope, now=_dt(10, 1))
+
+    assert before.total_quantity == Decimal("2")
+    assert historical.total_quantity == Decimal("1")
+    assert historical.event_cut == _dt(10, 0)
+    assert after == before
+    assert uow.reads == [(stream, _dt(10, 0))]
