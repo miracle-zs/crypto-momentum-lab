@@ -1422,7 +1422,9 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
 
     class Strategy:
         def required_data(self):
-            return SimpleNamespace(warmup_buckets=1)
+            return SimpleNamespace(
+                warmup_buckets=1, base_state_interval_seconds=15, required_fields=()
+            )
 
         def clear_market_state_buffers(self) -> None:
             seen["buffers_cleared"] = True

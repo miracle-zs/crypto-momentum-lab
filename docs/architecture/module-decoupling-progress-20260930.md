@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -565,6 +565,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 共享 shadow FakeStrategy 显式提供原默认场景的无操作预热/重置；原 production 与 fake E2E 流程通过完整回归。没有新 SQL、写入事务或生产数据修改。
 
 验证：修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2442 passed**，25.53 秒，一项现有 Starlette/httpx 警告；daemon **61 passed**。随后补充三项重置契约测试，契约文件合计 **6 passed**，覆盖阈值等于/超过、缺失 reset 失败；新增三项未重新计入完整回归的数量。契约/新增测试完整 Ruff、行情循环及迁移替身 F/I、契约定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十二批：启动恢复共用显式策略数据要求
+
+第四十一批提交为 `1e44c8f`；第四十二批继续本地实施，未部署生产。
+
+- startup_recovery 的 warmup 秒数、最低 bucket 数、恢复行数预算、覆盖校验及完整 warmup symbols 判断直接调用 required_data()。删除该能力与其采样/字段属性的动态探测，与实时恢复共同消费既有 LiveRuntimeStrategy 契约。
+- 显式 None 保留原默认语义：15 秒间隔、最低一 bucket、零基础 warmup 加 16 buffer 的历史窗口、覆盖校验跳过及目标 symbols 视为完整。正式要求使用模型字段，保留 max(1, interval)、最小历史窗口、全 symbols 行数预算与连续 bucket 校验。缺少方法不再静默跳过，是此前已明确的接口迁移。
+- 原恢复查询、cutover 等待、持仓 symbols 合集、checkpoint 清空/预热/发布顺序未改。repository 的可选 symbols 能力与预热方法的旧错误提示仍保留，本批不宣称清理所有动态探测。
+- CLI 测试的一处旧部分数据要求替身补齐原默认的间隔和空字段；首次失败回归不作为验收证据，修正后完整重跑。新增四项测试覆盖显式 None、15/60 秒要求、warmup 数量/窗口/跨 symbols 行数预算及缺失方法失败。
+
+验证：最终完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2449 passed**，26.57 秒，一项现有 Starlette/httpx 警告。启动契约/恢复/CLI 定向 **81 passed**；新增文件 **4 passed**。恢复模块与新增测试完整 Ruff、迁移 CLI 测试 F/I、git diff --check 通过。单独 startup_recovery 的 mypy --follow-imports=skip 未通过：两处 checkpoint 返回值 no-any-return 和一处旧 unused-ignore；不将此项记为通过，也不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

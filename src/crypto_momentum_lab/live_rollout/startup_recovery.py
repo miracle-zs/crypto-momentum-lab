@@ -242,19 +242,18 @@ def validate_live_warmup_coverage(
 ) -> None:
     """Reject startup unless every target symbol has a contiguous buffer."""
 
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
+    requirement = strategy.required_data()
+    if requirement is None:
         log.warning(
             "live_strategy_warmup_validation_skipped",
             reason="strategy_has_no_required_data_contract",
         )
         return
-    requirement = required_data()
     warmup_buckets = int(requirement.warmup_buckets)
     interval = timedelta(
-        seconds=int(getattr(requirement, "base_state_interval_seconds", 15))
+        seconds=int(requirement.base_state_interval_seconds)
     )
-    required_fields = tuple(getattr(requirement, "required_fields", ()))
+    required_fields = requirement.required_fields
     states_by_symbol: dict[str, list[MarketState15s]] = {}
     for state in states:
         states_by_symbol.setdefault(state.symbol, []).append(state)
@@ -309,15 +308,14 @@ def _symbols_with_complete_warmup(
     symbols from starting the worker.
     """
 
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
+    requirement = strategy.required_data()
+    if requirement is None:
         return frozenset(expected_symbols)
-    requirement = required_data()
     warmup_buckets = int(requirement.warmup_buckets)
     interval = timedelta(
-        seconds=int(getattr(requirement, "base_state_interval_seconds", 15))
+        seconds=int(requirement.base_state_interval_seconds)
     )
-    required_fields = tuple(getattr(requirement, "required_fields", ()))
+    required_fields = requirement.required_fields
     states_by_symbol: dict[str, list[MarketState15s]] = {}
     for state in states:
         states_by_symbol.setdefault(state.symbol, []).append(state)
@@ -358,13 +356,12 @@ def _recovery_state_limit(
     window even though the database contains all required history.
     """
 
-    required_data = getattr(strategy, "required_data", None)
+    requirement = strategy.required_data()
     interval_seconds = 15
-    if callable(required_data):
-        requirement = required_data()
+    if requirement is not None:
         interval_seconds = max(
             1,
-            int(getattr(requirement, "base_state_interval_seconds", 15)),
+            int(requirement.base_state_interval_seconds),
         )
     states_per_symbol = max(1, lookback_seconds // interval_seconds + 2)
     return max(WARMUP_STATE_LIMIT, symbol_count * states_per_symbol)
@@ -602,15 +599,14 @@ def checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
 
 def live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
     """Return the minimum history window sufficient for strategy buffers."""
-    required_data = getattr(strategy, "required_data", None)
+    requirement = strategy.required_data()
     warmup_buckets = 0
     interval_seconds = 15
-    if callable(required_data):
-        requirement = required_data()
-        warmup_buckets = int(getattr(requirement, "warmup_buckets", 0))
+    if requirement is not None:
+        warmup_buckets = int(requirement.warmup_buckets)
         interval_seconds = max(
             1,
-            int(getattr(requirement, "base_state_interval_seconds", 15)),
+            int(requirement.base_state_interval_seconds),
         )
     buffer_seconds = (warmup_buckets + 16) * interval_seconds
     return max(MIN_WARMUP_SECONDS, buffer_seconds)
@@ -667,10 +663,10 @@ def _notify_warmup_status(
 
 
 def _required_warmup_buckets(strategy: LiveRuntimeStrategy) -> int:
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
+    requirement = strategy.required_data()
+    if requirement is None:
         return 1
-    return max(1, int(required_data().warmup_buckets))
+    return max(1, int(requirement.warmup_buckets))
 
 
 def _require_aware(value: datetime, field_name: str) -> None:
