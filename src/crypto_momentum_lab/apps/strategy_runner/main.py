@@ -1703,6 +1703,7 @@ def build_postgres_paper_source(
     )
     return PostgresPaperMarketStateSource(
         loader=loader,
+        wakeup=loader,
         config=PaperLiveSourceConfig(
             environment=environment,
             start_at=start_at,

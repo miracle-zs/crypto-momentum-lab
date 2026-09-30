@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
 import crypto_momentum_lab.strategy_runner.live_source as live_source
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.persistence.postgres.runtime_state_loader import (
@@ -73,12 +75,16 @@ class LoopRecordingRepository:
 
 
 class FakeUniverseRepository:
-    async def load_active_memberships(self):
-        return {"BTCUSDT": object(), "ETHUSDT": object()}
-
-    async def load_active_memberships_at(self, observed_at):
+    async def load_active_entry_symbols_at(self, observed_at):
+        if observed_at is None:
+            return frozenset({"BTCUSDT", "ETHUSDT"})
         assert observed_at == datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
-        return {"BTCUSDT": object()}
+        return frozenset({"BTCUSDT"})
+
+    async def load_positive_gainer_symbols_at(self, observed_at, *, top_count):
+        assert observed_at == datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+        assert top_count == 1
+        return frozenset({"BTCUSDT"})
 
 
 def test_async_loader_reuses_one_event_loop_for_pooled_database_connections() -> None:
@@ -232,6 +238,7 @@ def test_postgres_paper_source_uses_durable_wakeup_when_available() -> None:
     loader = WakeupLoader([(), (state,)])
     source = PostgresPaperMarketStateSource(
         loader=loader,
+        wakeup=loader,
         config=PaperLiveSourceConfig(
             environment="research",
             start_at=None,
@@ -250,3 +257,73 @@ def test_postgres_paper_source_uses_durable_wakeup_when_available() -> None:
 
 def test_paper_live_source_has_no_historical_resume_interface() -> None:
     assert "resume_run_ids" not in PaperLiveSourceConfig.__dataclass_fields__
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled", "failure"])
+def test_separate_wakeup_and_polling_fallback(monkeypatch, mode):
+    state = fixture_state("BTCUSDT", 0)
+    loader = FakeLoader([(), (state,)])
+    events = []
+
+    class Wakeup:
+        def prepare_wakeup(self):
+            events.append("prepare")
+            if mode == "failure":
+                raise RuntimeError("listen unavailable")
+            return mode == "enabled"
+
+        def wait_for_data(self, timeout_seconds):
+            assert 0 < timeout_seconds <= 30
+            events.append("wait")
+
+    monkeypatch.setattr(
+        live_source.time, "sleep", lambda seconds: events.append("poll")
+    )
+    source = PostgresPaperMarketStateSource(
+        loader=loader,
+        wakeup=Wakeup(),
+        config=PaperLiveSourceConfig(
+            environment="research",
+            start_at=None,
+            poll_interval_seconds=1,
+            idle_timeout_seconds=30,
+            max_states=1,
+            batch_size=1,
+        ),
+    )
+    assert tuple(source) == (state,)
+    assert events == ["prepare", "wait" if mode == "enabled" else "poll"]
+
+
+def test_universe_ranked_gainers_are_read_at_the_requested_cut():
+    loader = AsyncPostgresRuntimeStateLoader(
+        repository=LoopRecordingRepository(),
+        environment="research",
+        universe_repository=FakeUniverseRepository(),
+    )
+    try:
+        assert loader.load_positive_gainer_symbols_at(
+            datetime(2026, 7, 4, tzinfo=UTC), top_count=1
+        ) == frozenset({"BTCUSDT"})
+    finally:
+        loader.close()
+
+
+def test_absent_universe_reader_preserves_empty_symbol_sets():
+    loader = AsyncPostgresRuntimeStateLoader(
+        repository=LoopRecordingRepository(), environment="research"
+    )
+    try:
+        assert loader.load_active_symbols() == frozenset()
+        assert (
+            loader.load_active_symbols_at(datetime(2026, 7, 4, tzinfo=UTC))
+            == frozenset()
+        )
+        assert (
+            loader.load_positive_gainer_symbols_at(
+                datetime(2026, 7, 4, tzinfo=UTC), top_count=1
+            )
+            == frozenset()
+        )
+    finally:
+        loader.close()

@@ -85,3 +85,15 @@ class NoUniverseSnapshotObserver:
         snapshot: UniverseSnapshot,
     ) -> None:
         return None
+
+
+class UniverseSymbolReader(Protocol):
+    """Read activated entry symbols and ranked gainers at the decision cut."""
+
+    async def load_active_entry_symbols_at(
+        self, observed_at: datetime | None
+    ) -> frozenset[str]: ...
+
+    async def load_positive_gainer_symbols_at(
+        self, observed_at: datetime, *, top_count: int
+    ) -> frozenset[str]: ...

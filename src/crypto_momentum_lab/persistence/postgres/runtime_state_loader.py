@@ -14,9 +14,7 @@ import asyncpg  # type: ignore[import-untyped]
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
-from crypto_momentum_lab.persistence.postgres.repository import (
-    PostgresUniverseRepository,
-)
+from crypto_momentum_lab.domain.universe.ports import UniverseSymbolReader
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RUNTIME_STATE_READY_CHANNEL,
     PostgresRuntimeMarketStateRepository,
@@ -128,7 +126,7 @@ class _AsyncPostgresRuntimeStateWakeup:
 class AsyncPostgresRuntimeStateLoader:
     repository: PostgresRuntimeMarketStateRepository
     environment: str
-    universe_repository: PostgresUniverseRepository | None = None
+    universe_repository: UniverseSymbolReader | None = None
     shutdown: Callable[[], Awaitable[None]] | None = None
     notification_database_url: str | None = None
     notification_channel: str = RUNTIME_STATE_READY_CHANNEL
@@ -223,32 +221,16 @@ class AsyncPostgresRuntimeStateLoader:
     def load_active_symbols(self) -> frozenset[str]:
         if self.universe_repository is None:
             return frozenset()
-        loader = getattr(
-            self.universe_repository,
-            "load_active_entry_symbols_at",
-            None,
+        return self._event_loop.run_until_complete(
+            self.universe_repository.load_active_entry_symbols_at(None)
         )
-        if callable(loader):
-            return self._event_loop.run_until_complete(loader(None))
-        memberships = self._event_loop.run_until_complete(
-            self.universe_repository.load_active_memberships()
-        )
-        return frozenset(memberships)
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
         if self.universe_repository is None:
             return frozenset()
-        loader = getattr(
-            self.universe_repository,
-            "load_active_entry_symbols_at",
-            None,
+        return self._event_loop.run_until_complete(
+            self.universe_repository.load_active_entry_symbols_at(observed_at)
         )
-        if callable(loader):
-            return self._event_loop.run_until_complete(loader(observed_at))
-        memberships = self._event_loop.run_until_complete(
-            self.universe_repository.load_active_memberships_at(observed_at)
-        )
-        return frozenset(memberships)
 
     def load_positive_gainer_symbols_at(
         self,
@@ -258,15 +240,10 @@ class AsyncPostgresRuntimeStateLoader:
     ) -> frozenset[str]:
         if self.universe_repository is None:
             return frozenset()
-        loader = getattr(
-            self.universe_repository,
-            "load_positive_gainer_symbols_at",
-            None,
-        )
-        if not callable(loader):
-            return frozenset()
         return self._event_loop.run_until_complete(
-            loader(observed_at, top_count=top_count)
+            self.universe_repository.load_positive_gainer_symbols_at(
+                observed_at, top_count=top_count
+            )
         )
 
     def close(self) -> None:

@@ -45,6 +45,14 @@ class RuntimeStateLoader(Protocol):
     def close(self) -> None: ...
 
 
+class RuntimeStateWakeup(Protocol):
+    """Optional readiness hint; durable reads remain authoritative."""
+
+    def prepare_wakeup(self) -> bool | None: ...
+
+    def wait_for_data(self, timeout_seconds: float) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PaperLiveSourceConfig:
     environment: str
@@ -76,6 +84,7 @@ class PaperLiveSourceConfig:
 class PostgresPaperMarketStateSource:
     loader: RuntimeStateLoader
     config: PaperLiveSourceConfig
+    wakeup: RuntimeStateWakeup | None = None
 
     @property
     def description(self) -> str:
@@ -124,13 +133,13 @@ class PostgresPaperMarketStateSource:
         idle_started_at = time.monotonic()
         idle_poll_interval = self.config.poll_interval_seconds
         try:
-            prepare_wakeup = getattr(self.loader, "prepare_wakeup", None)
-            wakeup_enabled = callable(prepare_wakeup)
-            if callable(prepare_wakeup):
+            wakeup = self.wakeup
+            wakeup_enabled = wakeup is not None
+            if wakeup is not None:
                 try:
-                    wakeup_enabled = prepare_wakeup() is not False
+                    wakeup_enabled = wakeup.prepare_wakeup() is not False
                 except Exception:
-                    # The durable cursor and fallback polling remain authoritative.
+                    # Durable reads and fallback polling remain authoritative.
                     wakeup_enabled = False
             while yielded < self.config.max_states:
                 limit = min(
@@ -181,9 +190,8 @@ class PostgresPaperMarketStateSource:
                         self.config.idle_timeout_seconds - elapsed_idle,
                     )
                 if sleep_seconds > 0:
-                    wait_for_data = getattr(self.loader, "wait_for_data", None)
-                    if wakeup_enabled and callable(wait_for_data):
-                        wait_for_data(
+                    if wakeup_enabled and wakeup is not None:
+                        wakeup.wait_for_data(
                             min(
                                 self.config.notification_wait_seconds,
                                 self.config.idle_timeout_seconds - elapsed_idle,
