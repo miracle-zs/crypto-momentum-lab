@@ -357,7 +357,7 @@ class OrderExecutionCoordinator:
         max_queue_wait_seconds: float = 30.0,
         idle_timeout_seconds: float = 120.0,
         domain_coordinator: ExecutionCoordinator | None = None,
-        reservation_repository: Any | None = None,
+        reservation_repository: object | None = None,
         execution_book: ExecutionBook | None = None,
         initial_reservations: Iterable[PositionReservation] | None = None,
     ) -> None:
@@ -409,7 +409,7 @@ class OrderExecutionCoordinator:
         return self._execution_book
 
     @property
-    def reservation_repository(self) -> Any | None:
+    def reservation_repository(self) -> object | None:
         return self._reservation_repository
 
     @property
