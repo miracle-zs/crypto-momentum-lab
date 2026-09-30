@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1565,6 +1565,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：执行领域定向 **322 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，31.11 秒，一项现有 Starlette/httpx 警告。codec F/I、git diff --check 通过。
 
 前批七文件 mypy --follow-imports=skip 错误由 18 项降至 12 项，本批关闭覆盖与批次六项错误。剩余 episode/reduction/projection/facts 标志、父链字段、字符串列表及 RecoverySchemaError 所有者导入仍待处理，未完成扩大范围类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十四批：恢复 codec 与原生 journal store 类型验收闭合
+
+第一百二十三批提交为 `f9374bd`；第一百二十四批继续本地实施，未部署生产。
+
+- episode、reduction、projection、facts 六个布尔标志使用原严格 type 校验后的局部值；父链四个可空字符串保存校验后的类型；字符串列表逐项校验并构造明确 str 列表，原错误文本与结果顺序保持，无强转或忽略。
+- account_journal_store 从实际 recovery_models 所有者导入 RecoverySchemaError，删除通过 codec 隐式再导出的依赖。checkpoint/事实解码规则及数据库操作顺序不变。
+
+验证：实际 store、journal_store_ports、execution_unit_of_work、领域 ports、恢复模型、ledger 模型、recovery_codec 七文件联合 mypy --follow-imports=skip 通过，关闭前批十二项错误；临时 `def accept_store(store: PostgresAccountJournalStore) -> ExecutionJournalStore: return store` 探针联合检查通过并清理，确认具体 store 的静态接口适配。不代表跳过依赖、全部调用者或全仓类型验收。
+
+布尔修正阶段执行领域定向 **322 passed**；全部修正后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，29.90 秒，一项现有 Starlette/httpx 警告。两个修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

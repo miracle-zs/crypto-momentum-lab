@@ -591,7 +591,8 @@ class PositionRecoveryCodec:
             "episode",
         )
         closed_at = data.get("closed_at")
-        if type(data.get("is_active")) is not bool:
+        is_active = data.get("is_active")
+        if type(is_active) is not bool:
             raise RecoverySchemaError("is_active must be a boolean")
         return PositionEpisode(
             episode_id=_string(data, "episode_id"),
@@ -603,7 +604,7 @@ class PositionRecoveryCodec:
                 if closed_at is not None
                 else None
             ),
-            is_active=data["is_active"],
+            is_active=is_active,
             cumulative_bought=_decimal_value(data, "cumulative_bought"),
             cumulative_sold=_decimal_value(data, "cumulative_sold"),
             peak_quantity=_decimal_value(data, "peak_quantity"),
@@ -631,7 +632,8 @@ class PositionRecoveryCodec:
             },
             "reduction",
         )
-        if type(data.get("is_system")) is not bool:
+        is_system = data.get("is_system")
+        if type(is_system) is not bool:
             raise RecoverySchemaError("is_system must be a boolean")
         attributions: list[BatchReductionAttribution] = []
         for item in _array(data, "attributions"):
@@ -649,7 +651,7 @@ class PositionRecoveryCodec:
             quantity=_decimal_value(data, "quantity"),
             price=_decimal_value(data, "price"),
             reduced_at=_datetime_value(data, "reduced_at"),
-            is_system=data["is_system"],
+            is_system=is_system,
             attributions=tuple(attributions),
         )
 
@@ -741,7 +743,8 @@ class PositionRecoveryCodec:
         event_cut = data.get("event_cut")
         version = data.get("projection_version")
         stream_scope = data.get("stream_scope")
-        if type(data.get("is_comparable")) is not bool:
+        is_comparable = data.get("is_comparable")
+        if type(is_comparable) is not bool:
             raise RecoverySchemaError("is_comparable must be a boolean")
         if version is not None and not isinstance(version, str):
             raise RecoverySchemaError("projection_version must be a string or null")
@@ -772,7 +775,7 @@ class PositionRecoveryCodec:
                 else None
             ),
             discrepancy=cls.decode_discrepancy(data.get("discrepancy")),
-            is_comparable=data["is_comparable"],
+            is_comparable=is_comparable,
             projection_version=version,
             stream_scope=(
                 cls.decode_scope(stream_scope) if stream_scope is not None else None
@@ -967,9 +970,11 @@ class PositionRecoveryCodec:
             },
             "account facts",
         )
-        if type(data.get("has_synthetic_fills")) is not bool:
+        has_synthetic_fills = data.get("has_synthetic_fills")
+        if type(has_synthetic_fills) is not bool:
             raise RecoverySchemaError("has_synthetic_fills must be a boolean")
-        if type(data.get("has_late_events")) is not bool:
+        has_late_events = data.get("has_late_events")
+        if type(has_late_events) is not bool:
             raise RecoverySchemaError("has_late_events must be a boolean")
         coverage = data.get("coverage")
         checkpoint = data.get("checkpoint")
@@ -977,7 +982,8 @@ class PositionRecoveryCodec:
         recovery = data.get("recovery_checkpoint")
         cursor = data.get("fill_cursor_provenance")
         load_provenance = data.get("fill_load_provenance")
-        if type(data.get("prefix_facts_complete")) is not bool:
+        prefix_facts_complete = data.get("prefix_facts_complete")
+        if type(prefix_facts_complete) is not bool:
             raise RecoverySchemaError("prefix_facts_complete must be a boolean")
         return AccountFacts(
             position_key=cls.decode_position_key(data.get("position_key")),
@@ -994,11 +1000,11 @@ class PositionRecoveryCodec:
                 if checkpoint is not None
                 else None
             ),
-            has_synthetic_fills=data["has_synthetic_fills"],
+            has_synthetic_fills=has_synthetic_fills,
             conflicting_fills=tuple(
                 cls.decode_fill(item) for item in _array(data, "conflicting_fills")
             ),
-            has_late_events=data["has_late_events"],
+            has_late_events=has_late_events,
             stream_scope=cls.decode_scope(scope) if scope is not None else None,
             recovery_checkpoint=(
                 cls.decode_checkpoint(recovery) if recovery is not None else None
@@ -1018,7 +1024,7 @@ class PositionRecoveryCodec:
                 if load_provenance is not None
                 else None
             ),
-            prefix_facts_complete=data["prefix_facts_complete"],
+            prefix_facts_complete=prefix_facts_complete,
         )
 
     @classmethod
@@ -1111,6 +1117,7 @@ class PositionRecoveryCodec:
         parent_projection_digest = data.get("parent_projection_digest")
         parent_event_cut = data.get("parent_event_cut")
         suffix_facts_hash = data.get("suffix_facts_hash")
+        parsed_parent: dict[str, str | None] = {}
         for name, value in (
             ("parent_checkpoint_id", parent_checkpoint_id),
             ("parent_facts_hash", parent_facts_hash),
@@ -1119,6 +1126,7 @@ class PositionRecoveryCodec:
         ):
             if value is not None and not isinstance(value, str):
                 raise RecoverySchemaError(f"{name} must be a string or null")
+            parsed_parent[name] = value
         return PositionRecoveryCheckpoint(
             schema_version=version,
             checkpoint_id=_string(data, "checkpoint_id"),
@@ -1134,15 +1142,15 @@ class PositionRecoveryCodec:
             has_late_events=_boolean_value(data, "has_late_events"),
             integrity_issues=_string_array(data, "integrity_issues"),
             projection_digest=_string(data, "projection_digest"),
-            parent_checkpoint_id=parent_checkpoint_id,
-            parent_facts_hash=parent_facts_hash,
-            parent_projection_digest=parent_projection_digest,
+            parent_checkpoint_id=parsed_parent["parent_checkpoint_id"],
+            parent_facts_hash=parsed_parent["parent_facts_hash"],
+            parent_projection_digest=parsed_parent["parent_projection_digest"],
             parent_event_cut=(
                 _datetime_value({"value": parent_event_cut}, "value")
                 if parent_event_cut is not None
                 else None
             ),
-            suffix_facts_hash=suffix_facts_hash,
+            suffix_facts_hash=parsed_parent["suffix_facts_hash"],
             parent_stream_scope=(
                 cls.decode_scope(data.get("parent_stream_scope"))
                 if data.get("parent_stream_scope") is not None
@@ -1195,9 +1203,12 @@ def _array(data: dict[str, object], name: str) -> list[object]:
 
 def _string_array(data: dict[str, object], name: str) -> tuple[str, ...]:
     values = _array(data, name)
-    if any(not isinstance(item, str) for item in values):
-        raise RecoverySchemaError(f"{name} must contain only strings")
-    return tuple(values)
+    parsed: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            raise RecoverySchemaError(f"{name} must contain only strings")
+        parsed.append(item)
+    return tuple(parsed)
 
 
 def _string(data: dict[str, object], name: str) -> str:

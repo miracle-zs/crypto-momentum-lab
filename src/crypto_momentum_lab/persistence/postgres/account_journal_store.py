@@ -29,12 +29,12 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import (
     PositionRecoveryCodec,
-    RecoverySchemaError,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,
+    RecoverySchemaError,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
