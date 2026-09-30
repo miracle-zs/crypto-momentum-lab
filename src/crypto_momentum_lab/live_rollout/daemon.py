@@ -379,8 +379,9 @@ class LiveStrategyDaemon:
         )
         self._exit_events = LiveExitEventCoordinator(
             run_id=config.run_id,
-            exit_manager=self._exit_manager,
-            exit_enabled=lambda: self._exit_control.enabled,
+            exit_enabled=lambda: (
+                self._exit_manager is not None and self._exit_control.enabled
+            ),
             run_active=lambda: self._run_active,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,

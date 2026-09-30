@@ -25,7 +25,6 @@ from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitLaneOutcome,
 )
 from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
-from crypto_momentum_lab.live_rollout.exits import LiveExitManager
 from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 from tests.unit.shadow_operation.test_service import _state
 
@@ -136,7 +135,6 @@ def _coordinator(
 
     coordinator = LiveExitEventCoordinator(
         run_id="run-1",
-        exit_manager=cast(LiveExitManager, object()),
         exit_enabled=lambda: True,
         run_active=lambda: run_active,
         context_provider=cast(LiveContextProvider, provider),
@@ -261,3 +259,29 @@ async def test_grace_timeout_uses_processor_directly_when_lane_is_idle() -> None
     assert received_state == state
     assert now == NOW + timedelta(seconds=5)
     assert latest_quote == _quote()
+
+
+@pytest.mark.parametrize("trigger", ["account", "quote", "candle", "grace"])
+async def test_disabled_exit_coordinator_skips_all_collaborators(trigger: str) -> None:
+    coordinator = LiveExitEventCoordinator(
+        run_id="run-1",
+        exit_enabled=lambda: False,
+        run_active=lambda: pytest.fail("must not read run state"),
+        context_provider=cast(LiveContextProvider, object()),
+        sync_pending_entry_plans=lambda context: pytest.fail("must not sync"),
+        publish_managed_position_symbols=object(),
+        invalidate_context_cache=lambda: pytest.fail("must not invalidate"),
+        exit_processor=cast(LiveExitProcessor, object()),
+        exit_lane=cast(ExitExecutionLane, object()),
+    )
+    if trigger == "account":
+        result = await coordinator.process_account_event(_state())
+    elif trigger == "quote":
+        result = await coordinator.process_market_quote(_quote(), _state())
+    elif trigger == "candle":
+        result = await coordinator.process_closed_candle(
+            cast(ClosedCandle15mEvent, object())
+        )
+    else:
+        result = await coordinator.process_grace_timeout(_state(), now=NOW)
+    assert result is None

@@ -22,7 +22,6 @@ if TYPE_CHECKING:
         LiveContextProvider,
         LiveDaemonRuntimeContext,
     )
-    from crypto_momentum_lab.live_rollout.exits import LiveExitManager
     from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 from crypto_momentum_lab.live_rollout.exit_event_ports import (
@@ -40,7 +39,6 @@ class LiveExitEventCoordinator:
         self,
         *,
         run_id: str,
-        exit_manager: LiveExitManager | None,
         exit_enabled: Callable[[], bool],
         run_active: Callable[[], bool],
         context_provider: LiveContextProvider,
@@ -55,7 +53,6 @@ class LiveExitEventCoordinator:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
         self._run_id = run_id
-        self._exit_manager = exit_manager
         self._exit_enabled = exit_enabled
         self._run_active = run_active
         self._context_provider = context_provider
@@ -73,7 +70,7 @@ class LiveExitEventCoordinator:
     ) -> str | None:
         """Refresh account context and route one account-triggered exit."""
 
-        if self._exit_manager is None or not self._exit_enabled():
+        if not self._exit_enabled():
             return None
         context, failure = await self._load_context(state, invalidate=True)
         if failure is not None:
@@ -117,7 +114,7 @@ class LiveExitEventCoordinator:
     ) -> str | None:
         """Route a latest-value quote to the reduce-only exit lane."""
 
-        if self._exit_manager is None or not self._exit_enabled():
+        if not self._exit_enabled():
             return None
         if state.symbol != quote.symbol:
             return None
@@ -150,7 +147,7 @@ class LiveExitEventCoordinator:
     ) -> str | None:
         """Route one final 15m candle on the independent exit path."""
 
-        if self._exit_manager is None or not self._exit_enabled():
+        if not self._exit_enabled():
             return None
         state = _market_state_for_closed_candle(
             event.candle,
@@ -184,7 +181,7 @@ class LiveExitEventCoordinator:
     ) -> str | None:
         """Route a wall-clock grace timeout through the exit processor."""
 
-        if self._exit_manager is None or not self._exit_enabled():
+        if not self._exit_enabled():
             return None
         context, failure = await self._load_context(state, invalidate=False)
         if failure is not None:
