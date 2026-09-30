@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -12,17 +13,19 @@ from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
-from crypto_momentum_lab.live_rollout.closed_candle_feed import (
-    ClosedCandle15mEvent,
-)
-from crypto_momentum_lab.live_rollout.context import (
-    LiveContextProvider,
-    LiveDaemonRuntimeContext,
-)
-from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
-from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
-from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.live_rollout.closed_candle_feed import (
+        ClosedCandle15mEvent,
+    )
+    from crypto_momentum_lab.live_rollout.context import (
+        LiveContextProvider,
+        LiveDaemonRuntimeContext,
+    )
+    from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
+    from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
+    from crypto_momentum_lab.live_rollout.exits import LiveExitManager
+    from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 log = structlog.get_logger()
 

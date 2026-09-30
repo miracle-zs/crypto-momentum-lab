@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -954,6 +954,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 无新增接口、包装器或实现镜像测试，复用现有未托管持仓与回调行为验收。
 
 验证：未托管持仓/失效回调定向 **5 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2484 passed**，28.44 秒，一项现有 Starlette/httpx 警告。telemetry_ports、market_admission、context、context_prefetch 四文件联合定向 mypy --follow-imports=skip 通过，不包含 market_loop 类型验收。market_loop F/I、git diff --check 通过；完整 Ruff 发现该文件既有第 26 行长导入 E501，未改动该行，不宣称完整 Ruff 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十四批：退出事件协调注解导入隔离
+
+第七十三批提交为 `4afc464`；第七十四批继续本地实施，未部署生产。
+
+- exit_event_coordinator 将具体退出处理器、执行通道、退出管理器、K 线事件及上下文类型导入移至 TYPE_CHECKING；这些类型仅用于注解，实际对象仍由原装配提供。运行方法逻辑未改，未新增转发接口。
+- 首次隔离检查发现 context 经 ManagedLivePosition 间接加载 exits，进一步将协调模块自身的 context 注解导入也移至 TYPE_CHECKING。独立进程同时禁止 context、exits、exit_processor、exit_lane、closed_candle_feed 后协调模块可加载。实际运行仍依赖注入对象，不宣称能力接口全部收窄。
+- 账户/quote/candle/grace 路由、上下文读取与失效、成交处理及错误发布顺序保持。
+
+验证：退出协调/架构定向 **75 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2485 passed**，29.06 秒，一项现有 Starlette/httpx 警告。完整回归之后进一步调整 context 的纯注解导入，最终代码重新通过上述定向检查与五模块导入隔离检查。新增协调模块禁止 sqlalchemy/persistence 导入检查。核心文件与架构测试完整 Ruff、git diff --check 通过。协调模块与 context 的 mypy --follow-imports=skip 检查有四处协作者 outcome.failure 的 Any 返回错误，未忽略错误码；本批不宣称协调模块类型验收通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -16,6 +16,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.exit_channel_ports",
         "crypto_momentum_lab.live_rollout.exit_failure_policy",
         "crypto_momentum_lab.live_rollout.order_event_runtime",
+        "crypto_momentum_lab.live_rollout.exit_event_coordinator",
         "crypto_momentum_lab.live_rollout.entry_orders",
         "crypto_momentum_lab.live_rollout.account_event_ports",
         "crypto_momentum_lab.live_rollout.telemetry_ports",
