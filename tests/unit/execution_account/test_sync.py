@@ -821,9 +821,9 @@ async def test_persist_reconciliation_result_cursors_do_not_regress() -> None:
     service._remember_observation(t_base)
 
     # Initialize in-memory cursor at higher from_id = 200
-    from crypto_momentum_lab.execution_account.sync import _FillCursor
+    from crypto_momentum_lab.execution_account.fill_progress import FillCursor
 
-    service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=200, start_time_ms=None)
+    service._fill_cursors["BTCUSDT"] = FillCursor(from_id=200, start_time_ms=None)
     service._fill_cursor_checked_at["BTCUSDT"] = t_base
 
     # Incoming result has an older cursor with from_id = 150
@@ -883,9 +883,9 @@ async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor(
     t = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
     service._remember_observation(t)
 
-    from crypto_momentum_lab.execution_account.sync import _FillCursor
+    from crypto_momentum_lab.execution_account.fill_progress import FillCursor
 
-    service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=50, start_time_ms=None)
+    service._fill_cursors["BTCUSDT"] = FillCursor(from_id=50, start_time_ms=None)
 
     new_cursor = AccountFillReconciliationCursor(
         environment="live",

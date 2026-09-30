@@ -1,6 +1,6 @@
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -26,6 +26,12 @@ from crypto_momentum_lab.execution_account.client_compat import (
     incomplete_fill_symbols,
     optional_fill_provenance_fetcher,
 )
+from crypto_momentum_lab.execution_account.fill_progress import (
+    FillCursor,
+    account_fill_keys,
+    advance_fill_cursors,
+    fill_counts_by_symbol,
+)
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
@@ -42,7 +48,6 @@ from crypto_momentum_lab.execution_account.sync_ports import (
 type BalanceValue = tuple[Decimal, Decimal, Decimal]
 
 _FILL_KEY_CACHE_SIZE = 8192
-_FILL_FETCH_OVERLAP_MS = 60_000
 _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
 # Never issue an unbounded userTrades pull.  Symbols without a fromId cursor
 # and without a prior startTime are historical; scanning a week is enough to
@@ -61,12 +66,6 @@ _PROCESS_STATE_REFRESH = timedelta(seconds=60)
 _POSITION_SNAPSHOT_COALESCE = timedelta(seconds=2)
 
 
-@dataclass(frozen=True, slots=True)
-class _FillCursor:
-    from_id: int | None = None
-    start_time_ms: int | None = None
-
-
 class ExecutionAccountSyncService:
     def __init__(
         self,
@@ -82,8 +81,8 @@ class ExecutionAccountSyncService:
             symbol.strip().upper() for symbol in config.recent_fill_symbols
         }
         self._active_position_keys: set[tuple[str, str]] = set()
-        self._fill_cursors: dict[str, _FillCursor] = {
-            symbol.strip().upper(): _FillCursor(
+        self._fill_cursors: dict[str, FillCursor] = {
+            symbol.strip().upper(): FillCursor(
                 from_id=cursor.from_id,
                 start_time_ms=cursor.start_time_ms,
             )
@@ -431,16 +430,16 @@ class ExecutionAccountSyncService:
                 not scan.page_scan.page_exhausted or scan.page_scan.truncated
                 for scan in fill_load_scans
             )
-            fill_keys = _fill_keys(fills)
+            fill_keys = account_fill_keys(fills)
             new_fill_keys = frozenset(
                 key
                 for key in fill_keys
                 if (key[0] in previous_fill_cursors or key[0] in newly_active_symbols)
                 and key not in self._known_fill_keys
             )
-            fill_count_by_symbol = _fill_counts_by_symbol(fills)
+            fill_count_by_symbol = fill_counts_by_symbol(fills)
             next_fill_cursors = (
-                _advance_fill_cursors(
+                advance_fill_cursors(
                     previous_fill_cursors,
                     tracked_fill_symbols,
                     fills,
@@ -647,7 +646,7 @@ class ExecutionAccountSyncService:
             else:
                 continue
 
-            self._fill_cursors[sym] = _FillCursor(
+            self._fill_cursors[sym] = FillCursor(
                 from_id=new_from_id,
                 start_time_ms=new_start_time_ms,
             )
@@ -756,8 +755,8 @@ class ExecutionAccountSyncService:
             fill_count=len(fills),
             fills=fills,
             new_fills=fills,
-            new_fill_keys=frozenset(_fill_keys(fills)),
-            fill_count_by_symbol=_fill_counts_by_symbol(fills),
+            new_fill_keys=frozenset(account_fill_keys(fills)),
+            fill_count_by_symbol=fill_counts_by_symbol(fills),
             fills_catching_up=event_state is ExecutionAccountStatus.SYNCING,
         )
 
@@ -976,55 +975,6 @@ def _balance_has_value(balance: AccountBalanceSnapshot) -> bool:
 
 def _balance_value_is_nonzero(value: BalanceValue | None) -> bool:
     return value is not None and any(item != 0 for item in value)
-
-
-def _fill_keys(fills: tuple[AccountFillEvent, ...]) -> set[FillKey]:
-    return {(fill.symbol.strip().upper(), fill.trade_id.strip()) for fill in fills}
-
-
-def _fill_counts_by_symbol(
-    fills: tuple[AccountFillEvent, ...],
-) -> tuple[tuple[str, int], ...]:
-    counts: dict[str, int] = {}
-    for fill in fills:
-        symbol = fill.symbol.strip().upper()
-        counts[symbol] = counts.get(symbol, 0) + 1
-    return tuple(sorted(counts.items()))
-
-
-def _advance_fill_cursors(
-    previous: dict[str, _FillCursor],
-    symbols: tuple[str, ...],
-    fills: tuple[AccountFillEvent, ...],
-    *,
-    observed_at: datetime,
-) -> dict[str, _FillCursor]:
-    next_cursors = dict(previous)
-    max_trade_id_by_symbol: dict[str, int] = {}
-    for fill in fills:
-        try:
-            trade_id = int(fill.trade_id)
-        except (TypeError, ValueError):
-            continue
-        symbol = fill.symbol.strip().upper()
-        current = max_trade_id_by_symbol.get(symbol)
-        if current is None or trade_id > current:
-            max_trade_id_by_symbol[symbol] = trade_id
-
-    observed_at_ms = int(observed_at.timestamp() * 1000)
-    for symbol in symbols:
-        max_trade_id = max_trade_id_by_symbol.get(symbol)
-        if max_trade_id is not None:
-            next_cursors[symbol] = _FillCursor(from_id=max_trade_id + 1)
-            continue
-        cursor = previous.get(symbol)
-        if cursor is None:
-            next_cursors[symbol] = _FillCursor(start_time_ms=observed_at_ms)
-        elif cursor.from_id is None and cursor.start_time_ms is not None:
-            next_cursors[symbol] = _FillCursor(
-                start_time_ms=max(0, observed_at_ms - _FILL_FETCH_OVERLAP_MS)
-            )
-    return next_cursors
 
 
 def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:
