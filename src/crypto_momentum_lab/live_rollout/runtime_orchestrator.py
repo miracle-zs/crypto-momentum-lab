@@ -251,6 +251,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     ShadowSessionRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_event_repository import (
+    PostgresOrderEventRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -528,6 +531,7 @@ async def run_live_daemon(
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
+        order_event_repository = PostgresOrderEventRepository(execution_factory)
         submission_repository = PostgresOrderSubmissionRepository(execution_factory)
         checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
         telemetry_repository = PostgresRuntimeTelemetryRepository(observability_factory)
@@ -789,6 +793,7 @@ async def run_live_daemon(
             sessions=execution_factory,
             exchange=client,
             order_repository=order_repository,
+            event_repository=order_event_repository,
             account_label=account_label,
             strategy_name=strategy_name,
             callbacks=LiveExecutionCallbacks(

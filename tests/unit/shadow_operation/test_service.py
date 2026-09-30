@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -10,6 +11,11 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
     TradingLeaseState,
+)
+from crypto_momentum_lab.domain.shadow_operation.models import (
+    ShadowDecisionMetric,
+    ShadowOrderPlan,
+    ShadowSession,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -19,17 +25,11 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     SubmitPolicy,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.domain.shadow_operation.models import (
-    ShadowDecisionMetric,
-    ShadowOrderPlan,
-    ShadowSession,
-)
 from crypto_momentum_lab.shadow_operation.service import (
     ShadowOperationConfig,
     ShadowOperationContext,
@@ -98,6 +98,7 @@ def _service() -> tuple[
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_state_repository,
+        event_repository=order_state_repository,
         submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
         live_submit_enabled=False,
         clock=lambda: NOW,

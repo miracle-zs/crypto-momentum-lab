@@ -13,6 +13,7 @@ def arguments():
         sessions=async_sessionmaker(),
         exchange=Mock(),
         order_repository=Mock(),
+        event_repository=Mock(),
         account_label="account-3",
         strategy_name="momentum",
         callbacks=runtime.LiveExecutionCallbacks(
@@ -60,6 +61,7 @@ async def test_recovery_completes_before_submission_coordinator_exists(monkeypat
         assert backend._clock().utcoffset().total_seconds() == 0
         assert backend._exchange is args["exchange"]
         assert backend._repository is args["order_repository"]
+        assert backend._event_repository is args["event_repository"]
         assert (
             backend._on_before_exchange_submit
             is args["callbacks"].on_before_exchange_submit

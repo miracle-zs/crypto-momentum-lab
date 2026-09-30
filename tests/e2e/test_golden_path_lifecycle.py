@@ -29,6 +29,7 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
@@ -47,7 +48,6 @@ from crypto_momentum_lab.domain.universe.models import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     SubmitPolicy,
@@ -65,8 +65,14 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     TradingLeaseRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_event_repository import (
+    PostgresOrderEventRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
+)
+from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+    PostgresOrderSubmissionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
@@ -203,6 +209,7 @@ class DynamicFillingFakeExchange(FakeExchange):
 def _build_submission_service(
     *,
     order_repo: PostgresOrderRepository,
+    sessions: async_sessionmaker[AsyncSession],
     exchange: FakeExchange,
     limits: FixedLiveLimits | None = None,
     entry_order_type: EntryType = EntryType.MARKET,
@@ -210,6 +217,7 @@ def _build_submission_service(
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_repo,
+        event_repository=PostgresOrderEventRepository(sessions),
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -223,7 +231,7 @@ def _build_submission_service(
             max_daily_loss=Decimal("10"),
             max_gross_exposure=Decimal("25"),
         ),
-        repository=order_repo,
+        repository=PostgresOrderSubmissionRepository(sessions),
         state_machine=cast(OrderExecutionPort, machine),
         config=LiveSubmissionConfig(
             run_id="golden-run-1",
@@ -396,6 +404,7 @@ async def test_golden_path_full_trading_lifecycle(
     exchange = DynamicFillingFakeExchange(state=ExchangeOrderState.FILLED)
     submission_service = _build_submission_service(
         order_repo=order_repo,
+        sessions=session_factory,
         exchange=exchange,
     )
 
@@ -531,6 +540,7 @@ async def test_golden_path_risk_gate_blocks_excessive_exposure(
     # Limit max open positions to 1
     submission_service = _build_submission_service(
         order_repo=order_repo,
+        sessions=session_factory,
         exchange=exchange,
         limits=FixedLiveLimits(
             notional_cap=Decimal("25"),

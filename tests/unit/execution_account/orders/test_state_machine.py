@@ -48,6 +48,7 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -87,6 +88,7 @@ async def test_pre_submission_callback_runs_before_exchange_write() -> None:
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -116,6 +118,7 @@ async def test_failed_pre_submission_callback_blocks_exchange_write() -> None:
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -248,6 +251,7 @@ async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effect
     machine = OrderExecutionStateMachine(
         exchange=FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)),
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -521,6 +525,7 @@ def _machine(
     return OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,

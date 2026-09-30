@@ -20,6 +20,7 @@ async def test_shadow_operation_never_reaches_exchange_write_boundary() -> None:
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=repository,
+        event_repository=repository,
         submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
         live_submit_enabled=False,
         clock=lambda: NOW,

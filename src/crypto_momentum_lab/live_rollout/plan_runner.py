@@ -37,6 +37,9 @@ from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFenc
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_event_repository import (
+    PostgresOrderEventRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -106,6 +109,7 @@ async def run_live_plan(
         live_repository = PostgresLiveRolloutRepository(factory)
         risk_repository = PostgresRiskRepository(factory)
         order_repository = PostgresOrderRepository(factory)
+        order_event_repository = PostgresOrderEventRepository(factory)
         risk_config = await load_latest_risk_config(factory, account_label)
         approval = await live_repository.load_active_approval(
             account_label=account_label,
@@ -181,6 +185,7 @@ async def run_live_plan(
             is_draining=lambda: session_is_draining(factory, session_id),
         )
         machine = OrderExecutionStateMachine(
+            event_repository=order_event_repository,
             exchange=client,
             repository=order_repository,
             submit_policy=SubmitPolicy.LIVE_SUBMIT,

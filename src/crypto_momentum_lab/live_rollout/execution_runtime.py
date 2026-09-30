@@ -19,6 +19,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeBoundaryCallback,
     OrderEventCallback,
+    OrderEventRepository,
     OrderExchangeClient,
     OrderExchangeSubmitGuard,
     OrderExecutionStateMachine,
@@ -60,6 +61,7 @@ async def build_live_execution_runtime(
     sessions: async_sessionmaker[AsyncSession],
     exchange: OrderExchangeClient,
     order_repository: OrderStateRepository,
+    event_repository: OrderEventRepository,
     account_label: str,
     strategy_name: str,
     callbacks: LiveExecutionCallbacks,
@@ -67,6 +69,7 @@ async def build_live_execution_runtime(
     backend = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_repository,
+        event_repository=event_repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: datetime.now(tz=UTC),

@@ -111,6 +111,7 @@ def _session() -> tuple[
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=FakeOrderRepository(),
+        event_repository=FakeOrderRepository(),
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,

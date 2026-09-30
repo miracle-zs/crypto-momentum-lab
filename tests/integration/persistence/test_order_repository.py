@@ -37,6 +37,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
     TradingLeaseRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_event_repository import (
+    PostgresOrderEventRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -56,6 +59,7 @@ async def order_repository(
 ) -> AsyncIterator[
     tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ]
@@ -80,6 +84,7 @@ async def order_repository(
                 await session.execute(delete(model))
     yield (
         PostgresOrderRepository(factory),
+        PostgresOrderEventRepository(factory),
         PostgresOrderSubmissionRepository(factory),
         factory,
     )
@@ -89,11 +94,12 @@ async def order_repository(
 async def test_claim_intent_allows_one_worker(
     order_repository: tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
 ) -> None:
-    repository, submissions, _ = order_repository
+    repository, events, submissions, _ = order_repository
     await _save_intent(submissions)
 
     results = await asyncio.gather(
@@ -111,11 +117,12 @@ async def test_claim_intent_allows_one_worker(
 async def test_save_exchange_order_event_is_idempotent(
     order_repository: tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
     event = ExchangeOrderEvent(
@@ -127,8 +134,8 @@ async def test_save_exchange_order_event_is_idempotent(
         details={"status": "NEW"},
     )
 
-    assert await repository.append_order_event(event) is True
-    assert await repository.append_order_event(event) is False
+    assert await events.append_order_event(event) is True
+    assert await events.append_order_event(event) is False
 
     async with factory() as session:
         count = await session.scalar(select(func.count(ExchangeOrderEventRow.event_id)))
@@ -138,7 +145,7 @@ async def test_save_exchange_order_event_is_idempotent(
 async def test_external_order_adoption_uses_normal_cancel_event_journal(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     plan = _plan()
     await repository.adopt_external_order_for_cancellation(
         plan,
@@ -151,7 +158,7 @@ async def test_external_order_adoption_uses_normal_cancel_event_journal(
     assert persisted.state is ExchangeOrderState.SUBMITTED
     assert persisted.exchange_order_id == "external-order"
 
-    assert await repository.append_order_event(
+    assert await events.append_order_event(
         ExchangeOrderEvent(
             event_id="external-canceled",
             client_order_id=plan.client_order_id,
@@ -170,11 +177,12 @@ async def test_external_order_adoption_uses_normal_cancel_event_journal(
 async def test_save_fill_deduplicates_exchange_trade_identity(
     order_repository: tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
     fill = ExchangeOrderFill(
@@ -190,8 +198,8 @@ async def test_save_fill_deduplicates_exchange_trade_identity(
     )
     duplicate = replace(fill, fill_id="fill-2")
 
-    assert await repository.save_fill(fill) is True
-    assert await repository.save_fill(duplicate) is False
+    assert await events.save_fill(fill) is True
+    assert await events.save_fill(duplicate) is False
 
     async with factory() as session:
         count = await session.scalar(select(func.count()).select_from(ExchangeFillRow))
@@ -201,11 +209,12 @@ async def test_save_fill_deduplicates_exchange_trade_identity(
 async def test_prepare_submission_journals_intent_order_and_event_together(
     order_repository: tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     prepared = await submissions.prepare_submission(
         intent=_intent(),
         evaluation=RiskEvaluation(
@@ -250,7 +259,7 @@ async def test_prepare_submission_journals_intent_order_and_event_together(
 async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     intent = replace(
         _intent(),
         reduce_only=True,
@@ -283,7 +292,7 @@ async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
         )
         is not None
     )
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="exit-ack",
             client_order_id=first_plan.client_order_id,
@@ -324,7 +333,7 @@ async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
 
 
 async def test_concurrent_prepare_grants_only_one_submission(order_repository) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     evaluation = RiskEvaluation(
         evaluation_id="evaluation-1",
         candidate_id="candidate-1",
@@ -345,7 +354,7 @@ async def test_concurrent_prepare_grants_only_one_submission(order_repository) -
         )
     )
     assert sum(result is not None for result in results) == 1
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="original-filled",
             client_order_id=_plan().client_order_id,
@@ -380,7 +389,7 @@ async def test_concurrent_prepare_grants_only_one_submission(order_repository) -
 async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_live_lease(factory)
     first_intent = _intent()
     first_evaluation = _evaluation(first_intent, "evaluation-entry-1")
@@ -426,7 +435,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
             **claim_kwargs,
         )
 
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="entry-canceled",
             client_order_id=first_plan.client_order_id,
@@ -453,7 +462,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
 async def test_live_submission_rejects_stale_code_generation(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_live_lease(factory)
 
     with pytest.raises(
@@ -477,7 +486,7 @@ async def test_live_submission_rejects_stale_code_generation(
 async def test_live_submission_rejects_draining_session(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_live_lease(factory)
     async with factory() as session:
         async with session.begin():
@@ -514,7 +523,7 @@ async def test_live_submission_rejects_draining_session(
 async def test_live_exit_episode_reservation_survives_rolling_workers(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_live_lease(factory)
     first_intent = replace(
         _intent(),
@@ -570,7 +579,7 @@ async def test_live_exit_episode_reservation_survives_rolling_workers(
     loser_evaluation = second_evaluation if results[0] is not None else first_evaluation
     loser_plan = second_plan if results[0] is not None else first_plan
 
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="exit-canceled",
             client_order_id=winner_plan.client_order_id,
@@ -601,7 +610,7 @@ async def test_live_exit_episode_reservation_survives_rolling_workers(
 async def test_prepare_rejects_client_order_id_reused_by_another_intent(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     prepared = await submissions.prepare_submission(
         intent=_intent(),
         evaluation=RiskEvaluation(
@@ -652,14 +661,14 @@ async def test_prepare_rejects_client_order_id_reused_by_another_intent(
 
 
 async def test_late_ack_cannot_reopen_filled_order(order_repository) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
     for event_id, state, seconds in (
         ("filled-first", ExchangeOrderState.FILLED, 3),
         ("late-ack", ExchangeOrderState.ACKNOWLEDGED, 1),
     ):
-        await repository.append_order_event(
+        await events.append_order_event(
             ExchangeOrderEvent(
                 event_id=event_id,
                 client_order_id=_plan().client_order_id,
@@ -676,10 +685,10 @@ async def test_late_ack_cannot_reopen_filled_order(order_repository) -> None:
 
 
 async def test_late_ack_cannot_reopen_canceled_order(order_repository) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="canceled-first",
             client_order_id=_plan().client_order_id,
@@ -689,7 +698,7 @@ async def test_late_ack_cannot_reopen_canceled_order(order_repository) -> None:
             details={},
         )
     )
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="late-partial",
             client_order_id=_plan().client_order_id,
@@ -708,11 +717,11 @@ async def test_late_ack_cannot_reopen_canceled_order(order_repository) -> None:
 async def test_conflicting_exchange_identity_is_journaled_without_overwrite(
     order_repository,
 ) -> None:
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
     for index, exchange_id in enumerate(("original-order", "different-order")):
-        await repository.append_order_event(
+        await events.append_order_event(
             ExchangeOrderEvent(
                 event_id=f"identity-{index}",
                 client_order_id=_plan().client_order_id,
@@ -739,7 +748,7 @@ async def test_exit_batch_binding_loads_from_durable_intent(order_repository) ->
 
     from crypto_momentum_lab.live_rollout.postgres_runtime import _load_exit_batch_ids
 
-    repository, submissions, factory = order_repository
+    repository, events, submissions, factory = order_repository
     intent = replace(_intent(), reduce_only=True, features={"batch_id": "old-batch"})
     await submissions.save_approved_intent(
         intent,
@@ -764,14 +773,15 @@ async def test_exit_batch_binding_loads_from_durable_intent(order_repository) ->
 async def test_load_unresolved_orders_returns_unknown_state(
     order_repository: tuple[
         PostgresOrderRepository,
+        PostgresOrderEventRepository,
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
 ) -> None:
-    repository, submissions, _ = order_repository
+    repository, events, submissions, _ = order_repository
     await _save_intent(submissions)
     await repository.save_planned_order(_plan())
-    await repository.append_order_event(
+    await events.append_order_event(
         ExchangeOrderEvent(
             event_id="event-unknown",
             client_order_id="cml_12345678901234567890123456789012",

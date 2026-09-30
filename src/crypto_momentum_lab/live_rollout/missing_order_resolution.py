@@ -15,6 +15,9 @@ from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_event_repository import (
+    PostgresOrderEventRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -83,6 +86,7 @@ async def resolve_missing_live_order(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         order_repository = PostgresOrderRepository(factory)
+        order_event_repository = PostgresOrderEventRepository(factory)
         command_repository = PostgresCommandRepository(factory)
         order = await order_repository.load_order(client_order_id)
         if order is None:
@@ -186,7 +190,7 @@ async def resolve_missing_live_order(
             occurred_at=now,
             details=evidence,
         )
-        inserted = await order_repository.append_order_event(
+        inserted = await order_event_repository.append_order_event(
             ExchangeOrderEvent(
                 event_id=f"operator-absent-{verification_id}",
                 client_order_id=client_order_id,

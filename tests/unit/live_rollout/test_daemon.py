@@ -2153,6 +2153,7 @@ def _daemon(
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_repository,
+        event_repository=order_repository,
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,

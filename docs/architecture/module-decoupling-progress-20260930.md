@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -165,11 +165,25 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 
 本批没有 schema 变更、生产发布或服务器重启。事件/成交仓储、复杂成交归因和其他运行装配仍待继续拆分，真实数据库验收仍待补齐。
 
+## 第十二批：订单事件/成交仓储与显式事件端口
+
+第十一批提交为 `9f0c0e3`；第十二批继续本地实施，未部署生产。
+
+- `persistence/postgres/order_event_repository.py` 定义 PostgresOrderEventRepository，承接 append_order_event 与 save_fill。事件唯一插入、订单状态/累计量更新、exit episode 状态与终态释放、live exposure claim 释放仍在同一个 session.begin 中完成；成交写入按既有唯一约束返回是否插入，不伪造持仓成交。
+- 保留原 SQL 的状态/身份保护：迟到 ACK 不重新打开终态订单，FILLED 不被后续 cancel/reject 覆盖，累计成交量不回退；冲突的 exchange identity 仍入事件日志但不覆盖订单，不触发无效订单更新后的占用释放。迁移方法及累计数量解析 helper 的 AST 与原实现核对一致。
+- PostgresOrderRepository 删除事件与成交方法，不保留转发层。OrderExecutionStateMachine 的 OrderStateRepository 收缩为 plan/shadow 写入，新增独立 OrderEventRepository 两项异步能力；构造器必须显式注入 event_repository，不自动包装旧仓储、不探测方法或 fallback。
+- 实盘执行 factory、single-plan runner、shadow runtime、missing-order resolution 及所有仓库内状态机装配迁移。生产两项接口由不同仓储实例承担；旧内存测试替身显式注入两项接口。Shadow 适配器删除事件/成交转发，仅保留计划与 suppression 写入。
+- 数据库集成 fixture 增加独立事件仓储，订单终态测试直接调用该仓储。Golden-path 数据库测试 helper 同步注入 native 事件与提交仓储，补齐此前提交迁移的该测试装配；该文件本批仍未执行真实数据库用例。
+
+验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2181 passed**，22.93 秒。新增事件仓储测试 **9 passed**，覆盖重复事件、更新未命中不释放占用、按 durable state 判断终态释放、同一事务与释放失败传播、fill 冲突返回及旧仓储无事件/成交能力。独立状态机端口测试 **2 passed**，用不带事件方法的订单接口执行带成交的订单，验证事件/fill 只使用事件接口，重复插入结果不会通知回调。新仓储与运行 factory 定向 `mypy --follow-imports=skip`、受影响生产代码/新增测试 Ruff、其他迁移测试 F/I 检查、git diff --check 通过。数据库集成文件 **17 tests collected**，未执行真实事务；替身的事务退出和 SQL 逻辑核对不作为真实数据库并发/回滚验收。
+
+没有数据库 schema 变更、生产发布或服务器重启。PostgresOrderRepository 仍承担计划、外部订单 adoption、读取与旧 suppression 保存；本批不宣称订单生命周期中的所有共享数据库约束已消除。复杂成交归因、其他运行装配与真实数据库/重启验收仍待完成。
+
 ## 后续实施顺序
 
 1. 补齐真实 Postgres 并发、原子回滚与完整进程重启验收；第二批已完成自愈事务迁移及提交后重载契约。
 2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；复杂成交归因及状态协调仍保留在 Book，按风险继续简化。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
-3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，继续处理订单事件/成交职责，第十批已提取实盘执行 runtime factory，继续处理其他运行子系统与可调用的 CLI 用例。
+3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，继续检查剩余订单计划/adoption/读取职责，第十批已提取实盘执行 runtime factory，继续处理其他运行子系统与可调用的 CLI 用例。
 4. 恢复模型/codec 的静态环：集中摘要计算与投影编码职责，保留既有 checkpoint digest 与跨 epoch 保护。
 
 生产账户事实覆盖冲突和策略状态发布缺失属于尚未关闭的运行问题；本次结构迁移不能作为这些问题已经修复的证据。

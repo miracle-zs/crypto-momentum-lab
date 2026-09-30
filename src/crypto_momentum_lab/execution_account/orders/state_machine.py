@@ -17,6 +17,8 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError as _OrderPreSubmissionError,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission as _PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
@@ -107,16 +109,18 @@ class OrderStateRepository(Protocol):
     async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
         pass
 
-    async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
-        pass
-
-    async def save_fill(self, fill: ExchangeOrderFill) -> bool:
-        pass
-
     async def save_shadow_suppression(
         self,
         event: ShadowSuppressionEvent,
     ) -> None:
+        pass
+
+
+class OrderEventRepository(Protocol):
+    async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
+        pass
+
+    async def save_fill(self, fill: ExchangeOrderFill) -> bool:
         pass
 
 
@@ -164,6 +168,7 @@ class OrderExecutionStateMachine:
         *,
         exchange: OrderExchangeClient,
         repository: OrderStateRepository,
+        event_repository: OrderEventRepository,
         submit_policy: SubmitPolicy,
         live_submit_enabled: bool,
         clock: Callable[[], datetime] | None = None,
@@ -185,6 +190,7 @@ class OrderExecutionStateMachine:
             raise ValueError("reconciliation retry delays must not be negative")
         self._exchange = exchange
         self._repository = repository
+        self._event_repository = event_repository
         self._submit_policy = submit_policy
         self._live_submit_enabled = live_submit_enabled
         self._clock = clock or (lambda: datetime.now(tz=UTC))
@@ -234,7 +240,9 @@ class OrderExecutionStateMachine:
                 if prepared_submission.plan != plan:
                     raise ValueError("prepared submission does not match order plan")
                 if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                    raise ValueError("shadow submit cannot use a prepared live submission")
+                    raise ValueError(
+                        "shadow submit cannot use a prepared live submission"
+                    )
             else:
                 await self._repository.save_planned_order(plan)
             if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
@@ -271,7 +279,9 @@ class OrderExecutionStateMachine:
                     prepared_submission.submitting_event,
                 )
         except Exception as exc:
-            if isinstance(exc, (ValueError, LiveSubmissionDisabledError, _OrderPreSubmissionError)):
+            if isinstance(
+                exc, (ValueError, LiveSubmissionDisabledError, _OrderPreSubmissionError)
+            ):
                 raise
             raise _OrderPreSubmissionError(f"pre-submission failed: {exc}") from exc
         try:
@@ -595,7 +605,7 @@ class OrderExecutionStateMachine:
         if snapshot.client_order_id != plan.client_order_id:
             raise ValueError("exchange response client order id mismatch")
         for fill in snapshot.fills:
-            await self._repository.save_fill(fill)
+            await self._event_repository.save_fill(fill)
         await self._append_event(
             plan,
             snapshot.state,
@@ -641,7 +651,7 @@ class OrderExecutionStateMachine:
             exchange_order_id=exchange_order_id,
             details=details or {},
         )
-        inserted = await self._repository.append_order_event(event)
+        inserted = await self._event_repository.append_order_event(event)
         if inserted:
             await self._notify_event(plan, event)
 

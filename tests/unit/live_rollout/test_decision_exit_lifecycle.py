@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,12 +19,12 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
-from crypto_momentum_lab.domain.strategy import EntryType, OrderIntentCandidate, StrategySide
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
+from crypto_momentum_lab.domain.strategy import (
+    EntryType,
+    OrderIntentCandidate,
+    StrategySide,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
-    LiveSubmissionDisabledError,
     OrderExecutionResult,
     OrderExecutionStateMachine,
     SubmitPolicy,
@@ -246,6 +246,7 @@ async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> Non
     machine = OrderExecutionStateMachine(
         exchange=mock_exchange,
         repository=FailingRepo(),
+        event_repository=FailingRepo(),
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
