@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -738,6 +738,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 账户事件去重、记录、对账、快照应用和 process_account_event 调用/重试顺序不变；退出通道循环及重试逻辑未改。
 
 验证：生产改动后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**，26.11 秒，一项现有 Starlette/httpx 警告。随后补充三项导入检查：账户退出能力无 sqlalchemy/persistence 导入，以及 account_channel/exit_channels 不加载 daemon 实现；全部纳入账户/退出通道/架构定向 **66 passed**。新增三项未计入前述完整回归数量。接口定向 mypy --follow-imports=skip、核心文件和架构测试完整 Ruff、git diff --check 通过，不代表所有消费模块或全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十六批：独立退出通道处理能力接口
+
+第五十五批提交为 `869e46e`；第五十六批继续本地实施，未部署生产。
+
+- exit_channel_ports.py 定义 ExitChannelProcessor，明确托管持仓 symbols 与 market quote、closed candle、grace timeout 三种异步处理，原参数/返回失败原因能力保持。事件和 quote 类型仅 TYPE_CHECKING 引用。
+- LiveExitChannelRuntime 删除具体 daemon 的类型导入，改为消费四项所需能力；原 daemon 直接满足接口，没有新增处理转发实现。运行循环、重试、错误通知与关闭不变。
+- note_order_identity_conflict 的既有可选 hasattr 检查保留，不在本批强制旧替身支持该能力；不宣称退出通道所有动态探测均完成迁移。
+
+验证：退出通道/CLI/架构定向 **129 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2465 passed**。包含第五十五批后补三项导入检查及本批一项新接口无 sqlalchemy/persistence 导入检查。新接口定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表消费模块或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -5,21 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 import structlog
 
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
 )
+from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
 )
 from crypto_momentum_lab.market_data.quote_hub import WebSocketMarketQuoteSource
-
-if TYPE_CHECKING:
-    from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
 
 log = structlog.get_logger()
 
@@ -60,7 +57,7 @@ class LiveExitChannelRuntime:
     def __init__(
         self,
         *,
-        daemon: LiveStrategyDaemon,
+        daemon: ExitChannelProcessor,
         latest_market_quotes: LatestMarketQuoteCache,
         latest_market_states: LatestMarketStateCache,
         is_transient_error: Callable[[Exception], bool],
