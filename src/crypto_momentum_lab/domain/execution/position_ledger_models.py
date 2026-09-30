@@ -23,7 +23,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,

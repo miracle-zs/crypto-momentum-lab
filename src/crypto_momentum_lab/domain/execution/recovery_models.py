@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from crypto_momentum_lab.domain.account import AccountFillReconciliationCursor
+from crypto_momentum_lab.domain.account.models import AccountFillReconciliationCursor
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
     AccountFacts,

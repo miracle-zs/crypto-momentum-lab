@@ -192,6 +192,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
     head = state.head
     if head is not None:
         payload = head.state_payload
+        stored_reservations = payload.get("active_reservation_ids")
         expected_key = {
             "environment": key.environment,
             "account_label": key.account_label,
@@ -212,10 +213,10 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             or (not isinstance(payload.get("view_digest"), str))
             or (type(payload.get("journal_revision")) is not int)
             or (payload.get("journal_revision") != journal.revision)
-            or (not isinstance(payload.get("active_reservation_ids"), list))
+            or (not isinstance(stored_reservations, list))
             or any(
                 not isinstance(value, str) or not value
-                for value in payload.get("active_reservation_ids", ())
+                for value in stored_reservations
             )
         ):
             raise RuntimeError("durable execution head is malformed")
@@ -298,16 +299,18 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
         book.use_durable_projection_version(
             projection_version, event_cut=view.event_cut
         )
-        last_sequence = payload.get("last_sequence")
-        if last_sequence is not None and (
-            type(last_sequence) is not int or last_sequence < 0
-        ):
+        stored_sequence = payload.get("last_sequence")
+        if stored_sequence is None:
+            last_sequence = None
+        elif type(stored_sequence) is int and stored_sequence >= 0:
+            last_sequence = stored_sequence
+        else:
             diagnostics.append(
-                ("durable_execution_head_sequence_invalid", {"sequence": last_sequence})
+                ("durable_execution_head_sequence_invalid", {"sequence": stored_sequence})
             )
             last_sequence = 0
         head_revision = head.revision
-        reservation_ids = set(payload["active_reservation_ids"])
+        reservation_ids = set(stored_reservations)
     else:
         head_revision = 0
     return RecoveredPosition(

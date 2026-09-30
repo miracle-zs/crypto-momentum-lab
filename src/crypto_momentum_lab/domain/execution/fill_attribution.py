@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.evidence_settlement import (
     cumulative_fill_delta,
 )

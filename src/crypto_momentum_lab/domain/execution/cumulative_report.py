@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionCumulativeOrderReport,

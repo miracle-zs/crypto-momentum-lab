@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionCumulativeOrderReport,
 )

@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import AccountFillEvent, AccountPositionSnapshot
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderEvent
 from crypto_momentum_lab.domain.execution.position_ledger_models import (

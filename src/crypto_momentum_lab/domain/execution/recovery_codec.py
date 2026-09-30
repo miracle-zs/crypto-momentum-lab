@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,

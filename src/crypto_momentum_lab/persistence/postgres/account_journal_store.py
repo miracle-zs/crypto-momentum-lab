@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,

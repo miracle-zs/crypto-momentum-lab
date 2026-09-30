@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十七批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1719,6 +1719,17 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - ledger 从账户模型实际所有者导入 AccountFillEvent/AccountPositionSnapshot，避免跳过包门面后模型变为 Any，关闭 _same_fill 布尔返回错误。未新增强转或忽略。
 
 验证：evidence_digest、evidence_codec、position_repair、position_recovery、position_repair_models、account/models、position_ledger_models、recovery_models、recovery_codec、position_ledger、account_journal、position_book 十二文件 mypy --follow-imports=skip 通过，关闭上批六项错误；不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，31.08 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十七批：账户模型所有者导入与恢复 head 类型验收
+
+第一百三十六批提交为 `61cf07e`；第一百三十七批于 2026-10-01 继续本地实施，未部署生产。
+
+- 执行领域八个剩余账户模型消费模块及 journal store 改为从 domain.account.models 直接导入，消除静态检查依赖包门面再导出的路径；账户包 API 本批保持。
+- 联合类型验收纳入真实 Postgres UoW 与修复适配器后，修复恢复 head 三处校验后类型丢失：reservation 列表保留已校验局部值，sequence 明确 None/非负 exact int/异常降级三分支。异常 reservation 拒绝和异常 sequence 诊断后归零保持，bool 仍不作为合法 int。
+
+验证：账户模型、执行恢复/ledger/journal/position book、修复模型/计算、摘要/codec、证据模型/lifecycle/settlement/attribution/cumulative report、领域 ports、Postgres account_fact_rows/journal store/修复适配与端口/执行 UoW，共二十四文件 mypy --follow-imports=skip 通过，关闭三项新增类型错误。不代表全仓类型或真实数据库验收。全部最终逻辑修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2544 passed**，31.04 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

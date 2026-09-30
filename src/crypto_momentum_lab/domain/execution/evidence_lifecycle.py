@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     OutboxEntry,
