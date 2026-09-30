@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十七批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1601,6 +1601,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 类型沿用实际 journal store 端口的返回契约；历史读取的时区校验、Postgres 方言检查、事务内 session 及 checkpoint 查询顺序保持。
 
 验证：原七文件联合 mypy --follow-imports=skip 通过；临时探针将原生 ExecutionTransaction 赋值给 ExecutionTransactionPort，并将原生 UoW 的历史读取结果返回为 DurableJournalCut，联合八文件检查通过后清理。该检查不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2531 passed**，30.63 秒，一项现有 Starlette/httpx 警告。修改文件 F/I 与 git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十七批：执行事务的 reservation 写入能力边界
+
+第一百二十六批提交为 `70c0b7c`；第一百二十七批于 2026-10-01 继续本地实施，未部署生产。
+
+- 将执行事务 save_reservations/update_reservation 的 Any 参数收窄为 PositionReservation，并纳入实际领域模型和具体 reservation 仓储联合类型检查。
+- 提取 ExecutionReservationStore 两方法接口，仅表达事务实际使用的同 session 保存与结算能力；ExecutionTransaction 与 AsyncPostgresExecutionUnitOfWork 的构造参数替代整个 AsyncPostgresPositionReservationRepository 依赖。原生仓储直接满足接口，不增加转发适配器。
+- 原仓储保持锁、容量/版本校验和单调结算职责，session 仍由执行 UoW 所有。接口只列现有调用使用的参数，不加入独立仓储辅助方法的 expires_at 能力。
+- 为 reservation_store_ports 增加独立进程导入守卫，禁止加载 SQLAlchemy、具体 Postgres 实现及执行协调栈。
+
+验证：十个所有者文件与临时原生 store/transaction 接口赋值探针联合 mypy --follow-imports=skip **十一文件通过**，探针已清理；不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2532 passed**，29.96 秒，一项现有 Starlette/httpx 警告。新接口与架构测试完整 Ruff，执行 UoW F/I 与 git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

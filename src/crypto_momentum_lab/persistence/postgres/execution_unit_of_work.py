@@ -56,6 +56,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
     ExitPolicyMode,
+    PositionReservation,
     TradeCommand,
     TradeCommandType,
 )
@@ -91,8 +92,8 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionRecoveryCheckpointRow,
 )
-from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
-    AsyncPostgresPositionReservationRepository,
+from crypto_momentum_lab.persistence.postgres.reservation_store_ports import (
+    ExecutionReservationStore,
 )
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
@@ -108,7 +109,7 @@ class ExecutionTransaction:
         *,
         journal_store: ExecutionJournalStore,
         command_repository: PostgresCommandRepository,
-        reservation_repository: AsyncPostgresPositionReservationRepository,
+        reservation_repository: ExecutionReservationStore,
     ) -> None:
         self.session = session
         self._journal_store = journal_store
@@ -172,7 +173,7 @@ class ExecutionTransaction:
 
     async def save_reservations(
         self,
-        reservations: Sequence[Any],
+        reservations: Sequence[PositionReservation],
         *,
         expected_projection_version: str | None = None,
         batch_quantities: Mapping[str, Decimal] | None = None,
@@ -188,7 +189,7 @@ class ExecutionTransaction:
 
     async def update_reservation(
         self,
-        reservation: Any,
+        reservation: PositionReservation,
         *,
         release_reason: str | None = None,
     ) -> None:
@@ -502,7 +503,7 @@ class AsyncPostgresExecutionUnitOfWork:
         *,
         journal_store: ExecutionJournalStore,
         command_repository: PostgresCommandRepository,
-        reservation_repository: AsyncPostgresPositionReservationRepository,
+        reservation_repository: ExecutionReservationStore,
     ) -> None:
         self._session_factory = session_factory
         self._journal_store = journal_store
