@@ -370,7 +370,7 @@ async def test_repair_adapter_delegates_transaction_and_rollback_to_normal_uow()
     assert events == ["locked", "rollback"]
 
 
-async def test_repair_reads_exact_account_run_and_hedge_side(monkeypatch):
+async def test_repair_reads_exact_account_run_and_hedge_side():
     from unittest.mock import Mock
 
     from sqlalchemy.dialects import postgresql
@@ -382,12 +382,18 @@ async def test_repair_reads_exact_account_run_and_hedge_side(monkeypatch):
     unknown_side = replace(loaded.account_fills[0], raw_payload={})
     results = [Mock(), Mock()]
     results[0].all.return_value = ["order-1"]
-    results[1].all.return_value = [loaded.account_fills[0], other_side, unknown_side]
+    from dataclasses import asdict
+
+    from crypto_momentum_lab.persistence.postgres.models import AccountFillEventRow
+
+    results[1].all.return_value = [
+        AccountFillEventRow(**asdict(fill))
+        for fill in (loaded.account_fills[0], other_side, unknown_side)
+    ]
     tx = AsyncMock()
     tx.session.scalars.side_effect = results
     tx.load_head.return_value = None
     tx.load_recovery.return_value = loaded.cut
-    monkeypatch.setattr(adapter, "_fill_from_row", lambda row: row)
     actual = await adapter.PostgresPositionRepairTransaction(tx).load_repair_facts(
         request
     )

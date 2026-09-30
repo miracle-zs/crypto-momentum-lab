@@ -16,9 +16,11 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairReceipt,
     PositionRepairRequest,
 )
+from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
+    account_fill_from_row,
+)
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
-    _fill_from_row,
 )
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
@@ -74,7 +76,7 @@ class PostgresPositionRepairTransaction:
                 .order_by(AccountFillEventRow.trade_at.asc())
             )
         ).all()
-        fills = tuple(_fill_from_row(row) for row in rows)
+        fills = tuple(account_fill_from_row(row) for row in rows)
         # Do not borrow fills from the opposite hedge side; missing side cannot
         # prove ownership and the domain journal remains fail-closed.
         fills = tuple(

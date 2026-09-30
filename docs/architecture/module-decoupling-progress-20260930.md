@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1673,6 +1673,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 为新 Postgres 接口增加独立进程导入守卫，防止加载 SQLAlchemy、具体存储实现和执行协调栈。
 
 验证：十个所有者文件与临时赋值探针联合 mypy --follow-imports=skip **十一文件通过**，同时验证原生 ExecutionTransaction 满足修复执行接口、原生修复事务满足 PositionRepairTransaction、原生修复 UoW 满足 PositionRepairUnitOfWork；探针清理。不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2540 passed**，30.69 秒，一项现有 Starlette/httpx 警告。三个修改代码/测试文件完整 Ruff、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十三批：共享成交行转换的实际所有者
+
+第一百三十二批提交为 `ff66da7`；第一百三十三批于 2026-10-01 继续本地实施，未部署生产。
+
+- 将 journal store 私有 _fill_from_row 移为 account_fact_rows.account_fill_from_row，journal store 与修复适配器直接依赖共享转换所有者。转换字段与领域校验不变；修复装配仍创建实际 journal store。
+- 新模块仅在类型检查时导入 ORM 行类型，新增独立进程守卫确认导入不加载 SQLAlchemy、具体仓储或执行协调栈。
+- 账户/run/hedge side 修复读取验收改为真实 AccountFillEventRow 输入，删除转换函数 monkeypatch，覆盖原生成 SQL 约束和实际转换后的方向过滤。
+
+验证：转换、journal store、修复适配器、接口、原生执行 UoW、账户/修复/ledger/恢复模型与 codec 十二文件联合 mypy --follow-imports=skip 通过，不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2541 passed**，31.19 秒，一项现有 Starlette/httpx 警告。新模块、修复适配器和两个测试文件完整 Ruff，journal store F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

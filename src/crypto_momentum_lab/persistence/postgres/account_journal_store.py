@@ -36,6 +36,9 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
     RecoverySchemaError,
 )
+from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
+    account_fill_from_row,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     AccountFillReconciliationCursorRow,
@@ -542,7 +545,7 @@ class PostgresAccountJournalStore:
                 )
             elif raw_side != scope.position_side.value:
                 continue
-            fills.append(_fill_from_row(row))
+            fills.append(account_fill_from_row(row))
 
         snapshot_statement = select(AccountPositionSnapshotRow).where(
             AccountPositionSnapshotRow.environment == scope.environment,
@@ -1023,24 +1026,6 @@ def _max_fact_time(facts: AccountFacts) -> datetime | None:
 
 
 _raw_position_side = extract_fill_position_side
-
-
-def _fill_from_row(row: AccountFillEventRow) -> AccountFillEvent:
-    return AccountFillEvent(
-        environment=row.environment,
-        account_label=row.account_label,
-        symbol=row.symbol,
-        trade_id=row.trade_id,
-        order_id=row.order_id,
-        side=row.side,
-        price=row.price,
-        quantity=row.quantity,
-        realized_pnl=row.realized_pnl,
-        fee=row.fee,
-        fee_asset=row.fee_asset,
-        trade_at=row.trade_at,
-        raw_payload=row.raw_payload,
-    )
 
 
 def _snapshot_from_row(row: AccountPositionSnapshotRow) -> AccountPositionSnapshot:
