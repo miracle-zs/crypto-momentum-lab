@@ -196,7 +196,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._risk_repository = PostgresRiskRepository(execution_sessions)
         self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
         self._order_repository = PostgresOrderReadRepository(execution_sessions)
-        self._position_repair_uow = PostgresPositionRepairUnitOfWork(execution_sessions)
+        self._position_repair_uow = PostgresPositionRepairUnitOfWork(
+            execution_sessions, strategy_name=strategy_name
+        )
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_loaded_at: datetime | None = None

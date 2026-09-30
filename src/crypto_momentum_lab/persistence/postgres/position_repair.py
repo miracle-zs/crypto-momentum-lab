@@ -134,12 +134,16 @@ class PostgresPositionRepairTransaction:
 
 
 class PostgresPositionRepairUnitOfWork:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], *, strategy_name: str
+    ) -> None:
         self._execution = AsyncPostgresExecutionUnitOfWork(
             sessions,
             journal_store=PostgresAccountJournalStore(),
             command_repository=PostgresCommandRepository(sessions),
-            reservation_repository=AsyncPostgresPositionReservationRepository(sessions),
+            reservation_repository=AsyncPostgresPositionReservationRepository(
+                sessions, strategy_name=strategy_name
+            ),
         )
 
     @asynccontextmanager
