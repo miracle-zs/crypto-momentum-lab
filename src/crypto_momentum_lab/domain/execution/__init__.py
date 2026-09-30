@@ -7,6 +7,7 @@ from crypto_momentum_lab.domain.execution.command_models import (
     ExecutionScope,
     OutboxEntry,
 )
+from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import (
     Accepted,
     AlreadyAccepted,
@@ -17,7 +18,6 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     EvidenceConflict,
     ExecutionActResult,
     ExecutionBook,
-    ExecutionEvidence,
     ExecutionObserveResult,
     ExecutionReceipt,
     ExecutionRequest,

@@ -3,16 +3,12 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
 
-from crypto_momentum_lab.domain.account import (
-    AccountFillEvent,
-    AccountPositionSnapshot,
-)
 from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
 )
@@ -39,6 +35,19 @@ from crypto_momentum_lab.domain.execution.evidence_codec import (
     _trade_payload_digest,
     _view_projection_digest,
 )
+from crypto_momentum_lab.domain.execution.evidence_models import (
+    ExecutionEvidence,
+)
+from crypto_momentum_lab.domain.execution.evidence_rules import (
+    _canonical_evidence_payload,
+    _coverage_for_scope,
+    _evidence_identity,
+    _scoped_evidence_identity,
+)
+from crypto_momentum_lab.domain.execution.evidence_settlement import (
+    cumulative_fill_delta,
+    cumulative_order_delta,
+)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
     ExecutionReadinessError,
@@ -47,7 +56,6 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
     VersionConflictError,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderEvent,
     ExchangeOrderState,
     ExitAllocation,
     FuturesPositionSide,
@@ -66,15 +74,10 @@ from crypto_momentum_lab.domain.execution.position_book import (
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
-    AccountFillLoadProvenance,
-    CoverageEvidence,
-    ExitOrderSubmissionFact,
-    FactCoverageInterval,
     FactCoverageStatus,
     FreshnessRequirement,
     PositionKey,
     PositionView,
-    compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.execution.position_recovery import (
     create_verified_recovery_checkpoint,
@@ -88,7 +91,6 @@ from crypto_momentum_lab.domain.execution.recovery_codec import (
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
-    StreamCheckpointAdoption,
 )
 from crypto_momentum_lab.domain.execution.reservation_repository import (
     ReservationRepository,
@@ -109,19 +111,6 @@ log = structlog.get_logger(__name__)
 class _AbortObservation(Exception):
     def __init__(self, result: ExecutionObserveResult) -> None:
         self.result = result
-
-
-
-def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object]:
-    payload = asdict(evidence)
-    payload.pop("observed_at", None)
-    order_event = payload.get("order_event")
-    if isinstance(order_event, dict):
-        order_event.pop("occurred_at", None)
-    cumulative_order = payload.get("cumulative_order")
-    if isinstance(cumulative_order, dict):
-        cumulative_order.pop("observed_at", None)
-    return payload
 
 
 def _execution_head_payload(
@@ -162,104 +151,6 @@ def _execution_head_payload(
             for reservation in book.get_active_reservations(key)
         ),
     }
-
-
-def _evidence_identity(evidence: ExecutionEvidence) -> str:
-    if evidence.stream_id is None or evidence.stream_epoch is None:
-        return evidence.evidence_id
-    key = evidence.scope.to_position_key()
-    scope = AccountFactStreamScope.for_position_key(
-        key, stream_id=evidence.stream_id, stream_epoch=evidence.stream_epoch
-    )
-    return _scoped_evidence_identity(scope, evidence.evidence_id)
-
-
-def _scoped_evidence_identity(
-    scope: AccountFactStreamScope,
-    evidence_id: str,
-) -> str:
-    key = PositionKey(
-        environment=scope.environment,
-        account_label=scope.account_label,
-        symbol=scope.symbol,
-        position_side=scope.position_side,
-    )
-    return (
-        f"{key.canonical_id}\x1f{scope.stream_id}\x1f"
-        f"{scope.stream_epoch}\x1f{evidence_id}"
-    )
-
-
-def _coverage_for_scope(
-    evidence: ExecutionEvidence,
-    scope: AccountFactStreamScope,
-) -> ExecutionEvidence:
-    proof = evidence.coverage_evidence
-    if evidence.fill_load_provenance is not None:
-        if (
-            proof is not None
-            and proof.load_provenance != evidence.fill_load_provenance
-        ):
-            raise ValueError("coverage and fill-load provenance disagree")
-        if proof is None:
-            return evidence
-    if proof is not None and evidence.fill_load_provenance is None:
-        if proof.load_provenance is None:
-            raise ValueError("coverage proof has no durable fill-load provenance")
-        evidence = replace(
-            evidence,
-            fill_load_provenance=proof.load_provenance,
-        )
-    if proof is None:
-        if evidence.coverage is not None and (
-            evidence.coverage.stream_scope is not None
-            and evidence.coverage.stream_scope != scope
-        ):
-            raise ValueError("coverage interval does not match the event stream")
-        return evidence
-    if proof.stream_scope != scope:
-        raise ValueError("fill coverage proof does not match the event stream")
-    if proof.load_provenance != evidence.fill_load_provenance:
-        raise ValueError("coverage proof does not bind the persisted fill scan")
-
-    fill_start = proof.fill_load_start
-    checkpoint_cut = proof.checkpoint_event_cut
-    if fill_start is not None and checkpoint_cut is not None and checkpoint_cut >= fill_start:
-        start = (
-            evidence.fill_load_provenance.source_anchor_event_cut
-            if evidence.fill_load_provenance is not None
-            and evidence.fill_load_provenance.source_anchor_kind
-            == "recovery_checkpoint"
-            else fill_start
-        )
-        end = checkpoint_cut
-    else:
-        start = evidence.observed_at
-        end = evidence.observed_at
-    is_page_complete = bool(getattr(proof, "page_exhausted", False)) and bool(
-        getattr(proof, "not_truncated", False)
-    )
-    if is_page_complete:
-        derived = compose_fact_coverage(
-            proof,
-            start=start,
-            end=end,
-            expected_scope=scope,
-        )
-    else:
-        derived = FactCoverageInterval(
-            start_at=start,
-            end_at=end,
-            source_cursor=proof.fill_cursor_id,
-            status=FactCoverageStatus.PENDING,
-            stream_scope=scope,
-            evidence_observed_at=proof.evidence_observed_at,
-        )
-    if evidence.coverage is not None and evidence.coverage != derived:
-        raise ValueError(
-            "supplied coverage interval disagrees with its typed source proof"
-        )
-    return replace(evidence, coverage=derived)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,109 +223,6 @@ class CommandConflict:
 
 
 ExecutionActResult = Accepted | AlreadyAccepted | StaleView | Blocked | CommandConflict
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionEvidence:
-    evidence_id: str
-    scope: ExecutionScope
-    observed_at: datetime
-    fill: AccountFillEvent | None = None
-    snapshot: AccountPositionSnapshot | None = None
-    boundary: ExitOrderSubmissionFact | None = None
-    order_event: ExchangeOrderEvent | None = None
-    coverage: FactCoverageInterval | None = None
-    coverage_evidence: CoverageEvidence | None = None
-    fill_load_provenance: AccountFillLoadProvenance | None = None
-    fills: tuple[AccountFillEvent, ...] = ()
-    stream_checkpoint_adoption: StreamCheckpointAdoption | None = None
-    stream_id: str | None = None
-    stream_epoch: str | None = None
-    sequence: int | None = None
-    cumulative_order: ExecutionCumulativeOrderReport | None = None
-
-    def __post_init__(self) -> None:
-        if self.sequence is not None and self.sequence < 0:
-            raise ValueError("execution evidence sequence must be non-negative")
-        if (self.stream_id is None) != (self.stream_epoch is None):
-            raise ValueError("stream_id and stream_epoch must be supplied together")
-        if self.fill_load_provenance is not None:
-            if self.stream_id is None or self.stream_epoch is None:
-                raise ValueError("fill-load provenance requires a scoped event")
-            expected_scope = AccountFactStreamScope.for_position_key(
-                self.scope.to_position_key(),
-                stream_id=self.stream_id,
-                stream_epoch=self.stream_epoch,
-            )
-            if self.fill_load_provenance.stream_scope != expected_scope:
-                raise ValueError("fill-load provenance does not match the event scope")
-            if (
-                self.coverage_evidence is not None
-                and self.coverage_evidence.load_provenance
-                != self.fill_load_provenance
-            ):
-                raise ValueError("coverage and fill-load provenance disagree")
-        if self.stream_checkpoint_adoption is not None:
-            adoption = self.stream_checkpoint_adoption
-            if self.stream_id is None or self.stream_epoch is None:
-                raise ValueError("stream checkpoint adoption requires stream identity")
-            expected_scope = AccountFactStreamScope.for_position_key(
-                self.scope.to_position_key(),
-                stream_id=self.stream_id,
-                stream_epoch=self.stream_epoch,
-            )
-            if adoption.target_scope != expected_scope:
-                raise ValueError("stream checkpoint adoption target does not match evidence")
-            if self.fill_load_provenance != adoption.fill_load_provenance:
-                raise ValueError("adoption provenance does not match execution evidence")
-            if (
-                self.coverage_evidence is None
-                or self.coverage_evidence.load_provenance
-                != adoption.fill_load_provenance
-                or self.coverage_evidence.checkpoint_event_cut
-                != adoption.target_event_cut
-            ):
-                raise ValueError("adoption requires matching complete coverage evidence")
-        if self.fill is not None and self.fills:
-            raise ValueError("supply either fill or fills, not both")
-        trade_ids = [fill.trade_id for fill in self.fills]
-        if len(trade_ids) != len(set(trade_ids)):
-            raise ValueError("one account event cannot repeat a trade id")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionCumulativeOrderReport:
-    """Cumulative exchange order quantities used for settlement only.
-
-    This is not an account trade fact and must never be appended to the
-    position ledger. Only exchange trade identities alter projected holdings.
-    """
-
-    order_id: str
-    cumulative_quantity: Decimal
-    cumulative_quote: Decimal
-    observed_at: datetime
-
-    def __post_init__(self) -> None:
-        if not self.order_id.strip():
-            raise ValueError("cumulative order id must not be empty")
-        if self.observed_at.tzinfo is None:
-            raise ValueError("cumulative order observed_at must be timezone-aware")
-        if (
-            not self.cumulative_quantity.is_finite()
-            or not self.cumulative_quote.is_finite()
-            or self.cumulative_quantity < 0
-            or self.cumulative_quote < 0
-            or (
-                self.cumulative_quantity == 0
-                and self.cumulative_quote != 0
-            )
-            or (
-                self.cumulative_quantity > 0
-                and self.cumulative_quote <= 0
-            )
-        ):
-            raise ValueError("cumulative order report quantities are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2707,7 +2495,8 @@ class ExecutionBook:
                 can_rollover = (
                     current_book is not None
                     and evidence.snapshot is not None
-                    and evidence.snapshot.position_amt == current_book.get_view().total_quantity
+                    and evidence.snapshot.position_amt
+                    == current_book.get_view().total_quantity
                     and not bool(self.get_active_reservations(key))
                 )
                 if can_rollover:
@@ -2763,68 +2552,25 @@ class ExecutionBook:
             adopted_prefix_trade = False
             applied_fill = fill
             if is_cumulative:
-                cumulative_qty = Decimal(str(raw_payload.get("cum_qty", fill.quantity)))
-                cumulative_quote = Decimal(
-                    str(raw_payload.get("cum_quote", cumulative_qty * fill.price))
-                )
-                if (
-                    not cumulative_qty.is_finite()
-                    or not cumulative_quote.is_finite()
-                    or cumulative_qty < Decimal("0")
-                    or cumulative_quote < Decimal("0")
-                ):
-                    return EvidenceConflict(
-                        evidence_id=evidence.evidence_id,
-                        reason="Cumulative fill quantity or quote is invalid",
-                    )
                 watermark_key = self._order_watermark_key(key, order_id)
-                previous_cumulative = self._order_cumulative_fills.get(
-                    watermark_key, Decimal("0")
-                )
-                previous_quote = self._order_cumulative_quotes.get(
-                    watermark_key, Decimal("0")
-                )
-                delta_qty = cumulative_qty - previous_cumulative
-                if delta_qty < Decimal("0"):
-                    # An older exchange report is harmless: it must not rewind
-                    # the high-water mark or change the current position view.
-                    delta_qty = Decimal("0")
-                elif delta_qty == Decimal("0"):
-                    if cumulative_quote != previous_quote:
-                        return EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=(
-                                "Cumulative quote changed without a quantity change"
-                            ),
-                        )
-                else:
-                    delta_quote = cumulative_quote - previous_quote
-                    if delta_quote <= Decimal("0"):
-                        return EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=(
-                                "Cumulative quote did not increase with cumulative "
-                                "quantity"
-                            ),
-                        )
-                    if trade_id in self._seen_trade_ids:
-                        return EvidenceConflict(
-                            evidence_id=evidence.evidence_id,
-                            reason=(
-                                f"Cumulative fill identity {trade_id} was reused with "
-                                "a higher cumulative quantity"
-                            ),
-                        )
-                    applied_fill = replace(
+                try:
+                    fill_delta = cumulative_fill_delta(
                         fill,
-                        quantity=delta_qty,
-                        price=delta_quote / delta_qty,
+                        previous_quantity=self._order_cumulative_fills.get(
+                            watermark_key, Decimal("0")
+                        ),
+                        previous_quote=self._order_cumulative_quotes.get(
+                            watermark_key, Decimal("0")
+                        ),
+                        trade_seen=trade_id in self._seen_trade_ids,
                     )
-                    pending_watermark = (
-                        watermark_key,
-                        cumulative_qty,
-                        cumulative_quote,
-                    )
+                except ValueError as error:
+                    return EvidenceConflict(evidence.evidence_id, str(error))
+                delta_qty = fill_delta.quantity
+                cumulative_qty = fill_delta.cumulative_quantity
+                applied_fill = fill_delta.fill
+                if fill_delta.watermark is not None:
+                    pending_watermark = (watermark_key, *fill_delta.watermark)
                 settlement_delta_qty = delta_qty
 
             existing_trade = next(
@@ -2992,40 +2738,19 @@ class ExecutionBook:
             previous_quote = self._order_cumulative_quotes.get(
                 watermark_key, Decimal("0")
             )
-            real_order_fills = tuple(
-                item
-                for item in journal.read_cut().fills
-                if item.order_id == report.order_id
-            )
-            real_quantity = sum(
-                (item.quantity for item in real_order_fills), Decimal("0")
-            )
-            real_quote = sum(
-                (item.quantity * item.price for item in real_order_fills),
-                Decimal("0"),
-            )
-            target_quantity = max(
-                previous_quantity,
-                report.cumulative_quantity,
-                real_quantity,
-            )
-            if target_quantity > previous_quantity:
-                target_quote = (
-                    report.cumulative_quote
-                    if report.cumulative_quantity >= real_quantity
-                    else real_quote
+            try:
+                order_delta = cumulative_order_delta(
+                    report,
+                    previous_quantity=previous_quantity,
+                    previous_quote=previous_quote,
+                    account_fills=journal.read_cut().fills,
                 )
-                if target_quote <= previous_quote:
-                    return EvidenceConflict(
-                        evidence_id=evidence.evidence_id,
-                        reason="cumulative order quote watermark did not advance",
-                    )
-                delta_quantity = target_quantity - previous_quantity
-                pending_watermark = (
-                    watermark_key,
-                    target_quantity,
-                    target_quote,
-                )
+            except ValueError as error:
+                return EvidenceConflict(evidence.evidence_id, str(error))
+            if order_delta.watermark is not None:
+                target_quantity, target_quote = order_delta.watermark
+                delta_quantity = order_delta.quantity
+                pending_watermark = (watermark_key, target_quantity, target_quote)
                 outbox = self._outbox_by_command_id.get(report.order_id)
                 is_exit_report = bool(
                     self._find_active_reservations_for_command(report.order_id)

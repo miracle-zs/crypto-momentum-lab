@@ -12,10 +12,10 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import (
     EvidenceConflict,
     ExecutionBook,
-    ExecutionEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
