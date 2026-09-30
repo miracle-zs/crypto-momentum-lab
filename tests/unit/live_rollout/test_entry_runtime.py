@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
+from crypto_momentum_lab.strategy_runner.candle_source import ClosedCandleEmaSnapshot
 
 
 class FakeClient:
@@ -34,10 +36,13 @@ class FakeUniverseRepository:
 
 
 class FakeEmaProvider:
+    def prune(self, **kwargs) -> int:
+        return 0
+
     def load(self, *, symbol: str, observed_at: datetime):
-        return SimpleNamespace(
-            ema5=101,
-            ema10=99,
+        return ClosedCandleEmaSnapshot(
+            ema5=Decimal("101"),
+            ema10=Decimal("99"),
             observed_at=observed_at,
             snapshot_id=f"snapshot-{symbol}",
             config_hash="ema-config",
@@ -49,7 +54,7 @@ async def test_entry_runtime_warms_exchange_from_positive_gainer_pool() -> None:
     client = FakeClient()
     runtime = LiveEntryRuntime(
         universe_reader=FakeUniverseRepository(),
-        client=client,  # type: ignore[arg-type]
+        client=client,
         ema_provider=None,
         positive_gainer_top_count=3,
         entry_leverage=7,
@@ -69,8 +74,8 @@ async def test_entry_runtime_loads_ema_context_without_pool_cache() -> None:
     observed_at = datetime(2026, 9, 12, tzinfo=UTC)
     runtime = LiveEntryRuntime(
         universe_reader=None,
-        client=FakeClient(),  # type: ignore[arg-type]
-        ema_provider=FakeEmaProvider(),  # type: ignore[arg-type]
+        client=FakeClient(),
+        ema_provider=FakeEmaProvider(),
         positive_gainer_top_count=None,
         entry_leverage=None,
         margin_type=None,

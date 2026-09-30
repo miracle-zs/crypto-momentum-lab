@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 import structlog
 
@@ -17,18 +17,13 @@ from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
 from crypto_momentum_lab.domain.universe.ports import UniverseSnapshotReader
 from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.entry_cache import (
+    EntryEmaProvider,
     EntryFilterCacheConfig,
     LiveEntryFilterCache,
     LiveEntrySymbolCache,
     LiveEntryUniverseData,
     universe_context_for,
 )
-
-if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
-    from crypto_momentum_lab.strategy_runner.candle_source import (
-        ClosedCandleEmaProvider,
-    )
 
 log = structlog.get_logger()
 
@@ -46,6 +41,15 @@ UniverseSnapshotProvider = Callable[
 ReadyCallback = Callable[[bool], None]
 
 
+class EntryExchangeWarmup(Protocol):
+    @property
+    def configured_margin_type_count(self) -> int: ...
+
+    async def warm_entry_margin_type(self, symbols: Iterable[str]) -> None: ...
+
+    async def warm_entry_leverage(self, symbols: Iterable[str]) -> None: ...
+
+
 class LiveEntryRuntime:
     """Own live entry-pool data, cache selection, and warmup semantics.
 
@@ -58,8 +62,8 @@ class LiveEntryRuntime:
         self,
         *,
         universe_reader: UniverseSnapshotReader | None,
-        client: BinanceUsdMTradeClient,
-        ema_provider: ClosedCandleEmaProvider | None,
+        client: EntryExchangeWarmup,
+        ema_provider: EntryEmaProvider | None,
         positive_gainer_top_count: int | None,
         entry_leverage: int | None,
         margin_type: str | None,

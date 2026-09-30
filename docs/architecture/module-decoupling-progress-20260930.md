@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -689,6 +689,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 三个缓存测试 provider 显式实现原无缓存清理场景的 prune 返回零，删除其构造点的 arg-type 忽略。读取/后台 warmup/取消/停止流程未改，保护 symbols、一小时期限和每币 32 个边界保持。
 
 验证：entry cache/runtime/架构定向 **62 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2459 passed**，25.11 秒，一项现有 Starlette/httpx 警告。entry_cache、entry_runtime、domain/universe/ports 三文件定向 mypy --follow-imports=skip 通过；核心文件及迁移测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。实际 provider 的既有单元清理回归包含于完整单元测试；不代表真实外部 candle 读取验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十二批：entry runtime 消费实际预热与 EMA 能力
+
+第五十一批提交为 `fdb0fd1`；第五十二批继续本地实施，未部署生产。
+
+- EntryExchangeWarmup Protocol 声明 warm_entry_margin_type、warm_entry_leverage 与 configured_margin_type_count，LiveEntryRuntime 不再标注具体 BinanceUsdMTradeClient。原生客户端的同名方法与属性直接满足接口，未增加转发实现。
+- EMA 参数沿用 EntryEmaProvider，删除具体 ClosedCandleEmaProvider 类型导入。entry runtime 与缓存共享实际能力契约，不新增另一套 provider 协议。
+- 删除 TYPE_CHECKING 中的具体客户端/provider 导入；LiveEntryRuntime 在去除注解后 AST 与上一批一致。持仓池读取、margin/leverage 预热顺序、背景 cache 配置、EMA 获取及停止流程保持。
+- 测试客户端与 EMA 替身删除旧 arg-type 忽略；EMA 替身显式实现 prune 并返回正式 ClosedCandleEmaSnapshot，保留原数值与来源 ID。
+
+验证：entry runtime/cache/架构定向 **62 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2459 passed**，25.82 秒，一项现有 Starlette/httpx 警告。entry_cache、entry_runtime、domain/universe/ports 三文件定向 mypy --follow-imports=skip 通过；核心文件和迁移测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。本批仅调用能力类型迁移，沿用现有行为回归。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
