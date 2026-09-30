@@ -1267,8 +1267,8 @@ class ExecutionBook:
             )
 
         # 4. Command building and reservation calculation
-        episode = getattr(view, "active_episode", None)
-        if episode is not None and getattr(episode, "side", None) is not None:
+        episode = view.active_episode
+        if episode is not None:
             side = episode.side
         elif key.position_side == FuturesPositionSide.SHORT:
             side = StrategySide.SHORT
