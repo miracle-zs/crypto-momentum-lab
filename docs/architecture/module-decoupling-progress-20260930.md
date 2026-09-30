@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百二十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百二十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1526,6 +1526,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 类型检查暴露 load_positions 复用流变量的可空查找结果；使用 matched_scope 表示查找，最终 scope 在原 head 匹配/构造或单流分支赋值，选择规则与错误文本保持。
 
 验证：执行领域及位置修复定向 **343 passed**；最终修改后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，31.20 秒，一项现有 Starlette/httpx 警告。execution_unit_of_work、新接口、领域执行 ports、恢复模型、ledger 模型五文件联合 mypy --follow-imports=skip 通过，新接口完整 Ruff、UoW F/I、git diff --check 通过。具体 PostgresAccountJournalStore 所有者未纳入该类型范围，原生实现静态适配与真实数据库验收仍待补齐。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百二十一批：具体 journal store 状态标志类型收窄
+
+第一百二十批提交为 `dd112d6`；第一百二十一批纳入实际 journal store 检查，未部署生产。
+
+- 六文件检查初始暴露五项错误：checkpoint 解码 Any 返回两项、事实状态布尔字段两项、时间列表 Any 一项。
+- 状态加载先读取字段到独立局部变量，经原 type(value) is bool 校验后使用；没有 stored state 时沿用 checkpoint 标志，late_fills 的 OR 规则保持。_max_fact_time 明确 datetime 列表，时间聚合规则不变，无强转或忽略。
+- 六文件检查错误降至两项 codec 返回 Any。初次将 recovery_codec 纳入七文件检查暴露 28 项旧错误（包含当时 store 的四项及 codec/导出问题）；本批未修复 codec，不宣称具体 store 完整静态适配或扩大检查通过。
+
+验证：执行领域定向 **322 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2529 passed**，32.20 秒，一项现有 Starlette/httpx 警告。修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -863,15 +863,21 @@ def _facts_from_rows(
         if isinstance(row.payload.get("issue"), str)
     )
     state_row = latest_recorded("facts_state")
+    synthetic_flag = bool(checkpoint and checkpoint.has_synthetic_fills)
+    late_flag = bool(checkpoint and checkpoint.has_late_events)
     state: dict[str, object] = {}
     if state_row is not None:
         state = state_row.payload
         if type(state.get("schema_version")) is not int or state["schema_version"] != 1:
             raise RecoverySchemaError("unsupported stored journal facts-state schema")
-        if type(state.get("has_synthetic_fills")) is not bool:
+        stored_synthetic = state.get("has_synthetic_fills")
+        if type(stored_synthetic) is not bool:
             raise RecoverySchemaError("stored facts-state synthetic flag is invalid")
-        if type(state.get("has_late_events")) is not bool:
+        stored_late = state.get("has_late_events")
+        if type(stored_late) is not bool:
             raise RecoverySchemaError("stored facts-state late flag is invalid")
+        synthetic_flag = stored_synthetic
+        late_flag = stored_late
         state_issues = state.get("integrity_issues")
         if not isinstance(state_issues, list) or any(
             not isinstance(item, str) for item in state_issues
@@ -903,20 +909,9 @@ def _facts_from_rows(
         exit_boundaries=boundaries,
         coverage=coverage,
         checkpoint=legacy_checkpoint,
-        has_synthetic_fills=(
-            state["has_synthetic_fills"]
-            if state
-            else bool(checkpoint and checkpoint.has_synthetic_fills)
-        ),
+        has_synthetic_fills=synthetic_flag,
         conflicting_fills=fill_conflicts,
-        has_late_events=(
-            (
-                state["has_late_events"]
-                if state
-                else bool(checkpoint and checkpoint.has_late_events)
-            )
-            or bool(late_fills)
-        ),
+        has_late_events=late_flag or bool(late_fills),
         stream_scope=scope,
         recovery_checkpoint=checkpoint,
         fact_conflicts=tuple([*domain_conflicts, *conflicts]),
@@ -1005,7 +1000,7 @@ def _json_digest(value: object) -> str:
 
 
 def _max_fact_time(facts: AccountFacts) -> datetime | None:
-    values = [
+    values: list[datetime] = [
         *(fill.trade_at for fill in facts.fills),
         *(fill.trade_at for fill in facts.conflicting_fills),
         *(fill.trade_at for fill in facts.late_fills),
