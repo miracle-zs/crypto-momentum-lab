@@ -21,7 +21,7 @@ from crypto_momentum_lab.execution_account.daemon import (
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
-from crypto_momentum_lab.execution_account.sync import (
+from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncResult,
 )
 from crypto_momentum_lab.execution_account.user_data_sync import AccountUserDataState

@@ -102,7 +102,7 @@ def test_account_event_from_reconciled_fill_requires_snapshot() -> None:
     from crypto_momentum_lab.execution_account.snapshot_models import (
         AccountSnapshot,
     )
-    from crypto_momentum_lab.execution_account.sync import (
+    from crypto_momentum_lab.execution_account.sync_models import (
         ExecutionAccountSyncResult,
     )
 
@@ -178,7 +178,7 @@ def test_publish_reconciled_fill_ignores_when_snapshot_is_none() -> None:
         AccountFillEvent,
         ExecutionAccountStatus,
     )
-    from crypto_momentum_lab.execution_account.sync import (
+    from crypto_momentum_lab.execution_account.sync_models import (
         ExecutionAccountSyncResult,
     )
 

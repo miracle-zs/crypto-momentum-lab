@@ -460,6 +460,7 @@ importlib.import_module(sys.argv[1])
     [
         "crypto_momentum_lab.execution_account.snapshot_models",
         "crypto_momentum_lab.execution_account.snapshot_changes",
+        "crypto_momentum_lab.execution_account.sync_models",
     ],
 )
 def test_account_snapshot_imports_without_sync_service(module):

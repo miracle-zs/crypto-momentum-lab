@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百五十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百六十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1986,6 +1986,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 独立进程导入守卫扩展到计算模块，禁止加载 sync、SQLAlchemy 与具体存储；未增加兼容转发。
 
 验证：snapshot_changes、snapshot_models 与实际账户模型三文件 mypy --follow-imports=skip 通过，不代表同步服务或全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2640 passed**，32.13 秒，一项现有 Starlette/httpx 警告。新模块及架构测试完整 Ruff，其余迁移文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百六十批：同步配置与结果模型独立
+
+第一百五十九批提交为 `b8454cf`；第一百六十批于 2026-10-01 继续本地实施，未部署生产。
+
+- ExecutionAccountSyncConfig、ExecutionAccountSyncResult 与 FillKey 移至 execution_account.sync_models，直接依赖账户领域模型与独立快照模型。配置默认批量常数跟随其唯一使用者迁移。
+- daemon、应用装配与实际测试直接导入模型所有者，daemon 不再因结果和成交键类型导入同步实现；同步服务使用同一模型，没有新增转发或兼容别名。
+- 两个类的 AST 与迁移前完全一致，保留配置范围、时区、游标和来源锚点校验以及所有默认值。独立进程导入守卫覆盖新模型，禁止加载 sync、SQLAlchemy 与具体存储。
+
+验证：sync_models、snapshot_models 与实际账户模型三文件 mypy --follow-imports=skip 通过，不代表 daemon、同步服务或全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2641 passed**，31.72 秒，一项现有 Starlette/httpx 警告。新模块及架构测试完整 Ruff，其余迁移文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

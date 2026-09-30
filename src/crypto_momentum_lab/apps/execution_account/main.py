@@ -52,9 +52,11 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlHubConfig,
 )
 from crypto_momentum_lab.execution_account.sync import (
+    ExecutionAccountSyncService,
+)
+from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncResult,
-    ExecutionAccountSyncService,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.persistence.postgres.account_repository import (

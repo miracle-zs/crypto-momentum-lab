@@ -6,7 +6,9 @@ from crypto_momentum_lab.execution_account.daemon import (
     UserDataAccountSyncConfig,
     UserDataAccountSyncDaemon,
 )
-from crypto_momentum_lab.execution_account.sync import ExecutionAccountSyncResult
+from crypto_momentum_lab.execution_account.sync_models import (
+    ExecutionAccountSyncResult,
+)
 
 
 class SnapshotService:

@@ -9,8 +9,10 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.execution_account.sync import (
-    ExecutionAccountSyncConfig,
     ExecutionAccountSyncService,
+)
+from crypto_momentum_lab.execution_account.sync_models import (
+    ExecutionAccountSyncConfig,
 )
 
 

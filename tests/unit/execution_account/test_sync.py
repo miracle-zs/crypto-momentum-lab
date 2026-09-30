@@ -17,9 +17,11 @@ from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync import (
+    ExecutionAccountSyncService,
+)
+from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncResult,
-    ExecutionAccountSyncService,
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,

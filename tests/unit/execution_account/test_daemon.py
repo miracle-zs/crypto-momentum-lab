@@ -5,7 +5,9 @@ from crypto_momentum_lab.execution_account.daemon import (
     ContinuousAccountSyncConfig,
     ContinuousAccountSyncDaemon,
 )
-from crypto_momentum_lab.execution_account.sync import ExecutionAccountSyncResult
+from crypto_momentum_lab.execution_account.sync_models import (
+    ExecutionAccountSyncResult,
+)
 
 
 async def test_continuous_sync_only_publishes_transient_states_at_startup() -> None:
