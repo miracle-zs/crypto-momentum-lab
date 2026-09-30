@@ -355,11 +355,7 @@ class ExecutionBook:
                     s
                     for s in states
                     if (
-                        s.scope.environment == key.environment
-                        and s.scope.account_label == key.account_label
-                        and s.scope.symbol == key.symbol
-                        and getattr(s.scope.position_side, "value", s.scope.position_side)
-                        == getattr(key.position_side, "value", key.position_side)
+                        s.scope.matches(key)
                     )
                 ),
                 None,
@@ -917,7 +913,7 @@ class ExecutionBook:
             )
             has_no_reservations = not bool(self.get_active_reservations(key))
             has_no_commands = not any(
-                getattr(cmd, "key", None) == key
+                cmd.scope.to_position_key() == key
                 for cmd in self._outbox_by_command_id.values()
             )
             is_known_active_stream = (
@@ -1884,7 +1880,7 @@ class ExecutionBook:
             )
             has_no_reservations = not bool(self.get_active_reservations(key))
             has_no_commands = not any(
-                getattr(cmd, "key", None) == key
+                cmd.scope.to_position_key() == key
                 for cmd in self._outbox_by_command_id.values()
             )
             current_scope = self._stream_scopes.get(canon)

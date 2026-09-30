@@ -2758,3 +2758,94 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
     assert historical.event_cut == _dt(10, 0)
     assert after == before
     assert uow.reads == [(stream, _dt(10, 0))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_position", [True, False])
+async def test_outbox_scope_controls_flat_stream_fast_path(same_position) -> None:
+    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.observation_models import (
+        Applied,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class NoTransaction:
+        def transaction(self, key):
+            raise AssertionError("flat snapshot stream adoption opened a transaction")
+
+    book = ExecutionBook(execution_unit_of_work=NoTransaction())
+    book._persistence_failed = False
+    key = _scope().to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old-epoch"
+    )
+
+    from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+    command_scope = _scope() if same_position else ExecutionScope(
+        environment="live", account_label="other-account", symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    command = TradeCommand(
+        command_id="pending-command", position_key=command_scope.to_position_key(),
+        command_type=TradeCommandType.ENTRY, side=StrategySide.LONG,
+        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
+    )
+    book._outbox_by_command_id[command.command_id] = OutboxEntry(
+        command_id=command.command_id, request_id="request", scope=command_scope,
+        command=command,
+    )
+
+    def reject_copy(*, key):
+        raise AssertionError("flat snapshot stream adoption cloned the execution book")
+
+    book._staged_copy = reject_copy
+    flat_snap = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        mark_price=Decimal("65000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=None,
+        margin_type=None,
+        observed_at=_dt(10, 0),
+        raw_payload={},
+    )
+    result = await book.observe(
+        ExecutionEvidence(
+            evidence_id="new-epoch-flat-snapshot",
+            scope=_scope(),
+            observed_at=_dt(10, 0),
+            stream_id="account_event_hub",
+            stream_epoch="new-epoch",
+            sequence=1,
+            snapshot=flat_snap,
+        )
+    )
+    if same_position:
+        from crypto_momentum_lab.domain.execution.observation_models import (
+            EvidenceConflict,
+        )
+
+        assert isinstance(result, EvidenceConflict)
+        assert book._stream_scopes[key.canonical_id].stream_epoch == "old-epoch"
+        return
+    assert isinstance(result, Applied)
+    assert book._stream_scopes[key.canonical_id].stream_epoch == "new-epoch"
+
+    # Reading with the new stream epoch must succeed cleanly without stream mismatch
+    view = await book.read(
+        _scope(),
+        stream_id="account_event_hub",
+        stream_epoch="new-epoch",
+    )
+    assert view.total_quantity == Decimal("0")
+    assert view.stream_scope.stream_epoch == "new-epoch"
