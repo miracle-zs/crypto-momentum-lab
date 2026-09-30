@@ -35,6 +35,7 @@ from crypto_momentum_lab.domain.execution.evidence_codec import (
     _trade_payload_digest,
     _view_projection_digest,
 )
+from crypto_momentum_lab.domain.execution.evidence_lifecycle import plan_order_event
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionEvidence,
 )
@@ -60,7 +61,6 @@ from crypto_momentum_lab.domain.execution.fill_attribution import (
     plan_fill_observation,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderState,
     ExitAllocation,
     FuturesPositionSide,
 )
@@ -2709,101 +2709,30 @@ class ExecutionBook:
 
         # 4. Process Order Event
         if evidence.order_event is not None:
-            ev_state = evidence.order_event.state
             cmd_id = evidence.order_event.client_order_id
             outbox = self._outbox_by_command_id.get(cmd_id)
-            already_terminal = outbox is not None and outbox.state in (
-                DispatchState.TERMINAL,
-                DispatchState.REJECTED,
+            event_plan = plan_order_event(
+                outbox,
+                evidence.order_event,
+                observed_at=evidence.observed_at,
+                account_fills=journal.read_cut().fills,
+                durable=self._execution_unit_of_work is not None,
             )
-
-            if outbox is not None and not already_terminal:
-                if ev_state in (
-                    ExchangeOrderState.ACKNOWLEDGED,
-                    ExchangeOrderState.SUBMITTED,
-                ) and outbox.state in (
-                    DispatchState.PREPARED,
-                    DispatchState.DISPATCHING,
-                    DispatchState.UNKNOWN,
-                ):
-                    await self._persist_transition(
-                        outbox,
-                        replace(
-                            outbox,
-                            state=DispatchState.ACKNOWLEDGED,
-                            updated_at=evidence.observed_at,
-                        ),
-                    )
-                elif ev_state in (
-                    ExchangeOrderState.CANCELED,
-                    ExchangeOrderState.EXPIRED,
-                    ExchangeOrderState.REJECTED,
-                    ExchangeOrderState.ABSENT_RECONCILED,
-                    ExchangeOrderState.FILLED,
-                ):
-                    target_state = (
-                        DispatchState.REJECTED
-                        if ev_state == ExchangeOrderState.REJECTED
-                        else DispatchState.TERMINAL
-                    )
-                    updated = replace(
-                        outbox,
-                        state=target_state,
-                        last_error=(
-                            f"Order {ev_state.value}"
-                            if ev_state != ExchangeOrderState.FILLED
-                            else outbox.last_error
-                        ),
-                        updated_at=evidence.observed_at,
-                    )
-                    await self._persist_transition(outbox, updated)
-                    if ev_state == ExchangeOrderState.FILLED:
-                        confirmed_trade_quantity = sum(
-                            (
-                                fill.quantity
-                                for fill in journal.read_cut().fills
-                                if fill.order_id == cmd_id
-                            ),
-                            Decimal("0"),
-                        )
-                        if (
-                            confirmed_trade_quantity
-                            >= outbox.command.requested_quantity
-                            or self._execution_unit_of_work is None
-                        ):
-                            released_qty += await self._release_command_reservations(
-                                cmd_id,
-                                reason=(
-                                    "order_filled_with_confirmed_trades"
-                                    if confirmed_trade_quantity
-                                    >= outbox.command.requested_quantity
-                                    else "order_finished_filled"
-                                ),
-                            )
-                        else:
-                            self._recovery_required_commands.add(cmd_id)
-                            settlement_recovery_required = True
-                            diagnostics = (
-                                "Filled terminal lacks complete account trade facts; "
-                                "active reservation is retained for recovery",
-                            )
-                    else:
-                        released_qty += await self._release_command_reservations(
-                            cmd_id,
-                            reason=f"order_finished_{ev_state.value.lower()}",
-                        )
-                    dispatch_reconciled_command_id = cmd_id
-                elif ev_state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+            if event_plan.updated is not None:
+                assert outbox is not None
+                if event_plan.requires_dispatch_reconciliation:
                     self._dispatch_reconciliation_required_commands.add(cmd_id)
-                    await self._persist_transition(
-                        outbox,
-                        replace(
-                            outbox,
-                            state=DispatchState.UNKNOWN,
-                            last_error="Pending reconciliation",
-                            updated_at=evidence.observed_at,
-                        ),
+                await self._persist_transition(outbox, event_plan.updated)
+                if event_plan.release_reason is not None:
+                    released_qty += await self._release_command_reservations(
+                        cmd_id, reason=event_plan.release_reason,
                     )
+                if event_plan.recovery_diagnostic is not None:
+                    self._recovery_required_commands.add(cmd_id)
+                    settlement_recovery_required = True
+                    diagnostics = (event_plan.recovery_diagnostic,)
+                if event_plan.dispatch_reconciled:
+                    dispatch_reconciled_command_id = cmd_id
 
         if pending_watermark is not None:
             watermark_key, cumulative_qty, cumulative_quote = pending_watermark
