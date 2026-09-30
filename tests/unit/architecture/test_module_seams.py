@@ -13,6 +13,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.shadow_preflight",
         "crypto_momentum_lab.live_rollout.session_state",
         "crypto_momentum_lab.live_rollout.lease_recovery",
+        "crypto_momentum_lab.live_rollout.account_event_ports",
         "crypto_momentum_lab.live_rollout.telemetry_ports",
         "crypto_momentum_lab.live_rollout.control_plane",
         "crypto_momentum_lab.live_rollout.decision_facts",
@@ -169,6 +170,34 @@ class LoopGuard(MetaPathFinder):
         )):
             raise RuntimeError('contract consumer imported execution: ' + fullname)
 sys.meta_path.insert(0, LoopGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.live_rollout.account_channel",
+        "crypto_momentum_lab.live_rollout.exit_channels",
+    ],
+)
+def test_account_exit_consumers_do_not_load_daemon(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class DaemonGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'crypto_momentum_lab.live_rollout.daemon':
+            raise RuntimeError('consumer imported daemon implementation')
+sys.meta_path.insert(0, DaemonGuard())
 importlib.import_module(sys.argv[1])
 """
     result = subprocess.run(

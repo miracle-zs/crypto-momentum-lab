@@ -8,7 +8,9 @@ from collections.abc import AsyncIterable, Awaitable, Callable
 import structlog
 
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
+from crypto_momentum_lab.live_rollout.account_event_ports import (
+    AccountEventExitProcessor,
+)
 from crypto_momentum_lab.live_rollout.exit_channels import (
     DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     ORDER_IDENTITY_CONFLICT_REASON,
@@ -42,7 +44,7 @@ class LiveAccountEventRuntime:
     def __init__(
         self,
         *,
-        daemon: LiveStrategyDaemon,
+        daemon: AccountEventExitProcessor,
         latest_market_states: LatestMarketStateCache,
         latest_market_quotes: LatestMarketQuoteCache,
         order_reconciliation: LiveOrderReconciliation | None = None,

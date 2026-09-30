@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -726,6 +726,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 账户 runtime 在移除注解差异后 AST 与上一批一致。fill identity 去重、异步成交记录、订单对账、账户快照应用和退出决策顺序保持；telemetry recorder 队列与持久化逻辑未迁移。
 
 验证：account channel/telemetry/架构定向 **81 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**。telemetry_ports 定向 mypy --follow-imports=skip 通过；核心接口/账户通道完整 Ruff、telemetry F/I、git diff --check 通过，不代表账户通道或全仓类型验收。沿用现有成交去重及快照顺序行为回归，无新增镜像实现测试。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十五批：账户通道退出处理能力与 daemon 导入隔离
+
+第五十四批提交为 `30ea917`；第五十五批继续本地实施，未部署生产。
+
+- account_event_ports.py 定义 AccountEventExitProcessor，仅要求异步 process_account_event(state, quote) -> str | None，LiveAccountEventRuntime 改为依赖此能力，删除具体 LiveStrategyDaemon 导入。原 daemon 与账户测试替身直接满足接口，没有新增处理转发实现。
+- exit_channels 的 daemon 导入移至 TYPE_CHECKING，并开启延迟注解；退出通道仍标注其原使用类型。本批不宣称退出通道全部能力已收窄，目标是解除账户通道经共享 retry helpers 的间接 daemon 导入。
+- 账户事件去重、记录、对账、快照应用和 process_account_event 调用/重试顺序不变；退出通道循环及重试逻辑未改。
+
+验证：生产改动后的完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**，26.11 秒，一项现有 Starlette/httpx 警告。随后补充三项导入检查：账户退出能力无 sqlalchemy/persistence 导入，以及 account_channel/exit_channels 不加载 daemon 实现；全部纳入账户/退出通道/架构定向 **66 passed**。新增三项未计入前述完整回归数量。接口定向 mypy --follow-imports=skip、核心文件和架构测试完整 Ruff、git diff --check 通过，不代表所有消费模块或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
