@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
 from crypto_momentum_lab.domain.execution.ports import ExecutionUnitOfWorkPort
+from crypto_momentum_lab.domain.execution.reservation_repository import (
+    ReservationRepository,
+)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
@@ -93,10 +96,11 @@ async def build_live_execution_runtime(
         command_repository=commands,
         reservation_repository=reservations,
     )
+    book_reservations: ReservationRepository = reservations
     book_commands: CommandRepository = commands
     book = ExecutionBook(
         coordinator=domain_coordinator,
-        reservation_repository=reservations,
+        reservation_repository=book_reservations,
         command_repository=book_commands,
         execution_unit_of_work=unit_of_work,
     )
