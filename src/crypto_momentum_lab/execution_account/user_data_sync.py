@@ -23,6 +23,7 @@ from crypto_momentum_lab.execution_account.snapshot_models import (
 )
 from crypto_momentum_lab.execution_account.user_data_fields import (
     event_raw_payload,
+    initial_mark_price,
     parse_bool,
     parse_decimal,
     parse_timestamp,
@@ -233,7 +234,7 @@ class AccountUserDataState:
             mark_price = (
                 existing_position.mark_price
                 if existing_position is not None
-                else _initial_mark_price(
+                else initial_mark_price(
                     entry_price=entry_price,
                     position_amt=position_amt,
                     unrealized_pnl=unrealized_pnl,
@@ -399,23 +400,3 @@ class AccountUserDataState:
             self._seen_trade_id_set.discard(expired)
         self._seen_trade_ids.append(trade_key)
         self._seen_trade_id_set.add(trade_key)
-
-
-def _initial_mark_price(
-    *,
-    entry_price: Decimal,
-    position_amt: Decimal,
-    unrealized_pnl: Decimal,
-) -> Decimal:
-    """Build a safe provisional mark for a position-only account update.
-
-    Binance does not include mark price in ``ACCOUNT_UPDATE``.  Deriving it
-    from unrealized PnL is exact when PnL is non-zero; entry price is the
-    conservative provisional mark at a flat PnL boundary.  The next REST
-    snapshot replaces this value with the exchange mark.
-    """
-    if position_amt != 0 and unrealized_pnl != 0:
-        derived = entry_price + unrealized_pnl / position_amt
-        if derived > 0:
-            return derived
-    return entry_price if entry_price > 0 else Decimal("0")

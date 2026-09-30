@@ -87,3 +87,23 @@ def json_value(value: object) -> JsonValue:
     if isinstance(value, list | tuple):
         return [json_value(item) for item in value]
     return str(value)
+
+
+def initial_mark_price(
+    *,
+    entry_price: Decimal,
+    position_amt: Decimal,
+    unrealized_pnl: Decimal,
+) -> Decimal:
+    """Build a safe provisional mark for a position-only account update.
+
+    Binance does not include mark price in ``ACCOUNT_UPDATE``.  Deriving it
+    from unrealized PnL is exact when PnL is non-zero; entry price is the
+    conservative provisional mark at a flat PnL boundary.  The next REST
+    snapshot replaces this value with the exchange mark.
+    """
+    if position_amt != 0 and unrealized_pnl != 0:
+        derived = entry_price + unrealized_pnl / position_amt
+        if derived > 0:
+            return derived
+    return entry_price if entry_price > 0 else Decimal("0")
