@@ -9,13 +9,13 @@ import asyncpg  # type: ignore[import-untyped]
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RUNTIME_STATE_READY_CHANNEL,
     PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
 )
 
 _MAX_IDLE_POLL_INTERVAL_SECONDS = 3.0

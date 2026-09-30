@@ -35,6 +35,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.position_repair import PositionRepairRequest
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     StrategyLiveState,
@@ -113,7 +114,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
 )
 
 log = structlog.get_logger(__name__)

@@ -1,5 +1,5 @@
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -12,6 +12,9 @@ from crypto_momentum_lab.domain.market.market_book import (
     compute_market_state_hash,
 )
 from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import (
+    RuntimeStateCursor as _RuntimeStateCursor,
+)
 from crypto_momentum_lab.domain.market.runtime_state_models import (
     RuntimeStateSequenceRange as _RuntimeStateSequenceRange,
 )
@@ -26,12 +29,6 @@ _MAX_RUNTIME_STATE_INSERT_ROWS = 500
 _RUNTIME_STATE_INTERVAL_SECONDS = 15
 RUNTIME_STATE_READY_CHANNEL = "cml_runtime_state_ready"
 type _RuntimeStateKey = tuple[str, str, datetime]
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStateCursor:
-    bucket_start: datetime | None = None
-    symbol: str | None = None
 
 
 def validate_closed_states(states: tuple[MarketState15s, ...]) -> None:
@@ -337,7 +334,7 @@ class PostgresRuntimeMarketStateRepository:
         self,
         *,
         environment: str,
-        cursor: RuntimeStateCursor,
+        cursor: _RuntimeStateCursor,
         limit: int,
         upper_bound: datetime | None = None,
         symbols: Collection[str] | None = None,

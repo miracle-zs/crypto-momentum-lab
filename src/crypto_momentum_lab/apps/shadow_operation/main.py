@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import (
     RunMode,
@@ -46,7 +47,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,

@@ -2,9 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import crypto_momentum_lab.strategy_runner.live_source as live_source
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    RuntimeStateCursor,
-)
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.strategy_runner.live_source import (
     AsyncPostgresRuntimeStateLoader,
     PaperLiveSourceConfig,
@@ -102,9 +100,7 @@ def test_async_loader_reads_active_entry_symbols_on_its_event_loop() -> None:
         universe_repository=FakeUniverseRepository(),
     )
 
-    assert loader.load_active_symbols() == frozenset(
-        {"BTCUSDT", "ETHUSDT"}
-    )
+    assert loader.load_active_symbols() == frozenset({"BTCUSDT", "ETHUSDT"})
     loader.close()
 
 
@@ -189,9 +185,10 @@ def test_postgres_paper_source_stops_after_idle_timeout(monkeypatch) -> None:
     assert fields["idle_timeout_seconds"] == 0
     assert fields["elapsed_idle_seconds"] >= 0
     assert fields["yielded_state_count"] == 0
-    assert fields["cursor_bucket_start"] == datetime(
-        2026, 7, 3, 0, 0, tzinfo=UTC
-    ).isoformat()
+    assert (
+        fields["cursor_bucket_start"]
+        == datetime(2026, 7, 3, 0, 0, tzinfo=UTC).isoformat()
+    )
     assert fields["cursor_symbol"] == ""
     assert fields["action"] == "exit_for_container_restart"
 

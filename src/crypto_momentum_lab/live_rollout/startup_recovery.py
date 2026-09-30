@@ -8,15 +8,15 @@ from time import monotonic, perf_counter
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
+from crypto_momentum_lab.domain.market.runtime_state_repository import (
+    RuntimeMarketStateReadRepository,
+)
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
     LiveRuntimeStrategy,
 )
 from crypto_momentum_lab.live_rollout.readiness import LiveWarmupStatus
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
-)
 
 log = structlog.get_logger()
 
@@ -50,7 +50,7 @@ def cursor_after_market_bucket(bucket_start: datetime) -> RuntimeStateCursor:
 
 async def wait_for_durable_market_state_cutover(
     *,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     requested_cutover: datetime,
     timeout_seconds: float = _DURABLE_CUTOVER_WAIT_SECONDS,
@@ -109,7 +109,7 @@ async def wait_for_durable_market_state_cutover(
 
 async def load_live_market_state_gap(
     *,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     symbol: str,
     previous_at: datetime,
@@ -209,7 +209,7 @@ async def _sleep_for_durable_cutover(seconds: float) -> None:
 
 async def load_live_warmup_symbols(
     *,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     observed_at: datetime,
     symbols: Collection[str] | None = None,
@@ -373,7 +373,7 @@ def _recovery_state_limit(
 async def warm_live_strategy(
     *,
     strategy: LiveRuntimeStrategy,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     now: datetime,
     cutover_at: datetime | None = None,
@@ -481,7 +481,7 @@ async def restore_live_strategy_from_checkpoint(
     *,
     strategy: LiveRuntimeStrategy,
     checkpoint: StrategyCheckpoint,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     cutover_at: datetime | None = None,
     warmup_symbols: Collection[str] | None = None,
@@ -619,7 +619,7 @@ def live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
 async def warm_live_strategy_then_start_fresh(
     *,
     strategy: LiveRuntimeStrategy,
-    repository: PostgresRuntimeMarketStateRepository,
+    repository: RuntimeMarketStateReadRepository,
     environment: str,
     now: datetime,
     cutover_at: datetime | None = None,

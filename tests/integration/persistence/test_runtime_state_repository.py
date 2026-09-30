@@ -8,16 +8,16 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import AggTradeGap
+from crypto_momentum_lab.domain.market.runtime_state_models import (
+    RuntimeStateCursor,
+    RuntimeStateSequenceRange,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     RuntimeMarketStateGapRow,
 )
-from crypto_momentum_lab.domain.market.runtime_state_models import (
-    RuntimeStateSequenceRange,
-)
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,

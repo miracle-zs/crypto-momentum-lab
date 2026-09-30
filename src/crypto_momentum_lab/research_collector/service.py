@@ -17,12 +17,10 @@ from datetime import UTC, datetime, timedelta
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubReplayUnavailable,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    RuntimeStateCursor,
 )
 from crypto_momentum_lab.research_collector.health import CollectorHealthStore
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal

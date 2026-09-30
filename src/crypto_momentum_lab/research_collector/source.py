@@ -6,10 +6,10 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
-    RuntimeStateCursor,
 )
 from crypto_momentum_lab.research_collector.models import require_utc
 

@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveOperatorApproval,
 )
+from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
@@ -46,9 +47,6 @@ from crypto_momentum_lab.persistence.postgres.position_order_window import (
     _load_order_anchor_events,
     _opening_anchors_from_events,
     _OrderAnchorEvent,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    RuntimeStateCursor,
 )
 from tests.unit.live_rollout.test_gates import _context as gate_context
 from tests.unit.shadow_operation.test_service import _context as shadow_context
