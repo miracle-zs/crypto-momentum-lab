@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountFillEvent,
     AccountOpenOrderSnapshot,

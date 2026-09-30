@@ -544,6 +544,7 @@ assert codec not in sys.modules
     [
         "crypto_momentum_lab.execution_account.binance.user_data_models",
         "crypto_momentum_lab.execution_account.binance.user_data_parser",
+        "crypto_momentum_lab.execution_account.user_data_sync",
     ],
 )
 def test_user_data_event_model_imports_without_transport(module):
