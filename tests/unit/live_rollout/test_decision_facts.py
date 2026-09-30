@@ -299,8 +299,8 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
 
 
 def _pending_exit_case():
-    from dataclasses import replace
     from unittest.mock import AsyncMock, create_autospec
+
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -375,6 +375,64 @@ async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
     uow.mark_exit_dispatched.assert_not_awaited()
 
     book.read.side_effect = None
+    await source.recover_pending_exits()
+    handler.assert_awaited_once_with(command)
+    uow.mark_exit_dispatched.assert_awaited_once_with(
+        "incident-decision", command.command_id
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["projection", "not_ready", "epoch"])
+async def test_newly_committed_exit_defers_without_stopping_market_consumer(
+    mismatch: str,
+) -> None:
+    source, uow, book, view, handler, command = _pending_exit_case()
+    if mismatch == "projection":
+        view.projection_version = "pv_newer"
+    elif mismatch == "not_ready":
+        view.is_ready_for_trade = False
+    else:
+        book.read.side_effect = ValueError(
+            "requested account stream does not match the restored position"
+        )
+    uow.commit_decision.return_value = SimpleNamespace(
+        policy_revision=1,
+        next_state_digest="next_digest",
+        decision_id="incident-decision",
+        is_replay=False,
+    )
+    next_state = PolicyState(policy_version=2)
+    result = DecisionResult(
+        decision_id="incident-decision",
+        input_hash="input",
+        intent=None,
+        exit_command=command,
+        next_policy_state=next_state,
+        rejection_reason=None,
+        evaluated_at=command.created_at,
+    )
+    trace = DecisionTrace(
+        decision_id="incident-decision",
+        account_label="incident-account",
+        strategy_name="orderflow_impulse",
+        decision_time=command.created_at,
+        intent_produced=False,
+        frame_digest="frame",
+        evaluated_market_refs=(SimpleNamespace(bucket_start=command.created_at),),
+    )
+
+    receipt = await source.commit_decision(trace, result, None)
+
+    assert receipt.decision_id == "incident-decision"
+    assert source.current_policy_state == next_state
+    assert source.policy_revision == 1
+    handler.assert_not_awaited()
+    uow.mark_exit_dispatched.assert_not_awaited()
+    uow.mark_exit_superseded.assert_not_awaited()
+
+    book.read.side_effect = None
+    view.projection_version = "pv_expected"
+    view.is_ready_for_trade = True
     await source.recover_pending_exits()
     handler.assert_awaited_once_with(command)
     uow.mark_exit_dispatched.assert_awaited_once_with(

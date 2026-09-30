@@ -542,10 +542,18 @@ class LiveDecisionFactSource:
         if handler is None:
             raise RuntimeError("durable accepted exit has no dispatch handler")
         if not await self._exit_matches_current_book(command):
-            raise RuntimeError(
-                f"accepted exit {command.command_id} does not match the current "
-                "ready Book projection; its durable outbox remains pending"
+            # Account updates can change the Book after the decision commits.
+            # Preserve the durable pending exit and keep consuming fresh facts;
+            # the recovery loop rechecks readiness before any exchange effect.
+            log.warning(
+                "durable_decision_exit_deferred_until_book_ready",
+                decision_id=decision_id,
+                command_id=command.command_id,
+                projection_version=command.expected_projection_version,
+                stream_id=self._stream_id,
+                stream_epoch=self._stream_epoch,
             )
+            return
         result = handler(command)
         if asyncio.iscoroutine(result):
             result = await result
