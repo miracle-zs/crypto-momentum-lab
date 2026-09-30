@@ -564,7 +564,8 @@ class ExecutionBook:
         return journal
 
     async def _persist_outbox_state(self, entry: OutboxEntry) -> None:
-        if self._command_repo is None and self._active_transaction is None:
+        command_repository = self._command_repo
+        if command_repository is None and self._active_transaction is None:
             return
         watermark_key = self._order_watermark_key(
             entry.scope.to_position_key(), entry.command.command_id
@@ -593,8 +594,8 @@ class ExecutionBook:
                     requested_at=entry.created_at,
                     details=details,
                 )
-            else:
-                await self._command_repo.upsert_execution_command(
+            elif command_repository is not None:
+                await command_repository.upsert_execution_command(
                     command_id=entry.command_id,
                     client_order_id=entry.command.command_id,
                     command=(
@@ -622,11 +623,12 @@ class ExecutionBook:
     async def _restore_durable_positions(
         self,
         *,
+        unit_of_work: ExecutionUnitOfWorkPort,
         account_label: str,
         environment: str,
         as_of: datetime,
     ) -> None:
-        states = await self._execution_unit_of_work.load_positions(
+        states = await unit_of_work.load_positions(
             environment=environment,
             account_label=account_label,
             as_of=as_of,
@@ -707,6 +709,7 @@ class ExecutionBook:
             self._dispatch_reconciliation_required_commands.clear()
             self._coordinator._reservations_by_id.clear()
             await self._restore_durable_positions(
+                unit_of_work=self._execution_unit_of_work,
                 account_label=account_label,
                 environment=environment,
                 as_of=as_of,
@@ -1602,6 +1605,7 @@ class ExecutionBook:
         command_id: str,
         target: DispatchState,
         *,
+        unit_of_work: ExecutionUnitOfWorkPort,
         at: datetime | None = None,
         external_order_id: str | None = None,
         reason: str = "",
@@ -1619,7 +1623,7 @@ class ExecutionBook:
                 raise RuntimeError("Execution command has no durable stream scope")
             candidate = self._staged_copy(key=key)
             try:
-                async with self._execution_unit_of_work.transaction(key) as tx:
+                async with unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)
                     if head is None or self._head_revisions.get(canon) != head.revision:
                         raise RuntimeError(
@@ -1737,6 +1741,7 @@ class ExecutionBook:
             return await self._durable_command_mutation(
                 command_id,
                 target,
+                unit_of_work=self._execution_unit_of_work,
                 at=at,
                 external_order_id=external_order_id,
                 reason=reason,

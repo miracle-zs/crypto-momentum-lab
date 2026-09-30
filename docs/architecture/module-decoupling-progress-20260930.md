@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1317,6 +1317,20 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：执行簿定向 **46 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，29.83 秒，一项现有 Starlette/httpx 警告。执行簿及测试 F/I、git diff --check 通过。
 
 四文件联合 mypy --follow-imports=skip 错误由 12 项降至 9 项，剩余涉及 Any 返回值及可空命令仓储/UoW；未增加忽略，尚未完成具体执行簿适配或全仓类型验收。上一批五文件检查通过结论不扩展为该范围通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零四批：耐久私有用例显式传入必需 UoW
+
+第一百零三批提交为 `a215773`；第一百零四批继续本地实施，未部署生产。
+
+- _restore_durable_positions 与 _durable_command_mutation 增加必需 unit_of_work 参数，由原已确认非空的 restore/_transition_command 分支传入；私有用例不再用可空成员执行 load_positions 或 transaction。
+- _persist_outbox_state 使用局部 command_repository，在无活跃事务的路径显式确认其非空后调用 upsert_execution_command。活跃事务优先、缺少仓储时返回、失败标记与抛错规则保持。
+- 锁、候选状态、事务开关及提交后发布顺序不变，无新增 UoW 或转发适配器。三个直接调用私有恢复方法的测试同步显式传入原 StubUow；首轮失败提示测试遗漏迁移，补齐后原摘要/事实哈希迁移与活跃 reservation 恢复验收通过。
+
+验证：执行领域定向 **316 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，30.23 秒，一项现有 Starlette/httpx 警告。执行簿及测试 F/I、git diff --check 通过。
+
+含具体 ExecutionBook 的四文件联合 mypy --follow-imports=skip 错误由 9 项降至 6 项，均为 Any 返回值；尚未完成具体适配或全仓类型验收，未新增忽略。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

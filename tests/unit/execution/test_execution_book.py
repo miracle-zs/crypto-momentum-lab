@@ -2283,9 +2283,11 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
         async def load_positions(self, **kwargs):
             return (state,)
 
-    book = ExecutionBook(execution_unit_of_work=StubUow())
+    unit_of_work = StubUow()
+    book = ExecutionBook(execution_unit_of_work=unit_of_work)
     # Restoration must succeed and migrate the digest instead of crashing
     await book._restore_durable_positions(
+        unit_of_work=unit_of_work,
         account_label="primary",
         environment="live",
         as_of=datetime.now(UTC),
@@ -2450,9 +2452,11 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         async def load_positions(self, **kwargs):
             return (state,)
 
-    book = ExecutionBook(execution_unit_of_work=StubUow())
+    unit_of_work = StubUow()
+    book = ExecutionBook(execution_unit_of_work=unit_of_work)
     # Must succeed without raising RuntimeError("durable position facts do not match the execution head")
     await book._restore_durable_positions(
+        unit_of_work=unit_of_work,
         account_label="primary",
         environment="live",
         as_of=datetime.now(UTC),
@@ -2536,9 +2540,11 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
         async def load_positions(self, **kwargs):
             return (state,)
 
-    book = ExecutionBook(execution_unit_of_work=StubUow())
+    unit_of_work = StubUow()
+    book = ExecutionBook(execution_unit_of_work=unit_of_work)
     # The current durable snapshot repairs the in-memory head while reservations remain active.
     await book._restore_durable_positions(
+        unit_of_work=unit_of_work,
         account_label="primary",
         environment="live",
         as_of=datetime.now(UTC),
