@@ -90,8 +90,8 @@ class LiveSubmissionFence:
     ) -> None:
         """Raise ``OrderPreSubmissionError`` if an entry fence is stale."""
 
-        client_order_id = getattr(plan, "client_order_id", None)
-        if client_order_id is not None and not str(client_order_id).strip():
+        client_order_id = plan.client_order_id
+        if not client_order_id.strip():
             raise OrderPreSubmissionError("client_order_id must not be empty")
 
         if plan.reduce_only:

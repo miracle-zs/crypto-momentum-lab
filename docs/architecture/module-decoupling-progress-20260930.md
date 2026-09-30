@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十八批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十九批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -894,6 +894,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - GTD 到期判断、reduce-only 排除、terminal/已全部成交排除、撤单日志与停止/观察者取消顺序保持。未新增撤单转发实现，实际撤单仍使用原回调。
 
 验证：限价生命周期/架构定向 **72 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2480 passed**，28.67 秒，一项现有 Starlette/httpx 警告。新增 entry_orders 禁止 sqlalchemy/persistence 导入检查，并独立进程验证禁止具体 state_machine 时仍可导入。entry_orders 定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十九批：提交围栏使用必需订单标识
+
+第六十八批提交为 `621390c`；第六十九批继续本地实施，未部署生产。
+
+- 核对确认 LiveSubmissionFence 的耐久读取已依赖 LiveRiskStateReader，不新增重复仓储接口。
+- validate 直接读取 OrderExecutionPlan.client_order_id 并按领域字符串契约检查空白，删除 getattr、缺失默认值和 str 转换。真实计划的标识已是必需字符串，正常路径保持；缺失字段现在明确抛出 AttributeError，None/非字符串也不再经静默跳过或隐式转换获准。
+- 保留空白标识的 OrderPreSubmissionError、reduce-only 与入场分支、租约/epoch 检查、halt 读取及能力评估顺序。新增缺失身份检查证明在耐久读取前拒绝不完整计划，未新增数据库写入或提交路径。
+
+验证：提交围栏定向 **8 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2481 passed**，28.89 秒，一项现有 Starlette/httpx 警告。submission_fence 定向 mypy --follow-imports=skip、核心文件与围栏测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -355,3 +355,23 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
         cast(Any, SimpleNamespace(reduce_only=True, client_order_id="ord-exit-2")),
         checked_at,
     )
+
+
+async def test_submission_fence_requires_order_identity_before_durable_reads() -> None:
+    class RiskState:
+        async def load_active_lease(self, *args):
+            pytest.fail("missing identity must fail before durable reads")
+
+    fence = LiveSubmissionFence(
+        risk_state=cast(Any, RiskState()),
+        environment="live",
+        account_label="account-1",
+        strategy_name="momentum",
+        lease_owner="worker-1",
+        code_generation="generation-1",
+    )
+    with pytest.raises(AttributeError, match="client_order_id"):
+        await fence.validate(
+            cast(Any, SimpleNamespace(reduce_only=False)),
+            datetime.now(tz=UTC),
+        )
