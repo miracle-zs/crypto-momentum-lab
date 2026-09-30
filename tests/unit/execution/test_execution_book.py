@@ -2849,3 +2849,59 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position) -> Non
     )
     assert view.total_quantity == Decimal("0")
     assert view.stream_scope.stream_epoch == "new-epoch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_location", ["same", "other-account", "other-side"])
+async def test_outbox_scope_controls_cross_stream_read(command_location) -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+
+    class NoTransaction:
+        def transaction(self, key):
+            raise AssertionError("flat snapshot stream adoption opened a transaction")
+
+    book = ExecutionBook(execution_unit_of_work=NoTransaction())
+    book._persistence_failed = False
+    key = _scope().to_position_key()
+    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="old-epoch"
+    )
+
+    from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+    command_scope = _scope() if command_location == "same" else ExecutionScope(
+        environment="live", account_label=("other-account" if command_location == "other-account" else "primary"), symbol="BTCUSDT",
+        position_side=(FuturesPositionSide.LONG if command_location == "other-account" else FuturesPositionSide.SHORT),
+    )
+    command = TradeCommand(
+        command_id="pending-command", position_key=command_scope.to_position_key(),
+        command_type=TradeCommandType.ENTRY, side=StrategySide.LONG,
+        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
+    )
+    book._outbox_by_command_id[command.command_id] = OutboxEntry(
+        command_id=command.command_id, request_id="request", scope=command_scope,
+        command=command,
+    )
+
+    book.register_active_stream(
+        environment="live", account_label="primary",
+        stream_id="account_event_hub", stream_epoch="new-epoch",
+    )
+    if command_location == "same":
+        with pytest.raises(ValueError, match="does not match the restored position"):
+            await book.read(
+                _scope(), stream_id="account_event_hub", stream_epoch="new-epoch"
+            )
+        assert book._stream_scopes[key.canonical_id].stream_epoch == "old-epoch"
+        assert key.canonical_id not in book._journals
+    else:
+        view = await book.read(
+            _scope(), stream_id="account_event_hub", stream_epoch="new-epoch"
+        )
+        assert view.total_quantity == Decimal("0")
+        assert view.stream_scope.stream_epoch == "new-epoch"
+    assert book._outbox_by_command_id[command.command_id].command is command
