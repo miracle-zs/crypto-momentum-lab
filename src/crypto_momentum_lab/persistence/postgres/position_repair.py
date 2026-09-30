@@ -25,11 +25,13 @@ from crypto_momentum_lab.persistence.postgres.command_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
-    ExecutionTransaction,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     ExchangeOrderRow,
+)
+from crypto_momentum_lab.persistence.postgres.position_repair_ports import (
+    PositionRepairExecutionTransaction,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -37,7 +39,7 @@ from crypto_momentum_lab.persistence.postgres.position_reservation_repository im
 
 
 class PostgresPositionRepairTransaction:
-    def __init__(self, transaction: ExecutionTransaction) -> None:
+    def __init__(self, transaction: PositionRepairExecutionTransaction) -> None:
         self._transaction = transaction
 
     async def load_repair_facts(

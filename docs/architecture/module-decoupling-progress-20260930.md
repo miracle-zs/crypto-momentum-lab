@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百三十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百三十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1661,6 +1661,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 为新模型模块增加两项独立进程导入验收，禁止数据库、执行协调栈和恢复 codec 隐式加载，使用契约不再需要加载修复计算。
 
 验证：position_repair、position_repair_models、position_context_ports、position_ledger_models、领域 ports、recovery_models、position_self_healing 七文件 mypy --follow-imports=skip 通过，不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2539 passed**，31.01 秒，一项现有 Starlette/httpx 警告。计算、模型、自愈与架构测试完整 Ruff，其余修改文件 F/I，git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百三十二批：Postgres 修复适配的执行事务能力接口
+
+第一百三十一批提交为 `b93455b`；第一百三十二批于 2026-10-01 继续本地实施，未部署生产。
+
+- 新增 PositionRepairExecutionTransaction，复用现有领域 ExecutionTransactionPort，只补充修复 SQL 查询实际需要的只读 session 能力。PostgresPositionRepairTransaction 构造参数不再绑定具体 ExecutionTransaction 类。
+- 原生执行 UoW 仍负责创建事务、共享 advisory lock 和 session，修复适配器保留查询、record_trade、persist_facts 与 head CAS 的原顺序，没有新增事务或提交动作。
+- 为新 Postgres 接口增加独立进程导入守卫，防止加载 SQLAlchemy、具体存储实现和执行协调栈。
+
+验证：十个所有者文件与临时赋值探针联合 mypy --follow-imports=skip **十一文件通过**，同时验证原生 ExecutionTransaction 满足修复执行接口、原生修复事务满足 PositionRepairTransaction、原生修复 UoW 满足 PositionRepairUnitOfWork；探针清理。不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2540 passed**，30.69 秒，一项现有 Starlette/httpx 警告。三个修改代码/测试文件完整 Ruff、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
