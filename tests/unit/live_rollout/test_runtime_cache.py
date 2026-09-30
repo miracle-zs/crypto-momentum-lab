@@ -32,6 +32,8 @@ def test_runtime_cache_maintains_protection_set_and_interval() -> None:
     maintenance = LiveRuntimeCacheMaintenance(
         run_id="run-1",
         strategy=strategy,
+        strategy_protected_symbols=strategy.cache_protected_symbols,
+        strategy_pruner=strategy.prune_inactive_symbols,
         pending_entry_symbols=lambda: {"pendingusdt"},
     )
 
@@ -83,6 +85,8 @@ def test_runtime_cache_logs_memory_and_cache_snapshot() -> None:
     maintenance = LiveRuntimeCacheMaintenance(
         run_id="run-1",
         strategy=strategy,
+        strategy_protected_symbols=strategy.cache_protected_symbols,
+        strategy_pruner=strategy.prune_inactive_symbols,
         pending_entry_symbols=lambda: (),
     )
     maintenance.update_managed_symbols(position_symbols=(), order_symbols=())
@@ -119,3 +123,15 @@ def test_runtime_cache_logs_memory_and_cache_snapshot() -> None:
     assert fields["buffered_symbol_count"] == 3
     assert fields["buffered_state_count"] == 12
     assert "telemetry_sample_series_count" not in fields
+
+
+def test_absent_cache_callbacks_keep_memory_only_behavior() -> None:
+    strategy = _Strategy()
+    maintenance = LiveRuntimeCacheMaintenance(
+        run_id="run-1",
+        strategy=strategy,
+        pending_entry_symbols=lambda: (),
+    )
+    maintenance.update_managed_symbols(position_symbols=(), order_symbols=())
+    maintenance.prune(now=NOW, current_symbol="BTCUSDT")
+    assert strategy.prune_calls == 0

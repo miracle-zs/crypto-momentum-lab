@@ -274,10 +274,18 @@ class LiveStrategyDaemon:
         self._run_active = False
         self._exit_control = LiveExitControlGate(run_id=config.run_id)
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
+        strategy_protected_symbols = getattr(strategy, "cache_protected_symbols", None)
+        strategy_pruner = getattr(strategy, "prune_inactive_symbols", None)
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
             strategy=self._strategy,
             pending_entry_symbols=self._pending_entries.pending_symbols,
+            strategy_protected_symbols=(
+                strategy_protected_symbols
+                if callable(strategy_protected_symbols)
+                else None
+            ),
+            strategy_pruner=strategy_pruner if callable(strategy_pruner) else None,
             volume_metrics_provider=(
                 (lambda: getattr(self._signal_recorder, "volume_metrics", {}))
                 if self._signal_recorder is not None

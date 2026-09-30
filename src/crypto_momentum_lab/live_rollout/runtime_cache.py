@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
 from datetime import datetime, timedelta
+from typing import Protocol
 
 import structlog
 
@@ -19,6 +20,16 @@ _CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
 _STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
 
 
+class StrategyCachePruner(Protocol):
+    def __call__(
+        self,
+        *,
+        now: datetime,
+        protected_symbols: Collection[str],
+        inactive_after: timedelta,
+    ) -> tuple[str, ...]: ...
+
+
 class LiveRuntimeCacheMaintenance:
     """Protect active symbols while pruning cold strategy state."""
 
@@ -28,6 +39,8 @@ class LiveRuntimeCacheMaintenance:
         run_id: str,
         strategy: object,
         pending_entry_symbols: Callable[[], Iterable[str]],
+        strategy_protected_symbols: Callable[[], Iterable[str]] | None = None,
+        strategy_pruner: StrategyCachePruner | None = None,
         volume_metrics_provider: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         if not run_id.strip():
@@ -35,6 +48,8 @@ class LiveRuntimeCacheMaintenance:
         self._run_id = run_id
         self._strategy = strategy
         self._pending_entry_symbols = pending_entry_symbols
+        self._strategy_protected_symbols = strategy_protected_symbols
+        self._strategy_pruner = strategy_pruner
         self._volume_metrics_provider = volume_metrics_provider
         self._managed_position_symbols: frozenset[str] = frozenset()
         self._managed_order_symbols: frozenset[str] = frozenset()
@@ -73,23 +88,12 @@ class LiveRuntimeCacheMaintenance:
             protected.update(_normalize_symbols(active_symbols))
         protected.update(_normalize_symbols(self._pending_entry_symbols()))
 
-        strategy_protected = getattr(
-            self._strategy,
-            "cache_protected_symbols",
-            None,
-        )
-        if callable(strategy_protected):
-            protected.update(_normalize_symbols(strategy_protected()))
+        if self._strategy_protected_symbols is not None:
+            protected.update(_normalize_symbols(self._strategy_protected_symbols()))
         protected_symbols = frozenset(protected)
-
-        strategy_prune = getattr(
-            self._strategy,
-            "prune_inactive_symbols",
-            None,
-        )
         evicted_strategy_symbols: tuple[str, ...] = ()
-        if callable(strategy_prune):
-            evicted_strategy_symbols = strategy_prune(
+        if self._strategy_pruner is not None:
+            evicted_strategy_symbols = self._strategy_pruner(
                 now=now,
                 protected_symbols=protected_symbols,
                 inactive_after=_STRATEGY_CACHE_INACTIVE_AFTER,
