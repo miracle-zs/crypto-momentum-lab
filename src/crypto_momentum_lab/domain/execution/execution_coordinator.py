@@ -206,15 +206,18 @@ class ExecutionCoordinator:
         return self._reservations_by_id.get(reservation_id)
 
     def get_active_reservations(
-        self, key: PositionKey
+        self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
-        """Returns all currently active reservations for a given PositionKey."""
-        return tuple(
+        """Return active reservations, optionally restricted to one position."""
+        active = tuple(
             r
             for r in self._reservations_by_id.values()
-            if r.position_key.canonical_id == key.canonical_id
+            if (key is None or r.position_key.canonical_id == key.canonical_id)
             and r.active_quantity > Decimal("0")
         )
+        if key is None:
+            return tuple(sorted(active, key=lambda r: (r.created_at, r.reservation_id)))
+        return active
 
     def get_available_batch_quantity(
         self, view: PositionView, batch_id: str

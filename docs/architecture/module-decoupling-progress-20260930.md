@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零六批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1345,6 +1345,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：ExecutionBook、PositionContextBook、position_repair、position_ledger_models、PositionBook、ExecutionCoordinator、command_lifecycle、AccountJournal、reservation_repository、账户模型共十文件联合 mypy --follow-imports=skip 通过。额外临时类型探针 `def accept_native_book(book: ExecutionBook) -> PositionContextBook: return book` 与上述文件联合检查通过，确认原生执行簿结构兼容，探针已清理。不宣称其他跳过依赖或全仓类型验收；原仅四文件 skip 检查仍不能当作完整类型上下文。
 
 执行领域及 reservation 完整性定向 **330 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，29.79 秒，一项现有 Starlette/httpx 警告。三个修改文件 F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零六批：活跃 reservation 查询归属协调器
+
+第一百零五批提交为 `38a99a3`；第一百零六批继续本地实施，未部署生产。
+
+- ExecutionCoordinator.get_active_reservations 接收可选 PositionKey；指定 key 保持原插入顺序及 canonical_id/active_quantity 过滤，全量查询按 created_at、reservation_id 排序。
+- ExecutionBook.get_active_reservations 直接调用该公共契约，删除方法存在探测和直接读取协调器私有字典的路径。全量查询逻辑从执行簿移动到 reservation 状态所有者，不增加转发适配器或仓储查询。
+- 不完整替身须提供原生协调器必需方法；其他恢复、候选复制与发布路径的私有字典访问仍保留，不宣称私有访问全清。锁、事务和 reservation 状态所有权保持。
+
+验证：执行领域及 reservation 完整性定向 **330 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，30.02 秒，一项现有 Starlette/httpx 警告。上一批十文件联合 mypy --follow-imports=skip、两核心文件 F/I、git diff --check 通过，不代表全仓类型或真实数据库验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
