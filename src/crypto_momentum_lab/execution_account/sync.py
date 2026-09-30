@@ -34,6 +34,7 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     advance_fill_cursors,
     fill_counts_by_symbol,
     merge_fill_cursor,
+    plan_fill_polling_ranges,
 )
 from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.execution_account.position_history import (
@@ -60,11 +61,6 @@ from crypto_momentum_lab.execution_account.sync_ports import (
 )
 
 _FILL_KEY_CACHE_SIZE = 8192
-_NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
-# Never issue an unbounded userTrades pull.  Symbols without a fromId cursor
-# and without a prior startTime are historical; scanning a week is enough to
-# catch a still-open lot without replaying every prior episode on the symbol.
-_HISTORICAL_FILL_LOOKBACK = timedelta(days=7)
 # Dashboard and ops-monitor only need a fresh enough "still ready" sample.
 # Writing every ~30s heartbeat produced ~12k identical ready_readonly rows
 # per day per account.  ops-monitor fires live_account_lifecycle_not_ready
@@ -307,33 +303,12 @@ class ExecutionAccountSyncService:
                 if self._has_completed_sync
                 else set()
             )
-            start_time_by_symbol = {
-                symbol: cursor.start_time_ms
-                for symbol, cursor in previous_fill_cursors.items()
-                if (cursor.from_id is None and cursor.start_time_ms is not None)
-            }
-            from_id_by_symbol = {
-                symbol: cursor.from_id
-                for symbol, cursor in previous_fill_cursors.items()
-                if (cursor.from_id is not None and symbol in tracked_fill_symbols)
-            }
-            new_position_start_at = int(
-                (config.observed_at - _NEW_POSITION_FILL_LOOKBACK).timestamp() * 1000
+            from_id_by_symbol, start_time_by_symbol = plan_fill_polling_ranges(
+                previous_fill_cursors,
+                tracked_fill_symbols,
+                newly_active_symbols,
+                observed_at=config.observed_at,
             )
-            for symbol in newly_active_symbols:
-                if symbol not in previous_fill_cursors:
-                    start_time_by_symbol[symbol] = max(0, new_position_start_at)
-            # Any remaining tracked symbol still has no positional cursor.
-            # Bound it explicitly so userTrades never falls back to "latest
-            # 1000 fills of every prior episode" for that symbol.
-            historical_start_at = int(
-                (config.observed_at - _HISTORICAL_FILL_LOOKBACK).timestamp() * 1000
-            )
-            for symbol in tracked_fill_symbols:
-                if symbol in from_id_by_symbol:
-                    continue
-                if symbol not in start_time_by_symbol:
-                    start_time_by_symbol[symbol] = historical_start_at
             fills_by_key: dict[FillKey, AccountFillEvent] = {}
             fill_load_scans: list[AccountFillLoadScan] = []
             scan_fetcher = optional_fill_provenance_fetcher(self._client)
