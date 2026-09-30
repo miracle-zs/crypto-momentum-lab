@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
-from inspect import Parameter, signature
 from time import perf_counter
 from typing import Protocol
 
@@ -325,43 +324,15 @@ def _checkpoint_for_persistence(
     *,
     hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
 ) -> StrategyCheckpoint:
-    """Build a compact checkpoint without breaking lightweight adapters."""
+    """Request the strategy's compact checkpoint through its explicit contract."""
     started = perf_counter()
-    checkpoint_method = strategy.checkpoint
-    parameters: Mapping[str, Parameter] | None = None
-    try:
-        parameters = signature(checkpoint_method).parameters
-    except (TypeError, ValueError):
-        pass
-    if (
-        parameters is not None
-        and "include_market_state_buffers" in parameters
-        and (
-            parameters["include_market_state_buffers"].kind
-            in {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
-        )
-    ):
-        checkpoint = checkpoint_method(include_market_state_buffers=False)
-        log.info(
-            "live_checkpoint_built",
-            build_ms=round((perf_counter() - started) * 1000, 3),
-            payload_keys=tuple(sorted(checkpoint.payload)),
-        )
-        return _with_hub_cursor(checkpoint, hub_cursor_provider)
-
-    checkpoint = checkpoint_method()
-    payload = {
-        key: value
-        for key, value in checkpoint.payload.items()
-        if key not in {"market_state_buffers", "signal_buffers"}
-    }
-    compact = replace(checkpoint, payload=payload)
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
     log.info(
         "live_checkpoint_built",
         build_ms=round((perf_counter() - started) * 1000, 3),
-        payload_keys=tuple(sorted(compact.payload)),
+        payload_keys=tuple(sorted(checkpoint.payload)),
     )
-    return _with_hub_cursor(compact, hub_cursor_provider)
+    return _with_hub_cursor(checkpoint, hub_cursor_provider)
 
 
 def _with_hub_cursor(

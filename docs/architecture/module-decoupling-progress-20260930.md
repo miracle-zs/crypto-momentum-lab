@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -626,6 +626,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 协调器的 checkpoint 模型注解直接引用实际 models 所有者。缺失 writer 能力不再静默降级；writer coalescing、重试、同步保存、提交后回调与关闭未改。策略 checkpoint 参数签名探测仍保留，本批不宣称所有兼容探测均移除。
 
 验证：协调器既有回归 **13 passed**，涵盖耐久进度、dirty 预算和保存/失败场景；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。checkpoint_coordinator、checkpoint_writer、domain/strategy/models 三文件定向 mypy --follow-imports=skip 通过，未禁用错误码；核心文件完整 Ruff、git diff --check 通过，不代表全仓类型验收。本批没有新增镜像实现的测试，沿用真实 writer 的既有回归。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十七批：紧凑 checkpoint 契约直接调用
+
+第四十六批提交为 `b90f8f2`；第四十七批继续本地实施，未部署生产。
+
+- _checkpoint_for_persistence 直接调用已声明的 checkpoint(include_market_state_buffers=False)。删除 inspect.signature/Parameter 探测与旧无参数调用后手工删除 market_state_buffers/signal_buffers 的兼容分支，compact checkpoint 的实现由实际策略所有。
+- 生产策略已支持此参数，正常日志、Hub cursor 附加、保存调度与 writer 事务规则保持。旧无参数策略实现现在失败而非走备用路径，是明确的接口迁移；共享 shadow FakeStrategy 补齐相同参数。
+- 本批不新增备用适配或第二种 checkpoint 编码，保留既有策略 compact 行为与身份/epoch 规则。
+
+验证：checkpoint 协调器及 shadow service 定向 **17 passed**，原协调器测试继续断言 include_market_state_buffers=False。checkpoint_coordinator、checkpoint_writer、domain/strategy/models 三文件定向 mypy --follow-imports=skip 通过；核心文件完整 Ruff、迁移替身 F/I、git diff --check 通过，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

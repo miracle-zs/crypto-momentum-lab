@@ -144,7 +144,9 @@ class FakeStrategy:
             checkpoint=StrategyCheckpoint({}, {}, {}, {}),
         )
 
-    def checkpoint(self) -> StrategyCheckpoint:
+    def checkpoint(
+        self, *, include_market_state_buffers: bool = True
+    ) -> StrategyCheckpoint:
         return StrategyCheckpoint({}, {}, {}, {})
 
 
