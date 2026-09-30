@@ -208,3 +208,34 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.live_rollout.exit_channels",
+        "crypto_momentum_lab.live_rollout.exit_channel_ports",
+    ],
+)
+def test_exit_consumers_do_not_load_market_sources(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class MarketSourceGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.market_data.quote_hub',
+            'crypto_momentum_lab.live_rollout.closed_candle_feed',
+        }:
+            raise RuntimeError('exit consumer imported market source: ' + fullname)
+sys.meta_path.insert(0, MarketSourceGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

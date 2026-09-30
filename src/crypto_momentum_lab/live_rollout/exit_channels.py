@@ -16,8 +16,8 @@ from crypto_momentum_lab.live_rollout.market_cache import (
 )
 
 if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
     from crypto_momentum_lab.live_rollout.closed_candle_feed import ClosedCandle15mEvent
-    from crypto_momentum_lab.market_data.quote_hub import RealtimeMarketQuote
 
 log = structlog.get_logger()
 
