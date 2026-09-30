@@ -168,8 +168,6 @@ class LiveContextRuntime:
         if resolved is None:
             raise ValueError("context_reader or context_provider must be provided")
         self._run_id = run_id
-        self._context_reader = resolved
-        self._context_provider = resolved
         self._has_currentness_check = False
         if hasattr(resolved, "is_current"):
             self._currentness_check = resolved.is_current

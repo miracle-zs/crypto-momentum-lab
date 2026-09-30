@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成八十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成九十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1144,6 +1144,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 新增两项新/旧方法绑定测试，验证主方法优先与原绑定稳定性。不新增上下文读取或缓存实现。
 
 验证：上下文定向 **10 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2502 passed**。context 定向 mypy --follow-imports=skip、核心文件与上下文测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第九十批：清理上下文运行的无用对象依赖
+
+第八十九批提交为 `80a049e`；第九十批继续本地实施，未部署生产。
+
+- 能力绑定后 LiveContextRuntime 不再读取 _context_reader/_context_provider，删除两项重复保存属性。仍保留构造兼容输入和已绑定方法，不新增转发实现。
+- daemon 通过已有 context_provider 参数传入 callable provider，删除把该对象塞入严格 reader 参数时的 arg-type 忽略；resolved 选择结果不变。
+- 上下文 generation、新鲜度、失效优先级、托管符号发布及 provider 生命周期行为保持。不宣称 daemon 全仓类型验收完成。
+
+验证：上下文/daemon 定向 **71 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2502 passed**。context、context_prefetch、market_admission、telemetry_ports 四文件联合定向 mypy --follow-imports=skip、context 完整 Ruff、daemon F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
