@@ -2939,3 +2939,30 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     repository.load_seen_event_ids.assert_not_awaited()
     repository.load_seen_fill_trade_ids.assert_not_awaited()
     repository.load_execution_order_watermarks.assert_not_awaited()
+
+    request = ExecutionRequest(
+        request_id="blocked-during-restore", scope=_scope(),
+        strategy_name="trend", strategy_version="1", run_id="run",
+        decision_ref="decision", expected_view_token="unused",
+        action=TradeCommandType.ENTRY, requested_quantity=Decimal("1"),
+    )
+    result = await book.act(request)
+    assert isinstance(result, Blocked)
+    assert "restore is required" in result.reason
+    repository.upsert_execution_command.assert_not_awaited()
+
+    # Correct the durable record and retry on the same Book instance.
+    details[field] = None
+    repository.load_seen_event_ids.return_value = ()
+    repository.load_seen_fill_trade_ids.return_value = ()
+    repository.load_execution_order_watermarks.return_value = ()
+    await book.restore(account_label="primary")
+    assert book._persistence_failed is False
+    entry = book.get_outbox("unparseable-command")
+    assert entry is not None
+    assert entry.state is DispatchState.PREPARED
+    assert entry.scope == _scope()
+    assert entry.command.requested_quantity == Decimal("1")
+    repository.load_seen_event_ids.assert_awaited_once()
+    repository.load_seen_fill_trade_ids.assert_awaited_once()
+    repository.load_execution_order_watermarks.assert_awaited_once()
