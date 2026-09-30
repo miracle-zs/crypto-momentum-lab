@@ -2071,11 +2071,13 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("notify", [False, True])
 async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
-    monkeypatch,
+    monkeypatch, notify: bool,
 ) -> None:
     state = SimpleNamespace(symbol="BTCUSDT")
     failures: list[tuple[str, str | None]] = []
+    calls: list[tuple[str, str]] = []
 
     async def stop_after_first_cycle(_delay: float) -> None:
         raise asyncio.CancelledError
@@ -2084,6 +2086,9 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
 
     class Daemon:
         managed_position_symbols = frozenset({"BTCUSDT"})
+
+        def note_order_identity_conflict(self, symbol):
+            pytest.fail("helper must not discover daemon notification methods")
 
         async def process_grace_timeout(self, _state, *, now, latest_quote):
             del now, latest_quote
@@ -2098,7 +2103,17 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
             latest_market_quotes=SimpleNamespace(
                 for_symbols=lambda _symbols: (),
             ),
-            on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
+            on_exit_failure=lambda symbol, failure: (
+                calls.append(("failure", symbol)),
+                failures.append((symbol, failure)),
+            ),
+            on_order_identity_conflict=(
+                (lambda symbol: calls.append(("identity", symbol))) if notify else None
+            ),
         )
 
     assert failures == [("BTCUSDT", "order_identity_conflict")]
+    assert calls == (
+        [("identity", "BTCUSDT"), ("failure", "BTCUSDT")]
+        if notify else [("failure", "BTCUSDT")]
+    )
