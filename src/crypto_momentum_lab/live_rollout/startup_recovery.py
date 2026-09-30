@@ -272,20 +272,19 @@ def validate_live_warmup_coverage(
             for state in states_by_symbol.get(symbol, ())
             if all(getattr(state, field, None) is not None for field in required_fields)
         ]
-        valid_states.sort(key=lambda state: getattr(state, "bucket_start", cutover_at))
+        valid_states.sort(key=lambda state: state.bucket_start)
         if len(valid_states) < warmup_buckets:
             missing.append(f"{symbol}:have={len(valid_states)},need={warmup_buckets}")
             continue
         window = valid_states[-warmup_buckets:]
-        if all(hasattr(state, "bucket_start") for state in window):
-            if (
-                any(
-                    current.bucket_start - previous.bucket_start != interval
-                    for previous, current in zip(window, window[1:], strict=False)
-                )
-                or window[-1].bucket_start != cutover_at
-            ):
-                gaps.append(symbol)
+        if (
+            any(
+                current.bucket_start - previous.bucket_start != interval
+                for previous, current in zip(window, window[1:], strict=False)
+            )
+            or window[-1].bucket_start != cutover_at
+        ):
+            gaps.append(symbol)
 
     if missing or gaps:
         details: list[str] = []
