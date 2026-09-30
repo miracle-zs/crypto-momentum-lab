@@ -38,6 +38,10 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     fill_counts_by_symbol,
     merge_fill_cursor,
 )
+from crypto_momentum_lab.execution_account.position_history import (
+    PositionSignature,
+    should_persist_position,
+)
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
@@ -64,10 +68,6 @@ _HISTORICAL_FILL_LOOKBACK = timedelta(days=7)
 # well below that threshold -- 5 minutes raced the alert and flapped
 # critical every cycle.
 _PROCESS_STATE_REFRESH = timedelta(seconds=60)
-# A fill burst can emit many ACCOUNT_UPDATE events with the same position
-# view.  Collapse identical (amount, entry) observations that land within
-# this window so one close does not stamp dozens of duplicate snapshots.
-_POSITION_SNAPSHOT_COALESCE = timedelta(seconds=2)
 
 
 class ExecutionAccountSyncService:
@@ -102,7 +102,7 @@ class ExecutionAccountSyncService:
         )
         self._last_balance_values: dict[str, BalanceValue] = {}
         self._last_position_signatures: dict[
-            tuple[str, str], tuple[Decimal, Decimal, datetime]
+            tuple[str, str], PositionSignature
         ] = {}
         self._known_fill_keys: set[FillKey] = set()
         self._known_fill_key_order: deque[FillKey] = deque(maxlen=_FILL_KEY_CACHE_SIZE)
@@ -788,23 +788,7 @@ class ExecutionAccountSyncService:
         for position in positions:
             key = (position.symbol, position.position_side)
             last = self._last_position_signatures.get(key)
-            if position.position_amt == 0:
-                # Durable zero only when the previous observation was open.
-                if last is None or last[0] == 0:
-                    continue
-                persisted.append(position)
-                self._last_position_signatures[key] = (
-                    position.position_amt,
-                    position.entry_price,
-                    observed_at,
-                )
-                continue
-            if (
-                last is not None
-                and last[0] == position.position_amt
-                and last[1] == position.entry_price
-                and observed_at - last[2] < _POSITION_SNAPSHOT_COALESCE
-            ):
+            if not should_persist_position(position, last, observed_at=observed_at):
                 continue
             persisted.append(position)
             self._last_position_signatures[key] = (
