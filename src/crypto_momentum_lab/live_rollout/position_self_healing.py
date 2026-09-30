@@ -7,10 +7,12 @@ from crypto_momentum_lab.domain.execution.position_context_ports import (
     PositionRepairBook,
 )
 from crypto_momentum_lab.domain.execution.position_repair import (
+    build_position_repair,
+)
+from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairBlocked,
     PositionRepairRequest,
     PositionRepairUnitOfWork,
-    build_position_repair,
 )
 
 log = structlog.get_logger(__name__)

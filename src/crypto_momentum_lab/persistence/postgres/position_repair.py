@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.execution.evidence_codec import _trade_payload_digest
 from crypto_momentum_lab.domain.execution.ports import ExecutionTradeIdentity
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-from crypto_momentum_lab.domain.execution.position_repair import (
+from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepair,
     PositionRepairFacts,
     PositionRepairReceipt,

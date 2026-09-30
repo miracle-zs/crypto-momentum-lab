@@ -62,6 +62,7 @@ import pytest
         "crypto_momentum_lab.domain.execution.projection_codec",
         "crypto_momentum_lab.domain.execution.ports",
         "crypto_momentum_lab.domain.execution.position_context_ports",
+        "crypto_momentum_lab.domain.execution.position_repair_models",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:
@@ -131,6 +132,7 @@ def test_package_import_does_not_load_application_adapters(
         "crypto_momentum_lab.domain.execution.projection_codec",
         "crypto_momentum_lab.domain.execution.ports",
         "crypto_momentum_lab.domain.execution.position_context_ports",
+        "crypto_momentum_lab.domain.execution.position_repair_models",
         "crypto_momentum_lab.domain.execution.account_journal",
         "crypto_momentum_lab.domain.execution.position_book",
     ],
