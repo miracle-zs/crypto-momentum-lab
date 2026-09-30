@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.execution.command_repository import CommandRepository
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -92,10 +93,11 @@ async def build_live_execution_runtime(
         command_repository=commands,
         reservation_repository=reservations,
     )
+    book_commands: CommandRepository = commands
     book = ExecutionBook(
         coordinator=domain_coordinator,
         reservation_repository=reservations,
-        command_repository=commands,
+        command_repository=book_commands,
         execution_unit_of_work=unit_of_work,
     )
     # Recovery failure must prevent exposing a submission coordinator.
