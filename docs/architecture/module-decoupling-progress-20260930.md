@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -810,6 +810,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 此改动消除无关模块的导入时耦合，实际运行对应流仍依赖该 Hub 的原异常类型；缺失模块的导入失败会在该流执行时暴露，不宣称运行依赖已消失。
 
 验证：重连/致命错误及新导入隔离检查定向 **5 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2472 passed**，27.06 秒，一项现有 Starlette/httpx 警告。新增独立进程检查：禁止三种无关 Hub 后账户通道仍可加载。stream_recovery 定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十二批：风控运行消费健康上报能力
+
+第六十一批提交为 `22dc3d0`；第六十二批继续本地实施，未部署生产。
+
+- LiveRiskControlRuntime 已通过 dispatch、状态读取、上下文失效和 gate 刷新回调装配，不依赖具体 daemon；本批不新增重复处理接口。
+- 其 telemetry 仅调用 consumer_health，改为复用已有 ConsumerHealthSink，删除完整 LiveTelemetrySink 的类型引用。原 recorder 与现有测试替身直接满足接口，无新增记录转发实现。
+- 去除参数注解后 risk_control 全部函数 AST 与上一批一致。风控事件派发、耐久命令 claim/complete、消费者可用性与 gate 刷新顺序、恢复任务与重试规则保持。
+
+验证：风控/架构定向 **68 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2473 passed**，26.91 秒，一项现有 Starlette/httpx 警告。新增 risk_control 独立进程禁止 sqlalchemy/persistence 导入检查。risk_control 与 telemetry_ports 两文件定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

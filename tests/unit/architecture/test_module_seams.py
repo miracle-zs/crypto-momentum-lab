@@ -17,6 +17,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.account_event_ports",
         "crypto_momentum_lab.live_rollout.telemetry_ports",
         "crypto_momentum_lab.live_rollout.control_plane",
+        "crypto_momentum_lab.live_rollout.risk_control",
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",

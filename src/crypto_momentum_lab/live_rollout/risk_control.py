@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import structlog
 
@@ -28,11 +28,9 @@ from crypto_momentum_lab.live_rollout.commands import (
     EMERGENCY_FLATTEN_CONFIRMATION,
     require_authorized_command,
 )
+from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
 
 log = structlog.get_logger()
-
-if TYPE_CHECKING:
-    from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 
 
 class RiskControlCommandRepository(Protocol):
@@ -189,7 +187,7 @@ class LiveRiskControlRuntime:
         dispatch: Callable[[RiskControlEvent], Awaitable[str | None]],
         invalidate_contexts: Callable[[], None],
         refresh_entry_gate: Callable[[], None],
-        telemetry: LiveTelemetrySink | None,
+        telemetry: ConsumerHealthSink | None,
         clock: Callable[[], datetime],
         reconcile_retry_initial_seconds: float = 1.0,
         reconcile_retry_max_seconds: float = 30.0,
