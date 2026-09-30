@@ -31,12 +31,8 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 )
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
-    ExecutionBook,
     OrderExecutionPlan,
     TradeCommand,
-)
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
 )
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
@@ -79,7 +75,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
-    OrderExecutionStateMachine,
     SubmitPolicy,
 )
 from crypto_momentum_lab.execution_account.risk_control_hub import (
@@ -107,6 +102,10 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
+from crypto_momentum_lab.live_rollout.execution_runtime import (
+    LiveExecutionCallbacks,
+    build_live_execution_runtime,
+)
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -239,15 +238,8 @@ from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
     WebSocketMarketQuoteVolumeSource,
 )
-from crypto_momentum_lab.persistence.postgres.account_journal_store import (
-    PostgresAccountJournalStore,
-)
-from crypto_momentum_lab.persistence.postgres.command_repository import (
-    PostgresCommandRepository,
-)
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
-    AsyncPostgresExecutionUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -264,9 +256,6 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
-)
-from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
-    AsyncPostgresPositionReservationRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
@@ -792,47 +781,22 @@ async def run_live_daemon(
             evidence_provider=_provide_capability_evidence,
         )
 
-        state_machine = OrderExecutionStateMachine(
+        execution_runtime = await build_live_execution_runtime(
+            sessions=execution_factory,
             exchange=client,
-            repository=order_repository,
-            submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            live_submit_enabled=True,
-            clock=lambda: datetime.now(tz=UTC),
-            on_event=order_event_runtime.handle,
-            on_before_submit=register_expected_entry,
-            on_before_exchange_submit=submission_fence.validate,
-            on_exchange_request=telemetry.exchange_request_started,
-            on_exchange_response=telemetry.exchange_response_received,
-            serialize_commands=False,
-        )
-        reservation_repository = AsyncPostgresPositionReservationRepository(
-            execution_factory, strategy_name=strategy_name
-        )
-        domain_coordinator = ExecutionCoordinator()
-        command_repository = PostgresCommandRepository(execution_factory)
-        execution_unit_of_work = AsyncPostgresExecutionUnitOfWork(
-            execution_factory,
-            journal_store=PostgresAccountJournalStore(),
-            command_repository=command_repository,
-            reservation_repository=reservation_repository,
-        )
-        execution_book = ExecutionBook(
-            coordinator=domain_coordinator,
-            reservation_repository=reservation_repository,
-            command_repository=command_repository,
-            execution_unit_of_work=execution_unit_of_work,
-        )
-        # An incomplete recovery must fail startup before order submission.
-        await execution_book.restore(account_label=account_label)
-
-        execution_coordinator = OrderExecutionCoordinator(
-            backend=state_machine,
+            order_repository=order_repository,
             account_label=account_label,
-            environment="live",
-            reservation_repository=reservation_repository,
-            domain_coordinator=domain_coordinator,
-            execution_book=execution_book,
+            strategy_name=strategy_name,
+            callbacks=LiveExecutionCallbacks(
+                on_event=order_event_runtime.handle,
+                on_before_submit=register_expected_entry,
+                on_before_exchange_submit=submission_fence.validate,
+                on_exchange_request=telemetry.exchange_request_started,
+                on_exchange_response=telemetry.exchange_response_received,
+            ),
         )
+        execution_book = execution_runtime.book
+        execution_coordinator = execution_runtime.coordinator
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
