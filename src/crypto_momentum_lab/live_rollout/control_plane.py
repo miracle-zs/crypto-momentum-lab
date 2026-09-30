@@ -23,7 +23,7 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
-from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
+from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
 
 log = structlog.get_logger(__name__)
 
@@ -102,7 +102,7 @@ class LiveControlPlaneRuntime:
         notify_market_state_gap: Callable[[str], None],
         refresh_entry_gate: Callable[[], None],
         mark_database_ok: Callable[[], None],
-        telemetry: LiveTelemetrySink | None = None,
+        telemetry: ConsumerHealthSink | None = None,
         clock: Clock | None = None,
         strategy_warmup_ready: bool = False,
     ) -> None:

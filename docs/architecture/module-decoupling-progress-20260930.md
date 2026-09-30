@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -702,6 +702,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 测试客户端与 EMA 替身删除旧 arg-type 忽略；EMA 替身显式实现 prune 并返回正式 ClosedCandleEmaSnapshot，保留原数值与来源 ID。
 
 验证：entry runtime/cache/架构定向 **62 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2459 passed**，25.82 秒，一项现有 Starlette/httpx 警告。entry_cache、entry_runtime、domain/universe/ports 三文件定向 mypy --follow-imports=skip 通过；核心文件和迁移测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。本批仅调用能力类型迁移，沿用现有行为回归。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十三批：控制平面消费者健康记录能力
+
+第五十二批提交为 `4dfc2a8`；第五十三批继续本地实施，未部署生产。
+
+- telemetry_ports.py 定义 ConsumerHealthSink，仅暴露同步 consumer_health 及原 consumer/available/occurred_at/reason/recovery/lag/sequence 参数、默认值。原 LiveTelemetrySink 继承该接口，删除重复声明；完整 sink 其他能力不变。
+- LiveControlPlaneRuntime 依赖 ConsumerHealthSink，不再导入完整 telemetry 模块。实际 telemetry recorder 与 FakeTelemetry 直接满足单方法能力，无新增转发或记录实现。
+- 控制平面函数在去除注解后 AST 与原实现一致；账户快照可用性、行情 gap 标记、lease 更新与健康事件发布顺序均保持。同步记录/有界队列/实际 telemetry 生命周期未迁移。
+
+验证：控制平面/telemetry/架构定向 **78 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**，26.15 秒，一项现有 Starlette/httpx 警告。新增 telemetry_ports、control_plane 两项独立进程禁止 sqlalchemy/persistence 导入检查。telemetry_ports、control_plane、实际 context 接口三文件一起定向 mypy --follow-imports=skip 通过；仅前两文件检查时 context 被跳过会出现 Any 基类错误，已通过纳入实际所有者处理，未禁用错误码。核心文件完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

@@ -13,6 +13,8 @@ import pytest
         "crypto_momentum_lab.live_rollout.shadow_preflight",
         "crypto_momentum_lab.live_rollout.session_state",
         "crypto_momentum_lab.live_rollout.lease_recovery",
+        "crypto_momentum_lab.live_rollout.telemetry_ports",
+        "crypto_momentum_lab.live_rollout.control_plane",
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",

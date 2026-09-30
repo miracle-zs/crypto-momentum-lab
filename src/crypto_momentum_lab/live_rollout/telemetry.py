@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.execution_account.hub import AccountEvent
+from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
 
 log = structlog.get_logger()
 
@@ -172,19 +173,7 @@ _EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
 )
 
 
-class LiveTelemetrySink(Protocol):
-    def consumer_health(
-        self,
-        *,
-        consumer: str,
-        available: bool,
-        occurred_at: datetime,
-        reason: str | None = None,
-        recovery: bool = False,
-        lag: bool = False,
-        sequence: int | None = None,
-    ) -> None: ...
-
+class LiveTelemetrySink(ConsumerHealthSink, Protocol):
     def market_state_progress(
         self,
         state: MarketState15s,
