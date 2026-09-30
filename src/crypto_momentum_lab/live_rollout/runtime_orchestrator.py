@@ -86,6 +86,10 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
 )
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
+from crypto_momentum_lab.live_rollout.account_event_ports import (
+    AccountEventExitProcessor,
+    AccountEventOrderReconciler,
+)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
@@ -231,8 +235,8 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_ORDER_TELEMETRY_EVENTS,
     RUNTIME_METADATA_SNAPSHOT,
     LiveRuntimeTelemetry,
-    LiveTelemetrySink,
 )
+from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.hub import (
     WebSocketMarketStateSource,
@@ -1939,14 +1943,14 @@ async def _bootstrap_execution_position_facts(
 async def _run_account_event_channel(
     *,
     source: AsyncIterable[AccountEvent],
-    daemon: LiveStrategyDaemon,
+    daemon: AccountEventExitProcessor,
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
-    order_reconciliation: LiveOrderReconciliation | None = None,
+    order_reconciliation: AccountEventOrderReconciler | None = None,
     order_repository: OrderReadRepository | None = None,
     state_machine: OrderExecutionPort | None = None,
     run_id: str | None = None,
-    telemetry: LiveTelemetrySink | None = None,
+    telemetry: AccountFillSink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
     on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None] | None = None,
     on_account_snapshot_recovery: Callable[[str], None] | None = None,

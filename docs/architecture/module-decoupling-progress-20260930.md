@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成八十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成八十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1062,6 +1062,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 去除参数注解后编排全部函数 AST 与上一批一致，启动 buffer.close 的错误传播、重连、账户快照及退出处理顺序保持。
 
 验证：编排/启动缓冲定向 **73 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2495 passed**，29.07 秒，一项现有 Starlette/httpx 警告。编排 F/I、git diff --check 通过，本批未作编排或全仓类型验收。复用现有行为检查，无新增镜像实现测试。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第八十三批：账户编排入口复用消费能力
+
+第八十二批提交为 `26a1f11`；第八十三批继续本地实施，未部署生产。
+
+- _run_account_event_channel 参数改为 AccountEventExitProcessor、AccountEventOrderReconciler 与 AccountFillSink，对齐账户 runtime 的实际消费能力，删除该入口完整 daemon/具体对账对象/完整 telemetry 类型限制。
+- 保留缺省对账对象时由订单读取仓储、执行端口和 run_id 创建原 LiveOrderReconciliation 的分支；该入口仍有实际装配职责，不移除必要原生实现导入。编排不再引用完整 LiveTelemetrySink 类型。
+- 去除参数注解后编排全部函数 AST 与上一批一致，账户事件流恢复、成交记录、先对账后发布快照、退出重试及回调顺序保持，无新增转发实现。
+
+验证：编排/账户通道定向 **76 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2495 passed**，29.29 秒，一项现有 Starlette/httpx 警告。account_event_ports 与 telemetry_ports 两文件定向 mypy --follow-imports=skip、编排 F/I、git diff --check 通过，不代表编排或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
