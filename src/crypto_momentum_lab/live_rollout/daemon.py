@@ -392,6 +392,11 @@ class LiveStrategyDaemon:
             exit_processor=self._exit_processor,
             exit_lane=self._exit_lane,
         )
+        entry_submission_waiter = getattr(
+            self._state_machine, "wait_for_entry_submissions_idle", None
+        )
+        if not callable(entry_submission_waiter):
+            entry_submission_waiter = None
         self._scheduled_controller = ScheduledRiskWindowController(
             config=ScheduledRiskWindowControllerConfig(
                 run_id=config.run_id,
@@ -411,6 +416,7 @@ class LiveStrategyDaemon:
             cancel_unfilled_entry_orders=self._cancel_unfilled_entry_orders,
             fetch_exchange_positions=self._fetch_exchange_positions,
             clock=self._clock,
+            wait_for_entry_submissions_idle=entry_submission_waiter,
         )
         self._entry_lane = EntryExecutionLane(
             config=EntryLaneConfig(

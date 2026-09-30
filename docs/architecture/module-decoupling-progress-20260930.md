@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成八十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成八十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1038,6 +1038,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 去除参数注解后控制器类 AST 与上一批一致。规划请求、撤单分类、平仓重试、权威仓位验证和入场恢复顺序保持。wait_for_entry_submissions_idle 的既有动态探测仍是待收窄点。
 
 验证：定时控制器/架构定向 **77 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2492 passed**，29.43 秒，一项现有 Starlette/httpx 警告。scheduled_controller、context、领域行情模型三文件联合定向 mypy --follow-imports=skip、核心文件完整 Ruff、git diff --check 通过，不代表完整管理器实现或全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第八十一批：定时撤单前等待能力显式注入
+
+第八十批提交为 `256c32a`；第八十一批继续本地实施，未部署生产。
+
+- ScheduledRiskWindowController 接收可选 wait_for_entry_submissions_idle 异步回调，撤单前不再 getattr/callable 探测执行对象。缺省 None 沿用不等待行为。
+- daemon 构造时绑定现有可调用等待方法，不支持该能力的旧执行替身注入 None；兼容选择仍留在装配，不宣称全仓探测清零。等待绑定属于构造生命周期，不再逐次发现方法替换。
+- 等待成功后才读取待入场计划并撤单；等待异常仍返回原 scheduled_entry_submission_drain_failed 原因，CancelledError 原样传播。未新增等待实现或第二条撤单路径。
+
+验证：控制器定向 **6 passed**，包含新增未配置/成功/失败三项显式等待行为；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2495 passed**，28.75 秒，一项现有 Starlette/httpx 警告。scheduled_controller、context、领域行情模型三文件联合定向 mypy --follow-imports=skip、核心文件与控制器测试完整 Ruff、daemon F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

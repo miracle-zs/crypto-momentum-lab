@@ -121,10 +121,12 @@ class ScheduledRiskWindowController:
         ),
         clock: Callable[[], datetime],
         startup_market_timeout_seconds: float = 30.0,
+        wait_for_entry_submissions_idle: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._exit_manager = exit_manager
         self._state_machine = state_machine
+        self._wait_for_entry_submissions_idle = wait_for_entry_submissions_idle
         self._context_provider = context_provider
         self._sync_pending_entry_plans = sync_pending_entry_plans
         self._publish_managed_position_symbols = publish_managed_position_symbols
@@ -369,12 +371,8 @@ class ScheduledRiskWindowController:
         )
 
     async def _cancel_scheduled_entry_orders(self) -> str | None:
-        wait_for_idle = getattr(
-            self._state_machine,
-            "wait_for_entry_submissions_idle",
-            None,
-        )
-        if callable(wait_for_idle):
+        wait_for_idle = self._wait_for_entry_submissions_idle
+        if wait_for_idle is not None:
             try:
                 await wait_for_idle()
             except asyncio.CancelledError:

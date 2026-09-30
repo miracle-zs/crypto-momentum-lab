@@ -215,3 +215,49 @@ async def test_scheduled_controller_completes_flatten_after_market_state_arrives
     # Now flatten should process and complete cleanly
     status = await controller.process()
     assert status is None
+
+
+@pytest.mark.parametrize("mode", ["absent", "success", "failure"])
+async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> None:
+    calls = []
+
+    class Canceller:
+        async def wait_for_entry_submissions_idle(self):
+            pytest.fail("controller must not discover waiter methods")
+
+    async def wait():
+        calls.append("wait")
+        if mode == "failure":
+            raise OSError("unavailable")
+
+    def pending():
+        calls.append("pending")
+        return ()
+
+    controller = ScheduledRiskWindowController(
+        config=ScheduledRiskWindowControllerConfig(
+            run_id="test-run", scheduled_risk_window=None
+        ),
+        exit_manager=None,
+        state_machine=Canceller(),
+        context_provider=None,
+        sync_pending_entry_plans=lambda context: None,
+        publish_managed_position_symbols=None,
+        invalidate_context_cache=lambda: None,
+        process_exit_requests=None,
+        set_entry_blocked=lambda blocked, **kwargs: None,
+        pending_entry_plans=pending,
+        cancel_unfilled_entry_orders=None,
+        fetch_exchange_positions=None,
+        clock=lambda: datetime.now(tz=UTC),
+        wait_for_entry_submissions_idle=wait if mode != "absent" else None,
+    )
+    result = await controller._cancel_scheduled_entry_orders()
+    assert calls == (
+        ["wait"] if mode == "failure"
+        else ["wait", "pending"] if mode == "success"
+        else ["pending"]
+    )
+    assert result == (
+        "scheduled_entry_submission_drain_failed:OSError" if mode == "failure" else None
+    )
