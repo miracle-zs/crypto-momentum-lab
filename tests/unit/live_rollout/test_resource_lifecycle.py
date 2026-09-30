@@ -35,23 +35,23 @@ async def test_live_resource_lifecycle_preserves_shutdown_order() -> None:
     events: list[str] = []
 
     lifecycle = LiveResourceLifecycle(
-        entry_runtime=FakeResource("entry-runtime", events),  # type: ignore[arg-type]
-        entry_order_lifecycle=FakeResource("entry-orders", events),  # type: ignore[arg-type]
-        execution_coordinator=FakeResource("coordinator", events),  # type: ignore[arg-type]
-        client=FakeResource("client", events),  # type: ignore[arg-type]
-        closed_candle_feed=FakeResource("candle-feed", events),  # type: ignore[arg-type]
-        candle_source=FakeResource("candle-source", events),  # type: ignore[arg-type]
-        ema_candle_source=FakeResource("ema-source", events),  # type: ignore[arg-type]
-        signal_recorder=FakeResource("signal-recorder", events),  # type: ignore[arg-type]
-        telemetry=FakeResource("telemetry", events),  # type: ignore[arg-type]
-        volume_cache=FakeResource("volume-cache", events),  # type: ignore[arg-type]
-        volume_rest_client=FakeResource("volume-client", events),  # type: ignore[arg-type]
-        execution_engine=FakeResource("execution-engine", events),  # type: ignore[arg-type]
-        market_engine=FakeResource("market-engine", events),  # type: ignore[arg-type]
-        observability_engine=FakeResource("observability-engine", events),  # type: ignore[arg-type]
-        checkpoint_engine=FakeResource("checkpoint-engine", events),  # type: ignore[arg-type]
-        heartbeat_engine=FakeResource("heartbeat-engine", events),  # type: ignore[arg-type]
-        health=FakeResource("health", events),  # type: ignore[arg-type]
+        entry_runtime=FakeResource("entry-runtime", events),
+        entry_order_lifecycle=FakeResource("entry-orders", events),
+        execution_coordinator=FakeResource("coordinator", events),
+        client=FakeResource("client", events),
+        closed_candle_feed=FakeResource("candle-feed", events),
+        candle_source=FakeResource("candle-source", events),
+        ema_candle_source=FakeResource("ema-source", events),
+        signal_recorder=FakeResource("signal-recorder", events),
+        telemetry=FakeResource("telemetry", events),
+        volume_cache=FakeResource("volume-cache", events),
+        volume_rest_client=FakeResource("volume-client", events),
+        execution_engine=FakeResource("execution-engine", events),
+        market_engine=FakeResource("market-engine", events),
+        observability_engine=FakeResource("observability-engine", events),
+        checkpoint_engine=FakeResource("checkpoint-engine", events),
+        heartbeat_engine=FakeResource("heartbeat-engine", events),
+        health=FakeResource("health", events),
     )
 
     await lifecycle.close()
@@ -87,8 +87,8 @@ async def test_live_resource_lifecycle_closes_shared_candle_source_once() -> Non
         execution_coordinator=None,
         client=None,
         closed_candle_feed=None,
-        candle_source=source,  # type: ignore[arg-type]
-        ema_candle_source=source,  # type: ignore[arg-type]
+        candle_source=source,
+        ema_candle_source=source,
         signal_recorder=None,
         telemetry=None,
         volume_cache=None,
@@ -110,7 +110,7 @@ async def test_live_resource_lifecycle_bounds_hanging_cleanup() -> None:
     events: list[str] = []
 
     lifecycle = LiveResourceLifecycle(
-        entry_runtime=HangingResource(),  # type: ignore[arg-type]
+        entry_runtime=HangingResource(),
         entry_order_lifecycle=None,
         execution_coordinator=None,
         client=None,
@@ -126,7 +126,7 @@ async def test_live_resource_lifecycle_bounds_hanging_cleanup() -> None:
         observability_engine=None,
         checkpoint_engine=None,
         heartbeat_engine=None,
-        health=FakeResource("health", events),  # type: ignore[arg-type]
+        health=FakeResource("health", events),
         shutdown_timeout_seconds=0.01,
     )
 

@@ -10,6 +10,8 @@ import pytest
     "module",
     [
         "crypto_momentum_lab.live_rollout.decision_facts",
+        "crypto_momentum_lab.live_rollout.resource_ports",
+        "crypto_momentum_lab.live_rollout.resource_lifecycle",
         "crypto_momentum_lab.strategy_runner.live_source",
         "crypto_momentum_lab.research_collector.source",
         "crypto_momentum_lab.research_collector",
@@ -135,6 +137,7 @@ importlib.import_module(sys.argv[1])
 @pytest.mark.parametrize(
     "module",
     [
+        "crypto_momentum_lab.live_rollout.resource_lifecycle",
         "crypto_momentum_lab.live_rollout",
         "crypto_momentum_lab.live_rollout.market_runtime_contracts",
         "crypto_momentum_lab.live_rollout.runtime_supervisor",

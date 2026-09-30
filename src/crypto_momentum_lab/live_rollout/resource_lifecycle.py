@@ -5,28 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from time import perf_counter
-from typing import Protocol
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncEngine
 
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
-)
-from crypto_momentum_lab.health import LocalHealthWriter
-from crypto_momentum_lab.live_rollout.closed_candle_feed import (
-    BinanceClosedCandle15mFeed,
-)
-from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
-from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
-from crypto_momentum_lab.live_rollout.signal_recorder import (
-    LiveStrategySignalRecorder,
-)
-from crypto_momentum_lab.live_rollout.telemetry import LiveRuntimeTelemetry
-from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
-from crypto_momentum_lab.strategy_runner.candle_source import (
-    BinanceRestClosedCandle15mSource,
+from crypto_momentum_lab.live_rollout.resource_ports import (
+    AsyncClosable,
+    AsyncDisposable,
+    AsyncStoppable,
+    HealthStopMarker,
+    SyncClosable,
 )
 
 log = structlog.get_logger()
@@ -35,33 +22,29 @@ _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 _RESOURCE_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
-class _StoppableVolumeCache(Protocol):
-    async def stop(self) -> None: ...
-
-
 class LiveResourceLifecycle:
     """Close live resources in the order required by the execution safety model."""
 
     def __init__(
         self,
         *,
-        entry_runtime: LiveEntryRuntime | None = None,
-        entry_order_lifecycle: LiveLimitOrderLifecycle | None = None,
-        execution_coordinator: OrderExecutionCoordinator | None = None,
-        client: BinanceUsdMTradeClient | None = None,
-        closed_candle_feed: BinanceClosedCandle15mFeed | None = None,
-        candle_source: BinanceRestClosedCandle15mSource | None = None,
-        ema_candle_source: BinanceRestClosedCandle15mSource | None = None,
-        signal_recorder: LiveStrategySignalRecorder | None = None,
-        telemetry: LiveRuntimeTelemetry | None = None,
-        volume_cache: _StoppableVolumeCache | None = None,
-        volume_rest_client: BinanceUsdMRestClient | None = None,
-        execution_engine: AsyncEngine | None = None,
-        market_engine: AsyncEngine | None = None,
-        observability_engine: AsyncEngine | None = None,
-        checkpoint_engine: AsyncEngine | None = None,
-        heartbeat_engine: AsyncEngine | None = None,
-        health: LocalHealthWriter | None = None,
+        entry_runtime: AsyncStoppable | None = None,
+        entry_order_lifecycle: AsyncStoppable | None = None,
+        execution_coordinator: AsyncClosable | None = None,
+        client: AsyncClosable | None = None,
+        closed_candle_feed: AsyncStoppable | None = None,
+        candle_source: SyncClosable | None = None,
+        ema_candle_source: SyncClosable | None = None,
+        signal_recorder: AsyncStoppable | None = None,
+        telemetry: AsyncStoppable | None = None,
+        volume_cache: AsyncStoppable | None = None,
+        volume_rest_client: AsyncClosable | None = None,
+        execution_engine: AsyncDisposable | None = None,
+        market_engine: AsyncDisposable | None = None,
+        observability_engine: AsyncDisposable | None = None,
+        checkpoint_engine: AsyncDisposable | None = None,
+        heartbeat_engine: AsyncDisposable | None = None,
+        health: HealthStopMarker | None = None,
         shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         if shutdown_timeout_seconds <= 0:
