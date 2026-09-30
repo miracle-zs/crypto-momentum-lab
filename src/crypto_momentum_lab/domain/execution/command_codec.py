@@ -33,6 +33,13 @@ def _required_text(values: Mapping[str, object], field_name: str) -> str:
     return value
 
 
+def _optional_text(values: Mapping[str, object], field_name: str) -> str | None:
+    value = values.get(field_name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"execution command {field_name} must be text or null")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SkippedCommand:
     command_id: str
@@ -144,6 +151,11 @@ def decode_active_command(
         attempt_count = dtls.get("attempt_count")
         if not isinstance(attempt_count, int) or attempt_count < 0:
             raise ValueError("execution command attempt_count is missing or invalid")
+        expected_projection_version = _optional_text(
+            dtls, "expected_projection_version"
+        )
+        external_order_id = _optional_text(dtls, "external_order_id")
+        last_error = _optional_text(dtls, "last_error")
         limit_price_val = dtls.get("limit_price")
         limit_price = (
             Decimal(str(limit_price_val)) if limit_price_val is not None else None
@@ -160,7 +172,7 @@ def decode_active_command(
         requested_quantity=quantity,
         limit_price=limit_price,
         reduce_only=dtls["reduce_only"],
-        expected_projection_version=dtls.get("expected_projection_version"),
+        expected_projection_version=expected_projection_version,
         created_at=requested_at,
     )
     entry = OutboxEntry(
@@ -170,8 +182,8 @@ def decode_active_command(
         command=cmd,
         state=disp_state,
         attempt_count=attempt_count,
-        external_order_id=dtls.get("external_order_id"),
-        last_error=dtls.get("last_error"),
+        external_order_id=external_order_id,
+        last_error=last_error,
         created_at=requested_at,
         updated_at=requested_at,
     )

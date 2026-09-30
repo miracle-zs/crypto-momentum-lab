@@ -184,3 +184,32 @@ def test_watermark_rejects_blank_scope_identity(row, field):
     scope = dict(row["details"]["scope"], **{field: " "})
     with pytest.raises(ValueError, match=field):
         decode_order_watermark({"scope": scope}, account_label=None)
+
+
+@pytest.mark.parametrize(
+    "field", ["expected_projection_version", "external_order_id", "last_error"]
+)
+@pytest.mark.parametrize("value", [1, True, [], {}])
+def test_non_text_optional_command_fields_are_skipped(row, field, value):
+    row["details"][field] = value
+    before = deepcopy(row)
+    restored = decode_active_command(row, account_label="account-3", restored_at=NOW)
+    assert isinstance(restored, SkippedCommand)
+    assert field in restored.reason
+    assert row == before
+
+
+@pytest.mark.parametrize(
+    "field", ["expected_projection_version", "external_order_id", "last_error"]
+)
+@pytest.mark.parametrize("value", [None, "", "text"])
+def test_optional_command_text_values_are_preserved(row, field, value):
+    row["details"][field] = value
+    restored = decode_active_command(row, account_label="account-3", restored_at=NOW)
+    assert isinstance(restored, RestoredCommand)
+    owner = (
+        restored.entry.command
+        if field == "expected_projection_version"
+        else restored.entry
+    )
+    assert getattr(owner, field) == value
