@@ -710,12 +710,10 @@ class ExecutionBook:
                     if recovered is None:
                         continue
                     if isinstance(recovered, SkippedCommand):
-                        log.warning(
-                            "skipping_unparseable_active_execution_command",
-                            command_id=recovered.command_id,
-                            error=recovered.reason,
+                        raise ValueError(
+                            f"active execution command {recovered.command_id} "
+                            f"cannot be restored: {recovered.reason}"
                         )
-                        continue
                     entry = recovered.entry
                     cid = entry.command_id
                     self._outbox_by_command_id[cid] = entry

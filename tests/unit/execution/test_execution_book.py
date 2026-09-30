@@ -2907,3 +2907,35 @@ async def test_outbox_scope_controls_cross_stream_read(command_location, dispatc
         assert view.total_quantity == Decimal("0")
         assert view.stream_scope.stream_epoch == "new-epoch"
     assert book._outbox_by_command_id[command.command_id].command is command
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["expected_projection_version", "external_order_id", "last_error"]
+)
+async def test_unparseable_active_command_blocks_restore_before_identity_reads(field):
+    from unittest.mock import AsyncMock
+
+    repository = AsyncMock()
+    details = {
+        "scope": {"environment": "live", "account_label": "primary",
+                  "symbol": "BTCUSDT", "position_side": "LONG"},
+        "side": "long", "order_type": "market", "quantity": "1",
+        "reduce_only": False, "reservations": [], "request_id": "request",
+        "attempt_count": 0, field: 123,
+    }
+    repository.load_active_execution_commands.return_value = [{
+        "command_id": "unparseable-command", "client_order_id": "unparseable-command",
+        "command": "entry", "status": "prepared", "requested_at": _dt(10, 0),
+        "details": details,
+    }]
+    book = ExecutionBook(command_repository=repository)
+    with pytest.raises(RuntimeError, match="restore active execution commands") as error:
+        await book.restore(account_label="primary")
+    assert field in str(error.value.__cause__)
+    assert "unparseable-command" in str(error.value.__cause__)
+    assert book._persistence_failed is True
+    assert not book._outbox_by_command_id
+    repository.load_seen_event_ids.assert_not_awaited()
+    repository.load_seen_fill_trade_ids.assert_not_awaited()
+    repository.load_execution_order_watermarks.assert_not_awaited()
