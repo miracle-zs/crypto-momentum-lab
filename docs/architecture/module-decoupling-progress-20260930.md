@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -476,6 +476,20 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2404 passed**，25.60 秒，保留一项现有 Starlette/httpx 警告。状态/租约/仓储/CLI/架构定向 **138 passed**。新增状态测试 **8 项**覆盖 draining、live_enabled、halted、completed、缺失与未知状态，以及查询失败、取消传播；新增独立进程无 sqlalchemy/persistence 导入检查。session_state、lease_recovery 两模块定向 mypy --follow-imports=skip，核心文件/测试完整 Ruff、编排/单次计划/CLI F/I 和 git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍未验收，运行编排其他 SQL 与不同语义的上下文查询继续按实际职责核查。
+
+## 第三十五批：shadow 演练证据读取与告警归属
+
+第三十四批提交为 `b01ae69`；第三十五批继续本地实施，未部署生产。
+
+- PostgresShadowRepository.has_matching_completed_session 承接编排中的 shadow 查询，按 strategy_name、strategy_config_hash 和 completed 状态过滤、ended_at 降序取一条。不新增时间窗口，旧匹配记录仍可通过；SQL statement AST 与原查询一致。
+- live_rollout/shadow_preflight.py 定义 CompletedShadowSessionReader 并拥有缺失记录告警。匹配时不记录缺失事件；未匹配时仍 warning，acknowledged 时仍 info；事件名、详情字段及错误/取消传播保持，不新增提交阻塞。
+- daemon 与单次计划在原装配处创建 shadow 仓储，分别使用原 execution/session factory。删除 CLI 注入旧告警函数、单次计划的 ShadowPreflightWarning 参数和编排的两个旧私有函数，无旧接口转发或重导出。
+- runtime_orchestrator 不再包含直接 select 查询或 ORM 行导入，但仍负责具体运行装配，并依赖 session/engine 和其他原生适配器；不能据此宣称全部编排已解耦。
+- 原三个 CLI shadow 测试迁至新职责所有者，保留原替身查询与日志断言，补充显式读取替身的匹配无告警、连接错误与取消传播测试。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2408 passed**，25.87 秒，一项现有 Starlette/httpx 警告。新增所有者测试 **6 passed**；迁移三项测试后 CLI/shadow/架构定向 **122 passed**，后续补充的三项测试已纳入完整回归。新增 shadow_preflight 独立进程无数据库导入检查。核心文件/所有者测试完整 Ruff、编排/单次计划/CLI/迁移 CLI 测试 F/I、shadow_preflight 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；shadow SQL 替身测试不替代真实数据库验收。
 
 ## 后续实施顺序
 

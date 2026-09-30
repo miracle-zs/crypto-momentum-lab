@@ -30,6 +30,26 @@ class PostgresShadowRepository:
     ) -> None:
         self._session_factory = session_factory
 
+    async def has_matching_completed_session(
+        self,
+        *,
+        strategy_name: str,
+        strategy_config_hash: str,
+    ) -> bool:
+        async with self._session_factory() as database_session:
+            completed_shadow = await database_session.scalar(
+                select(ShadowSessionRow.run_id)
+                .where(
+                    ShadowSessionRow.strategy_name == strategy_name,
+                    ShadowSessionRow.strategy_config_hash == strategy_config_hash,
+                    ShadowSessionRow.state == "completed",
+                )
+                .order_by(ShadowSessionRow.ended_at.desc())
+                .limit(1)
+            )
+        return completed_shadow is not None
+
+
     async def start_session(self, session_record: ShadowSession) -> None:
         await self._insert(ShadowSessionRow, asdict(session_record))
 

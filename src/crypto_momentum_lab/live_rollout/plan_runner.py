@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import crypto_momentum_lab.live_rollout.session_state as session_state
+import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight_rules
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -56,6 +57,9 @@ from crypto_momentum_lab.persistence.postgres.risk_repository import (
 from crypto_momentum_lab.persistence.postgres.session import (
     create_execution_database_engine,
 )
+from crypto_momentum_lab.persistence.postgres.shadow_repository import (
+    PostgresShadowRepository,
+)
 
 LatestRiskConfigLoader = Callable[
     [async_sessionmaker[AsyncSession], str],
@@ -69,7 +73,6 @@ ApprovedIntentNotionalLoader = Callable[
     [async_sessionmaker[AsyncSession], str],
     Awaitable[Decimal | None],
 ]
-ShadowPreflightWarning = Callable[..., Awaitable[None]]
 
 
 async def run_live_plan(
@@ -93,7 +96,6 @@ async def run_live_plan(
     load_latest_risk_config: LatestRiskConfigLoader,
     load_latest_account_state: LatestAccountStateLoader,
     load_approved_intent_notional: ApprovedIntentNotionalLoader,
-    warn_if_shadow_preflight_missing: ShadowPreflightWarning,
 ) -> LiveSessionResult:
     """Validate and execute one approved plan with live safety barriers."""
 
@@ -105,6 +107,7 @@ async def run_live_plan(
     execution_coordinator: OrderExecutionCoordinator | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
+        shadow_repository = PostgresShadowRepository(factory)
         live_repository = PostgresLiveRolloutRepository(factory)
         risk_repository = PostgresRiskRepository(factory)
         order_repository = PostgresOrderPlanRepository(factory)
@@ -219,8 +222,8 @@ async def run_live_plan(
         )
 
         async def shadow_preflight() -> bool:
-            await warn_if_shadow_preflight_missing(
-                factory,
+            await shadow_preflight_rules.warn_if_shadow_preflight_missing(
+                shadow_repository,
                 strategy_name=strategy_name,
                 strategy_config_hash=strategy_config_hash,
                 account_label=account_label,

@@ -21,11 +21,11 @@ from time import perf_counter
 from typing import Any
 
 import structlog
-from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 import crypto_momentum_lab.live_rollout.session_state as session_state
+import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
@@ -249,9 +249,6 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
     PostgresLiveSignalRepository,
 )
-from crypto_momentum_lab.persistence.postgres.models import (
-    ShadowSessionRow,
-)
 from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
     PostgresOrderAdoptionRepository,
 )
@@ -296,6 +293,9 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_execution_database_engine,
     create_market_database_engine,
     create_observability_database_engine,
+)
+from crypto_momentum_lab.persistence.postgres.shadow_repository import (
+    PostgresShadowRepository,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.candle_source import (
@@ -518,6 +518,7 @@ async def run_live_daemon(
             checkpoint_engine,
             expire_on_commit=False,
         )
+        shadow_repository = PostgresShadowRepository(execution_factory)
         live_repository = PostgresLiveRolloutRepository(execution_factory)
         risk_repository = PostgresRiskRepository(execution_factory)
         # Lease liveness is a control-plane concern.  Give it one isolated
@@ -1021,8 +1022,8 @@ async def run_live_daemon(
             )
         if not draining:
             await session_lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
-        await _warn_if_shadow_preflight_missing(
-            execution_factory,
+        await shadow_preflight.warn_if_shadow_preflight_missing(
+            shadow_repository,
             strategy_name=strategy_name,
             strategy_config_hash=strategy_config_hash,
             account_label=account_label,
@@ -2024,50 +2025,3 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if cause is not None and isinstance(cause, Exception):
         return _is_order_identity_conflict(cause)
     return False
-
-
-async def _has_matching_shadow_session(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    strategy_name: str,
-    strategy_config_hash: str,
-) -> bool:
-    async with factory() as database_session:
-        completed_shadow = await database_session.scalar(
-            select(ShadowSessionRow.run_id)
-            .where(
-                ShadowSessionRow.strategy_name == strategy_name,
-                ShadowSessionRow.strategy_config_hash == strategy_config_hash,
-                ShadowSessionRow.state == "completed",
-            )
-            .order_by(ShadowSessionRow.ended_at.desc())
-            .limit(1)
-        )
-    return completed_shadow is not None
-
-
-async def _warn_if_shadow_preflight_missing(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    strategy_name: str,
-    strategy_config_hash: str,
-    account_label: str,
-    session_id: str,
-    acknowledged: bool = False,
-) -> None:
-    if await _has_matching_shadow_session(
-        factory,
-        strategy_name=strategy_name,
-        strategy_config_hash=strategy_config_hash,
-    ):
-        return
-    details = {
-        "account_label": account_label,
-        "session_id": session_id,
-        "strategy_name": strategy_name,
-        "strategy_config_hash": strategy_config_hash,
-    }
-    if acknowledged:
-        log.info("live_shadow_preflight_missing_acknowledged", **details)
-    else:
-        log.warning("live_shadow_preflight_missing", **details)

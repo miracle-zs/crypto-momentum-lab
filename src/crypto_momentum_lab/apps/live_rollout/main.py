@@ -106,9 +106,6 @@ from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_strategy_config_hash as _runtime_options_manifest_hash,
 )
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
-    _warn_if_shadow_preflight_missing,
-)
-from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
     run_live_daemon as _run_live_daemon,
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
@@ -1165,7 +1162,6 @@ def submit_plan_command(
             load_latest_risk_config=_latest_risk_config,
             load_latest_account_state=_latest_account_state,
             load_approved_intent_notional=_approved_intent_notional,
-            warn_if_shadow_preflight_missing=_warn_if_shadow_preflight_missing,
         )
     )
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
