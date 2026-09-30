@@ -72,6 +72,30 @@ class PostgresLiveRolloutRepository:
             created_at=row.created_at,
         )
 
+    async def load_latest_operating_state(
+        self,
+        session_id: str,
+    ) -> str | None:
+        """Read the latest durable transition before attempting lease recovery."""
+
+        async with self._session_factory() as database_session:
+            latest_state = await database_session.scalar(
+                select(LiveSessionTransitionRow.state)
+                .where(
+                    LiveSessionTransitionRow.session_id == session_id,
+                    LiveSessionTransitionRow.state.not_in(
+                        (
+                            LiveSessionState.PREFLIGHT.value,
+                            LiveSessionState.SHADOW_PREFLIGHT.value,
+                        )
+                    ),
+                )
+                .order_by(LiveSessionTransitionRow.occurred_at.desc())
+                .limit(1)
+            )
+        return latest_state
+
+
     async def save_transition(self, transition: LiveSessionTransition) -> None:
         values = _prepare_transition_values(transition)
         await self._insert(LiveSessionTransitionRow, values)

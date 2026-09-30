@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -450,6 +450,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2386 passed**，25.85 秒。规则/CLI/架构定向 **128 passed**；领域规则单独 **9 passed**，在迁移的六项用例上补齐非待对账状态、已有 exchange order ID、非零已成交数量三项拒绝。新增 missing_order_rules 无 sqlalchemy/persistence 导入检查。领域模块定向 `mypy --follow-imports=skip`、规则/运行用例/新增测试/架构完整 Ruff、CLI 及迁移测试 F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子失败回滚和进程重启仍待补齐；运行装配中的具体仓储依赖继续保留在实际创建处，后续需要核对余下业务依赖与整体验收缺口。
+
+## 第三十三批：租约恢复用例与耐久会话读取接口
+
+第三十二批提交为 `b3d2589`；第三十三批继续本地实施，未部署生产。
+
+- live_rollout/lease_recovery.py 独立拥有自动租约恢复与准入判定，定义 LiveSessionStateReader 和 LiveLeaseAcquirer；只依赖实际读取和获取租约能力，不导入 SQLAlchemy、ORM 或 Postgres。startup_resilience 保留启动重试与具体异常分类，删除旧恢复函数与重导出。
+- PostgresLiveRolloutRepository.load_latest_operating_state 承接原查询：同 session、排除 preflight/shadow_preflight、按 occurred_at 降序取一条。SQL statement AST 保持；返回原始耐久状态字符串或 None，未知状态仍不能准入，不引入枚举转换错误。
+- 运行装配显式注入原生会话仓储与风险仓储；首次启动和心跳分别保留 execution/heartbeat session factory。未拆分 acquire_lease 的原生事务或新增写入路径。
+- gate 已通过或已有租约仍直接返回；此前已启用实盘、未排空且唯一阻塞为 missing_active_lease 才恢复。TTL、owner、code generation、随机 lease ID 与日志保持。原排空查询暂留运行编排，本批不宣称所有启动 SQL 已移除。
+
+验证：最终完整本地回归 **2395 passed**；新增恢复用例 **7 项**覆盖非活跃/缺失耐久状态拒绝、排空与额外 gate 阻塞、成功租约字段及已有租约不读取/写入；新增仓储 SQL 编译测试检查过滤、排序、limit 与未知状态保留，属于替身查询验收；新增无数据库导入检查。核心文件与新增测试完整 Ruff、编排与 CLI 测试 F/I、lease recovery 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍未验收，替身测试与 SQL 编译不能替代真实 Postgres 验收。
 
 ## 后续实施顺序
 

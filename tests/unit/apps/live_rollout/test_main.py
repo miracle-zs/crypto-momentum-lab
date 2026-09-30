@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
+from crypto_momentum_lab.live_rollout.lease_recovery import (
+    should_auto_reacquire_live_lease,
+)
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
@@ -26,7 +29,6 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     is_retryable_live_startup_error,
     live_startup_retry_delay,
-    should_auto_reacquire_live_lease,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,

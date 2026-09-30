@@ -121,6 +121,9 @@ from crypto_momentum_lab.live_rollout.lease import (
     LeaseHeartbeatConfig,
     LiveLeaseHeartbeat,
 )
+from crypto_momentum_lab.live_rollout.lease_recovery import (
+    maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
+)
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
@@ -213,9 +216,6 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 )
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     is_retryable_live_startup_error as _is_retryable_live_startup_error,
-)
-from crypto_momentum_lab.live_rollout.startup_resilience import (
-    maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream as _resilient_market_state_stream,
@@ -535,6 +535,7 @@ async def run_live_daemon(
             heartbeat_engine,
             expire_on_commit=False,
         )
+        heartbeat_live_repository = PostgresLiveRolloutRepository(heartbeat_factory)
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderPlanRepository(execution_factory)
         order_adoption_repository = PostgresOrderAdoptionRepository(execution_factory)
@@ -985,7 +986,7 @@ async def run_live_daemon(
             unresolved_order_states=tuple(item.state for item in unresolved),
         )
         active_lease = await _maybe_auto_reacquire_live_lease(
-            factory=execution_factory,
+            session_state_reader=live_repository,
             risk_repository=risk_repository,
             gate_context=gate_context,
             session_id=session_id,
@@ -1451,7 +1452,7 @@ async def run_live_daemon(
             gate_context: LiveGateContext,
         ) -> TradingLease | None:
             return await _maybe_auto_reacquire_live_lease(
-                factory=heartbeat_factory,
+                session_state_reader=heartbeat_live_repository,
                 risk_repository=heartbeat_risk_repository,
                 gate_context=gate_context,
                 session_id=session_id,
