@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from inspect import signature
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.account.models import (
@@ -21,6 +20,9 @@ from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecovery
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
+)
+from crypto_momentum_lab.execution_account.client_compat import (
+    fetch_positions_for_reconciliation,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -263,7 +265,7 @@ class ExecutionAccountSyncService:
             previous_active_position_keys = set(self._active_position_keys)
             positions = tuple(
                 _position_cut_for_trade_scan(item)
-                for item in await _fetch_positions_for_reconciliation(self._client)
+                for item in await fetch_positions_for_reconciliation(self._client)
             )
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
@@ -947,23 +949,6 @@ class ExecutionAccountSyncService:
         self._last_persisted_process_state = state
         self._last_persisted_process_state_reason = reason
         self._last_persisted_process_state_at = observed_at
-
-
-async def _fetch_positions_for_reconciliation(
-    client: ReadOnlyAccountClient,
-) -> tuple[AccountPositionSnapshot, ...]:
-    fetch_positions = client.fetch_positions
-    try:
-        supports_explicit_flat_rows = (
-            "include_flat" in signature(fetch_positions).parameters
-        )
-    except (TypeError, ValueError):
-        supports_explicit_flat_rows = False
-    if supports_explicit_flat_rows:
-        return await fetch_positions(include_flat=True)
-    # Adapters without V2's explicit flat rows remain usable for paper/tests,
-    # but cannot establish a live zero-position anchor.
-    return await fetch_positions()
 
 
 def _position_cut_for_trade_scan(
