@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.domain.strategy.models import StrategyDataRequirement
 from crypto_momentum_lab.live_rollout.hub_cursor import (
     LiveHubCursorState,
     hub_cursor_for_startup,
@@ -17,6 +18,7 @@ from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     load_live_market_state_gap,
+    validate_live_warmup_coverage,
     wait_for_durable_market_state_cutover,
 )
 from crypto_momentum_lab.market_data.hub import MarketStateBatch
@@ -286,3 +288,38 @@ def test_hub_cursor_is_discarded_before_durable_market_rewarm() -> None:
         checkpoint,
         requires_market_recovery=False,
     ) == {"stream_id": "old-stream", "sequence": 42}
+
+
+@pytest.mark.parametrize("mode", ["continuous", "gap", "missing_timestamp"])
+def test_warmup_coverage_requires_contiguous_bucket_timestamps(mode: str) -> None:
+    cutover = datetime(2026, 9, 30, tzinfo=UTC)
+    requirement = StrategyDataRequirement(
+        base_state_interval_seconds=15,
+        warmup_buckets=2,
+        required_fields=("close_price",),
+        max_gap_seconds=15,
+        allow_entries_before_warmup=False,
+    )
+    strategy = SimpleNamespace(required_data=lambda: requirement)
+    first = SimpleNamespace(
+        symbol="BTCUSDT", close_price=1,
+        bucket_start=cutover - timedelta(seconds=30 if mode == "gap" else 15),
+    )
+    second = SimpleNamespace(symbol="BTCUSDT", close_price=1, bucket_start=cutover)
+    if mode == "missing_timestamp":
+        del first.bucket_start
+
+    def validate():
+        validate_live_warmup_coverage(
+            strategy=strategy, states=(second, first),
+            expected_symbols=("BTCUSDT",), cutover_at=cutover,
+        )
+
+    if mode == "gap":
+        with pytest.raises(RuntimeError, match="gaps=BTCUSDT"):
+            validate()
+    elif mode == "missing_timestamp":
+        with pytest.raises(AttributeError, match="bucket_start"):
+            validate()
+    else:
+        validate()
