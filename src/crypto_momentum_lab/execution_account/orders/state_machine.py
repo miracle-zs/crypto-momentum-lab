@@ -220,55 +220,60 @@ class OrderExecutionStateMachine:
         *,
         prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
-        if not plan.quantized:
-            raise ValueError("order plan must be quantized before execution")
-        if (
-            self._submit_policy is SubmitPolicy.LIVE_SUBMIT
-            and not self._live_submit_enabled
-        ):
-            raise LiveSubmissionDisabledError(
-                "live_submit policy requires explicit live_submit_enabled"
-            )
-        if prepared_submission is not None:
-            if prepared_submission.plan != plan:
-                raise ValueError("prepared submission does not match order plan")
-            if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                raise ValueError("shadow submit cannot use a prepared live submission")
-        else:
-            await self._repository.save_planned_order(plan)
-        if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-            await self._repository.save_shadow_suppression(
-                ShadowSuppressionEvent(
-                    order_plan_id=plan.client_order_id,
-                    client_order_id=plan.client_order_id,
-                    suppressed_at=self._now(),
-                    reason="shadow_submit_policy",
-                    order_payload={
-                        "symbol": plan.symbol,
-                        "side": plan.side,
-                        "type": plan.order_type,
-                        "quantity": str(plan.quantity),
-                        "price": None if plan.price is None else str(plan.price),
-                        "reduce_only": plan.reduce_only,
-                    },
+        try:
+            if not plan.quantized:
+                raise ValueError("order plan must be quantized before execution")
+            if (
+                self._submit_policy is SubmitPolicy.LIVE_SUBMIT
+                and not self._live_submit_enabled
+            ):
+                raise LiveSubmissionDisabledError(
+                    "live_submit policy requires explicit live_submit_enabled"
                 )
-            )
-            await self._append_event(plan, ExchangeOrderState.SUPPRESSED)
-            return OrderExecutionResult(
-                client_order_id=plan.client_order_id,
-                state=ExchangeOrderState.SUPPRESSED,
-                exchange_order_id=None,
-                suppressed=True,
-                plan=plan,
-            )
+            if prepared_submission is not None:
+                if prepared_submission.plan != plan:
+                    raise ValueError("prepared submission does not match order plan")
+                if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
+                    raise ValueError("shadow submit cannot use a prepared live submission")
+            else:
+                await self._repository.save_planned_order(plan)
+            if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
+                await self._repository.save_shadow_suppression(
+                    ShadowSuppressionEvent(
+                        order_plan_id=plan.client_order_id,
+                        client_order_id=plan.client_order_id,
+                        suppressed_at=self._now(),
+                        reason="shadow_submit_policy",
+                        order_payload={
+                            "symbol": plan.symbol,
+                            "side": plan.side,
+                            "type": plan.order_type,
+                            "quantity": str(plan.quantity),
+                            "price": None if plan.price is None else str(plan.price),
+                            "reduce_only": plan.reduce_only,
+                        },
+                    )
+                )
+                await self._append_event(plan, ExchangeOrderState.SUPPRESSED)
+                return OrderExecutionResult(
+                    client_order_id=plan.client_order_id,
+                    state=ExchangeOrderState.SUPPRESSED,
+                    exchange_order_id=None,
+                    suppressed=True,
+                    plan=plan,
+                )
 
-        if prepared_submission is None:
-            await self._append_event(plan, ExchangeOrderState.SUBMITTING)
-        else:
-            await self._notify_event(
-                prepared_submission.plan,
-                prepared_submission.submitting_event,
-            )
+            if prepared_submission is None:
+                await self._append_event(plan, ExchangeOrderState.SUBMITTING)
+            else:
+                await self._notify_event(
+                    prepared_submission.plan,
+                    prepared_submission.submitting_event,
+                )
+        except Exception as exc:
+            if isinstance(exc, (ValueError, LiveSubmissionDisabledError, _OrderPreSubmissionError)):
+                raise
+            raise _OrderPreSubmissionError(f"pre-submission failed: {exc}") from exc
         try:
             snapshot = await self._exchange_call(
                 plan,
@@ -655,14 +660,21 @@ class OrderExecutionStateMachine:
         operation: str,
         call: Callable[[], Awaitable[ExchangeCallResult]],
     ) -> ExchangeCallResult:
-        if operation == "submit" and self._on_before_exchange_submit is not None:
-            await self._on_before_exchange_submit(plan, self._now())
-        if (
-            operation == "submit"
-            and not plan.reduce_only
-            and self._on_before_submit is not None
-        ):
-            await self._on_before_submit(plan, self._now())
+        try:
+            if operation == "submit" and self._on_before_exchange_submit is not None:
+                await self._on_before_exchange_submit(plan, self._now())
+            if (
+                operation == "submit"
+                and not plan.reduce_only
+                and self._on_before_submit is not None
+            ):
+                await self._on_before_submit(plan, self._now())
+        except Exception as guard_exc:
+            if isinstance(guard_exc, _OrderPreSubmissionError):
+                raise
+            raise _OrderPreSubmissionError(
+                f"pre-submission guard failed: {guard_exc}"
+            ) from guard_exc
         await self._notify_exchange_boundary(
             plan,
             f"{operation}_request_started",

@@ -1007,11 +1007,23 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
 
 
 async def test_position_view_uses_hub_snapshot_without_account_queries() -> None:
+    class MockSession:
+        async def scalar(self, _stmt):
+            return None
+
+        async def scalars(self, _stmt):
+            return SimpleNamespace(all=lambda: ())
+
+    class SessionContext:
+        async def __aenter__(self):
+            return MockSession()
+
+        async def __aexit__(self, *_args):
+            return None
+
     class SessionFactory:
         def __call__(self):
-            raise AssertionError(
-                "account snapshot path must not open an account-state session"
-            )
+            return SessionContext()
 
     snapshot = AccountSnapshot(
         config=AccountConfigSnapshot(

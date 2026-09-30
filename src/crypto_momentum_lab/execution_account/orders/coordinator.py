@@ -60,9 +60,13 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
+    LiveSubmissionDisabledError,
     OrderExecutionResult,
 )
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 
 log = structlog.get_logger()
 
@@ -467,24 +471,27 @@ class OrderExecutionCoordinator:
             positions = ()
         elif isinstance(snapshot, AccountPositionSnapshot):
             positions = (snapshot,)
-        elif isinstance(snapshot, AccountSnapshot):
-            if not isinstance(snapshot.config, AccountConfigSnapshot):
-                raise TypeError("AccountSnapshot.config must be AccountConfigSnapshot")
-            if (
-                snapshot.config.environment != self._environment
-                or snapshot.config.account_label != self._account_label
-            ):
-                raise ValueError(
-                    "AccountSnapshot config scope does not match coordinator"
-                )
-            positions = snapshot.positions
-            if hedge_mode is not None and hedge_mode != snapshot.config.hedge_mode:
-                raise ValueError("hedge_mode does not match AccountSnapshot config")
-            hedge_mode = snapshot.config.hedge_mode
         else:
-            raise TypeError(
-                "snapshot must be AccountPositionSnapshot or AccountSnapshot"
-            )
+            from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+
+            if isinstance(snapshot, AccountSnapshot):
+                if not isinstance(snapshot.config, AccountConfigSnapshot):
+                    raise TypeError("AccountSnapshot.config must be AccountConfigSnapshot")
+                if (
+                    snapshot.config.environment != self._environment
+                    or snapshot.config.account_label != self._account_label
+                ):
+                    raise ValueError(
+                        "AccountSnapshot config scope does not match coordinator"
+                    )
+                positions = snapshot.positions
+                if hedge_mode is not None and hedge_mode != snapshot.config.hedge_mode:
+                    raise ValueError("hedge_mode does not match AccountSnapshot config")
+                hedge_mode = snapshot.config.hedge_mode
+            else:
+                raise TypeError(
+                    "snapshot must be AccountPositionSnapshot or AccountSnapshot"
+                )
 
         # `symbols` describes event context, not proof that an omitted position
         # is flat. Only explicit exchange position rows are ingested here.
@@ -978,7 +985,13 @@ class OrderExecutionCoordinator:
         if self._execution_book.get_outbox(plan.client_order_id) is None:
             return
         if before_exchange_post or isinstance(
-            error, (OrderPreSubmissionError, ExchangeOrderRejectedError)
+            error,
+            (
+                OrderPreSubmissionError,
+                ExchangeOrderRejectedError,
+                LiveSubmissionDisabledError,
+                ValueError,
+            ),
         ):
             await self._execution_book.mark_rejected(
                 plan.client_order_id,
@@ -1046,7 +1059,12 @@ class OrderExecutionCoordinator:
                         sub_err,
                         before_exchange_post=isinstance(
                             sub_err,
-                            (OrderPreSubmissionError, ExchangeOrderRejectedError),
+                            (
+                                OrderPreSubmissionError,
+                                ExchangeOrderRejectedError,
+                                LiveSubmissionDisabledError,
+                                ValueError,
+                            ),
                         ),
                     )
                     raise
@@ -1110,7 +1128,12 @@ class OrderExecutionCoordinator:
                         sub_err,
                         before_exchange_post=isinstance(
                             sub_err,
-                            (OrderPreSubmissionError, ExchangeOrderRejectedError),
+                            (
+                                OrderPreSubmissionError,
+                                ExchangeOrderRejectedError,
+                                LiveSubmissionDisabledError,
+                                ValueError,
+                            ),
                         ),
                     )
                     raise

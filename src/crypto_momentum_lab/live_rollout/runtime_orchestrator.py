@@ -15,7 +15,7 @@ from collections.abc import (
     Mapping,
 )
 from dataclasses import replace
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
@@ -29,6 +29,7 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
 from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
     ExecutionBook,
     OrderExecutionPlan,
     TradeCommand,
@@ -39,6 +40,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -46,13 +50,14 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
     RuntimeMetadataSnapshot,
     compute_trading_rules_hash,
 )
-from crypto_momentum_lab.domain.risk import RiskEvaluation, TradingLease
+from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, TradingLease
 from crypto_momentum_lab.domain.runtime import (
     CapabilityEvaluator,
     CapabilityEvidence,
     RuntimePlanCompiler,
 )
 from crypto_momentum_lab.domain.strategy import (
+    EntryType,
     OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
@@ -842,8 +847,54 @@ async def run_live_daemon(
                     else deterministic_client_order_id(session_id, cmd.command_id)
                 )
             )
+            candidate_id = f"intent_exit_{cmd.command_id}"
+            signal_id = f"sig_exit_{cmd.command_id}"
+
+            features: dict[str, Any] = {
+                "command_id": cmd.command_id,
+                "position_side": cmd.position_key.position_side.value,
+                "quantity": str(cmd.requested_quantity),
+                "projection_version": cmd.expected_projection_version,
+            }
+            if allocs:
+                features["batch_id"] = allocs[0].batch_id
+                if getattr(allocs[0], "entry_price", None) is not None:
+                    features["entry_price"] = str(allocs[0].entry_price)
+
+            intent = OrderIntentCandidate(
+                candidate_id=candidate_id,
+                signal_id=signal_id,
+                run_id=session_id,
+                strategy_name=strategy_name,
+                strategy_version="v0",
+                config_hash=strategy_config_hash,
+                symbol=cmd.position_key.symbol,
+                side=cmd.side,
+                entry_type=(
+                    cmd.order_type
+                    if isinstance(cmd.order_type, EntryType)
+                    else EntryType(str(cmd.order_type).lower())
+                ),
+                limit_price=cmd.limit_price,
+                desired_notional=None,
+                reduce_only=True,
+                expires_at=cmd.created_at + timedelta(seconds=600),
+                created_at=cmd.created_at,
+                reason=cmd.reason or "decision_exit",
+                features=features,
+            )
+
+            evaluation = RiskEvaluation(
+                evaluation_id=f"eval_exit_{cmd.command_id}",
+                candidate_id=candidate_id,
+                decision=RiskDecision.APPROVED,
+                reason="decision_exit_approved",
+                evaluated_at=cmd.created_at,
+                details={"command_id": cmd.command_id},
+            )
+
             plan = OrderExecutionPlan(
-                intent_id=f"intent_exit_{cmd.command_id}",
+                intent_id=candidate_id,
                 run_id=session_id,
                 client_order_id=exit_client_order_id,
                 symbol=cmd.position_key.symbol,
@@ -864,7 +915,39 @@ async def run_live_daemon(
                 strategy_name=strategy_name,
                 strategy_version="v0",
             )
-            return await execution_coordinator.submit(plan)
+
+            async def _prepare_for_execution() -> PreparedOrderSubmission | None:
+                fencing_kwargs: dict[str, Any] = {}
+                if active_lease is not None:
+                    fencing_kwargs = {
+                        "environment": "live",
+                        "account_label": account_label,
+                        "strategy_name": strategy_name,
+                        "required_lease_owner": lease_owner,
+                        "required_lease_id": active_lease.lease_id,
+                        "required_code_generation": git_commit_hash,
+                    }
+                return await order_repository.prepare_submission(
+                    intent=intent,
+                    evaluation=evaluation,
+                    plan=plan,
+                    prepared_at=datetime.now(tz=UTC),
+                    required_session_id=session_id,
+                    **fencing_kwargs,
+                )
+
+            res = await execution_coordinator.prepare_and_execute(
+                plan,
+                prepare_submission=_prepare_for_execution,
+            )
+            if res is None:
+                return OrderExecutionResult(
+                    client_order_id=plan.client_order_id,
+                    state=ExchangeOrderState.REJECTED,
+                    exchange_order_id=None,
+                    plan=plan,
+                )
+            return res
 
         fact_source.set_exit_handler(_handle_decision_exit)
         await fact_source.restore()
