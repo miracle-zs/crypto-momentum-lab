@@ -749,23 +749,16 @@ def _strategy_decision_details(
 def _strategy_max_gap_seconds(
     strategy: market_runtime_contracts.LiveRuntimeStrategy,
 ) -> int | None:
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
-        return None
-    requirement = required_data()
-    value = getattr(requirement, "max_gap_seconds", None)
-    return None if value is None else int(value)
-
+    requirement = strategy.required_data()
+    return None if requirement is None else int(requirement.max_gap_seconds)
 
 def _strategy_state_interval_seconds(
     strategy: market_runtime_contracts.LiveRuntimeStrategy,
 ) -> int:
-    required_data = getattr(strategy, "required_data", None)
-    if not callable(required_data):
-        return 15
-    requirement = required_data()
-    value = getattr(requirement, "base_state_interval_seconds", 15)
-    interval_seconds = int(value)
+    requirement = strategy.required_data()
+    interval_seconds = (
+        15 if requirement is None else int(requirement.base_state_interval_seconds)
+    )
     if interval_seconds <= 0:
         raise ValueError("strategy state interval must be positive")
     return interval_seconds

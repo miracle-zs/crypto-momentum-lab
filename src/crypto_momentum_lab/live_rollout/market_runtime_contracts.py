@@ -12,10 +12,16 @@ from datetime import datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint, StrategyDecision
+from crypto_momentum_lab.domain.strategy import (
+    StrategyCheckpoint,
+    StrategyDataRequirement,
+    StrategyDecision,
+)
 
 
 class LiveRuntimeStrategy(Protocol):
+    def required_data(self) -> StrategyDataRequirement | None: ...
+
     def on_market_state(self, state: MarketState15s) -> StrategyDecision: ...
 
     def checkpoint(

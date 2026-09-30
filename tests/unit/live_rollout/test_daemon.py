@@ -2361,12 +2361,14 @@ class BlockingPlanAwareExchange(PlanAwareExchange):
 
 
 class GapAwareFakeStrategy(FakeStrategy):
+    def required_data(self):
+        from crypto_momentum_lab.domain.strategy import StrategyDataRequirement
+
+        return StrategyDataRequirement(15, 1, ("close_price",), 30, False)
+
     def __init__(self) -> None:
         self.reset_symbols: list[str] = []
         self.reset_counts_at_decision: list[int] = []
-
-    def required_data(self):
-        return SimpleNamespace(max_gap_seconds=30)
 
     def reset_symbol(self, symbol: str) -> None:
         self.reset_symbols.append(symbol)

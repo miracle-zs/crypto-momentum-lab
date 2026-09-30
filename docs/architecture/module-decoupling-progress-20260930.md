@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十九批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -541,6 +541,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：gate/daemon 定向 **82 passed**；最终完整本地回归 **2439 passed**。十组判定覆盖四种单原因、组合、重复、空集合、风险停机及未知原因。gate 模块及其测试完整 Ruff、行情循环/daemon 测试 F/I、gate 定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十批：行情策略数据要求的显式接口
+
+第三十九批提交为 `e529a9d`；第四十批继续本地实施，未部署生产。
+
+- LiveRuntimeStrategy 增加 required_data() -> StrategyDataRequirement | None。生产策略原本实现该方法并返回正式领域模型；行情循环直接读取 max_gap_seconds 与 base_state_interval_seconds，删除方法/字段 getattr/callable 能力探测。
+- 显式返回 None 表示沿用原无最大 gap 限制和 15 秒默认间隔；缺少方法的实现现在抛 AttributeError，不再静默默认为可运行，这是明确的调用契约迁移。方法仍在原两个读取点调用，不以合并读取改变时序。
+- 共享 shadow FakeStrategy 补齐显式 None；GapAwareFakeStrategy 使用正式 StrategyDataRequirement，保留 30 秒 gap 和 15 秒间隔。其余生产与仓库内活跃调用通过回归验证。正间隔校验与现有 gap/暂停/checkpoint 行为保持。
+- 新增三项契约测试覆盖非默认 60/120 秒要求及两项缺失方法拒绝；首次回归暴露旧替身缺失接口，补齐后重新完整执行通过，未把失败回归作为验收证据。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2442 passed**，25.82 秒，一项现有 Starlette/httpx 警告。daemon 单独 **61 passed**。契约及新增测试完整 Ruff、行情循环及迁移替身 F/I、契约定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+同时检查真实数据库验收环境：docker version 守护进程探针三秒超时；PATH 未找到 postgres/initdb/pg_ctl，常见 Homebrew PostgreSQL 目录也未找到。本批未连接生产或重复探测已知握手异常的 54329 数据库，未取得真实 Postgres 验收证据。真实通知、并发、原子回滚与完整重启仍待补齐。
 
 ## 后续实施顺序
 

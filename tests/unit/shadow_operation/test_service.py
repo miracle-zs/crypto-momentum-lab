@@ -127,6 +127,9 @@ def _service() -> tuple[
 
 
 class FakeStrategy:
+    def required_data(self) -> None:
+        return None
+
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         return StrategyDecision(
             signals=(_signal(),),
