@@ -127,6 +127,8 @@ def test_package_import_does_not_load_application_adapters(
         "crypto_momentum_lab.domain.execution.observation_models",
         "crypto_momentum_lab.domain.execution.recovery_models",
         "crypto_momentum_lab.domain.execution.projection_codec",
+        "crypto_momentum_lab.domain.execution.account_journal",
+        "crypto_momentum_lab.domain.execution.position_book",
     ],
 )
 def test_execution_values_import_without_coordination_stack(module: str) -> None:
