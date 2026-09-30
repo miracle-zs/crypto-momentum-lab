@@ -44,6 +44,10 @@ class CheckpointWriter:
     synchronously, while this module owns queue coalescing, retry, timing, and
     the explicit critical flush used when the daemon exits or enters an
     uncertain-order halt.
+
+    on_persist_success runs synchronously after the awaited persistence returns,
+    inside the write lock where applicable. Its exceptions follow the same
+    retry/critical-write policy as persistence errors; it is not best-effort.
     """
 
     def __init__(
@@ -54,6 +58,7 @@ class CheckpointWriter:
         retry_delay_seconds: float = 1.0,
         flush_timeout_seconds: float = 10.0,
         clock: Callable[[], float] | None = None,
+        on_persist_success: Callable[[], None] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -63,6 +68,7 @@ class CheckpointWriter:
             raise ValueError("flush_timeout_seconds must be positive")
         self._run_id = run_id
         self._persist = persist
+        self._on_persist_success = on_persist_success
         self._retry_delay_seconds = retry_delay_seconds
         self._flush_timeout_seconds = flush_timeout_seconds
         self._clock: Callable[[], float] = clock or perf_counter
@@ -155,6 +161,8 @@ class CheckpointWriter:
         """Persist a final snapshot on an explicit, bounded critical path."""
         if self._task is None:
             await self._persist(self._run_id, checkpoint, saved_at)
+            if self._on_persist_success is not None:
+                self._on_persist_success()
             self._persisted_count += 1
             self._last_persisted_monotonic = self._clock()
             self._last_persisted_token = max(
@@ -252,6 +260,8 @@ class CheckpointWriter:
         started = self._clock()
         async with self._write_lock:
             await self._persist(self._run_id, pending.checkpoint, pending.saved_at)
+            if self._on_persist_success is not None:
+                self._on_persist_success()
         completed = self._clock()
         duration_ms = (completed - started) * 1000
         self._last_duration_ms = duration_ms

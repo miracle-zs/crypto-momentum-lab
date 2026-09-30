@@ -2126,6 +2126,7 @@ def _daemon(
     strategy=None,
     context_provider=None,
     repository: FakeLiveRepository | None = None,
+    checkpoint_repository=None,
     checkpoint_every_states: int = 1,
     exit_manager: LiveExitManager | None = None,
     hedge_mode: bool = False,
@@ -2164,6 +2165,8 @@ def _daemon(
         del state
         return _runtime_context()
 
+    submission_repository = repository or FakeLiveRepository()
+    checkpoint_repository = checkpoint_repository or submission_repository
     return LiveStrategyDaemon(
         strategy=strategy or FakeStrategy(),
         risk_gateway=RiskGateway(),
@@ -2173,7 +2176,8 @@ def _daemon(
             max_daily_loss=Decimal("10"),
             max_gross_exposure=max_gross_exposure,
         ),
-        repository=repository or FakeLiveRepository(),
+        submission_repository=submission_repository,
+        persist_checkpoint=checkpoint_repository.save_checkpoint,
         state_machine=machine,
         context_provider=context_provider or default_context,
         signal_recorder=signal_recorder,
@@ -2493,3 +2497,32 @@ async def test_history_replay_reaches_live_decision_without_loading_live_context
     assert result.halt_reason is None
     assert calls == [_state()]
     assert exchange.calls == ["submit"]
+
+
+async def test_submission_and_checkpoint_persistence_are_independent():
+    class SubmissionOnly:
+        def __init__(self):
+            self.approved = []
+
+        async def save_approved_intent(self, intent, evaluation):
+            self.approved.append(intent)
+
+    saved = []
+
+    async def persist_checkpoint(run_id, checkpoint, saved_at):
+        saved.append((run_id, checkpoint, saved_at))
+
+    submissions = SubmissionOnly()
+    checkpoints = SimpleNamespace(save_checkpoint=persist_checkpoint)
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        repository=submissions,
+        checkpoint_repository=checkpoints,
+    )
+    result = await daemon.run(_states())
+    assert result.submitted_order_count == 1
+    assert len(submissions.approved) == 1
+    assert saved
+    assert all(item[0] == "run-1" for item in saved)
+    assert not hasattr(submissions, "save_checkpoint")
+    assert not hasattr(checkpoints, "save_approved_intent")

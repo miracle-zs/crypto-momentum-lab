@@ -75,3 +75,141 @@ async def test_checkpoint_writer_retries_periodic_failures() -> None:
     assert calls == 2
     assert writer.metrics.failure_count == 1
     assert writer.metrics.persisted_count == 1
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_success_notification_waits_for_persistence(started):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    async def persist(run_id, checkpoint, saved_at):
+        assert run_id == "run-1"
+        assert checkpoint.payload["value"] == "final"
+        entered.set()
+        await release.wait()
+        events.append("persisted")
+
+    writer = CheckpointWriter(
+        run_id="run-1",
+        persist=persist,
+        on_persist_success=lambda: events.append("notified"),
+        flush_timeout_seconds=1,
+    )
+    if started:
+        await writer.start()
+    try:
+        task = asyncio.create_task(
+            writer.save_now(_checkpoint("final"), datetime.now(UTC))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert events == []
+        assert writer.metrics.persisted_count == 0
+        release.set()
+        assert await task
+        assert events == ["persisted", "notified"]
+        assert writer.metrics.persisted_count == 1
+    finally:
+        release.set()
+        await writer.stop()
+
+
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_or_cancelled_persistence_does_not_notify(started, cancelled):
+    notifications = []
+
+    async def persist(*args):
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise TimeoutError("write failed")
+
+    writer = CheckpointWriter(
+        run_id="run-1",
+        persist=persist,
+        on_persist_success=lambda: notifications.append("ok"),
+        flush_timeout_seconds=1,
+    )
+    if started:
+        await writer.start()
+    try:
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await writer.save_now(_checkpoint("final"), datetime.now(UTC))
+        elif started:
+            assert (
+                await writer.save_now(_checkpoint("final"), datetime.now(UTC)) is False
+            )
+        else:
+            with pytest.raises(TimeoutError):
+                await writer.save_now(_checkpoint("final"), datetime.now(UTC))
+        assert notifications == []
+        assert writer.metrics.persisted_count == 0
+        assert writer.last_persisted_token == 0
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_notification_failure_preserves_critical_write_failure_policy(started):
+    events = []
+
+    async def persist(*args):
+        events.append("persisted")
+
+    def notify():
+        events.append("notified")
+        raise RuntimeError("health callback failed")
+
+    writer = CheckpointWriter(
+        run_id="run-1", persist=persist, on_persist_success=notify
+    )
+    if started:
+        await writer.start()
+    try:
+        if started:
+            assert (
+                await writer.save_now(_checkpoint("final"), datetime.now(UTC)) is False
+            )
+        else:
+            with pytest.raises(RuntimeError, match="health callback failed"):
+                await writer.save_now(_checkpoint("final"), datetime.now(UTC))
+        assert events == ["persisted", "notified"]
+        assert writer.metrics.persisted_count == 0
+        assert writer.last_persisted_token == 0
+    finally:
+        await writer.stop()
+
+
+async def test_periodic_notification_failure_retries_without_publishing_token():
+    events = []
+    attempts = 0
+
+    async def persist(*args):
+        events.append("persisted")
+
+    def notify():
+        nonlocal attempts
+        attempts += 1
+        events.append("notified")
+        assert writer.last_persisted_token == 0
+        if attempts == 1:
+            raise RuntimeError("health callback failed")
+
+    writer = CheckpointWriter(
+        run_id="run-1",
+        persist=persist,
+        on_persist_success=notify,
+        retry_delay_seconds=0.01,
+        flush_timeout_seconds=1,
+    )
+    await writer.start()
+    try:
+        token = writer.submit(_checkpoint("retry"), datetime.now(UTC))
+        assert await writer.flush()
+        assert events == ["persisted", "notified", "persisted", "notified"]
+        assert writer.metrics.failure_count == 1
+        assert writer.metrics.persisted_count == 1
+        assert writer.last_persisted_token == token
+    finally:
+        await writer.stop()

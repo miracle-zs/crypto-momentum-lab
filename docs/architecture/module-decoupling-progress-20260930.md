@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成二十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成二十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -329,11 +329,25 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 
 本批独立游标状态的实现与验证，不改变原有乱序批次策略、消费执行顺序或 checkpoint 提交时机，也不构成实际 Hub/数据库重启验收。真实数据库并发、原子失败回滚与进程重启仍未验收；无 schema 变更、生产发布或服务器采样。下一步继续核查运行编排内其他状态所有者及仓储适配的归属。
 
+## 第二十四批：提交仓储与 checkpoint 持久化接口分离
+
+第二十三批提交为 `61a0c81`；第二十四批继续本地实施，未部署生产。
+
+- 删除 runtime_orchestrator 内 _LiveDaemonRepositoryAdapter：原适配器仅把 approved intent、原子 prepare_submission 转发到提交仓储，再把 checkpoint 转发到另一仓储。删除 daemon 内将两类能力聚合的 LiveDaemonRepository，不把转发代码搬到新文件。
+- LiveStrategyDaemon 显式接受 submission_repository: LiveSubmissionRepository 和 persist_checkpoint: PersistCheckpoint。提交用例直接使用原生提交仓储；CheckpointWriter 使用独立保存回调，run_id 仍来自同一 daemon config，writer/coordinator 的启动、周期提交、关键 flush 和停止顺序不变。生产装配及全部 daemon 构造调用点同步迁移，没有旧参数兼容分支。
+- CheckpointWriter 增加可选同步 on_persist_success，生产用于保存成功后的数据库健康标记。回调只在 await persist 返回之后执行；异步 writer 路径仍在同一 write lock 内，未启动 writer 的直接 save_now 保留原直接执行路径。计数、token、持续时间与成功发布时间均在回调之后更新，回调不作为 best-effort 吞掉。
+- 保存异常或取消不调用成功回调。回调异常沿用旧适配器语义：周期写入重试，已启动 writer 的关键写入返回 False，未启动 writer 的直接保存向上传播，取消继续传播。数据库保存已完成而健康回调失败可能再次写入 checkpoint，此行为原先已存在，本批不改变幂等或重试口径。
+- 提交仓储 SQL、fencing、额度占用、intent/order/event 原子事务及 checkpoint SQL 实现均未改动；两个持久化方向没有合并事务或增加另一条提交路径。
+
+验证：完整单元及部署 smoke（开启 hub 网络测试）加两项 fake-service/fake-exchange 端到端测试 **2335 passed**，22.98 秒。新增 **10 项**测试：两种 writer 生命周期下保存完成前后通知顺序、失败/取消不通知、回调异常的关键写入语义、周期通知失败重试与 token 不提前发布，以及提交与 checkpoint 使用完全独立实现的 daemon 执行。writer/coordinator/daemon 定向回归 **86 passed**。writer 定向 `mypy --follow-imports=skip`、writer/新增测试完整 Ruff、daemon/编排/迁移测试 F/I、git diff --check 通过；不代表全仓类型检查。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库并发、原子失败回滚与进程重启仍未验收；下一步继续核查运行用例和 daemon 中剩余的兼容重导出及状态归属。
+
 ## 后续实施顺序
 
 1. 补齐真实 Postgres 并发、原子回滚与完整进程重启验收；第二批已完成自愈事务迁移及提交后重载契约。
 2. ExecutionBook 内部协作者：第三批已提取恢复/检查点计算；第四批已提取命令状态与 reservation 计算；第五批已提取命令/outbox 编解码与恢复校验；第六批已明确命令仓储接口并提取显式兼容适配；第七批已提取 reservation 仓储接口与显式兼容装配；第八批已提取证据模型、去重/覆盖规则与累计水位计算；第十六批已提取成交 identity/恢复前缀计划、退出结算判定及真实账户成交水位增量；第十七批已提取订单证据的 outbox/释放/恢复判定；第十八批已提取累计报告结算与水位持久化计划；第十九批已提取候选证据分组协调及观察结果模型；第二十批已提取耐久证据准入与水位写入计划；锁、核心事务和状态所有权继续由 Book 统一管理，不为缩短类而拆开事务。统一 mutation lock、候选状态、事务与提交后发布仍由 Book 所有。
-3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，第二十三批已独立 Hub 游标恢复与整批确认状态，继续处理其他运行子系统与可调用的 CLI 用例。
+3. 聚合仓储与运行装配：第九批已拆出执行命令/恢复/水位/对账仓储；第十一批已拆出意图占用/原子提交仓储，第十二批已独立事件/成交仓储与状态机事件端口，第十三批已独立订单读取仓储及领域读取接口，第十四批已独立外部订单接管仓储，第十五批已分离计划与 shadow suppression 接口，继续处理运行用例的装配，第十批已提取实盘执行 runtime factory，第二十三批已独立 Hub 游标恢复与整批确认状态；第二十四批已分离 daemon 提交与 checkpoint 接口并删除聚合转发适配器，继续处理其他运行子系统与可调用的 CLI 用例。
 4. 第二十一批已解除恢复模型/codec 的摘要循环，保留既有 checkpoint digest 与跨 epoch 保护；第二十二批已清理 execution 包门面的急切导入并迁移活跃调用点，继续核查其他模块级延迟环。
 
 生产账户事实覆盖冲突和策略状态发布缺失属于尚未关闭的运行问题；本次结构迁移不能作为这些问题已经修复的证据。

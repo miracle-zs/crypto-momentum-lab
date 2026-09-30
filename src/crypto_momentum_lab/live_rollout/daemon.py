@@ -7,7 +7,7 @@ from collections.abc import (
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any
 
 import structlog
 
@@ -29,7 +29,6 @@ from crypto_momentum_lab.domain.market.models import (
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
-    StrategyCheckpoint,
     StrategyDecision,
     UniverseRankingSnapshot,
 )
@@ -42,7 +41,10 @@ from crypto_momentum_lab.execution_account.orders.recovery import (
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
-from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
+from crypto_momentum_lab.live_rollout.checkpoint_writer import (
+    CheckpointWriter,
+    PersistCheckpoint,
+)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
@@ -124,15 +126,6 @@ log = structlog.get_logger()
 # from daemon.py; ownership now lives with the market loop module.
 LiveDaemonResult = _LiveDaemonResult
 LiveRuntimeStrategy = _LiveRuntimeStrategy
-
-
-class LiveDaemonRepository(LiveSubmissionRepository, Protocol):
-    async def save_checkpoint(
-        self,
-        run_id: str,
-        checkpoint: StrategyCheckpoint,
-        saved_at: datetime,
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +218,8 @@ class LiveStrategyDaemon:
         strategy: LiveRuntimeStrategy,
         risk_gateway: RiskGateway,
         limits: FixedLiveLimits,
-        repository: LiveDaemonRepository,
+        submission_repository: LiveSubmissionRepository,
+        persist_checkpoint: PersistCheckpoint,
         state_machine: OrderExecutionPort,
         context_provider: LiveContextProvider,
         config: LiveDaemonConfig,
@@ -249,11 +243,11 @@ class LiveStrategyDaemon:
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
+        on_checkpoint_saved: Callable[[], None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
         self._limits = limits
-        self._repository = repository
         self._state_machine = state_machine
         self._entry_control = LiveEntryControlGate(
             run_id=config.run_id,
@@ -276,7 +270,8 @@ class LiveStrategyDaemon:
         self._checkpoint_coordinator = LiveCheckpointCoordinator(
             writer=CheckpointWriter(
                 run_id=config.run_id,
-                persist=self._repository.save_checkpoint,
+                persist=persist_checkpoint,
+                on_persist_success=on_checkpoint_saved,
             ),
             strategy=self._strategy,
             checkpoint_every_states=config.checkpoint_every_states,
@@ -339,7 +334,7 @@ class LiveStrategyDaemon:
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,
             limits=self._limits,
-            repository=self._repository,
+            repository=submission_repository,
             state_machine=self._state_machine,
             config=LiveSubmissionConfig(
                 run_id=config.run_id,

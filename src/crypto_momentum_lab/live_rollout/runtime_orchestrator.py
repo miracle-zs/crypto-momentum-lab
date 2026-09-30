@@ -58,7 +58,6 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     RunMode,
-    StrategyCheckpoint,
     StrategyRunIdentity,
     StrategySide,
 )
@@ -1310,11 +1309,9 @@ async def run_live_daemon(
                 max_gross_exposure=max_gross,
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
             ),
-            repository=_LiveDaemonRepositoryAdapter(
-                submission_repository,
-                checkpoint_repository,
-                mark_live_database_ok,
-            ),
+            submission_repository=submission_repository,
+            persist_checkpoint=checkpoint_repository.save_checkpoint,
+            on_checkpoint_saved=mark_live_database_ok,
             state_machine=execution_coordinator,
             context_provider=context_provider,
             telemetry=telemetry,
@@ -2025,78 +2022,6 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     if cause is not None and isinstance(cause, Exception):
         return _is_order_identity_conflict(cause)
     return False
-
-
-class _LiveDaemonRepositoryAdapter:
-    def __init__(
-        self,
-        submission_repository: PostgresOrderSubmissionRepository,
-        checkpoint_repository: PostgresPaperDaemonRepository,
-        on_database_success: Callable[[], None] | None = None,
-    ) -> None:
-        self._submissions = submission_repository
-        self._checkpoints = checkpoint_repository
-        self._on_database_success = on_database_success
-
-    async def save_approved_intent(
-        self,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-    ) -> None:
-        await self._submissions.save_approved_intent(intent, evaluation)
-
-    async def prepare_submission(
-        self,
-        *,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-        plan: OrderExecutionPlan,
-        prepared_at: datetime,
-        environment: str | None = None,
-        account_label: str | None = None,
-        strategy_name: str | None = None,
-        required_lease_owner: str | None = None,
-        required_lease_id: str | None = None,
-        required_code_generation: str | None = None,
-        required_session_id: str | None = None,
-        max_open_positions: int | None = None,
-        max_daily_loss: Decimal | None = None,
-        max_gross_exposure: Decimal | None = None,
-        current_daily_pnl: Decimal | None = None,
-        current_gross_exposure: Decimal | None = None,
-        open_position_symbols: frozenset[str] | None = None,
-        exposure_notional: Decimal | None = None,
-    ) -> PreparedOrderSubmission | None:
-        return await self._submissions.prepare_submission(
-            intent=intent,
-            evaluation=evaluation,
-            plan=plan,
-            prepared_at=prepared_at,
-            environment=environment,
-            account_label=account_label,
-            strategy_name=strategy_name,
-            required_lease_owner=required_lease_owner,
-            required_lease_id=required_lease_id,
-            required_code_generation=required_code_generation,
-            required_session_id=required_session_id,
-            max_open_positions=max_open_positions,
-            max_daily_loss=max_daily_loss,
-            max_gross_exposure=max_gross_exposure,
-            current_daily_pnl=current_daily_pnl,
-            current_gross_exposure=current_gross_exposure,
-            open_position_symbols=open_position_symbols,
-            exposure_notional=exposure_notional,
-        )
-
-    async def save_checkpoint(
-        self,
-        run_id: str,
-        checkpoint: StrategyCheckpoint,
-        saved_at: datetime,
-    ) -> None:
-        await self._checkpoints.save_checkpoint(run_id, checkpoint, saved_at)
-        if self._on_database_success is not None:
-            self._on_database_success()
 
 
 async def _has_matching_shadow_session(
