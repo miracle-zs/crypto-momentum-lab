@@ -29,7 +29,6 @@ async def test_registrar_publishes_scoped_expectation_from_entry_plan() -> None:
             published.append(expectation)
 
     registrar = LiveEntryExpectationRegistrar(
-        account_event_hub_url="ws://account-hub",
         account_label="account-1",
         publisher=Publisher(),
     )
@@ -55,7 +54,6 @@ async def test_registrar_fails_closed_when_expectation_publish_fails() -> None:
             raise OSError("hub unavailable")
 
     registrar = LiveEntryExpectationRegistrar(
-        account_event_hub_url="ws://account-hub",
         account_label="account-1",
         publisher=Publisher(),
     )

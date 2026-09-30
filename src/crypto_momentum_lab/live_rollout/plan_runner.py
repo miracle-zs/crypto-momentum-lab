@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.execution_account.hub import (
+    WebSocketAccountPositionExpectationPublisher,
+)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
@@ -154,9 +157,15 @@ async def run_live_plan(
         if account_config.hedge_mode != plan_uses_hedge_mode:
             raise RuntimeError("order plan position mode does not match Binance")
 
+        if not account_event_hub_url.strip():
+            raise ValueError("account_event_hub_url must not be empty")
         register_expected_entry = LiveEntryExpectationRegistrar(
-            account_event_hub_url=account_event_hub_url,
             account_label=account_label,
+            publisher=WebSocketAccountPositionExpectationPublisher(
+                url=account_event_hub_url,
+                environment="live",
+                account_label=account_label,
+            ),
         )
         submission_fence = LiveSubmissionFence(
             risk_state=risk_repository,

@@ -22,6 +22,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",
+        "crypto_momentum_lab.live_rollout.entry_expectations",
         "crypto_momentum_lab.live_rollout.resource_ports",
         "crypto_momentum_lab.live_rollout.resource_lifecycle",
         "crypto_momentum_lab.strategy_runner.live_source",
@@ -308,6 +309,27 @@ class QuoteHubGuard(MetaPathFinder):
             raise RuntimeError('volume consumer imported quote hub: ' + fullname)
 sys.meta_path.insert(0, QuoteHubGuard())
 importlib.import_module('crypto_momentum_lab.live_rollout.volume')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_entry_expectation_registrar_does_not_load_account_hub() -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class AccountHubGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'crypto_momentum_lab.execution_account.hub':
+            raise RuntimeError('registrar imported account hub: ' + fullname)
+sys.meta_path.insert(0, AccountHubGuard())
+importlib.import_module('crypto_momentum_lab.live_rollout.entry_expectations')
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

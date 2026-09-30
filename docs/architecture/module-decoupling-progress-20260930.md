@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十五批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -858,6 +858,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 新增独立进程检查，禁止导入 quote_hub 后 volume 消费模块仍可加载。原 REST ticker 类型依赖保留，本批不宣称所有行情适配依赖均移除。
 
 验证：成交量/架构定向 **68 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2476 passed**，27.85 秒，一项现有 Starlette/httpx 警告。volume 定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十六批：入场预期发布器显式装配
+
+第六十五批提交为 `1ab9efd`；第六十六批继续本地实施，未部署生产。
+
+- LiveEntryExpectationRegistrar 仅接收必需 PositionExpectationPublisher 和 account_label，删除具体 WebSocket 发布器导入、URL 参数及内部默认创建。已有接口与原测试替身复用，无新增转发实现。
+- 长驻运行编排与单次 plan_runner 两个生产入口显式创建原 WebSocketAccountPositionExpectationPublisher，保留 live 环境、账户标签、URL 空值检查和入场提交前注册。注册器保留账户标签校验、计划到预期转换、失败日志及 OrderPreSubmissionError 封锁。
+- 构造接口不再接受缺省或 None publisher，也不再按发布器真假值选择备用对象；生产仍绑定原生发布器。源创建归装配，注册器不再知道连接地址。
+
+验证：注册器/CLI/架构定向 **138 passed**；最终完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2478 passed**，一项现有 Starlette/httpx 警告。新增注册器禁止 sqlalchemy/persistence 与禁止具体账户 Hub 导入两项独立进程检查。entry_expectations 定向 mypy --follow-imports=skip、核心注册器及相关测试完整 Ruff、两装配文件 F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

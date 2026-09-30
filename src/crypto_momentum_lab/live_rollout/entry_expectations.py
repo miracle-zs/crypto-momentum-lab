@@ -12,9 +12,6 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
 )
-from crypto_momentum_lab.execution_account.hub import (
-    WebSocketAccountPositionExpectationPublisher,
-)
 
 log = structlog.get_logger()
 
@@ -29,20 +26,13 @@ class LiveEntryExpectationRegistrar:
     def __init__(
         self,
         *,
-        account_event_hub_url: str,
         account_label: str,
-        publisher: PositionExpectationPublisher | None = None,
+        publisher: PositionExpectationPublisher,
     ) -> None:
-        if not account_event_hub_url.strip():
-            raise ValueError("account_event_hub_url must not be empty")
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
         self._account_label = account_label
-        self._publisher = publisher or WebSocketAccountPositionExpectationPublisher(
-            url=account_event_hub_url,
-            environment="live",
-            account_label=account_label,
-        )
+        self._publisher = publisher
 
     async def __call__(
         self,
