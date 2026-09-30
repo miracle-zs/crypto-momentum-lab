@@ -35,6 +35,7 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     fill_counts_by_symbol,
     merge_fill_cursor,
     plan_fill_polling_ranges,
+    select_fill_reconciliation_symbols,
 )
 from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 from crypto_momentum_lab.execution_account.position_history import (
@@ -288,9 +289,13 @@ class ExecutionAccountSyncService:
                 symbol for symbol, _side in self._config.fill_source_anchors
             )
             self._tracked_fill_symbols.update(active_fill_symbols)
-            tracked_fill_symbols = self._fill_symbols_for_reconciliation(
+            tracked_fill_symbols = select_fill_reconciliation_symbols(
+                self._tracked_fill_symbols,
+                self._fill_cursor_checked_at,
                 active_fill_symbols=active_fill_symbols,
                 observed_at=config.observed_at,
+                historical_interval=self._historical_fill_reconciliation_interval,
+                historical_batch_size=self._config.historical_fill_reconciliation_batch_size,
             )
             previous_fill_cursors = dict(self._fill_cursors)
             previous_active_symbols = {
@@ -696,34 +701,6 @@ class ExecutionAccountSyncService:
             fill_count_by_symbol=fill_counts_by_symbol(fills),
             fills_catching_up=event_state is ExecutionAccountStatus.SYNCING,
         )
-
-    def _fill_symbols_for_reconciliation(
-        self,
-        *,
-        active_fill_symbols: set[str],
-        observed_at: datetime,
-    ) -> tuple[str, ...]:
-        historical_cutoff = observed_at - self._historical_fill_reconciliation_interval
-        due_historical_symbols = {
-            symbol
-            for symbol in self._tracked_fill_symbols
-            if (
-                symbol not in active_fill_symbols
-                and (
-                    self._fill_cursor_checked_at.get(symbol) is None
-                    or self._fill_cursor_checked_at[symbol] <= historical_cutoff
-                )
-            )
-        }
-        historical_symbols = sorted(
-            due_historical_symbols,
-            key=lambda symbol: (
-                self._fill_cursor_checked_at.get(symbol)
-                or datetime.min.replace(tzinfo=UTC),
-                symbol,
-            ),
-        )[: self._config.historical_fill_reconciliation_batch_size]
-        return tuple(sorted(active_fill_symbols | set(historical_symbols)))
 
     def _positions_to_persist(
         self,

@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
@@ -135,3 +135,36 @@ def plan_fill_polling_ranges(
         if symbol not in start_time_by_symbol:
             start_time_by_symbol[symbol] = historical_start_at
     return from_id_by_symbol, start_time_by_symbol
+
+
+def select_fill_reconciliation_symbols(
+    tracked_fill_symbols: set[str],
+    checked_at: Mapping[str, datetime],
+    *,
+    active_fill_symbols: set[str],
+    observed_at: datetime,
+    historical_interval: timedelta,
+    historical_batch_size: int,
+) -> tuple[str, ...]:
+    """Select all active symbols and the oldest due bounded historical batch."""
+    historical_cutoff = observed_at - historical_interval
+    due_historical_symbols = {
+        symbol
+        for symbol in tracked_fill_symbols
+        if (
+            symbol not in active_fill_symbols
+            and (
+                checked_at.get(symbol) is None
+                or checked_at[symbol] <= historical_cutoff
+            )
+        )
+    }
+    historical_symbols = sorted(
+        due_historical_symbols,
+        key=lambda symbol: (
+            checked_at.get(symbol)
+            or datetime.min.replace(tzinfo=UTC),
+            symbol,
+        ),
+    )[: historical_batch_size]
+    return tuple(sorted(active_fill_symbols | set(historical_symbols)))
