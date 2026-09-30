@@ -1209,7 +1209,11 @@ async def run_live_daemon(
             ema_provider = ClosedCandleEmaProvider(candle_source)
 
         entry_runtime = LiveEntryRuntime(
-            market_session_factory=market_factory,
+            universe_reader=(
+                PostgresUniverseRepository(market_factory)
+                if entry_positive_gainer_top_count is not None
+                else None
+            ),
             client=client,
             ema_provider=ema_provider,
             positive_gainer_top_count=entry_positive_gainer_top_count,

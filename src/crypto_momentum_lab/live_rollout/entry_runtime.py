@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import UniverseRankingSnapshot
 from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
     universe_snapshot_for_symbols,
 )
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.domain.universe.ports import UniverseSnapshotReader
 from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.entry_cache import (
     EntryFilterCacheConfig,
@@ -23,12 +23,12 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
     LiveEntryUniverseData,
     universe_context_for,
 )
-from crypto_momentum_lab.persistence.postgres.repository import (
-    PostgresUniverseRepository,
-)
-from crypto_momentum_lab.strategy_runner.candle_source import (
-    ClosedCandleEmaProvider,
-)
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+    from crypto_momentum_lab.strategy_runner.candle_source import (
+        ClosedCandleEmaProvider,
+    )
 
 log = structlog.get_logger()
 
@@ -57,7 +57,7 @@ class LiveEntryRuntime:
     def __init__(
         self,
         *,
-        market_session_factory: async_sessionmaker[AsyncSession],
+        universe_reader: UniverseSnapshotReader | None,
         client: BinanceUsdMTradeClient,
         ema_provider: ClosedCandleEmaProvider | None,
         positive_gainer_top_count: int | None,
@@ -69,10 +69,10 @@ class LiveEntryRuntime:
         self._positive_gainer_top_count = positive_gainer_top_count
         self._entry_leverage = entry_leverage
         self._margin_type = margin_type
+        if positive_gainer_top_count is not None and universe_reader is None:
+            raise ValueError("universe_reader is required for the positive gainer pool")
         self._universe_repository = (
-            None
-            if positive_gainer_top_count is None
-            else PostgresUniverseRepository(market_session_factory)
+            universe_reader if positive_gainer_top_count is not None else None
         )
         self._entry_filter_cache: LiveEntryFilterCache | None = None
         self._entry_symbol_cache: LiveEntrySymbolCache | None = None

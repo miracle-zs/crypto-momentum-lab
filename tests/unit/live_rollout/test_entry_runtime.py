@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from crypto_momentum_lab.live_rollout import entry_runtime as entry_runtime_module
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 
 
@@ -46,17 +45,10 @@ class FakeEmaProvider:
 
 
 @pytest.mark.asyncio
-async def test_entry_runtime_warms_exchange_from_positive_gainer_pool(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        entry_runtime_module,
-        "PostgresUniverseRepository",
-        lambda _factory: FakeUniverseRepository(),
-    )
+async def test_entry_runtime_warms_exchange_from_positive_gainer_pool() -> None:
     client = FakeClient()
     runtime = LiveEntryRuntime(
-        market_session_factory=object(),  # type: ignore[arg-type]
+        universe_reader=FakeUniverseRepository(),
         client=client,  # type: ignore[arg-type]
         ema_provider=None,
         positive_gainer_top_count=3,
@@ -76,7 +68,7 @@ async def test_entry_runtime_warms_exchange_from_positive_gainer_pool(
 async def test_entry_runtime_loads_ema_context_without_pool_cache() -> None:
     observed_at = datetime(2026, 9, 12, tzinfo=UTC)
     runtime = LiveEntryRuntime(
-        market_session_factory=object(),  # type: ignore[arg-type]
+        universe_reader=None,
         client=FakeClient(),  # type: ignore[arg-type]
         ema_provider=FakeEmaProvider(),  # type: ignore[arg-type]
         positive_gainer_top_count=None,
@@ -100,3 +92,15 @@ async def test_entry_runtime_loads_ema_context_without_pool_cache() -> None:
     assert context.entry_price == 102
     assert context.ema5 == 101
     assert context.ema10 == 99
+
+
+def test_enabled_pool_requires_explicit_snapshot_reader():
+    with pytest.raises(ValueError, match="universe_reader is required"):
+        LiveEntryRuntime(
+            universe_reader=None,
+            client=FakeClient(),
+            ema_provider=None,
+            positive_gainer_top_count=3,
+            entry_leverage=7,
+            margin_type="ISOLATED",
+        )

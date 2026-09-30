@@ -97,3 +97,9 @@ class UniverseSymbolReader(Protocol):
     async def load_positive_gainer_symbols_at(
         self, observed_at: datetime, *, top_count: int
     ) -> frozenset[str]: ...
+
+
+class UniverseSnapshotReader(Protocol):
+    async def load_snapshot_at(
+        self, observed_at: datetime
+    ) -> UniverseSnapshot | None: ...
