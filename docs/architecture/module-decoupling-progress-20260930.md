@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十二批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -578,6 +578,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - CLI 测试的一处旧部分数据要求替身补齐原默认的间隔和空字段；首次失败回归不作为验收证据，修正后完整重跑。新增四项测试覆盖显式 None、15/60 秒要求、warmup 数量/窗口/跨 symbols 行数预算及缺失方法失败。
 
 验证：最终完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2449 passed**，26.57 秒，一项现有 Starlette/httpx 警告。启动契约/恢复/CLI 定向 **81 passed**；新增文件 **4 passed**。恢复模块与新增测试完整 Ruff、迁移 CLI 测试 F/I、git diff --check 通过。单独 startup_recovery 的 mypy --follow-imports=skip 未通过：两处 checkpoint 返回值 no-any-return 和一处旧 unused-ignore；不将此项记为通过，也不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十三批：启动恢复类型契约验收缺口关闭
+
+第四十二批提交为 `ef8d42c`；第四十三批继续本地实施，未部署生产。
+
+- market_runtime_contracts 与 startup_recovery 直接从 domain/strategy/models 导入实际模型，不再通过 strategy 包重导出获取这些注解，明确模型类型所有者。此处不宣称 Python 加载子模块会绕过包初始化。
+- startup_recovery 内部 _WarmupPageArguments TypedDict 明确 environment、cursor、limit、upper_bound 与 NotRequired symbols。保留原动态字典的运行值及 symbols 仅在显式 warmup_symbols 时传入的规则，删除 load_after 的 arg-type 忽略，没有 Any/cast 或错误码禁用。
+- 除 load_kwargs 注解差异外，所有 startup_recovery 函数 AST 与上一批一致。查询、预热、checkpoint、预算和错误路径均不改；本批补类型契约，不新增行为测试。
+
+验证：五个实际类型所有者/消费者一同定向 mypy --follow-imports=skip **通过**：startup_recovery、market_runtime_contracts、domain/strategy/models、domain/market/runtime_state_repository、domain/market/runtime_state_models。第四十二批报告的三项单文件类型错误在此明确口径下关闭；不代表全仓类型验收，也不把忽略依赖的单文件检查作为完整证据。核心文件完整 Ruff、git diff --check 通过。启动契约/恢复/CLI/架构定向 **132 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2449 passed**，25.41 秒，一项现有 Starlette/httpx 警告。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

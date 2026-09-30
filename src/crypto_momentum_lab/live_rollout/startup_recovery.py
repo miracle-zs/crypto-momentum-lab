@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from time import monotonic, perf_counter
+from typing import NotRequired, TypedDict
 
 import structlog
 
@@ -12,7 +13,7 @@ from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateC
 from crypto_momentum_lab.domain.market.runtime_state_repository import (
     RuntimeMarketStateReadRepository,
 )
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.domain.strategy.models import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
     LiveRuntimeStrategy,
 )
@@ -26,6 +27,14 @@ WARMUP_BATCH_SIZE = 5_000
 _DURABLE_CUTOVER_WAIT_SECONDS = 5.0
 _DURABLE_CUTOVER_POLL_SECONDS = 0.1
 _MARKET_GAP_RECOVERY_WAIT_SECONDS = 0.5
+
+class _WarmupPageArguments(TypedDict):
+    environment: str
+    cursor: RuntimeStateCursor
+    limit: int
+    upper_bound: datetime
+    symbols: NotRequired[Collection[str]]
+
 
 WarmupStatusCallback = Callable[[LiveWarmupStatus], None]
 
@@ -405,7 +414,7 @@ async def warm_live_strategy(
             WARMUP_BATCH_SIZE,
             recovery_state_limit - warmed_state_count,
         )
-        load_kwargs: dict[str, object] = {
+        load_kwargs: _WarmupPageArguments = {
             "environment": environment,
             "cursor": cursor,
             "limit": batch_limit,
@@ -413,7 +422,7 @@ async def warm_live_strategy(
         }
         if warmup_symbols is not None:
             load_kwargs["symbols"] = expected_symbols
-        batch = await repository.load_after(**load_kwargs)  # type: ignore[arg-type]
+        batch = await repository.load_after(**load_kwargs)
         if not batch:
             break
         accepted_in_batch = 0

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import (
+from crypto_momentum_lab.domain.strategy.models import (
     StrategyCheckpoint,
     StrategyDataRequirement,
     StrategyDecision,
