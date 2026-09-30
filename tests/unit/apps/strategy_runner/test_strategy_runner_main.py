@@ -7,14 +7,15 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.strategy_runner import main
+from crypto_momentum_lab.domain.strategy.paper_models import ReplayExecutionConfig
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
 from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowImpulseConfig,
 )
-from crypto_momentum_lab.domain.strategy.paper_models import ReplayExecutionConfig
-from crypto_momentum_lab.strategy_runner import PaperRunnerConfig, ReplayConfig
+from crypto_momentum_lab.strategy_runner.paper import PaperRunnerConfig
+from crypto_momentum_lab.strategy_runner.replay import ReplayConfig
 
 runner = CliRunner()
 

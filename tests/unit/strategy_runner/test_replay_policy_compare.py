@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.strategy import EntryPolicyComparisonRequest
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
-from crypto_momentum_lab.strategy_runner import (
+from crypto_momentum_lab.strategy_runner.replay import (
     EntryPolicyReplayError,
     ReplayConfig,
     build_entry_policy_replay_report,

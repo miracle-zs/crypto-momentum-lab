@@ -9,11 +9,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.decision.commit_models import DecisionCommit
 from crypto_momentum_lab.domain.decision.decision_engine import PolicyState
 from crypto_momentum_lab.domain.decision.policy_transition import (
     compute_policy_state_digest,
     serialize_policy_state,
 )
+from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
     MarketRevisionRef,
@@ -22,10 +24,8 @@ from crypto_momentum_lab.domain.market.revision_models import (
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
-from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
-    DecisionCommit,
 )
 from crypto_momentum_lab.persistence.postgres.models import DecisionTraceRow
 from crypto_momentum_lab.persistence.postgres.session import (

@@ -15,6 +15,12 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitConfig,
+    PaperPositionStatus,
+    ReplayExecutionConfig,
+    SimulatedFillStatus,
+)
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
@@ -24,19 +30,11 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
 )
-from crypto_momentum_lab.domain.strategy.paper_models import (
-    ReplayExecutionConfig,
-    SimulatedFillStatus,
-)
-from crypto_momentum_lab.strategy_runner import (
+from crypto_momentum_lab.strategy_runner.paper import (
     InMemoryPaperMarketStateSource,
     PaperRunnerConfig,
     PaperRunnerError,
     run_paper_trading,
-)
-from crypto_momentum_lab.domain.strategy.paper_models import (
-    PaperExitConfig,
-    PaperPositionStatus,
 )
 
 

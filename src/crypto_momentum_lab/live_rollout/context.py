@@ -19,6 +19,10 @@ import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
 )
@@ -29,13 +33,9 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
 )
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
-)
 
 
 @dataclass(frozen=True, slots=True)

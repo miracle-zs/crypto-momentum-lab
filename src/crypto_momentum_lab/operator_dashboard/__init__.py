@@ -1,3 +1,5 @@
-from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
+"""Operator dashboard queries and HTTP application.
 
-__all__ = ["create_dashboard_app"]
+Import the application factory from operator_dashboard.api explicitly.
+Package initialization deliberately does not construct the HTTP dependency graph.
+"""

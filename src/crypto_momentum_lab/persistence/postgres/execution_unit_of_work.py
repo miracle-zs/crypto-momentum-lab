@@ -6,7 +6,6 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -14,6 +13,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.decision import commit_models
 from crypto_momentum_lab.domain.decision.decision_engine import PolicyState
 from crypto_momentum_lab.domain.decision.policy_transition import (
     canonicalize_policy_value,
@@ -26,10 +26,20 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict as _DecisionCommitConflict,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState as _DurableExecutionPositionState,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionEvidenceIdentity as _ExecutionEvidenceIdentity,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionHeadSnapshot as _ExecutionHeadSnapshot,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionTradeIdentity as _ExecutionTradeIdentity,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionWatermark as _ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -77,50 +87,6 @@ from crypto_momentum_lab.persistence.postgres.position_reservation_repository im
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionCommit:
-    """Complete, typed input for an atomic live decision commit."""
-
-    trace: DecisionTrace
-    policy_key: str
-    expected_policy_revision: int
-    expected_prior_digest: str
-    prior_policy_state: PolicyState
-    next_policy_state: PolicyState
-    dependencies: tuple[ConsumerDependency, ...] = ()
-    accepted_exit: TradeCommand | None = None
-
-    def __post_init__(self) -> None:
-        if not self.policy_key.strip():
-            raise ValueError("policy_key must not be empty")
-        if self.expected_policy_revision < 0:
-            raise ValueError("expected_policy_revision must be non-negative")
-        if not self.expected_prior_digest.strip():
-            raise ValueError("expected_prior_digest must not be empty")
-        if not self.trace.decision_id.strip():
-            raise ValueError("decision trace id must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionCommitReceipt:
-    decision_id: str
-    policy_key: str
-    prior_state_digest: str
-    next_state_digest: str
-    policy_revision: int
-    durable_at: datetime
-    pending_exit_id: str | None = None
-    is_replay: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class DurablePolicySnapshot:
-    state: PolicyState
-    state_digest: str
-    revision: int
-    last_decision_id: str
 
 
 class ExecutionTransaction:
@@ -869,7 +835,9 @@ class AsyncPostgresDecisionUnitOfWork:
             retention_repository or AsyncPostgresRetentionRepository(session_factory)
         )
 
-    async def commit_decision(self, commit: DecisionCommit) -> DecisionCommitReceipt:
+    async def commit_decision(
+        self, commit: commit_models.DecisionCommit
+    ) -> commit_models.DecisionCommitReceipt:
         trace = commit.trace
         prior_digest = compute_policy_state_digest(commit.prior_policy_state)
         next_digest = compute_policy_state_digest(commit.next_policy_state)
@@ -1013,7 +981,7 @@ class AsyncPostgresDecisionUnitOfWork:
                             f"decision {trace.decision_id} exit outbox conflicts"
                         )
                     durable_at = prior_commit.committed_at
-                    return DecisionCommitReceipt(
+                    return commit_models.DecisionCommitReceipt(
                         decision_id=trace.decision_id,
                         policy_key=commit.policy_key,
                         prior_state_digest=prior_digest,
@@ -1098,7 +1066,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         )
                     )
 
-                return DecisionCommitReceipt(
+                return commit_models.DecisionCommitReceipt(
                     decision_id=trace.decision_id,
                     policy_key=commit.policy_key,
                     prior_state_digest=prior_digest,
@@ -1112,7 +1080,7 @@ class AsyncPostgresDecisionUnitOfWork:
 
     async def load_policy_state(
         self, policy_key: str
-    ) -> DurablePolicySnapshot | None:
+    ) -> commit_models.DurablePolicySnapshot | None:
         async with self._session_factory() as session:
             row = await session.get(DurablePolicyStateRow, policy_key)
         if row is None:
@@ -1123,7 +1091,7 @@ class AsyncPostgresDecisionUnitOfWork:
             raise _DecisionCommitConflict(
                 f"stored policy state {policy_key} failed its digest check"
             )
-        return DurablePolicySnapshot(
+        return commit_models.DurablePolicySnapshot(
             state=state,
             state_digest=digest,
             revision=row.policy_revision,
@@ -1135,7 +1103,7 @@ class AsyncPostgresDecisionUnitOfWork:
         policy_key: str,
         strategy_name: str,
         account_label: str,
-    ) -> DurablePolicySnapshot | None:
+    ) -> commit_models.DurablePolicySnapshot | None:
         """Load the durable head or import a fully verifiable legacy trace.
 
         A missing head is fresh only when no trace exists for this exact policy.
@@ -1164,7 +1132,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         raise _DecisionCommitConflict(
                             f"stored policy state {policy_key} failed its digest check"
                         )
-                    return DurablePolicySnapshot(
+                    return commit_models.DurablePolicySnapshot(
                         state=state,
                         state_digest=digest,
                         revision=state_row.policy_revision,
@@ -1400,7 +1368,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     updated_at=imported_at,
                 )
                 session.add(state_row)
-                return DurablePolicySnapshot(
+                return commit_models.DurablePolicySnapshot(
                     state=next_state,
                     state_digest=next_digest,
                     revision=1,
@@ -1412,7 +1380,7 @@ class AsyncPostgresDecisionUnitOfWork:
         policy_key: str,
         strategy_name: str,
         account_label: str,
-    ) -> DurablePolicySnapshot | None:
+    ) -> commit_models.DurablePolicySnapshot | None:
         """Compatibility alias for startup policy recovery callers."""
         return await self.load_or_import_policy_state(
             policy_key,
@@ -1566,9 +1534,4 @@ def _policy_state_from_payload(payload: dict[str, Any]) -> PolicyState:
     )
 
 
-__all__ = [
-    "AsyncPostgresDecisionUnitOfWork",
-    "DecisionCommit",
-    "DecisionCommitReceipt",
-    "DurablePolicySnapshot",
-]
+__all__ = ["AsyncPostgresDecisionUnitOfWork"]

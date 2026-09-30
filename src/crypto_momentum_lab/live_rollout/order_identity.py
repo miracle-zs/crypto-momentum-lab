@@ -1,7 +1,7 @@
-"""Legacy client-order identity expansion and order-row codec.
+"""Legacy client-order identity expansion from storage-independent observations.
 
 Moved out of postgres_runtime so the live context provider stays focused on
-orchestration and SQL loading.
+orchestration and SQL loading. No ORM types enter these calculations.
 """
 
 from __future__ import annotations
@@ -17,11 +17,9 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
     PositionOrderFact,
 )
-from crypto_momentum_lab.persistence.postgres.models import (
-    ExchangeOrderEventRow,
-    ExchangeOrderRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    OrderIdentityEvent,
+    OrderObservation,
     PersistedExchangeOrder,
 )
 
@@ -29,7 +27,7 @@ _PositionOrder = PositionOrderFact
 
 
 def _legacy_order_identity_is_ambiguous(
-    events: Sequence[ExchangeOrderEventRow],
+    events: Sequence[OrderIdentityEvent],
 ) -> bool:
     exchange_order_ids = {
         event.exchange_order_id for event in events if event.exchange_order_id
@@ -38,7 +36,7 @@ def _legacy_order_identity_is_ambiguous(
 
 
 def _legacy_order_identity_is_reconstructible(
-    events: Sequence[ExchangeOrderEventRow],
+    events: Sequence[OrderIdentityEvent],
     account_fill_quantities: Mapping[str, Decimal],
 ) -> bool:
     exchange_order_ids = {
@@ -69,7 +67,7 @@ def _legacy_order_identity_is_reconstructible(
 
 
 def _legacy_order_identity_is_zero_fill_terminal(
-    events: Sequence[ExchangeOrderEventRow],
+    events: Sequence[OrderIdentityEvent],
     account_fill_quantities: Mapping[str, Decimal],
 ) -> bool:
     """Recognize a harmless legacy collision with no possible fill.
@@ -80,7 +78,7 @@ def _legacy_order_identity_is_zero_fill_terminal(
     position and must not block a separately evidenced current entry.  Any
     active, filled, malformed, or incomplete evidence remains fail-closed.
     """
-    events_by_exchange_order_id: dict[str, list[ExchangeOrderEventRow]] = {}
+    events_by_exchange_order_id: dict[str, list[OrderIdentityEvent]] = {}
     for event in events:
         if event.exchange_order_id:
             events_by_exchange_order_id.setdefault(
@@ -120,12 +118,12 @@ def _legacy_order_identity_is_zero_fill_terminal(
 
 
 def _expand_legacy_order_row(
-    row: ExchangeOrderRow,
+    row: OrderObservation,
     *,
     plan: OrderExecutionPlan | None,
     fallback_state: ExchangeOrderState | None,
     fallback_executed_quantity: Decimal | None,
-    events: Sequence[ExchangeOrderEventRow],
+    events: Sequence[OrderIdentityEvent],
     account_fill_quantities: Mapping[str, Decimal],
 ) -> tuple[_PositionOrder, ...] | None:
     if not _legacy_order_identity_is_ambiguous(events):
@@ -184,7 +182,7 @@ def _expand_legacy_order_row(
 
 
 def _position_order_from_row(
-    row: object,
+    row: OrderObservation,
     *,
     plan: OrderExecutionPlan | None,
     fallback_state: ExchangeOrderState | None,
@@ -310,7 +308,7 @@ def _decimal_or_zero(value: object) -> Decimal:
 
 
 def _event_executed_quantity(
-    event: ExchangeOrderEventRow,
+    event: OrderIdentityEvent,
 ) -> Decimal | None:
     details = event.details
     if not isinstance(details, dict):

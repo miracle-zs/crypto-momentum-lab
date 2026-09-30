@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
+from crypto_momentum_lab.domain.decision.ports import DecisionUnitOfWorkPort
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
@@ -26,9 +27,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-    AsyncPostgresDecisionUnitOfWork,
-)
 
 
 def _setup_pending_exit_test():
@@ -57,7 +55,7 @@ def _setup_pending_exit_test():
         expected_projection_version="pv_active",
         created_at=datetime(2026, 9, 29, 11, 52, tzinfo=UTC),
     )
-    uow = create_autospec(AsyncPostgresDecisionUnitOfWork, instance=True, spec_set=True)
+    uow = create_autospec(DecisionUnitOfWorkPort, instance=True, spec_set=True)
     uow.load_pending_exits.return_value = (("dec_test_123", command),)
     uow.mark_exit_dispatched.return_value = True
     uow.mark_exit_superseded.return_value = True

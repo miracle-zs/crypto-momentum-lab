@@ -8,15 +8,15 @@ import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.persistence.parquet import write_market_states_15s_dataset
-from crypto_momentum_lab.strategies.compression_breakout import (
-    CompressionBreakoutConfig,
-)
 from crypto_momentum_lab.domain.strategy.paper_models import (
     ReplayExecutionConfig,
     SimulatedFillStatus,
 )
-from crypto_momentum_lab.strategy_runner import (
+from crypto_momentum_lab.persistence.parquet import write_market_states_15s_dataset
+from crypto_momentum_lab.strategies.compression_breakout import (
+    CompressionBreakoutConfig,
+)
+from crypto_momentum_lab.strategy_runner.replay import (
     ReplayConfig,
     ReplayError,
     build_strategy_replay_report,

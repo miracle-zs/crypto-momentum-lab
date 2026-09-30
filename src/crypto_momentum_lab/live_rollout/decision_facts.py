@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from typing import Any
 
 import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+from crypto_momentum_lab.domain.decision.commit_models import (
+    DecisionCommit,
+    DecisionCommitReceipt,
+)
 from crypto_momentum_lab.domain.decision.decision_engine import (
     DecisionInput,
     DecisionResult,
@@ -21,6 +24,10 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 )
 from crypto_momentum_lab.domain.decision.policy_transition import (
     compute_policy_state_digest,
+)
+from crypto_momentum_lab.domain.decision.ports import (
+    DecisionUnitOfWorkPort,
+    ExitDispatchHandler,
 )
 from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
@@ -41,11 +48,6 @@ from crypto_momentum_lab.domain.operational.retention_models import (
 from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
-from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-    AsyncPostgresDecisionUnitOfWork,
-    DecisionCommit,
-    DecisionCommitReceipt,
-)
 
 log = structlog.get_logger(__name__)
 
@@ -128,17 +130,12 @@ class LiveDecisionFactSource:
     def __init__(
         self,
         account_label: str,
-        trace_repository: Any | None = None,
         strategy_name: str = "orderflow_impulse",
-        retention_authority: Any | None = None,
         *,
         execution_book: ExecutionBook | None = None,
-        decision_unit_of_work: AsyncPostgresDecisionUnitOfWork | None = None,
+        decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
     ) -> None:
-        # Legacy persistence arguments remain accepted for callers migrating
-        # to the UoW, but live commits never use their background APIs.
-        del trace_repository, retention_authority
         if not account_label.strip() or not strategy_name.strip():
             raise ValueError("account and strategy identity must not be empty")
         self._account_label = account_label
@@ -155,7 +152,7 @@ class LiveDecisionFactSource:
         self._stream_epoch: str | None = None
         self._stream_sequence: int | None = None
         self._reported_stream_mismatches: set[tuple[str, str, str]] = set()
-        self._exit_handler: Any | None = None
+        self._exit_handler: ExitDispatchHandler | None = None
         self._commit_lock = asyncio.Lock()
 
     @property
@@ -179,7 +176,7 @@ class LiveDecisionFactSource:
             raise ValueError("execution_book is required")
         self._execution_book = execution_book
 
-    def set_exit_handler(self, handler: Any | None) -> None:
+    def set_exit_handler(self, handler: ExitDispatchHandler) -> None:
         self._exit_handler = handler
 
     def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
@@ -555,9 +552,7 @@ class LiveDecisionFactSource:
             )
             return
         try:
-            result = handler(command)
-            if asyncio.iscoroutine(result):
-                result = await result
+            result = await handler(command)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -570,8 +565,7 @@ class LiveDecisionFactSource:
                 command_id=command.command_id,
             )
             return
-        state = getattr(result, "state", None)
-        state_value = getattr(state, "value", state)
+        state_value = str(result.state)
         if state_value not in {
             "submitted",
             "acknowledged",
@@ -581,7 +575,7 @@ class LiveDecisionFactSource:
             log.warning(
                 "accepted_exit_not_durably_accepted",
                 command_id=command.command_id,
-                state=str(state_value),
+                state=state_value,
             )
             return
         if self._decision_uow is None:

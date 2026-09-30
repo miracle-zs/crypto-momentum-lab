@@ -13,6 +13,11 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    OrderObservation,
+    PersistedExchangeOrder,
+    PositionObservation,
+)
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
@@ -27,16 +32,15 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextReader,
     LiveDaemonRuntimeContext,
 )
-from crypto_momentum_lab.live_rollout.postgres_runtime import (
-    PostgresLiveContextProvider,
+from crypto_momentum_lab.live_rollout.position_classification import (
     _classify_live_positions,
     _classify_live_positions_detailed,
+)
+from crypto_momentum_lab.live_rollout.postgres_runtime import (
+    PostgresLiveContextProvider,
     _resolve_strategy_live_state,
     live_limits_from_approval,
     poll_live_market_states,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
     _load_order_anchor_events,
@@ -1589,7 +1593,7 @@ def _position(
     position_amt: Decimal = Decimal("0.5"),
     observed_at: datetime = NOW,
 ):
-    return SimpleNamespace(
+    return PositionObservation(
         symbol=symbol,
         position_side="LONG",
         position_amt=position_amt,
@@ -1616,7 +1620,7 @@ def _order(
         executed_quantity = (
             quantity if state == ExchangeOrderState.FILLED.value else Decimal("0")
         )
-    return SimpleNamespace(
+    return OrderObservation(
         state=state,
         reduce_only=reduce_only,
         symbol=symbol,
@@ -1629,6 +1633,7 @@ def _order(
         order_type=order_type,
         quantity=quantity,
         executed_quantity=executed_quantity,
+        price=None,
     )
 
 
@@ -1942,7 +1947,7 @@ async def test_load_order_anchor_events_isolates_position_side_zero_crossing() -
 
 
 def test_resolve_symbol_fill_horizon_anchors_to_earliest_order() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+    from crypto_momentum_lab.live_rollout.order_facts_loader import (
         _resolve_symbol_fill_horizon,
     )
 
@@ -1970,7 +1975,7 @@ def test_resolve_symbol_fill_horizon_anchors_to_earliest_order() -> None:
 
 
 def test_resolve_symbol_fill_horizon_falls_back_to_7d_when_no_orders() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+    from crypto_momentum_lab.live_rollout.order_facts_loader import (
         _resolve_symbol_fill_horizon,
     )
 
@@ -1982,16 +1987,16 @@ def test_resolve_symbol_fill_horizon_falls_back_to_7d_when_no_orders() -> None:
 
 
 def test_resolve_symbol_fill_horizon_safe_on_empty() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import (
+    from crypto_momentum_lab.live_rollout.order_facts_loader import (
         _resolve_symbol_fill_horizon,
     )
 
     assert _resolve_symbol_fill_horizon([], []) is None
 
 
-async def test_load_order_identity_metadata_dual_track_query() -> None:
-    from crypto_momentum_lab.live_rollout.postgres_runtime import (
-        _load_order_identity_metadata,
+async def testload_order_identity_metadata_dual_track_query() -> None:
+    from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
+        load_order_identity_metadata,
     )
 
     captured_query = None
@@ -2022,7 +2027,7 @@ async def test_load_order_identity_metadata_dual_track_query() -> None:
     session = CaptureSession()
     # Query with since = t_now - 24h (which is newer than t_order_old)
     since = t_now - timedelta(hours=24)
-    await _load_order_identity_metadata(
+    await load_order_identity_metadata(
         session,  # type: ignore[arg-type]
         [order],
         account_label="primary",

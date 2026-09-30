@@ -1,13 +1,13 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
@@ -18,21 +18,18 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
-    OrderExecutionPlan,
-    PositionObservation,
     PositionOrderFact,
+)
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    OrderIdentityEvent,
+    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_rules import (
     SymbolTradingRules as _SymbolTradingRules,
 )
-from crypto_momentum_lab.domain.execution.position_batches import (
-    ManagedLivePositionBatch,
-)
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
     PositionKey,
-    compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -41,7 +38,6 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.context import (
@@ -56,51 +52,19 @@ from crypto_momentum_lab.live_rollout.exits import (
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.order_facts_loader import (
-    OrderIdentityMetadata as _OrderIdentityMetadata,
-)
-from crypto_momentum_lab.live_rollout.order_facts_loader import (
-    _fill_raw_payload,
-    _load_order_identity_metadata,
     _resolve_symbol_fill_horizon,
 )
 from crypto_momentum_lab.live_rollout.order_identity import (
-    _decimal_or_zero,
-    _event_executed_quantity,
-    _expand_legacy_order_row,
-    _legacy_order_identity_is_ambiguous,
-    _legacy_order_identity_is_reconstructible,
-    _legacy_order_identity_is_zero_fill_terminal,
     _ms_to_dt,
-    _normalise_order_state,
-    _optional_text,
-    _position_order_from_plan,
-    _position_order_from_row,
-)
-from crypto_momentum_lab.live_rollout.order_identity_adapter import (
-    LegacyOrderIdentityAdapter,
 )
 from crypto_momentum_lab.live_rollout.position_batches import (
     _average_fill_prices,
-    _batch_id_for_entry,
-    _build_position_batches,
-    _entry_fill_at,
-    _exit_fill_quantity,
-    _is_entry_fill_observed,
-    _order_entry_time,
-    _position_order_key,
     _record_earliest_fill,
     _record_fill_quantity,
     _record_fill_value,
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
-    _classify_live_positions,
     _classify_live_positions_detailed,
-    _filled_order_quantity,
-    _has_recent_pending_entry_order,
-    _normalise_position_orders,
-    _opening_order_matches_side,
-    _repair_legacy_exit_batch_bindings,
-    _strategy_side,
 )
 from crypto_momentum_lab.live_rollout.position_self_healing import (
     auto_heal_unmanaged_position,
@@ -117,14 +81,17 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
     ExchangeFillRow,
-    ExchangeOrderEventRow,
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     OrderIntentExecutionRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
+    load_order_identity_metadata,
+    order_observation,
+    position_observation,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
     PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
@@ -1078,7 +1045,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             account_fill_quantities: dict[str, Decimal] = {}
             order_identity_events: Mapping[
                 str,
-                tuple[ExchangeOrderEventRow, ...],
+                tuple[OrderIdentityEvent, ...],
             ] = {}
             domain_account_fills: tuple[AccountFillEvent, ...] = ()
             since_time: datetime | None = None
@@ -1096,13 +1063,13 @@ class PostgresLiveContextProvider(LiveContextReader):
                     )
                 )
                 since_time = _resolve_symbol_fill_horizon(orders, active)
-                order_identity_metadata = await _load_order_identity_metadata(
+                order_identity_metadata = await load_order_identity_metadata(
                     session,
                     orders,
                     account_label=self._account_label,
                     since=since_time,
                 )
-                domain_account_fills = order_identity_metadata.domain_account_fills
+                domain_account_fills = order_identity_metadata.account_fills
                 order_identity_events = (
                     order_identity_metadata.events_by_client_order_id
                 )
@@ -1170,8 +1137,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                 for cursor in fill_cursors
             }
         managed, pending, unmanaged = _classify_live_positions_detailed(
-            active,
-            orders,
+            [position_observation(row) for row in active],
+            [order_observation(row) for row in orders],
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
@@ -1222,7 +1189,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         account_fill_quantities: dict[str, Decimal] = {}
         order_identity_events: Mapping[
             str,
-            tuple[ExchangeOrderEventRow, ...],
+            tuple[OrderIdentityEvent, ...],
         ] = {}
         domain_account_fills: tuple[AccountFillEvent, ...] = ()
         if active:
@@ -1240,13 +1207,13 @@ class PostgresLiveContextProvider(LiveContextReader):
                     )
                 )
                 since_time = _resolve_symbol_fill_horizon(orders, active)
-                order_identity_metadata = await _load_order_identity_metadata(
+                order_identity_metadata = await load_order_identity_metadata(
                     session,
                     orders,
                     account_label=self._account_label,
                     since=since_time,
                 )
-                domain_account_fills = order_identity_metadata.domain_account_fills
+                domain_account_fills = order_identity_metadata.account_fills
                 order_identity_events = (
                     order_identity_metadata.events_by_client_order_id
                 )
@@ -1326,7 +1293,7 @@ class PostgresLiveContextProvider(LiveContextReader):
 
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
-            orders,
+            [order_observation(row) for row in orders],
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),

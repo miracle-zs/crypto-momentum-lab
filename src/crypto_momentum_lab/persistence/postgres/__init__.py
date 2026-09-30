@@ -12,7 +12,6 @@ from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
     PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
@@ -68,7 +67,6 @@ __all__ = [
     "RuntimeStateCursor",
     "LeaseAlreadyHeldError",
     "LeaseOwnershipError",
-    "PersistedExchangeOrder",
     "create_account_database_engine",
     "create_async_database_engine",
     "create_checkpoint_database_engine",

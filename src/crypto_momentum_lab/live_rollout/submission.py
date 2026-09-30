@@ -36,6 +36,13 @@ from crypto_momentum_lab.domain.execution import (
     TradeCommandType,
     count_active_symbol_batch_concurrency,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
+from crypto_momentum_lab.domain.execution.order_submission import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
@@ -45,10 +52,6 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
-)
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
-from crypto_momentum_lab.domain.execution.order_submission import (
-    PreparedOrderSubmission,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -70,9 +73,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
     LiveTelemetrySink,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 

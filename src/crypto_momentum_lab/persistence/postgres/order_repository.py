@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
@@ -27,6 +27,7 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
     ShadowSuppressionEvent,
+    order_read_models,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
@@ -51,15 +52,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
-
-
-@dataclass(frozen=True, slots=True)
-class PersistedExchangeOrder:
-    plan: OrderExecutionPlan
-    state: ExchangeOrderState
-    exchange_order_id: str | None
-    updated_at: datetime
-    executed_quantity: Decimal = Decimal("0")
 
 
 class _SubmissionAlreadyPrepared(Exception):
@@ -1028,7 +1020,7 @@ class PostgresOrderRepository:
     async def load_unresolved_orders(
         self,
         run_id: str | None = None,
-    ) -> tuple[PersistedExchangeOrder, ...]:
+    ) -> tuple[order_read_models.PersistedExchangeOrder, ...]:
         terminal_states = tuple(
             state.value for state in ExchangeOrderState if state.terminal
         )
@@ -1051,7 +1043,7 @@ class PostgresOrderRepository:
     async def load_order(
         self,
         client_order_id: str,
-    ) -> PersistedExchangeOrder | None:
+    ) -> order_read_models.PersistedExchangeOrder | None:
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ExchangeOrderRow).where(
@@ -1502,8 +1494,8 @@ class PostgresOrderRepository:
                 )
 
 
-def _persisted_order(row: ExchangeOrderRow) -> PersistedExchangeOrder:
-    return PersistedExchangeOrder(
+def _persisted_order(row: ExchangeOrderRow) -> order_read_models.PersistedExchangeOrder:
+    return order_read_models.PersistedExchangeOrder(
         plan=OrderExecutionPlan(
             intent_id=row.intent_id,
             run_id=row.run_id,

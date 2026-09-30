@@ -301,6 +301,7 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
 def _pending_exit_case():
     from unittest.mock import AsyncMock, create_autospec
 
+    from crypto_momentum_lab.domain.decision.ports import DecisionUnitOfWorkPort
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -313,9 +314,6 @@ def _pending_exit_case():
         TradeCommandType,
     )
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
-        AsyncPostgresDecisionUnitOfWork,
-    )
 
     key = PositionKey("live", "incident-account", "TESTUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -342,7 +340,7 @@ def _pending_exit_case():
         expected_projection_version="pv_expected",
         created_at=datetime(2026, 9, 29, 10, tzinfo=UTC),
     )
-    uow = create_autospec(AsyncPostgresDecisionUnitOfWork, instance=True, spec_set=True)
+    uow = create_autospec(DecisionUnitOfWorkPort, instance=True, spec_set=True)
     uow.load_pending_exits.return_value = (("incident-decision", command),)
     uow.mark_exit_dispatched.return_value = True
     book = create_autospec(ExecutionBook, instance=True, spec_set=True)

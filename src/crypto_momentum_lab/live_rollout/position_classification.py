@@ -18,18 +18,23 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     PositionOrderFact,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    OrderIdentityEvent,
+    OrderObservation,
+    PersistedExchangeOrder,
+    PositionObservation,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import CoverageEvidence
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
-from crypto_momentum_lab.live_rollout.order_facts_loader import _resolve_symbol_fill_horizon
+from crypto_momentum_lab.live_rollout.order_facts_loader import (
+    _resolve_symbol_fill_horizon,
+)
 from crypto_momentum_lab.live_rollout.order_identity import (
-    _decimal_or_zero,
-    _event_executed_quantity,
     _expand_legacy_order_row,
     _legacy_order_identity_is_ambiguous,
     _legacy_order_identity_is_reconstructible,
     _legacy_order_identity_is_zero_fill_terminal,
-    _normalise_order_state,
     _optional_text,
     _position_order_from_plan,
     _position_order_from_row,
@@ -41,14 +46,6 @@ from crypto_momentum_lab.live_rollout.position_batches import (
     _is_entry_fill_observed,
     _order_entry_time,
     _position_order_key,
-)
-from crypto_momentum_lab.persistence.postgres.models import (
-    AccountPositionSnapshotRow,
-    ExchangeOrderEventRow,
-    ExchangeOrderRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
 )
 
 log = structlog.get_logger(__name__)
@@ -82,8 +79,8 @@ _PENDING_POSITION_MAX_AGE_SECONDS = 60
 
 
 def _classify_live_positions(
-    positions: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
-    orders: list[ExchangeOrderRow],
+    positions: Sequence[AccountPositionSnapshot | PositionObservation],
+    orders: list[OrderObservation],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
     *,
     entry_fill_times: Mapping[str, datetime] | None = None,
@@ -91,7 +88,7 @@ def _classify_live_positions(
     exit_batch_ids: Mapping[str, str] | None = None,
     order_identity_events: Mapping[
         str,
-        Sequence[ExchangeOrderEventRow],
+        Sequence[OrderIdentityEvent],
     ]
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
@@ -112,8 +109,8 @@ def _classify_live_positions(
     return managed, unmanaged
 
 def _classify_live_positions_detailed(
-    positions: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
-    orders: list[ExchangeOrderRow],
+    positions: Sequence[AccountPositionSnapshot | PositionObservation],
+    orders: list[OrderObservation],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
     *,
     entry_fill_times: Mapping[str, datetime] | None = None,
@@ -121,7 +118,7 @@ def _classify_live_positions_detailed(
     exit_batch_ids: Mapping[str, str] | None = None,
     order_identity_events: Mapping[
         str,
-        Sequence[ExchangeOrderEventRow],
+        Sequence[OrderIdentityEvent],
     ]
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
@@ -404,7 +401,7 @@ def _classify_live_positions_detailed(
     )
 
 def _has_recent_pending_entry_order(
-    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    position: AccountPositionSnapshot | PositionObservation,
     matching_orders: Sequence[_PositionOrder],
     fill_times: Mapping[str, datetime],
     *,
@@ -437,12 +434,12 @@ def _has_recent_pending_entry_order(
     return False
 
 def _normalise_position_orders(
-    orders: Sequence[ExchangeOrderRow],
+    orders: Sequence[OrderObservation],
     unresolved: Sequence[PersistedExchangeOrder],
     *,
     order_identity_events: Mapping[
         str,
-        Sequence[ExchangeOrderEventRow],
+        Sequence[OrderIdentityEvent],
     ]
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
@@ -509,7 +506,7 @@ def _repair_legacy_exit_batch_bindings(
     *,
     identity_events: Mapping[
         str,
-        Sequence[ExchangeOrderEventRow],
+        Sequence[OrderIdentityEvent],
     ],
     account_fill_quantities: Mapping[str, Decimal],
     fill_times: Mapping[str, datetime],
@@ -577,7 +574,7 @@ def _repair_legacy_exit_batch_bindings(
     return tuple(repaired), frozenset(unresolved)
 
 def _strategy_side(
-    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    position: AccountPositionSnapshot | PositionObservation,
     position_side: FuturesPositionSide,
 ) -> StrategySide:
     if position_side is FuturesPositionSide.LONG:
