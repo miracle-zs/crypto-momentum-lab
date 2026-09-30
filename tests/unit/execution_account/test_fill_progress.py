@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -7,6 +7,7 @@ from crypto_momentum_lab.execution_account.fill_progress import (
     FillCursor,
     merge_fill_cursor,
     plan_fill_polling_ranges,
+    select_fill_reconciliation_symbols,
 )
 
 
@@ -99,3 +100,73 @@ def test_empty_polling_selection_returns_empty_mappings():
     assert plan_fill_polling_ranges(
         {}, (), set(), observed_at=datetime(1970, 1, 8, tzinfo=UTC)
     ) == ({}, {})
+
+
+@pytest.mark.parametrize(
+    "offset,expected",
+    [(-1, ("BTCUSDT",)), (0, ("BTCUSDT",)), (1, ())],
+)
+def test_historical_schedule_includes_exact_due_cutoff(offset, expected):
+    observed = datetime(2026, 10, 1, tzinfo=UTC)
+    checked = observed - timedelta(hours=6) + timedelta(microseconds=offset)
+    assert (
+        select_fill_reconciliation_symbols(
+            {"BTCUSDT"},
+            {"BTCUSDT": checked},
+            active_fill_symbols=set(),
+            observed_at=observed,
+            historical_interval=timedelta(hours=6),
+            historical_batch_size=1,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_active_symbols_do_not_consume_historical_batch_limit(batch_size):
+    observed = datetime(2026, 10, 1, tzinfo=UTC)
+    active = {"A", "B", "C"}
+    checked = {symbol: observed for symbol in active}
+    assert select_fill_reconciliation_symbols(
+        active | {"H1", "H2"},
+        checked,
+        active_fill_symbols=active,
+        observed_at=observed,
+        historical_interval=timedelta(hours=6),
+        historical_batch_size=batch_size,
+    ) == tuple(sorted(active | {"H1", "H2"} if batch_size == 2 else active | {"H1"}))
+
+
+def test_unchecked_then_oldest_history_uses_symbol_tie_break_without_mutation():
+    observed = datetime(2026, 10, 1, tzinfo=UTC)
+    tracked = {"A", "Z", "B", "C", "D"}
+    active = {"LIVE"}
+    checked = {
+        "B": observed - timedelta(days=2),
+        "C": observed - timedelta(days=2),
+        "D": observed - timedelta(days=1),
+    }
+    before = (set(tracked), set(active), dict(checked))
+    assert select_fill_reconciliation_symbols(
+        tracked,
+        checked,
+        active_fill_symbols=active,
+        observed_at=observed,
+        historical_interval=timedelta(hours=6),
+        historical_batch_size=3,
+    ) == ("A", "B", "LIVE", "Z")
+    assert (tracked, active, checked) == before
+
+
+def test_empty_historical_schedule_selects_nothing():
+    assert (
+        select_fill_reconciliation_symbols(
+            set(),
+            {},
+            active_fill_symbols=set(),
+            observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+            historical_interval=timedelta(hours=6),
+            historical_batch_size=1,
+        )
+        == ()
+    )
