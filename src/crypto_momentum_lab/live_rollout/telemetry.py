@@ -29,6 +29,7 @@ from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.telemetry_ports import (
     AccountFillSink,
     ConsumerHealthSink,
+    OrderEventSink,
 )
 
 log = structlog.get_logger()
@@ -176,7 +177,7 @@ _EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
 )
 
 
-class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, Protocol):
+class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, OrderEventSink, Protocol):
     def market_state_progress(
         self,
         state: MarketState15s,
@@ -282,12 +283,6 @@ class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, Protocol):
         occurred_at: datetime,
         lane: str,
         ingress: "SourceIngress | None" = None,
-    ) -> None: ...
-
-    async def order_event(
-        self,
-        plan: OrderExecutionPlan,
-        event: ExchangeOrderEvent,
     ) -> None: ...
 
     async def exchange_request_started(

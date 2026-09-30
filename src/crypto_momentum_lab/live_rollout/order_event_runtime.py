@@ -2,34 +2,44 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import structlog
 
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
-from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
-from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
+from crypto_momentum_lab.live_rollout.telemetry_ports import OrderEventSink
 
 log = structlog.get_logger()
+
+
+class EntryOrderLifecycleObserver(Protocol):
+    def observe(self, plan: OrderExecutionPlan, event: ExchangeOrderEvent) -> None: ...
+
+
+class EntryOrderEventObserver(Protocol):
+    def observe_entry_order_event(
+        self, plan: OrderExecutionPlan, event: ExchangeOrderEvent
+    ) -> None: ...
 
 
 class LiveOrderEventRuntime:
     """Keep telemetry best-effort while preserving local order observers."""
 
-    def __init__(self, *, telemetry: LiveTelemetrySink) -> None:
+    def __init__(self, *, telemetry: OrderEventSink) -> None:
         self._telemetry = telemetry
-        self._entry_order_lifecycle: LiveLimitOrderLifecycle | None = None
-        self._daemon: LiveStrategyDaemon | None = None
+        self._entry_order_lifecycle: EntryOrderLifecycleObserver | None = None
+        self._daemon: EntryOrderEventObserver | None = None
 
     def set_entry_order_lifecycle(
         self,
-        lifecycle: LiveLimitOrderLifecycle,
+        lifecycle: EntryOrderLifecycleObserver,
     ) -> None:
         self._entry_order_lifecycle = lifecycle
 
-    def set_daemon(self, daemon: LiveStrategyDaemon) -> None:
+    def set_daemon(self, daemon: EntryOrderEventObserver) -> None:
         self._daemon = daemon
 
     async def handle(

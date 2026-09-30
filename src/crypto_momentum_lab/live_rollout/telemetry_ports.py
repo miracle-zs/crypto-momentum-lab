@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.order_state import (
+        ExchangeOrderEvent,
+        OrderExecutionPlan,
+    )
     from crypto_momentum_lab.execution_account.hub import AccountEvent
 
 
@@ -32,3 +36,9 @@ class AccountFillSink(Protocol):
         occurred_at: datetime,
     ) -> None: ...
 
+
+
+class OrderEventSink(Protocol):
+    async def order_event(
+        self, plan: OrderExecutionPlan, event: ExchangeOrderEvent
+    ) -> None: ...

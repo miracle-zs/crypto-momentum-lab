@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成六十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -870,6 +870,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 构造接口不再接受缺省或 None publisher，也不再按发布器真假值选择备用对象；生产仍绑定原生发布器。源创建归装配，注册器不再知道连接地址。
 
 验证：注册器/CLI/架构定向 **138 passed**；最终完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2478 passed**，一项现有 Starlette/httpx 警告。新增注册器禁止 sqlalchemy/persistence 与禁止具体账户 Hub 导入两项独立进程检查。entry_expectations 定向 mypy --follow-imports=skip、核心注册器及相关测试完整 Ruff、两装配文件 F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十七批：订单事件记录与观察能力
+
+第六十六批提交为 `a460130`；第六十七批继续本地实施，未部署生产。
+
+- telemetry_ports 定义单方法 OrderEventSink，完整 LiveTelemetrySink 继承该能力，删除重复声明；实际 recorder 实现不变。
+- order_event_runtime 定义 EntryOrderLifecycleObserver 与 EntryOrderEventObserver，仅要求原同步 observe 与 observe_entry_order_event。runtime 删除具体 daemon、entry_orders 与完整 telemetry 导入，现有生产对象/测试替身直接满足接口，无新增转发实现。
+- 去除参数/属性注解后原 runtime 类 AST 完全一致。先尽力记录 telemetry，再 finally 内依次更新限价生命周期和 daemon 的顺序保持；观察者错误传播规则与可选装配时机不变。
+
+验证：订单事件/架构定向 **69 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2479 passed**，28.56 秒，一项现有 Starlette/httpx 警告。新增 order_event_runtime 禁止 sqlalchemy/persistence 导入检查，并独立进程验证同时禁止三个具体协作者模块时仍可导入。order_event_runtime 与 telemetry_ports 两文件定向 mypy --follow-imports=skip、核心文件与架构测试完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
