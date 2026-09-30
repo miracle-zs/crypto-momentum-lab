@@ -19,6 +19,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionLedgerProjection,
 )
+from crypto_momentum_lab.domain.execution.projection_codec import (
+    compute_projection_digest,
+)
 
 POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = 3
 
@@ -406,18 +409,6 @@ class JournalPersistResult:
     @property
     def has_conflicts(self) -> bool:
         return self.conflict_count > 0
-
-
-def compute_projection_digest(projection: PositionLedgerProjection) -> str:
-    """Hash the complete materialized projection independent of fact token."""
-    from crypto_momentum_lab.domain.execution.recovery_codec import (
-        PositionRecoveryCodec,
-    )
-
-    payload = PositionRecoveryCodec.encode_projection(projection)
-    payload.pop("projection_version", None)
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def compute_checkpoint_chain_hash(
