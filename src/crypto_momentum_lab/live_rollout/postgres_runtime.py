@@ -90,8 +90,8 @@ from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
     order_observation,
     position_observation,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
     load_position_orders_bounded,
@@ -188,7 +188,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._approval_id = approval_id
         self._risk_repository = PostgresRiskRepository(execution_sessions)
         self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
-        self._order_repository = PostgresOrderRepository(execution_sessions)
+        self._order_repository = PostgresOrderReadRepository(execution_sessions)
         self._position_repair_uow = PostgresPositionRepairUnitOfWork(execution_sessions)
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
@@ -404,11 +404,15 @@ class PostgresLiveContextProvider(LiveContextReader):
                     continue
                 try:
                     pos_side = FuturesPositionSide(position.position_side.upper())
-                    key = PositionKey("live", self._account_label, position.symbol, pos_side)
+                    key = PositionKey(
+                        "live", self._account_label, position.symbol, pos_side
+                    )
                     request = PositionRepairRequest(
                         key=key, run_id=self._run_id,
                         scope=AccountFactStreamScope.for_position_key(
-                            key, stream_id=active_stream[0], stream_epoch=active_stream[1],
+                            key,
+                            stream_id=active_stream[0],
+                            stream_epoch=active_stream[1],
                         ),
                         expected_quantity=abs(position.position_amt),
                         observed_at=position.observed_at,

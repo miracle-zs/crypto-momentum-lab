@@ -34,6 +34,9 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
     TradeCommand,
 )
+from crypto_momentum_lab.domain.execution.order_read_repository import (
+    OrderReadRepository,
+)
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     deterministic_client_order_id,
@@ -253,6 +256,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
+)
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
@@ -531,6 +537,7 @@ async def run_live_daemon(
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
+        order_read_repository = PostgresOrderReadRepository(execution_factory)
         order_event_repository = PostgresOrderEventRepository(execution_factory)
         submission_repository = PostgresOrderSubmissionRepository(execution_factory)
         checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
@@ -935,7 +942,7 @@ async def run_live_daemon(
             run_id=session_id,
         )
         order_reconciliation = LiveOrderReconciliation(
-            order_repository=order_repository,
+            order_repository=order_read_repository,
             state_machine=execution_coordinator,
             run_id=session_id,
         )
@@ -949,7 +956,7 @@ async def run_live_daemon(
             strategy_name=strategy_name,
             now=now,
         )
-        unresolved = await order_repository.load_unresolved_orders(session_id)
+        unresolved = await order_read_repository.load_unresolved_orders(session_id)
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
         )
@@ -1926,7 +1933,7 @@ async def _run_account_event_channel(
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
     order_reconciliation: LiveOrderReconciliation | None = None,
-    order_repository: PostgresOrderRepository | None = None,
+    order_repository: OrderReadRepository | None = None,
     state_machine: OrderExecutionPort | None = None,
     run_id: str | None = None,
     telemetry: LiveTelemetrySink | None = None,

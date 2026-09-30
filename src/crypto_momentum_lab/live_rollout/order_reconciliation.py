@@ -13,12 +13,12 @@ from dataclasses import dataclass
 import structlog
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_read_repository import (
+    OrderReadRepository,
+)
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
-)
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
 )
 
 log = structlog.get_logger()
@@ -37,7 +37,7 @@ class LiveOrderReconciliation:
     state machine; it only retries unresolved orders after transient failures.
     """
 
-    order_repository: PostgresOrderRepository
+    order_repository: OrderReadRepository
     state_machine: OrderExecutionPort
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS

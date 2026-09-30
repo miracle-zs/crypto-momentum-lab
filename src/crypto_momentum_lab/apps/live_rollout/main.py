@@ -126,8 +126,8 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PostgresOrderRepository,
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
@@ -2130,7 +2130,7 @@ async def _preflight_summary(
         lease = await PostgresRiskRepository(factory).load_active_lease(
             "live", account_label, now
         )
-        unresolved = await PostgresOrderRepository(factory).load_unresolved_orders()
+        unresolved = await PostgresOrderReadRepository(factory).load_unresolved_orders()
         risk_config = await _latest_risk_config(factory, account_label)
         runtime_config = _preflight_runtime_strategy_config()
         runtime_strategy_config_hash = _live_strategy_config_hash(

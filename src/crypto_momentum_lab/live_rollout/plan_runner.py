@@ -40,6 +40,9 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -109,6 +112,7 @@ async def run_live_plan(
         live_repository = PostgresLiveRolloutRepository(factory)
         risk_repository = PostgresRiskRepository(factory)
         order_repository = PostgresOrderRepository(factory)
+        order_read_repository = PostgresOrderReadRepository(factory)
         order_event_repository = PostgresOrderEventRepository(factory)
         risk_config = await load_latest_risk_config(factory, account_label)
         approval = await live_repository.load_active_approval(
@@ -116,7 +120,7 @@ async def run_live_plan(
             strategy_name=strategy_name,
             now=now,
         )
-        unresolved = await order_repository.load_unresolved_orders(session_id)
+        unresolved = await order_read_repository.load_unresolved_orders(session_id)
         context = LiveGateContext(
             now=now,
             live_submit_enabled=True,

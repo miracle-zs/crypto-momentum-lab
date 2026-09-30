@@ -68,6 +68,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
@@ -424,7 +427,7 @@ async def test_golden_path_full_trading_lifecycle(
     # -------------------------------------------------------------------------
     # Step 5: Verify Order & Fill Persistence in PostgreSQL
     # -------------------------------------------------------------------------
-    persisted_entry = await order_repo.load_order(entry_result.client_order_id)
+    persisted_entry = await PostgresOrderReadRepository(session_factory).load_order(entry_result.client_order_id)
     assert persisted_entry is not None
     assert persisted_entry.state is ExchangeOrderState.FILLED
     assert persisted_entry.exchange_order_id == entry_result.exchange_order_id
@@ -520,7 +523,7 @@ async def test_golden_path_full_trading_lifecycle(
     closed_position = replace(position, closing_order_filled=True)
     assert closed_position.closing_order_filled is True
 
-    persisted_exit = await order_repo.load_order(exit_result.client_order_id)
+    persisted_exit = await PostgresOrderReadRepository(session_factory).load_order(exit_result.client_order_id)
     assert persisted_exit is not None
     assert persisted_exit.state is ExchangeOrderState.FILLED
     assert persisted_exit.plan.reduce_only is True
