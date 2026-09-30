@@ -18,6 +18,7 @@ import pytest
         "crypto_momentum_lab.domain.execution.command_lifecycle",
         "crypto_momentum_lab.domain.execution.command_codec",
         "crypto_momentum_lab.domain.execution.command_repository",
+        "crypto_momentum_lab.domain.execution.reservation_repository",
     ],
 )
 def test_application_modules_import_without_storage(module: str) -> None:

@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.execution.legacy_command_repository import (
     LegacyCommandRepositoryAdapter,
 )
+from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
+    assemble_legacy_execution_book,
+)
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
@@ -1451,14 +1454,13 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
 @pytest.mark.asyncio
 async def test_coordinator_execution_book_integration() -> None:
     from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
 
     backend = BlockingBackend()
     repo = InMemoryPositionReservationRepository()
-    custom_book = ExecutionBook(reservation_repository=repo)
+    custom_book = assemble_legacy_execution_book(reservation_repository=repo)
 
     coordinator = OrderExecutionCoordinator(
         backend=backend,
@@ -1747,7 +1749,7 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
 
 @pytest.mark.asyncio
 async def test_observation_failure_after_post_keeps_unknown_reservation() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState, ExecutionBook
+    from crypto_momentum_lab.domain.execution import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1769,7 +1771,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
             return _result(plan, ExchangeOrderState.ACKNOWLEDGED)
 
     repo = InMemoryPositionReservationRepository()
-    book = ExecutionBook(
+    book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(FailAcknowledgementOnce()),
         reservation_repository=repo,
     )
@@ -1810,7 +1812,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
 
 @pytest.mark.asyncio
 async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
-    from crypto_momentum_lab.domain.execution import DispatchState, ExecutionBook
+    from crypto_momentum_lab.domain.execution import DispatchState
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         InMemoryPositionReservationRepository,
     )
@@ -1828,7 +1830,7 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
             return _result(plan, ExchangeOrderState.ACKNOWLEDGED)
 
     reservation_repo = InMemoryPositionReservationRepository()
-    book = ExecutionBook(
+    book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(
             FailAcknowledgementAndUnknown()
         ),
@@ -2038,7 +2040,6 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
 async def test_first_live_entry_reservation_on_cold_start() -> None:
     """Verifies F1: first live entry on empty ExecutionBook succeeds and is admitted."""
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.execution_coordinator import (
         ExecutionCoordinator,
     )
@@ -2063,7 +2064,7 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
     backend = BlockingBackend()
     repo = InMemoryReservationRepo()
     domain_coord = ExecutionCoordinator()
-    book = ExecutionBook(coordinator=domain_coord, reservation_repository=repo)
+    book = assemble_legacy_execution_book(coordinator=domain_coord, reservation_repository=repo)
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",

@@ -31,6 +31,9 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.execution.legacy_command_repository import (
     LegacyCommandRepositoryAdapter,
 )
+from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
+    assemble_legacy_execution_book,
+)
 
 
 def _dt(hour: int, minute: int, second: int = 0) -> datetime:
@@ -1294,7 +1297,7 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     )
     reservation_repo.save_reservation(reservation)
 
-    first_book = ExecutionBook(
+    first_book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
@@ -1362,7 +1365,7 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     assert isinstance(first_result, Applied)
     assert first_result.consumed_quantity == Decimal("3")
 
-    restored_book = ExecutionBook(
+    restored_book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
@@ -1504,7 +1507,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
         created_at=_dt(10, 0),
     )
     reservation_repo.save_reservation(reservation)
-    first_book = ExecutionBook(
+    first_book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )
@@ -1515,7 +1518,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     await first_book._persist_outbox_state(prepared)
     await first_book.mark_dispatching(command_id)
 
-    book = ExecutionBook(
+    book = assemble_legacy_execution_book(
         command_repository=LegacyCommandRepositoryAdapter(command_repo),
         reservation_repository=reservation_repo,
     )

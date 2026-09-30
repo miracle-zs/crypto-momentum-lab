@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import structlog
 
@@ -48,22 +48,24 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
+from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
+    assemble_legacy_execution_book,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     PositionReservation,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
-    PreparedOrderSubmission,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     LiveSubmissionDisabledError,
     OrderExecutionResult,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from crypto_momentum_lab.execution_account.sync import AccountSnapshot
@@ -372,7 +374,7 @@ class OrderExecutionCoordinator:
         self._idle_timeout_seconds = idle_timeout_seconds
         self._domain_coordinator = domain_coordinator
         self._reservation_repository = reservation_repository
-        self._execution_book = execution_book or ExecutionBook(
+        self._execution_book = execution_book or assemble_legacy_execution_book(
             coordinator=self._domain_coordinator,
             reservation_repository=self._reservation_repository,
         )

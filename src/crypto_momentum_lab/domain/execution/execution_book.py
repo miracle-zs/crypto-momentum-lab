@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 
 import structlog
 
@@ -92,6 +90,9 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
     StreamCheckpointAdoption,
 )
+from crypto_momentum_lab.domain.execution.reservation_repository import (
+    ReservationRepository,
+)
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
     ExitAllocator,
@@ -105,15 +106,10 @@ from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 log = structlog.get_logger(__name__)
 
 
-async def _maybe_await(val: Any) -> Any:
-    if inspect.isawaitable(val):
-        return await val
-    return val
-
-
 class _AbortObservation(Exception):
     def __init__(self, result: ExecutionObserveResult) -> None:
         self.result = result
+
 
 
 def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object]:
@@ -482,26 +478,15 @@ class ExecutionBook:
         books_by_key: dict[str, PositionBook] | None = None,
         journals_by_key: dict[str, AccountJournal] | None = None,
         coordinator: ExecutionCoordinator | None = None,
-        reservation_repository: Any | None = None,
+        reservation_repository: ReservationRepository | None = None,
         command_repository: CommandRepository | None = None,
         execution_unit_of_work: ExecutionUnitOfWorkPort | None = None,
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
         self._journals: dict[str, AccountJournal] = journals_by_key or {}
-        # ExecutionCoordinator.recover() is deliberately synchronous. A durable
-        # async reservation repository must be restored through ExecutionBook's
-        # awaited restore path instead of being queried from the constructor.
-        reservation_loader = getattr(
-            reservation_repository, "load_active_reservations", None
-        )
-        coordinator_repository = reservation_repository
-        if execution_unit_of_work is not None or inspect.iscoroutinefunction(
-            reservation_loader
-        ):
-            coordinator_repository = None
-        self._coordinator = coordinator or ExecutionCoordinator(
-            repository=coordinator_repository
-        )
+        # Default coordinator owns memory only. Durable/async restoration is
+        # explicitly awaited by restore; legacy sync assembly is outside Book.
+        self._coordinator = coordinator or ExecutionCoordinator()
         self._reservation_repo = reservation_repository
         self._command_repo = command_repository
         self._execution_unit_of_work = execution_unit_of_work
@@ -1032,25 +1017,17 @@ class ExecutionBook:
                     ) from err
 
         if self._reservation_repo is not None:
-            res_loader = getattr(
-                self._reservation_repo, "load_active_reservations", None
-            )
-            if callable(res_loader):
-                try:
-                    active_res = await _maybe_await(res_loader())
-                    for r in active_res:
-                        if (
-                            account_label is not None
-                            and r.position_key.account_label != account_label
-                        ):
-                            continue
-                        self._coordinator.register_reservation(r)
-                except Exception as err:
-                    raise RuntimeError("Failed to restore active reservations") from err
-            else:
-                raise RuntimeError(
-                    "reservation repository does not implement active restore"
-                )
+            try:
+                active_res = await self._reservation_repo.load_active_reservations()
+                for reservation in active_res:
+                    if (
+                        account_label is not None
+                        and reservation.position_key.account_label != account_label
+                    ):
+                        continue
+                    self._coordinator.register_reservation(reservation)
+            except Exception as err:
+                raise RuntimeError("Failed to restore active reservations") from err
         for canon, expected_ids in self._head_expected_reservation_ids.items():
             journal = self._journals.get(canon)
             if journal is None:
@@ -1651,39 +1628,40 @@ class ExecutionBook:
             )
 
             if self._reservation_repo is not None:
-                loader = getattr(self._reservation_repo, "load_reservation", None)
-                saver = getattr(self._reservation_repo, "save_reservations", None)
-                single_saver = getattr(self._reservation_repo, "save_reservation", None)
-
                 to_save: list[PositionReservation] = []
                 for res in reservations:
-                    if callable(loader):
-                        try:
-                            existing = await _maybe_await(loader(res.reservation_id))
-                            if existing is not None:
-                                if (
-                                    existing.batch_id != res.batch_id
-                                    or existing.reserved_quantity
-                                    != res.reserved_quantity
-                                    or existing.position_key != res.position_key
-                                ):
-                                    return CommandConflict(
-                                        request_id=command.command_id,
-                                        reason=(
-                                            f"Reservation {res.reservation_id} already "
-                                            f"exists with different parameters "
-                                            f"(batch_id={existing.batch_id}, "
-                                            f"quantity={existing.reserved_quantity}) "
-                                            f"that does not match requested "
-                                            f"(batch_id={res.batch_id}, "
-                                            f"quantity={res.reserved_quantity})"
-                                        ),
-                                    )
-                                continue
-                        except ReservationConflictError:
-                            raise
-                        except Exception:
-                            pass
+                    try:
+                        existing = await self._reservation_repo.load_reservation(
+                            res.reservation_id
+                        )
+                        if existing is not None:
+                            if (
+                                existing.batch_id != res.batch_id
+                                or existing.reserved_quantity != res.reserved_quantity
+                                or existing.position_key != res.position_key
+                            ):
+                                return CommandConflict(
+                                    request_id=command.command_id,
+                                    reason=(
+                                        f"Reservation {res.reservation_id} already "
+                                        f"exists with different parameters "
+                                        f"(batch_id={existing.batch_id}, "
+                                        f"quantity={existing.reserved_quantity}) "
+                                        f"that does not match requested "
+                                        f"(batch_id={res.batch_id}, "
+                                        f"quantity={res.reserved_quantity})"
+                                    ),
+                                )
+                            continue
+                    except ReservationConflictError:
+                        raise
+                    except Exception as load_error:
+                        self._persistence_failed = True
+                        self._recovery_required_commands.add(command.command_id)
+                        return Blocked(
+                            reason="Reservation identity lookup failed; restore is required",
+                            diagnostics=(str(load_error),),
+                        )
                     to_save.append(res)
 
                 if to_save:
@@ -1697,22 +1675,11 @@ class ExecutionBook:
                         )
                     )
                     try:
-                        if callable(saver):
-                            await _maybe_await(
-                                saver(
-                                    tuple(to_save),
-                                    expected_projection_version=expected_ver,
-                                    batch_quantities=batch_quantities_dict,
-                                )
-                            )
-                        elif callable(single_saver):
-                            for res in to_save:
-                                await _maybe_await(
-                                    single_saver(
-                                        res,
-                                        expected_projection_version=expected_ver,
-                                    )
-                                )
+                        await self._reservation_repo.save_reservations(
+                            tuple(to_save),
+                            expected_projection_version=expected_ver,
+                            batch_quantities=batch_quantities_dict,
+                        )
                     except Exception as save_err:
                         return CommandConflict(
                             request_id=command.command_id,
@@ -1765,16 +1732,10 @@ class ExecutionBook:
                         current.reservation_id, current.active_quantity
                     )
                     if self._reservation_repo is not None:
-                        updater = getattr(
-                            self._reservation_repo, "update_reservation", None
+                        await self._reservation_repo.update_reservation(
+                            released,
+                            release_reason="outbox_acceptance_failed",
                         )
-                        if callable(updater):
-                            await _maybe_await(
-                                updater(
-                                    released,
-                                    release_reason="outbox_acceptance_failed",
-                                )
-                            )
                 except Exception as rollback_err:
                     rollback_errors.append(str(rollback_err))
             diagnostics = [f"outbox persistence failed: {persist_err}"]
@@ -2067,19 +2028,11 @@ class ExecutionBook:
                 release_reason=release_reason,
             )
         elif self._reservation_repo is not None:
-            updater = getattr(self._reservation_repo, "update_reservation", None)
-            if not callable(updater):
-                self._persistence_failed = True
-                raise RuntimeError(
-                    "reservation repository does not implement update_reservation"
-                )
             try:
-                if release_reason is None:
-                    await _maybe_await(updater(reservation))
-                else:
-                    await _maybe_await(
-                        updater(reservation, release_reason=release_reason)
-                    )
+                await self._reservation_repo.update_reservation(
+                    reservation,
+                    release_reason=release_reason,
+                )
             except Exception:
                 self._persistence_failed = True
                 self._recovery_required_commands.add(reservation.command_id)
