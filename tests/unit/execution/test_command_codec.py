@@ -169,3 +169,18 @@ def test_outbox_enum_encoding_preserves_existing_persisted_text(row):
     assert restored.entry.scope.position_side is FuturesPositionSide.LONG
     assert restored.entry.command.side is StrategySide.LONG
     assert restored.entry.command.order_type is EntryType.MARKET
+
+
+@pytest.mark.parametrize("scope", [None, [], "scope"])
+def test_watermark_rejects_non_mapping_scope(scope):
+    with pytest.raises(TypeError, match="scope must be a mapping"):
+        decode_order_watermark({"scope": scope}, account_label=None)
+
+
+@pytest.mark.parametrize(
+    "field", ["environment", "account_label", "symbol", "position_side"]
+)
+def test_watermark_rejects_blank_scope_identity(row, field):
+    scope = dict(row["details"]["scope"], **{field: " "})
+    with pytest.raises(ValueError, match=field):
+        decode_order_watermark({"scope": scope}, account_label=None)

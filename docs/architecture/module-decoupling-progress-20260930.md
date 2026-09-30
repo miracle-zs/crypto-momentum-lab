@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百四十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百四十四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1801,6 +1801,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 新增 LONG/long/market 固定文本验收，确认恢复后分别为原持仓方向、策略方向及订单类型枚举；既有六状态恢复和中断 dispatch 封锁验收保持。
 
 验证：命令 codec 定向 **22 passed**；codec、command_models、trade_command、position_ledger_models、order_state 五文件 mypy --follow-imports=skip 通过，不代表全仓类型或真实数据库验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2599 passed**，30.82 秒，一项现有 Starlette/httpx 警告。两个修改文件完整 Ruff 与 git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百四十四批：命令恢复 codec 输入映射边界
+
+第一百四十三批提交为 `6388401`；第一百四十四批于 2026-10-01 继续本地实施，未部署生产。
+
+- _required_text、decode_active_command、decode_order_watermark 输入改为 Mapping[str, object]，删除模块 Any 导入。内部嵌套映射仍依赖运行校验，本批不声称所有嵌套值已静态收窄。
+- watermark scope 明确要求 Mapping，四项身份复用非空文本校验后构造 ExecutionScope；合法数值、水位和账户过滤不变。边界行为收紧：非映射 scope 明确 TypeError，空身份文本明确 ValueError，避免依赖后续字段索引失败。
+- 新增七项拒绝验收，覆盖三种非映射 scope 与四种空身份字段。
+
+验证：命令 codec 与实际 command/交易/ledger/order state 模型五文件 mypy --follow-imports=skip 通过；修改前边界收窄后的既有定向 **22 passed**。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2606 passed**，31.04 秒，一项现有 Starlette/httpx 警告。两个修改文件完整 Ruff 与 git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

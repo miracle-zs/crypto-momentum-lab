@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
 from crypto_momentum_lab.domain.execution.command_lifecycle import (
     plan_command_transition,
@@ -27,7 +26,7 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 
-def _required_text(values: Mapping[str, Any], field_name: str) -> str:
+def _required_text(values: Mapping[str, object], field_name: str) -> str:
     value = values.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"execution command {field_name} is missing or invalid")
@@ -91,7 +90,7 @@ def encode_outbox_details(
 
 
 def decode_active_command(
-    cmd_data: Mapping[str, Any],
+    cmd_data: Mapping[str, object],
     *,
     account_label: str | None,
     restored_at: datetime,
@@ -195,16 +194,18 @@ def decode_active_command(
 
 
 def decode_order_watermark(
-    row: Mapping[str, Any],
+    row: Mapping[str, object],
     *,
     account_label: str | None,
 ) -> RestoredWatermark | None:
     scope_data = row["scope"]
+    if not isinstance(scope_data, Mapping):
+        raise TypeError("order watermark scope must be a mapping")
     scope = ExecutionScope(
-        environment=scope_data["environment"],
-        account_label=scope_data["account_label"],
-        symbol=scope_data["symbol"],
-        position_side=FuturesPositionSide(scope_data["position_side"]),
+        environment=_required_text(scope_data, "environment"),
+        account_label=_required_text(scope_data, "account_label"),
+        symbol=_required_text(scope_data, "symbol"),
+        position_side=FuturesPositionSide(_required_text(scope_data, "position_side")),
     )
     if account_label is not None and scope.account_label != account_label:
         return None
