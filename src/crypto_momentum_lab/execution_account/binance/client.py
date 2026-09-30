@@ -38,7 +38,6 @@ from crypto_momentum_lab.domain.live_rollout.authorization import (
     EMERGENCY_FLATTEN_CONFIRMATION,
     require_authorized_command,
 )
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
     exit_position_quantity,
     open_order_matches_exit,
@@ -51,6 +50,11 @@ from crypto_momentum_lab.execution_account.binance.request_rules import (
     normalize_fill_cursors,
     normalize_margin_type,
     normalize_symbols,
+)
+from crypto_momentum_lab.execution_account.binance.rest_parser import (
+    account_fill_from_trade_item,
+    decimal_value,
+    json_mapping,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
 from crypto_momentum_lab.execution_account.orders.recovery import (
@@ -376,7 +380,7 @@ class BinanceUsdMPrivateReadClient:
         position_mode_payload = await self._signed_get("/fapi/v1/positionSide/dual")
         position_mode = _require_mapping(position_mode_payload)
         hedge_mode = bool(position_mode.get("dualSidePosition", False))
-        raw_payload = _json_mapping(data)
+        raw_payload = json_mapping(data)
         raw_payload["dualSidePosition"] = hedge_mode
         observed_at = self._now()
         return AccountConfigSnapshot(
@@ -397,11 +401,11 @@ class BinanceUsdMPrivateReadClient:
                 environment=self._environment,
                 account_label=self._account_label,
                 asset=str(item.get("asset", "")),
-                wallet_balance=_decimal(item.get("balance", "0")),
-                available_balance=_decimal(item.get("availableBalance", "0")),
-                unrealized_pnl=_decimal(item.get("crossUnPnl", "0")),
+                wallet_balance=decimal_value(item.get("balance", "0")),
+                available_balance=decimal_value(item.get("availableBalance", "0")),
+                unrealized_pnl=decimal_value(item.get("crossUnPnl", "0")),
                 observed_at=observed_at,
-                raw_payload=_json_mapping(item),
+                raw_payload=json_mapping(item),
             )
             for item in _require_sequence_of_mappings(payload)
         )
@@ -423,15 +427,15 @@ class BinanceUsdMPrivateReadClient:
                 account_label=self._account_label,
                 symbol=str(item.get("symbol", "")),
                 position_side=str(item.get("positionSide", "BOTH")),
-                position_amt=_decimal(item.get("positionAmt", "0")),
-                entry_price=_decimal(item.get("entryPrice", "0")),
-                mark_price=_decimal(item.get("markPrice", "0")),
-                unrealized_pnl=_decimal(item.get("unRealizedProfit", "0")),
-                notional=_decimal(item.get("notional", "0")),
+                position_amt=decimal_value(item.get("positionAmt", "0")),
+                entry_price=decimal_value(item.get("entryPrice", "0")),
+                mark_price=decimal_value(item.get("markPrice", "0")),
+                unrealized_pnl=decimal_value(item.get("unRealizedProfit", "0")),
+                notional=decimal_value(item.get("notional", "0")),
                 leverage=_optional_int(item.get("leverage")),
                 margin_type=_optional_str(item.get("marginType")),
                 observed_at=observed_at,
-                raw_payload=_json_mapping(item),
+                raw_payload=json_mapping(item),
             )
             for item in _require_sequence_of_mappings(payload)
         )
@@ -492,12 +496,12 @@ class BinanceUsdMPrivateReadClient:
                 side=str(item.get("side", "")),
                 order_type=str(item.get("type", "")),
                 status=str(item.get("status", "")),
-                price=_decimal(item.get("price", "0")),
-                original_quantity=_decimal(item.get("origQty", "0")),
-                executed_quantity=_decimal(item.get("executedQty", "0")),
+                price=decimal_value(item.get("price", "0")),
+                original_quantity=decimal_value(item.get("origQty", "0")),
+                executed_quantity=decimal_value(item.get("executedQty", "0")),
                 reduce_only=bool(item.get("reduceOnly", False)),
                 observed_at=observed_at,
-                raw_payload=_json_mapping(item),
+                raw_payload=json_mapping(item),
             )
             for item in _require_sequence_of_mappings(payload)
         )
@@ -560,16 +564,16 @@ class BinanceUsdMPrivateReadClient:
                         trade_id=trade_id,
                         order_id=str(item.get("orderId", "")),
                         side=str(item.get("side", "")),
-                        price=_decimal(item.get("price", "0")),
-                        quantity=_decimal(item.get("qty", "0")),
-                        realized_pnl=_decimal(item.get("realizedPnl", "0")),
-                        fee=_decimal(item.get("commission", "0")),
+                        price=decimal_value(item.get("price", "0")),
+                        quantity=decimal_value(item.get("qty", "0")),
+                        realized_pnl=decimal_value(item.get("realizedPnl", "0")),
+                        fee=decimal_value(item.get("commission", "0")),
                         fee_asset=str(item.get("commissionAsset", "")),
                         trade_at=datetime.fromtimestamp(
                             int(str(item.get("time", 0))) / 1000,
                             tz=UTC,
                         ),
-                        raw_payload=_json_mapping(item),
+                        raw_payload=json_mapping(item),
                     )
                     fills[(fill.symbol, fill.trade_id)] = fill
 
@@ -679,7 +683,7 @@ class BinanceUsdMPrivateReadClient:
                 max_trade_id: int | None = None
                 crossed_window_end = False
                 for item in items:
-                    fill = _account_fill_from_trade_item(
+                    fill = account_fill_from_trade_item(
                         item,
                         environment=self._environment,
                         account_label=self._account_label,
@@ -1479,10 +1483,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         *,
         entry_leverage: int | None = None,
     ) -> ExchangeOrderSnapshot:
-        executed_quantity = _decimal(data.get("executedQty", "0"))
-        average_price = _decimal(data.get("avgPrice", "0"))
+        executed_quantity = decimal_value(data.get("executedQty", "0"))
+        average_price = decimal_value(data.get("avgPrice", "0"))
         if executed_quantity > Decimal("0") and average_price <= Decimal("0"):
-            cum_quote = _decimal(data.get("cumQuote", "0"))
+            cum_quote = decimal_value(data.get("cumQuote", "0"))
             if cum_quote > Decimal("0"):
                 average_price = cum_quote / executed_quantity
         return ExchangeOrderSnapshot(
@@ -1494,10 +1498,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             average_price=average_price,
             entry_leverage=entry_leverage,
         )
-
-
-def _decimal(value: object) -> Decimal:
-    return Decimal(str(value))
 
 
 def _optional_int(value: object) -> int | None:
@@ -1513,36 +1513,6 @@ def _optional_str(value: object) -> str | None:
     return text if text else None
 
 
-def _account_fill_from_trade_item(
-    item: Mapping[str, object],
-    *,
-    environment: str,
-    account_label: str,
-    fallback_symbol: str,
-) -> AccountFillEvent:
-    symbol = str(item.get("symbol", fallback_symbol)).strip().upper()
-    if symbol != fallback_symbol:
-        raise ValueError("Binance userTrades response contained another symbol")
-    return AccountFillEvent(
-        environment=environment,
-        account_label=account_label,
-        symbol=symbol,
-        trade_id=str(item.get("id", "")),
-        order_id=str(item.get("orderId", "")),
-        side=str(item.get("side", "")),
-        price=_decimal(item.get("price", "0")),
-        quantity=_decimal(item.get("qty", "0")),
-        realized_pnl=_decimal(item.get("realizedPnl", "0")),
-        fee=_decimal(item.get("commission", "0")),
-        fee_asset=str(item.get("commissionAsset", "")),
-        trade_at=datetime.fromtimestamp(
-            int(str(item.get("time", 0))) / 1000,
-            tz=UTC,
-        ),
-        raw_payload=_json_mapping(item),
-    )
-
-
 def _require_mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("expected JSON object")
@@ -1556,22 +1526,6 @@ def _require_sequence_of_mappings(value: object) -> tuple[dict[str, object], ...
     for item in value:
         rows.append(_require_mapping(item))
     return tuple(rows)
-
-
-def _json_mapping(value: Mapping[str, object]) -> dict[str, JsonValue]:
-    return {str(key): _json_value(item) for key, item in value.items()}
-
-
-def _json_value(value: object) -> JsonValue:
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    if isinstance(value, list):
-        return [_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_value(item) for key, item in value.items()}
-    return str(value)
-
-
 
 
 def _exchange_error_code(exc: httpx.HTTPStatusError) -> int | None:
