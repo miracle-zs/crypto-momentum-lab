@@ -18,11 +18,11 @@ from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
     AccountPositionExpectationRegistry,
 )
+from crypto_momentum_lab.execution_account.snapshot_changes import (
+    apply_account_snapshot_delta,
+)
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
-)
-from crypto_momentum_lab.execution_account.sync import (
-    apply_account_snapshot_delta,
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,

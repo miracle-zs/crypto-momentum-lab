@@ -455,7 +455,14 @@ importlib.import_module(sys.argv[1])
     assert result.returncode == 0, result.stderr
 
 
-def test_account_snapshot_imports_without_sync_service():
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.execution_account.snapshot_models",
+        "crypto_momentum_lab.execution_account.snapshot_changes",
+    ],
+)
+def test_account_snapshot_imports_without_sync_service(module):
     script = """
 import importlib
 import sys
@@ -467,9 +474,12 @@ class SyncGuard(MetaPathFinder):
             or fullname.startswith('crypto_momentum_lab.persistence')):
             raise RuntimeError('snapshot imported service: ' + fullname)
 sys.meta_path.insert(0, SyncGuard())
-importlib.import_module('crypto_momentum_lab.execution_account.snapshot_models')
+importlib.import_module(sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 0, result.stderr
