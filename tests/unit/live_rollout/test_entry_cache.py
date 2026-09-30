@@ -31,6 +31,9 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
     ready = asyncio.Event()
 
     class Provider:
+        def prune(self, **kwargs) -> int:
+            return 0
+
         def load(
             self,
             *,
@@ -51,7 +54,7 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
         ready.set()
 
     cache = LiveEntryFilterCache(
-        ema_provider=Provider(),  # type: ignore[arg-type]
+        ema_provider=Provider(),
         symbol_loader=load_symbols,
         clock=lambda: now,
         on_ready=on_ready,
@@ -242,6 +245,9 @@ async def test_entry_filter_cache_stop_tolerates_pre_cancelled_task() -> None:
     ready = asyncio.Event()
 
     class Provider:
+        def prune(self, **kwargs) -> int:
+            return 0
+
         def load(
             self,
             *,
@@ -257,7 +263,7 @@ async def test_entry_filter_cache_stop_tolerates_pre_cancelled_task() -> None:
         return frozenset({"BTCUSDT"})
 
     cache = LiveEntryFilterCache(
-        ema_provider=Provider(),  # type: ignore[arg-type]
+        ema_provider=Provider(),
         symbol_loader=load_symbols,
         clock=lambda: now,
         on_ready=lambda _: ready.set(),
@@ -277,6 +283,9 @@ async def test_entry_filter_cache_stop_propagates_external_cancellation() -> Non
     now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
 
     class SlowProvider:
+        def prune(self, **kwargs) -> int:
+            return 0
+
         def load(
             self,
             *,
@@ -293,7 +302,7 @@ async def test_entry_filter_cache_stop_propagates_external_cancellation() -> Non
         return frozenset({"BTCUSDT"})
 
     cache = LiveEntryFilterCache(
-        ema_provider=SlowProvider(),  # type: ignore[arg-type]
+        ema_provider=SlowProvider(),
         symbol_loader=slow_symbols,
         clock=lambda: now,
     )

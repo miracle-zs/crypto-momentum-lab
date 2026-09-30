@@ -11,19 +11,35 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 import structlog
 
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
 from crypto_momentum_lab.strategy_runner.candle_source import (
-    ClosedCandleEmaProvider,
     ClosedCandleEmaSnapshot,
 )
 
 log = structlog.get_logger()
+
+
+class EntryEmaProvider(Protocol):
+    def load(
+        self, *, symbol: str, observed_at: datetime
+    ) -> ClosedCandleEmaSnapshot: ...
+
+    def prune(
+        self,
+        *,
+        now: datetime,
+        protected_symbols: Collection[str],
+        inactive_after: timedelta,
+        max_boundaries_per_symbol: int,
+    ) -> int: ...
+
 
 SymbolLoader = Callable[[datetime], Awaitable[frozenset[str]]]
 UniverseLoader = Callable[
@@ -160,7 +176,7 @@ class LiveEntryFilterCache:
     def __init__(
         self,
         *,
-        ema_provider: ClosedCandleEmaProvider,
+        ema_provider: EntryEmaProvider,
         symbol_loader: SymbolLoader | None = None,
         universe_loader: UniverseLoader | None = None,
         config: EntryFilterCacheConfig | None = None,
@@ -414,11 +430,8 @@ class LiveEntryFilterCache:
         observed_at: datetime,
         protected_symbols: frozenset[str],
     ) -> None:
-        prune = getattr(self._ema_provider, "prune", None)
-        if not callable(prune):
-            return
         with self._provider_lock:
-            pruned = prune(
+            pruned = self._ema_provider.prune(
                 now=observed_at,
                 protected_symbols=protected_symbols,
                 inactive_after=timedelta(hours=1),

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十一批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -679,6 +679,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：缓存/daemon 定向 **64 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2459 passed**，25.36 秒，一项现有 Starlette/httpx 警告。缓存模块与其测试一起定向 mypy --follow-imports=skip 通过；核心文件/测试完整 Ruff、daemon F/I、git diff --check 通过，不代表全仓类型验收。保留现有计数/保护/日志回归，无新增镜像实现测试。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐；累计五十批本地结构迁移不表示整个重构或生产异常验收已经完成。
+
+## 第五十一批：entry EMA 缓存读取与清理能力接口
+
+第五十批提交为 `d66369d`；第五十一批继续本地实施，未部署生产。
+
+- entry_cache 定义 EntryEmaProvider，明确同步 load(symbol, observed_at) 与 prune(now, protected_symbols, inactive_after, max_boundaries_per_symbol) 两项实际使用能力。缓存不再依赖具体 ClosedCandleEmaProvider 类型，EMA snapshot 值类型仍引用原所有者。
+- _prune_ema_provider 直接在原 provider lock 中调用 prune，删除动态能力探测。原生产 provider 已实现两项方法，无新转发实现；缺失清理能力的外部旧实现不再静默跳过，是明确的契约变化。
+- 三个缓存测试 provider 显式实现原无缓存清理场景的 prune 返回零，删除其构造点的 arg-type 忽略。读取/后台 warmup/取消/停止流程未改，保护 symbols、一小时期限和每币 32 个边界保持。
+
+验证：entry cache/runtime/架构定向 **62 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2459 passed**，25.11 秒，一项现有 Starlette/httpx 警告。entry_cache、entry_runtime、domain/universe/ports 三文件定向 mypy --follow-imports=skip 通过；核心文件及迁移测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。实际 provider 的既有单元清理回归包含于完整单元测试；不代表真实外部 candle 读取验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
 ## 后续实施顺序
 
