@@ -7,6 +7,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillSourceAnchor,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
+)
 from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
 
 OBSERVED_AT = datetime(2026, 10, 1, 12, 0, 0, 123000, tzinfo=UTC)
@@ -73,3 +76,9 @@ def test_earlier_cut_in_same_millisecond_keeps_existing_scan_semantics():
     assert plan is not None
     assert plan.start_time_ms == 1790856000122
     assert plan.source_anchor_event_cut == cut
+
+
+def test_zero_snapshot_anchor_retains_pre_extraction_digest():
+    assert stable_snapshot_anchor_id(position("0")) == (
+        "psnap_15ae10caf60f749c54609056d7ec1a83ecc042e655f04406fb93d704b51e34a9"
+    )

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百七十二批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百七十三批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -2144,6 +2144,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 首次局部验收发现测试固定时间误按本地时区计算，已改为 UTC 预期；该失败属于测试期望错误，不是生产扫描时间错误。
 
 验证：本批仅增加测试，未重复前批十六文件类型检查。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2692 passed**，30.71 秒，一项现有 Starlette/httpx 警告。新增测试完整 Ruff、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百七十三批：快照锚点编码脱离恢复 codec
+
+第一百七十二批提交为 `ee78e27`；第一百七十三批于 2026-10-01 继续本地实施，未部署生产。
+
+- domain.execution.snapshot_encoding 独立拥有持仓快照编码、规范 JSON 摘要与 stable_snapshot_anchor_id。扫描计划直接调用该所有者，不再加载恢复 codec。
+- 保留 format(decimal, "f")、原时区 isoformat、原始字段、JSON 排序/紧凑分隔及 psnap_ SHA-256 前缀。恢复 codec 的 encode_snapshot 使用同一实现，stable_snapshot_anchor_id 保留 cls.encode_snapshot 调度，兼容已有入口及子类覆盖。
+- 新增迁移前固定摘要测试；独立进程守卫加入 snapshot_encoding，并禁止所有该组模块加载 recovery_codec。对旧提交提取的两方法进行离线对照：三种时区、三种小数形式和两种原始 payload 共十八项编码及锚点完全一致。
+
+验证：前批联合范围加 snapshot_encoding 共十七文件严格 mypy 检查通过（其余依赖 follow_imports=skip，仅 httpx 正常跟随）；恢复 codec 本体仍非本批类型验收范围。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2694 passed**，30.49 秒，一项现有 Starlette/httpx 警告。新模块、扫描计划及测试完整 Ruff，恢复 codec F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

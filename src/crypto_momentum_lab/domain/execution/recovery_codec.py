@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -40,6 +38,10 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
     RecoverySchemaError,
 )
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    encode_position_snapshot,
+    snapshot_anchor_id,
+)
 from crypto_momentum_lab.domain.strategy import StrategySide
 
 ACCOUNT_FACTS_SCHEMA_VERSION = 2
@@ -56,12 +58,7 @@ class PositionRecoveryCodec:
         snapshot: AccountPositionSnapshot,
     ) -> str:
         """Return a deterministic identity suitable for a zero-snapshot anchor."""
-        encoded = json.dumps(
-            cls.encode_snapshot(snapshot),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        return f"psnap_{hashlib.sha256(encoded).hexdigest()}"
+        return snapshot_anchor_id(cls.encode_snapshot(snapshot))
 
     @classmethod
     def decode_scope(cls, value: object) -> AccountFactStreamScope:
@@ -296,23 +293,7 @@ class PositionRecoveryCodec:
             raw_payload=_json_mapping(data, "raw_payload"),
         )
 
-    @classmethod
-    def encode_snapshot(cls, snapshot: AccountPositionSnapshot) -> dict[str, object]:
-        return {
-            "environment": snapshot.environment,
-            "account_label": snapshot.account_label,
-            "symbol": snapshot.symbol,
-            "position_side": snapshot.position_side,
-            "position_amt": _decimal(snapshot.position_amt),
-            "entry_price": _decimal(snapshot.entry_price),
-            "mark_price": _decimal(snapshot.mark_price),
-            "unrealized_pnl": _decimal(snapshot.unrealized_pnl),
-            "notional": _decimal(snapshot.notional),
-            "leverage": snapshot.leverage,
-            "margin_type": snapshot.margin_type,
-            "observed_at": _datetime(snapshot.observed_at),
-            "raw_payload": snapshot.raw_payload,
-        }
+    encode_snapshot = staticmethod(encode_position_snapshot)
 
     @classmethod
     def decode_snapshot(cls, value: object) -> AccountPositionSnapshot:

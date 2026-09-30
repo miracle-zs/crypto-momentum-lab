@@ -468,6 +468,7 @@ importlib.import_module(sys.argv[1])
         "crypto_momentum_lab.execution_account.position_history",
         "crypto_momentum_lab.execution_account.reconciliation_records",
         "crypto_momentum_lab.execution_account.fill_scan_plan",
+        "crypto_momentum_lab.domain.execution.snapshot_encoding",
     ],
 )
 def test_account_snapshot_imports_without_sync_service(module):
@@ -478,6 +479,7 @@ from importlib.abc import MetaPathFinder
 class SyncGuard(MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if (fullname == 'crypto_momentum_lab.execution_account.sync'
+            or fullname == 'crypto_momentum_lab.domain.execution.recovery_codec'
             or fullname == 'sqlalchemy'
             or fullname.startswith('crypto_momentum_lab.persistence')):
             raise RuntimeError('snapshot imported service: ' + fullname)

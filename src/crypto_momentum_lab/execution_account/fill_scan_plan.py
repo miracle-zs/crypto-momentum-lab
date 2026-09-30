@@ -8,7 +8,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillSourceAnchor,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +38,7 @@ def plan_fill_scan(
         source_stream_id = source_anchor.stream_id
         source_stream_epoch = source_anchor.stream_epoch
     elif position.position_amt == Decimal("0"):
-        source_anchor_id = PositionRecoveryCodec.stable_snapshot_anchor_id(position)
+        source_anchor_id = stable_snapshot_anchor_id(position)
         source_anchor_cut = position.observed_at
         source_anchor_kind = "zero_snapshot"
         source_stream_id = None
