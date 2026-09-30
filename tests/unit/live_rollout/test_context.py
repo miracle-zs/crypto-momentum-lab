@@ -230,3 +230,26 @@ def test_invalidator_binding_preserves_priority_and_legacy_arguments(mode: str) 
     runtime.invalidate(event)
     assert runtime.generation == 1
     assert calls == [(mode, None if mode == "legacy_noarg" else event)]
+
+
+@pytest.mark.parametrize("method", ["is_current", "is_context_current"])
+def test_currentness_uses_original_bound_method(method: str) -> None:
+    calls = []
+
+    def check(context):
+        calls.append(context)
+        return True
+
+    provider = SimpleNamespace(**{method: check})
+    if method == "is_current":
+        provider.is_context_current = lambda context: pytest.fail("wrong priority")
+    runtime = LiveContextRuntime(
+        run_id="run-1",
+        context_provider=provider,
+        set_pending_position_symbols=lambda symbols: None,
+        update_managed_symbols=lambda positions, orders: None,
+    )
+    setattr(provider, method, lambda context: pytest.fail("must use bound method"))
+    context = object()
+    assert runtime.is_current(context)
+    assert calls == [context]

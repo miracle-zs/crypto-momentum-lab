@@ -170,6 +170,15 @@ class LiveContextRuntime:
         self._run_id = run_id
         self._context_reader = resolved
         self._context_provider = resolved
+        self._has_currentness_check = False
+        if hasattr(resolved, "is_current"):
+            self._currentness_check = resolved.is_current
+            self._has_currentness_check = True
+        elif hasattr(resolved, "is_context_current"):
+            self._currentness_check = resolved.is_context_current
+            self._has_currentness_check = True
+        else:
+            self._currentness_check = None
         self._uses_legacy_cache_invalidator = False
         if hasattr(resolved, "invalidate"):
             self._context_invalidator = resolved.invalidate
@@ -193,12 +202,9 @@ class LiveContextRuntime:
         return self._managed_position_symbols
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
-        reader = self._context_reader
         try:
-            if hasattr(reader, "is_current"):
-                return bool(reader.is_current(context))
-            if hasattr(reader, "is_context_current"):
-                return bool(reader.is_context_current(context))
+            if self._has_currentness_check:
+                return bool(self._currentness_check(context))
             if context.account_observed_at is None:
                 return False
             now = context.now or datetime.now(tz=UTC)
