@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十三批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成五十四批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -714,6 +714,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 控制平面函数在去除注解后 AST 与原实现一致；账户快照可用性、行情 gap 标记、lease 更新与健康事件发布顺序均保持。同步记录/有界队列/实际 telemetry 生命周期未迁移。
 
 验证：控制平面/telemetry/架构定向 **78 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**，26.15 秒，一项现有 Starlette/httpx 警告。新增 telemetry_ports、control_plane 两项独立进程禁止 sqlalchemy/persistence 导入检查。telemetry_ports、control_plane、实际 context 接口三文件一起定向 mypy --follow-imports=skip 通过；仅前两文件检查时 context 被跳过会出现 Any 基类错误，已通过纳入实际所有者处理，未禁用错误码。核心文件完整 Ruff、telemetry F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第五十四批：账户通道依赖成交记录能力
+
+第五十三批提交为 `631f8d9`；第五十四批继续本地实施，未部署生产。
+
+- telemetry_ports 增加 AccountFillSink，仅声明原异步 account_fill(event, occurred_at)。AccountEvent 仅 TYPE_CHECKING 引用，接口模块不急切加载事件通道实现。
+- LiveTelemetrySink 继承 AccountFillSink，删除重复方法声明；LiveAccountEventRuntime 仅依赖这一项能力，不再导入完整 telemetry 模块。实际 recorder 与现有 fill 替身直接满足能力，无新的记录转发实现。
+- 账户 runtime 在移除注解差异后 AST 与上一批一致。fill identity 去重、异步成交记录、订单对账、账户快照应用和退出决策顺序保持；telemetry recorder 队列与持久化逻辑未迁移。
+
+验证：account channel/telemetry/架构定向 **81 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2461 passed**。telemetry_ports 定向 mypy --follow-imports=skip 通过；核心接口/账户通道完整 Ruff、telemetry F/I、git diff --check 通过，不代表账户通道或全仓类型验收。沿用现有成交去重及快照顺序行为回归，无新增镜像实现测试。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

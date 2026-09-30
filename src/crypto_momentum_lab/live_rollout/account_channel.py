@@ -25,7 +25,7 @@ from crypto_momentum_lab.live_rollout.order_reconciliation import (
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,
 )
-from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
+from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 
 log = structlog.get_logger()
 
@@ -47,7 +47,7 @@ class LiveAccountEventRuntime:
         latest_market_quotes: LatestMarketQuoteCache,
         order_reconciliation: LiveOrderReconciliation | None = None,
         run_id: str | None = None,
-        telemetry: LiveTelemetrySink | None = None,
+        telemetry: AccountFillSink | None = None,
         is_transient_error: Callable[[Exception], bool],
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,

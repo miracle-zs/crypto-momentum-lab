@@ -1,7 +1,12 @@
 """Small telemetry capabilities consumed by independent runtime publishers."""
 
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.hub import AccountEvent
 
 
 class ConsumerHealthSink(Protocol):
@@ -15,5 +20,15 @@ class ConsumerHealthSink(Protocol):
         recovery: bool = False,
         lag: bool = False,
         sequence: int | None = None,
+    ) -> None: ...
+
+
+
+class AccountFillSink(Protocol):
+    async def account_fill(
+        self,
+        event: AccountEvent,
+        *,
+        occurred_at: datetime,
     ) -> None: ...
 

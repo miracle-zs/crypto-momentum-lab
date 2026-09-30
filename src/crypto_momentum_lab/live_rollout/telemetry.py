@@ -26,7 +26,10 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
+from crypto_momentum_lab.live_rollout.telemetry_ports import (
+    AccountFillSink,
+    ConsumerHealthSink,
+)
 
 log = structlog.get_logger()
 
@@ -173,7 +176,7 @@ _EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
 )
 
 
-class LiveTelemetrySink(ConsumerHealthSink, Protocol):
+class LiveTelemetrySink(ConsumerHealthSink, AccountFillSink, Protocol):
     def market_state_progress(
         self,
         state: MarketState15s,
@@ -301,12 +304,6 @@ class LiveTelemetrySink(ConsumerHealthSink, Protocol):
         occurred_at: datetime,
     ) -> None: ...
 
-    async def account_fill(
-        self,
-        event: AccountEvent,
-        *,
-        occurred_at: datetime,
-    ) -> None: ...
 
 
 RuntimeEventBatchSink = Callable[
