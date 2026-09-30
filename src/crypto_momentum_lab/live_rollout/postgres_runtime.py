@@ -27,6 +27,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
+from crypto_momentum_lab.domain.execution.position_context_ports import (
+    PositionContextBook,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     CoverageEvidence,
@@ -201,7 +204,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_snapshot: AccountSnapshot | None = None
         self._realtime_account_state: ExecutionAccountStatus | None = None
         self._realtime_account_sequence = 0
-        self._execution_book: Any | None = None
+        self._execution_book: PositionContextBook | None = None
         self._cached_book_bucket_end: datetime | None = None
         self._cached_book_result: (
             tuple[frozenset[str], tuple[Any, ...], frozenset[str]] | None
@@ -303,7 +306,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 await self._load_context(state), state
             )
 
-    def set_execution_book(self, execution_book: Any) -> None:
+    def set_execution_book(self, execution_book: PositionContextBook) -> None:
         """Use the restored ExecutionBook as the provider's position source."""
         if execution_book is None:
             raise ValueError("execution_book is required")
@@ -315,7 +318,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         context: LiveDaemonRuntimeContext,
         state: MarketState15s,
     ) -> LiveDaemonRuntimeContext:
-        book = getattr(self, "_execution_book", None)
+        book: PositionContextBook | None = getattr(self, "_execution_book", None)
         if book is None:
             return context
         if context.open_position_symbols == frozenset():
@@ -476,7 +479,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     async def _observe_book_drift(
         self,
         *,
-        book: Any,
+        book: PositionContextBook,
         context: LiveDaemonRuntimeContext,
     ) -> None:
         """Report Book-only residue that the account view no longer shows.

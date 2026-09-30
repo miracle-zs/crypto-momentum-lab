@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成九十九批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1264,6 +1264,20 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 协调器中直接针对 _execution_book 的三项 hasattr（流注册、流读取、drain）已清除，不宣称全仓动态探测清零。
 
 验证：协调器定向 **41 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2508 passed**，29.99 秒，一项现有 Starlette/httpx 警告。协调器及其测试 F/I、git diff --check 通过，本批未新增类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百批：运行上下文执行簿能力接口
+
+第九十九批提交为 `c83f21e`；第一百批继续本地实施，未部署生产。
+
+- 新增领域 PositionContextBook，继承已有 PositionRepairBook 的修复后 reload_position 契约，只增加当前上下文实际消费的 list_position_views 与 get_active_stream 两方法；不引入转发适配器。
+- PostgresLiveContextProvider 的执行簿成员、set_execution_book、局部读取变量及漂移扫描参数替换 Any 注解。原生执行簿仍由原生产装配注入，仓位读取、缓存、漂移扫描、自愈事务与重载顺序保持。
+- provider 的 getattr 初始化兼容路径仍保留，不宣称所有动态读取或 SQL 装配已经拆完。
+
+验证：上下文提供者定向 **48 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2508 passed**，29.91 秒，一项现有 Starlette/httpx 警告。新接口完整 Ruff、provider F/I、git diff --check 通过。
+
+类型检查未通过：新接口/position_repair/position_ledger_models 三文件联合 mypy --follow-imports=skip 报告原领域模型的 8 项错误及 position_repair 构造缺少返回注解 1 项；provider/新接口两文件窄检查则因跳过协议父类导入报 2 项 Any 父类错误。未增加忽略，不宣称接口适配器或全仓类型验收完成。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
