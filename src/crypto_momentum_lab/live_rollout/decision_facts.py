@@ -7,8 +7,9 @@ supplies only cash, risk, and operational posture; it never reconstructs lots.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
@@ -47,10 +48,22 @@ from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 
 log = structlog.get_logger(__name__)
+
+
+class DecisionPositionReader(Protocol):
+    """Read authoritative positions at the account stream and market cut."""
+
+    async def read(
+        self,
+        scope: ExecutionScope,
+        *,
+        event_cut: datetime | None = None,
+        stream_id: str | None = None,
+        stream_epoch: str | None = None,
+    ) -> PositionView: ...
 
 
 def _cash_balance(context: LiveDaemonRuntimeContext) -> Decimal | None:
@@ -133,7 +146,7 @@ class LiveDecisionFactSource:
         account_label: str,
         strategy_name: str = "orderflow_impulse",
         *,
-        execution_book: ExecutionBook | None = None,
+        execution_book: DecisionPositionReader | None = None,
         decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
     ) -> None:
@@ -172,7 +185,7 @@ class LiveDecisionFactSource:
     def current_policy_state(self) -> PolicyState:
         return self._policy_state
 
-    def set_execution_book(self, execution_book: ExecutionBook) -> None:
+    def set_execution_book(self, execution_book: DecisionPositionReader) -> None:
         if execution_book is None:
             raise ValueError("execution_book is required")
         self._execution_book = execution_book
@@ -619,6 +632,7 @@ def _decision_dependencies(trace: DecisionTrace) -> tuple[ConsumerDependency, ..
 
 
 __all__ = [
+    "DecisionPositionReader",
     "LiveDecisionFactSource",
     "frozen_decision_inputs_from_context",
 ]
