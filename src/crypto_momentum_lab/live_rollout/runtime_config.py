@@ -35,11 +35,6 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
     16.0,
     32.0,
 )
-_ORDER_IDENTITY_CONFLICT_MESSAGE = (
-    "client order ID is already bound to a different order"
-)
-
-
 def _live_strategy_config(
     profile: LiveOrderFlowImpulseProfile,
 ) -> dict[str, object]:

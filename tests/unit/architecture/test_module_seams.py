@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.parametrize(
     "module",
     [
+        "crypto_momentum_lab.live_rollout.order_identity_errors",
         "crypto_momentum_lab.live_rollout.shadow_preflight",
         "crypto_momentum_lab.live_rollout.session_state",
         "crypto_momentum_lab.live_rollout.lease_recovery",

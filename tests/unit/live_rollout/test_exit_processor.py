@@ -23,9 +23,11 @@ from crypto_momentum_lab.live_rollout.context import (
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
     LiveExitProcessor,
-    _is_order_identity_conflict,
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitOrderRequest
+from crypto_momentum_lab.live_rollout.order_identity_errors import (
+    is_durable_order_identity_conflict,
+)
 from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
 from tests.unit.shadow_operation.test_service import _intent, _state
 
@@ -45,7 +47,7 @@ def test_only_durable_order_identity_errors_are_classified_as_conflicts(
     message: str,
     expected: bool,
 ) -> None:
-    assert _is_order_identity_conflict(RuntimeError(message)) is expected
+    assert is_durable_order_identity_conflict(RuntimeError(message)) is expected
 
 
 class RecordingSubmission:

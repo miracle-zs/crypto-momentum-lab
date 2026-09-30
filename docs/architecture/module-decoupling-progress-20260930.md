@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成三十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成三十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -503,6 +503,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2416 passed**，25.67 秒，一项现有 Starlette/httpx 警告。金额读取及 CLI 定向 **77 passed**；新增 **8 项**替身测试覆盖缺失/非字典/空字段、字符串/零/浮点金额、非法金额，并检查查询 intent_id。金额查询与解析 AST 等价检查通过。订单读取仓储定向 mypy --follow-imports=skip、仓储及新增测试完整 Ruff、单次计划/CLI F/I、git diff --check 通过，不代表全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实 Postgres 通知、并发、原子回滚与完整进程重启仍待补齐；新增金额替身测试不替代真实数据库或实盘执行验收。
+
+## 第三十七批：订单身份冲突分类的明确归属
+
+第三十六批提交为 `b5e3b19`；第三十七批继续本地实施，未部署生产。
+
+- live_rollout/order_identity_errors.py 独立拥有 is_runtime_order_identity_conflict 与 is_durable_order_identity_conflict。两套判定范围不同，保留分别命名的原规则，不将 reservation/type-name 分类扩大到退出处理器。
+- 运行通道继续识别五类耐久消息、ReservationConflictError 类名及 OrderPreSubmissionError 的特定消息，并递归检查 cause；退出处理器继续只识别五类耐久消息和嵌套 cause。原特殊消息常量由 runtime_config 移到分类所有者。
+- 编排与退出处理器通过模块命名空间直接消费分类规则，删除各自旧私有函数；原测试直接从规则所有者导入，不保留旧函数重导出。通道回调注入、错误恢复、退出提交和重试流程保持。
+- 两个函数在名称及递归引用归一化后 AST 与原实现一致。现有基于错误消息/类名的分类没有改为新的异常体系，本批不宣称解决所有错误分类或并发问题。
+
+验证：完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2422 passed**，26.11 秒，一项现有 Starlette/httpx 警告。规则/退出处理器/身份 epoch/架构定向 **68 passed**。新增 **5 项**覆盖 reservation 类名及嵌套 cause 仅影响运行通道、三类嵌套耐久消息同时被两套规则识别；新增独立进程无 sqlalchemy/persistence 导入检查。规则及新增测试完整 Ruff、迁移文件 F/I、规则定向 mypy --follow-imports=skip、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
 ## 后续实施顺序
 

@@ -24,6 +24,7 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
 import crypto_momentum_lab.live_rollout.session_state as session_state
 import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
@@ -160,7 +161,6 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_LEASE_RENEW_BEFORE_SECONDS,
     _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
     _LIVE_STARTUP_BUFFER_LIMIT,
-    _ORDER_IDENTITY_CONFLICT_MESSAGE,
     _PENDING_POSITION_RETRY_DELAYS_SECONDS,
     LiveRuntimeConfig,
     _live_strategy_config,
@@ -1560,7 +1560,7 @@ async def run_live_daemon(
             latest_market_quotes=latest_market_quotes,
             latest_market_states=latest_market_states,
             is_transient_error=_is_transient_live_runtime_error,
-            is_order_identity_conflict=_is_order_identity_conflict,
+            is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
@@ -1604,7 +1604,7 @@ async def run_live_daemon(
             run_id=session_id,
             telemetry=telemetry,
             is_transient_error=_is_transient_live_runtime_error,
-            is_order_identity_conflict=_is_order_identity_conflict,
+            is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             on_account_snapshot=_on_account_snapshot_combined,
             on_account_snapshot_recovery=(
@@ -1963,7 +1963,7 @@ async def _run_account_event_channel(
         run_id=run_id,
         telemetry=telemetry,
         is_transient_error=_is_transient_live_runtime_error,
-        is_order_identity_conflict=_is_order_identity_conflict,
+        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         on_account_snapshot=on_account_snapshot,
         on_account_snapshot_recovery=on_account_snapshot_recovery,
@@ -1987,7 +1987,7 @@ async def _run_grace_timeout_channel(
         latest_market_quotes=latest_market_quotes,
         latest_market_states=latest_market_states,
         is_transient_error=_is_transient_live_runtime_error,
-        is_order_identity_conflict=_is_order_identity_conflict,
+        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
@@ -1999,29 +1999,3 @@ def _is_transient_live_runtime_error(error: Exception) -> bool:
         error,
         (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
     )
-
-
-def _is_order_identity_conflict(error: Exception) -> bool:
-    if isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE:
-        return True
-    msg = str(error)
-    if (
-        "already exists in terminal status" in msg
-        or "already bound to a different order" in msg
-        or "is in non-dispatchable state" in msg
-        or "Execution command was not durably accepted" in msg
-        or "conflicts with its durable identity" in msg
-    ):
-        return True
-    if "ReservationConflictError" in type(error).__name__:
-        return True
-    if "OrderPreSubmissionError" in type(error).__name__ and (
-        "already exists" in msg
-        or "non-dispatchable" in msg
-        or "durably accepted" in msg
-    ):
-        return True
-    cause = getattr(error, "__cause__", None)
-    if cause is not None and isinstance(cause, Exception):
-        return _is_order_identity_conflict(cause)
-    return False

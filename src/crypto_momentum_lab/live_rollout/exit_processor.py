@@ -17,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 
+import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -246,7 +247,7 @@ class LiveExitProcessor:
                     context=context,
                 )
             except Exception as error:
-                if self._exit_manager is not None and _is_order_identity_conflict(
+                if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
                     error
                 ):
                     self._exit_manager.note_order_identity_conflict(state.symbol)
@@ -641,7 +642,7 @@ class LiveExitProcessor:
                         error=str(error),
                     )
                     return None, context, "position_facts_not_restored"
-                if self._exit_manager is not None and _is_order_identity_conflict(
+                if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
                     error
                 ):
                     log.error(
@@ -840,7 +841,7 @@ class LiveExitProcessor:
                             error=str(error),
                         )
                         return approved, submitted, "position_facts_not_restored"
-                    if self._exit_manager is not None and _is_order_identity_conflict(
+                    if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
                         error
                     ):
                         log.error(
@@ -1073,20 +1074,6 @@ def _resize_reduce_only_candidate(
         desired_notional=desired_notional,
         features=features,
     )
-
-
-def _is_order_identity_conflict(error: Exception) -> bool:
-    message = str(error)
-    if (
-        "already exists in terminal status" in message
-        or "already bound to a different order" in message
-        or "is in non-dispatchable state" in message
-        or "Execution command was not durably accepted" in message
-        or "conflicts with its durable identity" in message
-    ):
-        return True
-    cause = error.__cause__
-    return isinstance(cause, Exception) and _is_order_identity_conflict(cause)
 
 
 def _is_missing_position_facts(error: Exception) -> bool:
