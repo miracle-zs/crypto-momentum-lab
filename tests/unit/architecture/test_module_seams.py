@@ -239,3 +239,31 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.live_rollout.account_channel",
+        "crypto_momentum_lab.live_rollout.account_event_ports",
+    ],
+)
+def test_account_consumers_do_not_load_order_reconciliation(module: str) -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class ReconciliationGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'crypto_momentum_lab.live_rollout.order_reconciliation':
+            raise RuntimeError('account consumer imported reconciliation: ' + fullname)
+sys.meta_path.insert(0, ReconciliationGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

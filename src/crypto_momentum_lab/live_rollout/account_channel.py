@@ -10,6 +10,7 @@ import structlog
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.account_event_ports import (
     AccountEventExitProcessor,
+    AccountEventOrderReconciler,
 )
 from crypto_momentum_lab.live_rollout.exit_channels import (
     DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
@@ -20,9 +21,6 @@ from crypto_momentum_lab.live_rollout.exit_channels import (
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
-)
-from crypto_momentum_lab.live_rollout.order_reconciliation import (
-    LiveOrderReconciliation,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,
@@ -47,7 +45,7 @@ class LiveAccountEventRuntime:
         daemon: AccountEventExitProcessor,
         latest_market_states: LatestMarketStateCache,
         latest_market_quotes: LatestMarketQuoteCache,
-        order_reconciliation: LiveOrderReconciliation | None = None,
+        order_reconciliation: AccountEventOrderReconciler | None = None,
         run_id: str | None = None,
         telemetry: AccountFillSink | None = None,
         is_transient_error: Callable[[Exception], bool],

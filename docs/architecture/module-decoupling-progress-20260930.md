@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成五十九批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成六十批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -786,6 +786,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 检查确认缓存已经直接引用领域模型，本批未额外创建缓存转发接口。两生产模块全部函数 AST 与上一批完全一致，消费、缓存与重试行为不变。
 
 验证：退出通道/架构定向 **64 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2469 passed**，26.66 秒，一项现有 Starlette/httpx 警告。exit_channels 与 exit_channel_ports 两文件定向 mypy --follow-imports=skip、两核心文件与架构测试完整 Ruff、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第六十批：账户通道依赖事件对账能力
+
+第五十九批提交为 `dd0cec8`；第六十批继续本地实施，未部署生产。
+
+- account_event_ports 增加 AccountEventOrderReconciler，仅声明只读 run_id 与异步 reconcile_account_event(event)。账户通道删除完整 LiveOrderReconciliation 导入，原生产对账对象及现有替身直接满足接口，没有新增对账转发实现。
+- 该接口的 AccountEvent 仅 TYPE_CHECKING 引用；原退出能力使用的 RealtimeMarketQuote 改为直接引用领域模型。账户输入已是 AsyncIterable，本批不再重复拆分。
+- 去除参数注解后账户通道全部函数 AST 与上一批一致。先对账、后账户快照发布及退出处理、fill 去重、失败恢复通知、run_id 选择和重试顺序保持。实际订单读取与状态机协调仍归原对账模块。
+
+验证：账户通道/架构定向 **68 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2471 passed**，26.76 秒，一项现有 Starlette/httpx 警告。新增两项独立进程检查，禁止导入具体 order_reconciliation 后，账户通道及能力模块仍可加载。account_event_ports 定向 mypy --follow-imports=skip、两核心文件与架构测试完整 Ruff、git diff --check 通过，不代表账户通道或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
