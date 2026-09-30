@@ -1315,6 +1315,7 @@ async def run_live_daemon(
             return None
 
         daemon = LiveStrategyDaemon(
+            cached_context_provider=lambda: context_provider.cached_context,
             strategy=strategy,
             risk_gateway=RiskGateway(),
             limits=FixedLiveLimits(

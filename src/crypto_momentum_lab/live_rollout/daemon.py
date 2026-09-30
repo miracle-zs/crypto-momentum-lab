@@ -230,6 +230,7 @@ class LiveStrategyDaemon:
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         on_checkpoint_saved: Callable[[], None] | None = None,
+        cached_context_provider: Callable[[], LiveDaemonRuntimeContext | None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -240,6 +241,10 @@ class LiveStrategyDaemon:
             state_machine=self._state_machine,
         )
         self._context_provider = context_provider
+        self._cached_context_provider = cached_context_provider or (
+            lambda: getattr(context_provider, "cached_context", None)
+            or getattr(context_provider, "_cached_context", None)
+        )
         self._config = config
         if (
             exit_manager is not None
@@ -641,9 +646,7 @@ class LiveStrategyDaemon:
             or self._market_loop.active_state_at
         )
         account_wm: datetime | None = None
-        ctx = getattr(self._context_provider, "cached_context", None) or getattr(
-            self._context_provider, "_cached_context", None
-        )
+        ctx = self._cached_context_provider()
         if ctx is not None and ctx.account_observed_at is not None:
             account_wm = ctx.account_observed_at
 
@@ -652,9 +655,7 @@ class LiveStrategyDaemon:
 
     def evaluate_readiness(self, symbol: str | None = None) -> ExecutionReadiness:
         reconciliation_gap = Decimal("0")
-        ctx = getattr(self._context_provider, "cached_context", None) or getattr(
-            self._context_provider, "_cached_context", None
-        )
+        ctx = self._cached_context_provider()
         if ctx is not None:
             if symbol is not None:
                 gap_count = int(symbol in ctx.unmanaged_position_symbols) + sum(

@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成九十批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成九十一批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1156,6 +1156,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 上下文 generation、新鲜度、失效优先级、托管符号发布及 provider 生命周期行为保持。不宣称 daemon 全仓类型验收完成。
 
 验证：上下文/daemon 定向 **71 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2502 passed**。context、context_prefetch、market_admission、telemetry_ports 四文件联合定向 mypy --follow-imports=skip、context 完整 Ruff、daemon F/I、git diff --check 通过。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第九十一批：水位与就绪度消费缓存读取回调
+
+第九十批提交为 `2c9df05`；第九十一批继续本地实施，未部署生产。
+
+- daemon 接收可选 cached_context_provider 同步读取回调，latest_watermark 和 evaluate_readiness 两处只调用该能力，不再直接探测上下文 provider 的缓存属性。
+- 生产运行编排显式绑定 PostgresLiveContextProvider.cached_context 公共属性，每次调用读取最新缓存，不在构造时冻结快照。旧调用者缺省回调仍通过构造处兼容闭包按公共缓存/私有缓存回退，私有读取未全仓清零。
+- 水位候选取最小、未托管/未解决订单计数和 readiness 计算规则保持，原缓存所有权与生命周期不变，无新增数据库读取或记录转发。
+
+验证：水位/就绪度定向 **2 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2502 passed**，29.23 秒，一项现有 Starlette/httpx 警告。daemon/编排 F/I、git diff --check 通过，本批未作 daemon/编排或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
