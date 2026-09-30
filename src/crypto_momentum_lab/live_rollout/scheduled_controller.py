@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
@@ -23,13 +23,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
-from crypto_momentum_lab.live_rollout.context import (
-    LiveContextProvider,
-    LiveDaemonRuntimeContext,
-)
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
@@ -39,6 +32,15 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
     ScheduledRiskWindowPhase,
 )
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionPort,
+    )
+    from crypto_momentum_lab.live_rollout.context import (
+        LiveContextProvider,
+        LiveDaemonRuntimeContext,
+    )
 
 log = structlog.get_logger()
 

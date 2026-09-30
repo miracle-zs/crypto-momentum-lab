@@ -24,6 +24,7 @@ import pytest
         "crypto_momentum_lab.live_rollout.control_plane",
         "crypto_momentum_lab.live_rollout.market_admission",
         "crypto_momentum_lab.live_rollout.risk_control",
+        "crypto_momentum_lab.live_rollout.scheduled_controller",
         "crypto_momentum_lab.live_rollout.decision_facts",
         "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",
@@ -335,6 +336,30 @@ class AccountHubGuard(MetaPathFinder):
             raise RuntimeError('registrar imported account hub: ' + fullname)
 sys.meta_path.insert(0, AccountHubGuard())
 importlib.import_module('crypto_momentum_lab.live_rollout.entry_expectations')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_scheduled_controller_does_not_load_execution_assembly() -> None:
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class AssemblyGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'crypto_momentum_lab.execution_account.orders.coordinator',
+            'crypto_momentum_lab.live_rollout.context',
+        }:
+            raise RuntimeError('scheduled controller imported assembly: ' + fullname)
+sys.meta_path.insert(0, AssemblyGuard())
+importlib.import_module('crypto_momentum_lab.live_rollout.scheduled_controller')
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

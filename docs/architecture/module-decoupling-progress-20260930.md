@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成七十六批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成七十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -990,6 +990,18 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 增加四种禁用事件测试，证明账户/quote/candle/grace 在退出不可用时不读取上下文、不启动执行通道、不失效缓存。原事件路由、结果处理及失效顺序保持，无新增转发实现。
 
 验证：退出协调/架构定向 **80 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2490 passed**，29.01 秒，一项现有 Starlette/httpx 警告。exit_event_ports、exit_event_coordinator、context 三文件联合定向 mypy --follow-imports=skip 通过，核心协调文件与测试完整 Ruff、daemon F/I、git diff --check 通过，不代表全仓类型验收。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第七十七批：定时风控注解导入隔离
+
+第七十六批提交为 `71d5b88`；第七十七批继续本地实施，未部署生产。
+
+- scheduled_controller 的 OrderExecutionPort、LiveContextProvider 与 LiveDaemonRuntimeContext 仅 TYPE_CHECKING 引用，运行时不再为这些注解加载执行协调器和上下文模块。
+- 保留 exits 的运行导入：控制器实际用 LiveExitCancellationRequest 做 isinstance 判断，本批不迁移请求模型，也不宣称退出管理能力已全部收窄。
+- 所有函数 AST 与上一批完全一致，定时窗口、撤单、flatten 请求、交易所仓位验证与重新开放入场顺序保持。无新增转发模块或第二套执行规则。
+
+验证：定时控制器/架构定向 **77 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2492 passed**，29.81 秒，一项现有 Starlette/httpx 警告。新增定时控制器禁止 sqlalchemy/persistence 导入检查，并新增独立进程同时禁止执行协调器和 context 的导入检查。核心文件与架构测试完整 Ruff、git diff --check 通过，本批未作定时控制器或全仓类型验收。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
