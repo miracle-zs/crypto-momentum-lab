@@ -18,7 +18,9 @@ from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import TradingLease
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from crypto_momentum_lab.execution_account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
 )

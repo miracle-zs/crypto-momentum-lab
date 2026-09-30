@@ -20,8 +20,10 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
 )
-from crypto_momentum_lab.execution_account.sync import (
+from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+)
+from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncResult,
     FillKey,
 )

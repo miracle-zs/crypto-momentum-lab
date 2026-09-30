@@ -28,7 +28,9 @@ from crypto_momentum_lab.domain.live_rollout import (
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from crypto_momentum_lab.execution_account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,

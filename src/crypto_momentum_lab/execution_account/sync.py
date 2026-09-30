@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
+from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
 
 type FillKey = tuple[str, str]
 type BalanceValue = tuple[Decimal, Decimal, Decimal]
@@ -217,14 +218,6 @@ class ExecutionAccountSyncConfig:
                 anchor.position_side.strip().upper(),
             ):
                 raise ValueError("fill_source_anchors keys must match anchor identity")
-
-
-@dataclass(frozen=True, slots=True)
-class AccountSnapshot:
-    config: AccountConfigSnapshot
-    balances: tuple[AccountBalanceSnapshot, ...]
-    positions: tuple[AccountPositionSnapshot, ...]
-    open_orders: tuple[AccountOpenOrderSnapshot, ...]
 
 
 @dataclass(frozen=True, slots=True)

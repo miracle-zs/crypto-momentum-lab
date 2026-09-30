@@ -30,8 +30,10 @@ from crypto_momentum_lab.execution_account.hub import (
     encode_account_event,
     encode_account_position_expectation,
 )
-from crypto_momentum_lab.execution_account.sync import (
+from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+)
+from crypto_momentum_lab.execution_account.sync import (
     diff_account_snapshots,
 )
 

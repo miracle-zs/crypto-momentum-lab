@@ -74,7 +74,9 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+    from crypto_momentum_lab.execution_account.snapshot_models import (
+        AccountSnapshot,
+    )
 
 log = structlog.get_logger()
 
@@ -476,7 +478,9 @@ class OrderExecutionCoordinator:
         elif isinstance(snapshot, AccountPositionSnapshot):
             positions = (snapshot,)
         else:
-            from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+            from crypto_momentum_lab.execution_account.snapshot_models import (
+                AccountSnapshot,
+            )
 
             if isinstance(snapshot, AccountSnapshot):
                 if not isinstance(snapshot.config, AccountConfigSnapshot):

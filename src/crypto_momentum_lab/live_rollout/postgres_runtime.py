@@ -47,7 +47,9 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from crypto_momentum_lab.execution_account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,

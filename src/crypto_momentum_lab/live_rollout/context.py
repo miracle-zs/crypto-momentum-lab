@@ -36,7 +36,9 @@ from crypto_momentum_lab.domain.risk import (
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+    from crypto_momentum_lab.execution_account.snapshot_models import (
+        AccountSnapshot,
+    )
     from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 
 

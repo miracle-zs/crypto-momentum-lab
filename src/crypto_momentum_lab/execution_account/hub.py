@@ -39,8 +39,10 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
 )
-from crypto_momentum_lab.execution_account.sync import (
+from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
+)
+from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshotDelta,
     apply_account_snapshot_delta,
 )

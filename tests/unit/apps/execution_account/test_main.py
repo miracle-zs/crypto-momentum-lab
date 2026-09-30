@@ -99,8 +99,10 @@ def test_account_event_from_reconciled_fill_requires_snapshot() -> None:
         AccountFillEvent,
         ExecutionAccountStatus,
     )
-    from crypto_momentum_lab.execution_account.sync import (
+    from crypto_momentum_lab.execution_account.snapshot_models import (
         AccountSnapshot,
+    )
+    from crypto_momentum_lab.execution_account.sync import (
         ExecutionAccountSyncResult,
     )
 
