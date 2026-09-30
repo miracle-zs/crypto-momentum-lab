@@ -10,12 +10,11 @@ Obays the RFC 2026-09-25 contracts:
 from __future__ import annotations
 
 import copy
-
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Protocol
 from uuid import uuid4
 
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -36,7 +37,7 @@ class ExecutionReadinessError(Exception):
     """Raised when PositionView is not ready for trading."""
 
 
-class PositionReservationRepository:
+class PositionReservationRepository(Protocol):
     """Protocol for durable storage and crash-recovery of batch lot reservations."""
 
     def save_reservation(

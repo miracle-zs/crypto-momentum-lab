@@ -2109,9 +2109,9 @@ class ExecutionBook:
                     if adopting_epoch:
                         if can_rollover:
                             candidate._stream_scopes[canon] = scope
-                            journal = candidate._journals.get(canon)
-                            if journal is not None:
-                                journal.adopt_stream_scope(scope)
+                            rollover_journal = candidate._journals.get(canon)
+                            if rollover_journal is not None:
+                                rollover_journal.adopt_stream_scope(scope)
                             candidate._recovery_adoption_scope = scope
                             candidate._last_sequences.pop(canon, None)
                         else:

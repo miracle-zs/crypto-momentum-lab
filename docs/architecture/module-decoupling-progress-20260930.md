@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成一百零四批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成一百零五批实施与验收，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -1331,6 +1331,20 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 验证：执行领域定向 **316 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，30.23 秒，一项现有 Starlette/httpx 警告。执行簿及测试 F/I、git diff --check 通过。
 
 含具体 ExecutionBook 的四文件联合 mypy --follow-imports=skip 错误由 9 项降至 6 项，均为 Any 返回值；尚未完成具体适配或全仓类型验收，未新增忽略。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第一百零五批：具体执行簿与仓位上下文接口适配验收
+
+第一百零四批提交为 `b501838`；第一百零五批继续本地实施，未部署生产。
+
+- 六项 Any 返回错误来自窄检查跳过 PositionBook、ExecutionCoordinator、命令生命周期等协作者所有者。纳入实际模块检查后定位到原仓储接口仅普通类、而内存实现按结构契约提供方法的问题。
+- PositionReservationRepository 正式继承 Protocol，保留原方法与 NotImplementedError 默认体；内存实现不需名义继承即可满足原同步仓储契约。无运行时 isinstance 使用、直接协议实例化或新适配器。
+- AccountJournal 直接从 domain.account.models 引用实际账户模型，避免检查跳过包门面时退化为 Any；流 rollover 局部使用独立 rollover_journal 名称，避免复用已推断非空的 journal 变量。执行顺序与事务所有权保持。
+
+验证：ExecutionBook、PositionContextBook、position_repair、position_ledger_models、PositionBook、ExecutionCoordinator、command_lifecycle、AccountJournal、reservation_repository、账户模型共十文件联合 mypy --follow-imports=skip 通过。额外临时类型探针 `def accept_native_book(book: ExecutionBook) -> PositionContextBook: return book` 与上述文件联合检查通过，确认原生执行簿结构兼容，探针已清理。不宣称其他跳过依赖或全仓类型验收；原仅四文件 skip 检查仍不能当作完整类型上下文。
+
+执行领域及 reservation 完整性定向 **330 passed**；完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2521 passed**，29.79 秒，一项现有 Starlette/httpx 警告。三个修改文件 F/I、git diff --check 通过。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 
