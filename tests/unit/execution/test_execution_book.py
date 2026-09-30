@@ -2588,3 +2588,38 @@ async def test_position_reads_reject_incomplete_account_stream(
     assert (
         await book.list_position_views(environment="live", account_label="primary") == ()
     )
+
+
+@pytest.mark.parametrize("query", ["book", "coordinator"])
+def test_active_reservation_query_preserves_order_and_scope(query) -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    book = ExecutionBook()
+    btc = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    eth = PositionKey("live", "primary", "ETHUSDT", FuturesPositionSide.LONG)
+    for identity, key, created_at, released in (
+        ("z", btc, _dt(10, 1), "0"),
+        ("b", eth, _dt(10, 0), "0"),
+        ("a", btc, _dt(10, 0), "0"),
+        ("released", btc, _dt(9, 0), "1"),
+    ):
+        book.coordinator.register_reservation(
+            PositionReservation(
+                reservation_id=identity,
+                command_id=f"command-{identity}",
+                position_key=key,
+                batch_id=f"batch-{identity}",
+                reserved_quantity=Decimal("1"),
+                released_quantity=Decimal(released),
+                created_at=created_at,
+            )
+        )
+    owner = book if query == "book" else book.coordinator
+    assert [r.reservation_id for r in owner.get_active_reservations()] == [
+        "a", "b", "z"
+    ]
+    assert [r.reservation_id for r in owner.get_active_reservations(btc)] == ["z", "a"]
+    assert [r.reservation_id for r in owner.get_active_reservations(eth)] == ["b"]
+    missing = PositionKey("live", "other", "BTCUSDT", FuturesPositionSide.LONG)
+    assert owner.get_active_reservations(missing) == ()
