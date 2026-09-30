@@ -277,7 +277,6 @@ class LiveStrategyDaemon:
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
             strategy=self._strategy,
-            telemetry=self._telemetry,
             pending_entry_symbols=self._pending_entries.pending_symbols,
             volume_metrics_provider=(
                 (lambda: getattr(self._signal_recorder, "volume_metrics", {}))

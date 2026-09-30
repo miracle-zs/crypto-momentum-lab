@@ -1,6 +1,6 @@
 # 模块解耦实施进度（2026-09-30）
 
-实施基线：`8eb059d`。本地已完成四十七批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
+实施基线：`8eb059d`。本地已完成四十八批结构拆分，尚未完成审计文档中的全部重构。这些结构改动未发布到生产；此前生产运行版本为 `259c8e0`，本批未重新采样服务器。
 
 ## 已实施
 
@@ -638,6 +638,19 @@ reservation_repository 仍保留旧同步/异步适配探测、保存/更新能�
 - 本批不新增备用适配或第二种 checkpoint 编码，保留既有策略 compact 行为与身份/epoch 规则。
 
 验证：checkpoint 协调器及 shadow service 定向 **17 passed**，原协调器测试继续断言 include_market_state_buffers=False。checkpoint_coordinator、checkpoint_writer、domain/strategy/models 三文件定向 mypy --follow-imports=skip 通过；核心文件完整 Ruff、迁移替身 F/I、git diff --check 通过，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。
+
+本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
+
+## 第四十八批：缓存维护移除无效 telemetry 依赖
+
+第四十七批提交为 `d063f6d`；第四十八批继续本地实施，未部署生产。
+
+- LiveRuntimeCacheMaintenance 删除未消费的 telemetry 构造参数与 self._telemetry，daemon 删除对应注入；缓存测试删除无效 telemetry 替身及传参。
+- 删除未使用的 _evicted_telemetry_series 赋值，并修正类说明为实际的策略缓存维护。除该无用赋值外，prune 函数 AST 与原实现一致。
+- 当前币、活跃池、托管持仓/订单、pending entries 和策略自身保护集的合并规则、分钟清理节奏、15 分钟冷缓存期限及内存日志保持。telemetry 在其他运行模块的实际职责不变，不新增其清理或指标。
+- 策略缓存能力仍是部分生产策略具备的可选能力；没有将其他策略强制改为支持缓存清理，不把合法可选接口误作已删除能力。
+
+验证：缓存/daemon 定向 **63 passed**；runtime_cache 定向 mypy --follow-imports=skip 通过；核心文件及缓存测试完整 Ruff、daemon F/I、git diff --check 通过，不代表全仓类型验收。完整单元、部署 smoke（开启 hub 网络测试）及两项 fake 端到端回归 **2458 passed**。本批是无效依赖清理，沿用保护集/节奏/日志既有测试，无新增镜像实现测试。
 
 本批无 schema 变更、生产发布或服务器采样。真实数据库通知、并发、原子回滚与完整进程重启仍待补齐。
 

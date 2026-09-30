@@ -20,14 +20,13 @@ _STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
 
 
 class LiveRuntimeCacheMaintenance:
-    """Protect active symbols while pruning cold strategy/telemetry state."""
+    """Protect active symbols while pruning cold strategy state."""
 
     def __init__(
         self,
         *,
         run_id: str,
         strategy: object,
-        telemetry: object | None,
         pending_entry_symbols: Callable[[], Iterable[str]],
         volume_metrics_provider: Callable[[], dict[str, object]] | None = None,
     ) -> None:
@@ -35,7 +34,6 @@ class LiveRuntimeCacheMaintenance:
             raise ValueError("run_id must not be empty")
         self._run_id = run_id
         self._strategy = strategy
-        self._telemetry = telemetry
         self._pending_entry_symbols = pending_entry_symbols
         self._volume_metrics_provider = volume_metrics_provider
         self._managed_position_symbols: frozenset[str] = frozenset()
@@ -97,7 +95,6 @@ class LiveRuntimeCacheMaintenance:
                 inactive_after=_STRATEGY_CACHE_INACTIVE_AFTER,
             )
 
-        _evicted_telemetry_series = 0
         self._last_maintenance_at = now
         volume_metrics: dict[str, object] = {}
         if self._volume_metrics_provider is not None:

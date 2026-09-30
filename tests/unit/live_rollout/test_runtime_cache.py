@@ -27,26 +27,11 @@ class _Strategy:
         return ("STALE",)
 
 
-class _Telemetry:
-    sample_series_count = 7
-
-    def __init__(self) -> None:
-        self.protected: frozenset[str] | None = None
-        self.prune_calls = 0
-
-    def prune_inactive_symbols(self, **kwargs: Any) -> int:
-        self.prune_calls += 1
-        self.protected = frozenset(kwargs["protected_symbols"])
-        return 1
-
-
 def test_runtime_cache_maintains_protection_set_and_interval() -> None:
     strategy = _Strategy()
-    telemetry = _Telemetry()
     maintenance = LiveRuntimeCacheMaintenance(
         run_id="run-1",
         strategy=strategy,
-        telemetry=telemetry,
         pending_entry_symbols=lambda: {"pendingusdt"},
     )
 
@@ -95,11 +80,9 @@ def test_runtime_cache_logs_memory_and_cache_snapshot() -> None:
             records.append((event, fields))
 
     strategy = _Strategy()
-    telemetry = _Telemetry()
     maintenance = LiveRuntimeCacheMaintenance(
         run_id="run-1",
         strategy=strategy,
-        telemetry=telemetry,
         pending_entry_symbols=lambda: (),
     )
     maintenance.update_managed_symbols(position_symbols=(), order_symbols=())
