@@ -6,7 +6,7 @@ from decimal import Decimal
 from inspect import signature
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.account import (
+from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
