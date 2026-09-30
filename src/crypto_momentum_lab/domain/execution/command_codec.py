@@ -68,27 +68,15 @@ def encode_outbox_details(
             "environment": entry.scope.environment,
             "account_label": entry.scope.account_label,
             "symbol": entry.scope.symbol,
-            "position_side": (
-                entry.scope.position_side.value
-                if hasattr(entry.scope.position_side, "value")
-                else str(entry.scope.position_side)
-            ),
+            "position_side": entry.scope.position_side.value,
         },
         "request_id": entry.request_id,
         "attempt_count": entry.attempt_count,
         "external_order_id": entry.external_order_id,
         "last_error": entry.last_error,
         "quantity": str(entry.command.requested_quantity),
-        "side": (
-            entry.command.side.value
-            if hasattr(entry.command.side, "value")
-            else str(entry.command.side)
-        ),
-        "order_type": (
-            entry.command.order_type.value
-            if hasattr(entry.command.order_type, "value")
-            else str(entry.command.order_type)
-        ),
+        "side": entry.command.side.value,
+        "order_type": entry.command.order_type.value,
         "limit_price": (
             str(entry.command.limit_price)
             if entry.command.limit_price is not None

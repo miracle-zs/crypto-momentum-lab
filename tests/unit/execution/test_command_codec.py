@@ -157,3 +157,15 @@ def test_watermark_round_trip_and_account_filter(row):
     assert recovered.quantity == Decimal("2") and recovered.quote == Decimal("20")
     assert recovered.order_id == "command-1"
     assert decode_order_watermark(watermark, account_label="account-4") is None
+
+
+def test_outbox_enum_encoding_preserves_existing_persisted_text(row):
+    details = row["details"]
+    assert details["scope"]["position_side"] == "LONG"
+    assert details["side"] == "long"
+    assert details["order_type"] == "market"
+    restored = decode_active_command(row, account_label="account-3", restored_at=NOW)
+    assert isinstance(restored, RestoredCommand)
+    assert restored.entry.scope.position_side is FuturesPositionSide.LONG
+    assert restored.entry.command.side is StrategySide.LONG
+    assert restored.entry.command.order_type is EntryType.MARKET
