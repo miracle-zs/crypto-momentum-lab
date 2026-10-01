@@ -40,6 +40,7 @@ from crypto_momentum_lab.execution_account.user_data_models import (
     UserDataStateError,
 )
 from crypto_momentum_lab.execution_account.user_data_sequence import (
+    positive_exchange_milliseconds,
     stale_user_data_reason,
     validate_exchange_update_watermark,
 )
@@ -56,18 +57,8 @@ class AccountUserDataState:
         *,
         expected_position_registry: AccountPositionExpectationRegistry | None = None,
     ) -> None:
-        self._config = snapshot.config
         self._expected_position_registry = expected_position_registry
-        self._balances = {item.asset: item for item in snapshot.balances}
-        self._positions = {
-            (item.symbol, item.position_side): item for item in snapshot.positions
-        }
-        self._open_orders = {
-            (item.symbol, item.order_id): item for item in snapshot.open_orders
-        }
-        self._last_order_received_at = {
-            key: item.observed_at for key, item in self._open_orders.items()
-        }
+        self.replace_snapshot(snapshot)
         self._last_account_exchange_event_at: datetime | None = None
         self._last_order_exchange_event_at: dict[tuple[str, str], datetime] = {}
         self._last_exchange_update_id: dict[str, int] = {}
@@ -86,6 +77,18 @@ class AccountUserDataState:
         }
         self._open_orders = {
             (item.symbol, item.order_id): item for item in snapshot.open_orders
+        }
+        self._baseline_balance_times = {
+            item.asset: positive_exchange_milliseconds(
+                item.raw_payload.get("updateTime")
+            )
+            for item in snapshot.balances
+        }
+        self._baseline_position_times = {
+            (item.symbol, item.position_side): positive_exchange_milliseconds(
+                item.raw_payload.get("updateTime")
+            )
+            for item in snapshot.positions
         }
         self._last_order_received_at = {
             key: item.observed_at for key, item in self._open_orders.items()
@@ -162,11 +165,20 @@ class AccountUserDataState:
         balance_rows = require_mapping_list(account.get("B"), "ACCOUNT_UPDATE.a.B")
         position_rows = require_mapping_list(account.get("P"), "ACCOUNT_UPDATE.a.P")
         reason: str | None = None
-        changed = bool(balance_rows or position_rows)
+        changed = False
+        # E / local receipt time cannot prove inclusion in a REST entity baseline.
+        transaction_time = positive_exchange_milliseconds(event.payload.get("T"))
 
         for row in balance_rows:
             asset = required_text(row.get("a"), "ACCOUNT_UPDATE balance asset")
-            wallet_balance = parse_decimal(row.get("wb"), "ACCOUNT_UPDATE wallet balance")
+            wallet_balance = parse_decimal(
+                row.get("wb"), "ACCOUNT_UPDATE wallet balance"
+            )
+            baseline_time = self._baseline_balance_times.get(asset)
+            if transaction_time is not None and baseline_time is not None:
+                if transaction_time < baseline_time:
+                    continue
+            changed = True
             existing = self._balances.get(asset)
             if existing is None:
                 available_balance = parse_decimal(
@@ -194,7 +206,14 @@ class AccountUserDataState:
             position_side = str(row.get("ps", "BOTH"))
             if not position_side.strip():
                 raise UserDataStateError("ACCOUNT_UPDATE position side is empty")
-            position_amt = parse_decimal(row.get("pa"), "ACCOUNT_UPDATE position amount")
+            baseline_time = self._baseline_position_times.get((symbol, position_side))
+            if transaction_time is not None and baseline_time is not None:
+                if transaction_time < baseline_time:
+                    continue
+            changed = True
+            position_amt = parse_decimal(
+                row.get("pa"), "ACCOUNT_UPDATE position amount"
+            )
             existing_position = self._positions.get((symbol, position_side))
             if existing_position is None and position_amt != 0:
                 expected_position = None

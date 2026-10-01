@@ -40,3 +40,10 @@ def stale_user_data_reason(
     elif last_received_at is not None and event.received_at < last_received_at:
         return "stale_local_event"
     return None
+
+
+def positive_exchange_milliseconds(value: object) -> int | None:
+    """Accept exchange integer timestamps only; zero denotes no evidence."""
+    if type(value) is int and value > 0:
+        return value
+    return None

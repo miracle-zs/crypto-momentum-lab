@@ -592,3 +592,117 @@ def test_snapshot_builder_rejects_missing_timezone_before_consuming_values(zone)
             open_orders=unexpected_values(),
             observed_at=datetime(2026, 10, 1, tzinfo=zone),
         )
+
+
+@pytest.mark.parametrize("replace_baseline", [False, True])
+@pytest.mark.parametrize(
+    "balance_time,position_time,expected_balance,expected_position",
+    [
+        (1783123202000, 1783123202000, "100", "0.002"),
+        (1783123202000, 1783123200000, "100", "0.003"),
+        (1783123200000, 1783123202000, "90", "0.002"),
+        (1783123200000, 1783123200000, "90", "0.003"),
+    ],
+)
+def test_rest_entity_times_prevent_delayed_ws_rollback(
+    replace_baseline,
+    balance_time,
+    position_time,
+    expected_balance,
+    expected_position,
+) -> None:
+    original = _initial_snapshot()
+    baseline = replace(
+        original,
+        balances=(
+            replace(original.balances[0], raw_payload={"updateTime": balance_time}),
+        ),
+        positions=(
+            replace(original.positions[0], raw_payload={"updateTime": position_time}),
+        ),
+    )
+    state = AccountUserDataState(original if replace_baseline else baseline)
+    if replace_baseline:
+        state.replace_snapshot(baseline)
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123203000,
+            "T": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "90", "cw": "70"}],
+                "P": [
+                    {
+                        "s": "BTCUSDT",
+                        "ps": "BOTH",
+                        "pa": "0.003",
+                        "ep": "49000",
+                        "up": "3",
+                        "mt": "cross",
+                    }
+                ],
+            },
+        },
+        received_at=original.config.observed_at + timedelta(seconds=4),
+    )
+    update = state.apply(event)
+    assert update.snapshot.balances[0].wallet_balance == Decimal(expected_balance)
+    assert update.snapshot.positions[0].position_amt == Decimal(expected_position)
+    assert update.snapshot.balances[0].available_balance == Decimal("80")
+    assert not update.needs_reconciliation
+    assert update.changed == (expected_balance == "90" or expected_position == "0.003")
+    assert not state.apply(event).changed
+
+
+@pytest.mark.parametrize("baseline_time", [None, 0, True, "1783123202000", -1])
+def test_invalid_rest_time_does_not_suppress_account_event(baseline_time) -> None:
+    original = _initial_snapshot()
+    state = AccountUserDataState(
+        replace(
+            original,
+            balances=(
+                replace(
+                    original.balances[0],
+                    raw_payload={"updateTime": baseline_time},
+                ),
+            ),
+        )
+    )
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123203000,
+                "T": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "90"}], "P": []},
+            },
+            received_at=original.config.observed_at + timedelta(seconds=4),
+        )
+    )
+    assert update.snapshot.balances[0].wallet_balance == Decimal("90")
+
+
+def test_event_time_fallback_is_not_rest_coverage_evidence() -> None:
+    original = _initial_snapshot()
+    state = AccountUserDataState(
+        replace(
+            original,
+            balances=(
+                replace(
+                    original.balances[0],
+                    raw_payload={"updateTime": 1783123202000},
+                ),
+            ),
+        )
+    )
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "90"}], "P": []},
+            },
+            received_at=original.config.observed_at + timedelta(seconds=4),
+        )
+    )
+    assert update.snapshot.balances[0].wallet_balance == Decimal("90")

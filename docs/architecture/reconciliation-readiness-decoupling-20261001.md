@@ -70,6 +70,16 @@ WS 持久化 worker 和后台对账结果提交不再获取 daemon 的 REST 请�
 
 验证：710 项相关单测/回归通过；真实隔离 PostgreSQL 的两项日志/checkpoint 集成测试通过，覆盖完整快照读回、重建 repository 后读取未覆盖尾部、跨账户游标拒绝，以及数据库失败后的整体回滚。六个修改实现模块 mypy、Ruff F/I、git diff --check 通过。服务器临时测试容器和转发已清理，代码及前一阶段 0046 迁移仍未发布生产。
 
+## 第七阶段：按实体拦截已被 REST 更新超越的旧账户事件
+
+AccountUserDataState 在初始化及 replace_snapshot 时保存每个资产、每个 symbol/positionSide 的 REST raw_payload.updateTime。ACCOUNT_UPDATE 应用时按行比较明确的原始 T：仅当 T 严格小于对应实体更新时间时跳过该行；同一事件中时间较新的其他实体继续应用。因此修复后 deferred 回放和普通延迟接收均不能通过这种已知旧行将 REST 余额、持仓恢复成旧值。全部行被跳过时 changed=False，不再制造重复观测提交；原有事件身份和更新序号 bookkeeping 仍执行。基线时间独立于后续 WS 行载荷保留，每次基线替换重新建立，不从本地接收时间推断。
+
+字段依据：[Binance USDⓈ-M 余额接口](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account)说明资产 updateTime 为最后更新时间；[持仓接口](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade)提供持仓 updateTime；[用户数据流](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/user-data-streams)区分交易时间 T 和生成时间 E。本实现由这些字段推导逐实体旧绝对值不应覆盖较新基线的规则，不将其宣称为交易所统一序号或原子快照保证。
+
+边界：正整数以外的时间、零更新时间、缺少 T、同毫秒事件仍沿用已有应用及恢复流程，不新增无证据的去重判断；E 的解析回退不能证明 REST 覆盖。此阶段并未解决这些模糊切面，也未改变订单/成交处理，不能凭开放订单缺席推断终态、跳过成交或推进持久消费 checkpoint。因此日志自动恢复、冻结和 deferred 删除仍未完成，当前规则只是收敛其中明确可判定的旧账户行。
+
+验证：新增 14 项回归，覆盖初始化/替换基线、余额与持仓各自新旧组合、事件重复、不可信时间和 E 回退。旧实现明确复现余额 100 被延迟 WS 覆盖成 90；724 项相关回归通过，两个实现模块 mypy、Ruff F/I、git diff --check 通过。没有修改数据库结构，也没有发布生产。
+
 ## 后续约束
 
 轻量观测已不暂停实时事件；完整对账在连接连续、基线新鲜且扫描期间没有新事件时，也不再因慢速网络获取而暂停事件应用。启动、恢复、成交补齐和扫描期间状态发生变化的账户仍使用受保护对账，因此 60 秒对账期间仍可能限制入场。下一步若要缩短活跃账户的窗口，需要建立可验证的 REST cut 与期间事件覆盖协议；不能直接回放已经去重的事件或把旧 REST 快照重标为新时间。不能仅延长周期、忽略 SYNCING 或提高事实过期阈值来消除降级。
