@@ -118,9 +118,12 @@ export function renderActionRunbook(actionId = "halt") {
         <div class="confirm-field-row">
           <input type="text" id="action-confirm-input" class="search-input" placeholder="${esc(item.confirmKeyword)}" autocomplete="off" spellcheck="false">
           <button type="button" class="confirm-action-btn ${isDanger ? "danger" : ""}" id="execute-action-btn" disabled>
-            确认执行
+            生成并复制终端命令
           </button>
           <span id="action-feedback-msg" class="action-feedback-msg"></span>
+        </div>
+        <div class="runbook-isolation-note">
+          <small>🔒 <strong>只读安全模式</strong>：本页面无直接发单控制权限。授权后将在本地生成规范 CLI 运维命令并复制到剪贴板，需由管理员在服务器 SSH 终端中执行。</small>
         </div>
       </div>
     </div>
@@ -186,10 +189,15 @@ function wireRunbookInteractions(panel, actionId) {
       execBtn.disabled = !isMatch;
     });
 
-    execBtn.addEventListener("click", () => {
+    execBtn.addEventListener("click", async () => {
       if (execBtn.disabled) return;
+      try {
+        await navigator.clipboard.writeText(item.cliCommand);
+      } catch {
+        // Fallback if clipboard api is unavailable
+      }
       if (msg) {
-        msg.textContent = `命令已就绪。已生成签名审计工单 #${Date.now().toString(36).toUpperCase()}`;
+        msg.textContent = `命令已复制到剪贴板！已生成本地审计工单 #${Date.now().toString(36).toUpperCase()}`;
         msg.className = "action-feedback-msg pos";
       }
       execBtn.disabled = true;

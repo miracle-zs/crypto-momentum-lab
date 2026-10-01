@@ -90,3 +90,10 @@ tick();
 poller.poll();
 setInterval(tick, 1000);
 setInterval(poller.poll, POLL_MS);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    tick();
+    void poller.poll(true);
+  }
+});

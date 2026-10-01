@@ -713,6 +713,17 @@ details.secondary[open] summary { margin-bottom: 10px; }
   cursor: not-allowed;
 }
 
+.runbook-isolation-note {
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.runbook-isolation-note strong {
+  color: var(--muted);
+}
+
 .action-feedback-msg {
   font-size: 11px;
   color: var(--up);

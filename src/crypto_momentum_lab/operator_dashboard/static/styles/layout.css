@@ -226,17 +226,17 @@
 }
 
 .poll-refresh-btn {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
   cursor: pointer;
   transition: border-color .15s ease, background .15s ease;
 }
 
 .poll-refresh-btn:hover {
-  border-color: var(--brand);
-  background: var(--surface-3);
+  border-color: var(--line);
+  background: var(--surface-2);
   color: var(--text);
 }
 
