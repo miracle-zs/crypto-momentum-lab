@@ -18,6 +18,9 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
+from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    ExecutionReadinessError,
+)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -247,8 +250,9 @@ class LiveExitProcessor:
                     context=context,
                 )
             except Exception as error:
-                if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
-                    error
+                if (
+                    self._exit_manager is not None
+                    and order_identity_errors.is_durable_order_identity_conflict(error)
                 ):
                     self._exit_manager.note_order_identity_conflict(state.symbol)
                 raise
@@ -532,13 +536,32 @@ class LiveExitProcessor:
             self._exit_recovery_next_attempt_at[root] = now + timedelta(
                 seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[delay_index]
             )
-            recovery_result = await self._submission.execute(
-                recovery_candidate,
-                requested_quantity=recovery_quantity,
-                state=state,
-                context=context,
-                reference_price=reference_price,
-            )
+            try:
+                recovery_result = await self._submission.execute(
+                    recovery_candidate,
+                    requested_quantity=recovery_quantity,
+                    state=state,
+                    context=context,
+                    reference_price=reference_price,
+                )
+            except Exception as error:
+                if not (
+                    _is_position_readiness_guard(error)
+                    or _is_missing_position_facts(error)
+                ):
+                    raise
+                # No POST passed the guard, so this did not consume a retry.
+                self._exit_recovery_attempts[root] = current_attempt
+                self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+                )
+                log.warning(
+                    "live_exit_recovery_position_not_ready",
+                    run_id=self._config.run_id,
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                )
+                return observed_result
             if recovery_result is None:
                 log.error(
                     "live_exit_recovery_not_submitted",
@@ -633,6 +656,14 @@ class LiveExitProcessor:
                     reference_price=reference_price,
                 )
             except Exception as error:
+                if _is_position_readiness_guard(error):
+                    log.warning(
+                        "live_exit_position_not_ready",
+                        run_id=self._config.run_id,
+                        symbol=request.candidate.symbol,
+                        candidate_id=request.candidate.candidate_id,
+                    )
+                    return None, context, "position_not_ready"
                 if _is_missing_position_facts(error):
                     log.error(
                         "live_exit_position_facts_unavailable",
@@ -642,8 +673,9 @@ class LiveExitProcessor:
                         error=str(error),
                     )
                     return None, context, "position_facts_not_restored"
-                if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
-                    error
+                if (
+                    self._exit_manager is not None
+                    and order_identity_errors.is_durable_order_identity_conflict(error)
                 ):
                     log.error(
                         "live_exit_order_identity_conflict",
@@ -841,8 +873,11 @@ class LiveExitProcessor:
                             error=str(error),
                         )
                         return approved, submitted, "position_facts_not_restored"
-                    if self._exit_manager is not None and order_identity_errors.is_durable_order_identity_conflict(
-                        error
+                    if (
+                        self._exit_manager is not None
+                        and order_identity_errors.is_durable_order_identity_conflict(
+                            error
+                        )
                     ):
                         log.error(
                             "live_exit_order_identity_conflict",
@@ -1093,3 +1128,10 @@ def _exit_strategy_side(plan: OrderExecutionPlan) -> StrategySide:
     if plan.side == "BUY":
         return StrategySide.SHORT
     raise ValueError(f"unsupported exit side: {plan.side}")
+
+
+def _is_position_readiness_guard(error: Exception) -> bool:
+    if isinstance(error, ExecutionReadinessError):
+        return True
+    cause = error.__cause__
+    return isinstance(cause, Exception) and _is_position_readiness_guard(cause)

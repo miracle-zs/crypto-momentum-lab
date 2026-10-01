@@ -11,6 +11,8 @@
 3. 待退出恢复曾仅以本地 Book 零仓标 SUPERSEDED。新增只读回执核验：明确新鲜零仓、无相关挂单、无 ACTIVE reservation、精确 client order ID 查询、指令时间界限与本地订单身份；确认 FILLED 必须有同账户/订单完整成交数量，标 DISPATCHED；确认近期不存在且本地无订单才标 SUPERSEDED；其余保留 PENDING。恢复使用短时账户快照复用和错误退避，运维工具默认 dry run 并共享私有 API 限速。
 4. 事实健康读端原先固定 UNKNOWN。现在读取当前 head 绑定的 checkpoint 全部摘要、scope、完整覆盖、健康与时间切面，核验非零仓数量与账户 head 一致，证据缺失/过期保持 UNKNOWN。展示使用证明本身的 cut，不用心跳时间替代。
 
+5. 发布前复查发现旧账户 4 XVS 持仓 CONFLICT 导致 13 次重启：`ExecutionReadinessError` 经退出提交保护包装后未被退出通道识别。新增回归在修复前真实抛出该异常；修复仅按异常 cause 类型把保护拒绝转为 position_not_ready，恢复支路保留原回执、退避且不消耗未发生的 POST 次数，其他数据错误继续上报。
+
 ## 发布前证据
 
 - 原错误由运行状态发布、Hub 证明传输、真实 Book epoch 恢复、平仓 outbox 边界回归复现。

@@ -290,3 +290,120 @@ async def test_process_requests_serializes_same_symbol_batches() -> None:
     assert await first == (1, 1, None)
     assert await second == (1, 1, None)
     assert len(submission.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_position_readiness_guard_defers_exit_instead_of_killing_daemon():
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ExecutionReadinessError,
+    )
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderPreSubmissionError,
+    )
+
+    class ConflictSubmission:
+        async def execute(self, *_args, **_kwargs):
+            try:
+                raise ExecutionReadinessError(
+                    "PositionView for live:account-4:XVSUSDT:LONG "
+                    "is not ready for trade (health=CONFLICT)"
+                )
+            except ExecutionReadinessError as cause:
+                raise OrderPreSubmissionError(
+                    "Failed to create position reservation"
+                ) from cause
+
+    processor = _processor(ConflictSubmission())
+    candidate = replace(_intent(), candidate_id="exit-conflict", reduce_only=True)
+    result = await processor.process_requests(
+        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
+        state=_state(),
+        context=_context(),
+    )
+    assert result == (0, 0, "position_not_ready")
+
+
+@pytest.mark.asyncio
+async def test_recovery_guard_preserves_receipt_and_post_attempts():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ExecutionReadinessError,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderPreSubmissionError,
+    )
+
+    class ConflictSubmission:
+        async def execute(self, *_args, **_kwargs):
+            try:
+                raise ExecutionReadinessError("PositionView not ready for trade")
+            except ExecutionReadinessError as cause:
+                raise OrderPreSubmissionError(
+                    "Failed to create position reservation"
+                ) from cause
+
+    processor = _processor(ConflictSubmission())
+    recovery = SimpleNamespace(
+        inspect_exit_order=AsyncMock(
+            return_value=SimpleNamespace(
+                order=None,
+                position_quantity=Decimal("0.001"),
+                active_exit_order_client_ids=(),
+                observed_at=NOW,
+            )
+        )
+    )
+    processor._exit_recovery_client = recovery
+    original_receipt = OrderExecutionResult(
+        "original-client-id", ExchangeOrderState.ABSENT_RECONCILED, None
+    )
+    processor._state_machine = SimpleNamespace(
+        mark_absent_reconciled=AsyncMock(return_value=original_receipt)
+    )
+    plan = OrderExecutionPlan(
+        "original-exit",
+        "run-1",
+        "original-client-id",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("0.001"),
+        None,
+        True,
+        NOW,
+    )
+    result = await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("0"),
+        state=_state(),
+        context=_context(),
+        source_candidate=replace(_intent(), reduce_only=True),
+    )
+    assert result is original_receipt
+    assert processor._exit_recovery_attempts["original-client-id"] == 0
+    assert processor._exit_recovery_next_attempt_at["original-client-id"] > NOW
+    await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("0"),
+        state=_state(),
+        context=_context(),
+    )
+    recovery.inspect_exit_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_submission_corruption_still_propagates():
+    class CorruptSubmission:
+        async def execute(self, *_args, **_kwargs):
+            raise ValueError("invalid durable payload")
+
+    processor = _processor(CorruptSubmission())
+    candidate = replace(_intent(), reduce_only=True)
+    with pytest.raises(ValueError, match="invalid durable payload"):
+        await processor.process_requests(
+            (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
+            state=_state(),
+            context=_context(),
+        )
