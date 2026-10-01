@@ -2,7 +2,7 @@ import asyncio
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Protocol, TypeVar, cast
@@ -335,6 +335,9 @@ class UserDataAccountSyncDaemon:
         self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
+        self._received_event_generation = 0
+        self._staged_reconciliation_baseline_at: datetime | None = None
+        self._staged_stream_token: int | None = None
         self._persistence_queue: (
             asyncio.Queue[_PendingUserDataPersistence | None] | None
         ) = None
@@ -574,6 +577,7 @@ class UserDataAccountSyncDaemon:
                     pass
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
+        self._received_event_generation += 1
         event_queue = self._event_queue
         if event_queue is None:
             await self._process_event(event)
@@ -985,11 +989,26 @@ class UserDataAccountSyncDaemon:
     async def _publish_heartbeat(self) -> None:
         self._check_stream_queue_health()
         if self._state is None or not (
-            self._accept_events or self._reconciliation_active
+            self._accept_events
+            or self._reconciliation_active
+            or self._staged_reconciliation_baseline_at is not None
         ):
             return
         last_sync_result = self._last_sync_result
-        is_syncing = self._reconciliation_active or (
+        baseline_at = self._staged_reconciliation_baseline_at
+        staged_baseline_expired = baseline_at is not None and not _baseline_is_fresh(
+            baseline_at, now=self._now()
+        )
+        is_syncing = (
+            self._reconciliation_active
+            or self._pipeline_recovery_event.is_set()
+            or staged_baseline_expired
+            or (
+                baseline_at is not None
+                and getattr(self._stream, "continuity_token", None)
+                != self._staged_stream_token
+            )
+        ) or (
             last_sync_result is not None
             and (
                 last_sync_result.fills_catching_up
@@ -1028,9 +1047,58 @@ class UserDataAccountSyncDaemon:
         wait_for_pipeline: bool = True,
     ) -> ExecutionAccountSyncResult:
         try:
+            prepared = None
+            prepared_generation = self._received_event_generation
+            stream_token = getattr(self._stream, "continuity_token", None)
+            fetch = getattr(self._service, "sync_once_for_realtime", None)
+            retain = getattr(self._service, "persist_reconciliation_facts", None)
+            last = self._last_sync_result
+            # Only a previously verified, fresh and continuously applied state
+            # may stay live while I/O runs. Startup/recovery/catch-up stay frozen.
+            can_stage = (
+                wait_for_pipeline
+                and isinstance(stream_token, int)
+                and callable(fetch)
+                and callable(retain)
+                and self._state is not None
+                and self._accept_events
+                and not self._reconciliation_active
+                and not self._pipeline_recovery_event.is_set()
+                and last is not None
+                and last.status is ExecutionAccountStatus.READY_READONLY
+                and not last.fills_catching_up
+                and last.snapshot is not None
+                and _baseline_is_fresh(
+                    last.snapshot.config.observed_at, now=self._now()
+                )
+                and not self._deferred_events
+                and (self._event_queue is None or self._event_queue.empty())
+                and (self._persistence_queue is None or self._persistence_queue.empty())
+            )
+            if can_stage:
+                assert (
+                    callable(fetch) and last is not None and last.snapshot is not None
+                )
+                self._staged_stream_token = stream_token
+                self._staged_reconciliation_baseline_at = (
+                    last.snapshot.config.observed_at
+                )
+                try:
+                    async with self._rest_sync_lock:
+                        prepared = await fetch(
+                            observed_at=self._now(),
+                            publish_transient_states=False,
+                            include_fills=include_fills,
+                        )
+                finally:
+                    self._staged_reconciliation_baseline_at = None
+                    self._staged_stream_token = None
             return await self._reconcile_impl(
                 include_fills=include_fills,
                 wait_for_pipeline=wait_for_pipeline,
+                prepared_result=prepared,
+                prepared_generation=prepared_generation,
+                prepared_stream_token=stream_token,
             )
         except Exception:
             if not self._pipeline_recovery_event.is_set():
@@ -1045,6 +1113,9 @@ class UserDataAccountSyncDaemon:
         *,
         include_fills: bool,
         wait_for_pipeline: bool = True,
+        prepared_result: ExecutionAccountSyncResult | None = None,
+        prepared_generation: int = 0,
+        prepared_stream_token: int | None = None,
     ) -> ExecutionAccountSyncResult:
         self._reconciliation_active = True
         if wait_for_pipeline and self._event_queue is not None:
@@ -1087,7 +1158,33 @@ class UserDataAccountSyncDaemon:
                 use_realtime_sync = (
                     self._state is not None and realtime_sync_callable is not None
                 )
-                if realtime_sync_callable is not None and use_realtime_sync:
+                discarded_result = None
+                if prepared_result is not None and (
+                    prepared_generation != self._received_event_generation
+                    or getattr(self._stream, "continuity_token", None)
+                    != prepared_stream_token
+                    or self._pipeline_recovery_event.is_set()
+                    or (
+                        prepared_result.snapshot is not None
+                        and not _baseline_is_fresh(
+                            prepared_result.snapshot.config.observed_at, now=self._now()
+                        )
+                    )
+                ):
+                    discarded_result = prepared_result
+                    if _is_usable_result(discarded_result):
+                        retain_facts = getattr(
+                            self._service, "persist_reconciliation_facts", None
+                        )
+                        if not callable(retain_facts):
+                            raise RuntimeError(
+                                "staged reconciliation cannot retain immutable facts"
+                            )
+                        await retain_facts(discarded_result)
+                    prepared_result = None
+                if prepared_result is not None:
+                    result = prepared_result
+                elif realtime_sync_callable is not None and use_realtime_sync:
                     result = await realtime_sync_callable(
                         observed_at=self._now(),
                         publish_transient_states=False,
@@ -1098,6 +1195,19 @@ class UserDataAccountSyncDaemon:
                         observed_at=self._now(),
                         publish_transient_states=False,
                         include_fills=include_fills,
+                    )
+                if discarded_result is not None and _is_usable_result(result):
+                    # A staged scan updates the service's identity cache. Carry
+                    # its newly discovered fills into the accepted result so a
+                    # guarded re-fetch cannot silently erase their publication.
+                    new_fills = {
+                        (fill.symbol, fill.trade_id): fill
+                        for fill in (*discarded_result.new_fills, *result.new_fills)
+                    }
+                    result = replace(
+                        result,
+                        new_fills=tuple(new_fills.values()),
+                        new_fill_keys=frozenset(new_fills),
                     )
             if _is_usable_result(result) and result.snapshot is not None:
                 self._last_sync_result = result
@@ -1447,6 +1557,12 @@ def _event_applied_result(
         fill_count_by_symbol=_fill_counts_by_symbol(fills),
         fills_catching_up=fills_catching_up,
     )
+
+
+def _baseline_is_fresh(observed_at: datetime, *, now: datetime) -> bool:
+    # Same bounded evidence age used by account readiness. Heartbeats are not
+    # a substitute for the time of the verified account baseline.
+    return 0 <= (now - observed_at).total_seconds() <= 180.0
 
 
 def _event_readiness_status(

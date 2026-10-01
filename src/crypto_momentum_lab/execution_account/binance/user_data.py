@@ -10,6 +10,7 @@ from urllib.parse import quote
 import structlog
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
@@ -111,6 +112,14 @@ class BinanceUsdMUserDataStream:
         self._pending_event_count = 0
         self._event_queue_high_watermark = 0
         self._event_queue_overflow_count = 0
+
+    @property
+    def continuity_token(self) -> int | None:
+        """Identify the current open connection; disconnected streams have no token."""
+        connection = self._connection
+        if self._stopping or connection is None or connection.state is not State.OPEN:
+            return None
+        return self._connection_count
 
     @property
     def metrics(self) -> BinanceUserDataStreamMetrics:

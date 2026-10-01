@@ -535,6 +535,25 @@ class ExecutionAccountSyncService:
                 pass
             raise
 
+    async def persist_reconciliation_facts(
+        self, result: ExecutionAccountSyncResult
+    ) -> None:
+        """Retain a staged scan without publishing its potentially stale baseline."""
+        scopes = [(row.environment, row.account_label) for row in result.fills]
+        scopes.extend(
+            (row.environment, row.account_label) for row in result.fill_cursor_updates
+        )
+        if any(
+            scope != (self._config.environment, self._config.account_label)
+            for scope in scopes
+        ):
+            raise ValueError("staged reconciliation facts belong to another account")
+        if result.fills or result.fill_cursor_updates:
+            await self._repository.save_reconciliation_fills_and_cursors(
+                fills=result.fills, cursors=result.fill_cursor_updates
+            )
+            self._update_fill_cursors_monotonically(result.fill_cursor_updates)
+
     async def persist_reconciliation_result(
         self,
         result: ExecutionAccountSyncResult,

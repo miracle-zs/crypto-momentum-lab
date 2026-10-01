@@ -1159,3 +1159,78 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
     )
     assert scan.page_scan.page_exhausted
     assert client.calls == [("BTCUSDT", int(start.timestamp() * 1000), client.cut)]
+
+
+async def test_staged_fact_retention_never_publishes_baseline_or_process_state():
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(), repository=repository, config=_config()
+    )
+    observed_at = datetime(2026, 7, 4, tzinfo=UTC)
+    cursor = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=101,
+        start_time_ms=None,
+        last_checked_at=observed_at,
+    )
+    result = ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.READY_READONLY,
+        reconciliation_id="staged",
+        mismatch_count=0,
+        fills=(_fill("BTCUSDT", "101"),),
+        fill_cursor_updates=(cursor,),
+    )
+    await service.persist_reconciliation_facts(result)
+    assert repository.snapshot_calls == 0
+    assert repository.process_states == []
+    assert repository.fills == list(result.fills)
+    assert repository.fill_cursor_calls == [(cursor,)]
+    assert service._fill_cursors["BTCUSDT"].from_id == 101
+    assert service._latest_observation_at is None
+
+
+async def test_staged_fact_retention_failure_keeps_cursor_and_rejects_other_account():
+    from dataclasses import replace
+
+    import pytest
+
+    from crypto_momentum_lab.execution_account.fill_progress import FillCursor
+
+    class FailingRepository(FakeRepository):
+        async def save_reconciliation_fills_and_cursors(self, **kwargs):
+            raise RuntimeError("staged facts write failed")
+
+    repository = FailingRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(), repository=repository, config=_config()
+    )
+    service._fill_cursors["BTCUSDT"] = FillCursor(from_id=50, start_time_ms=None)
+    result = ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.READY_READONLY,
+        reconciliation_id="staged",
+        mismatch_count=0,
+        fills=(_fill("BTCUSDT", "101"),),
+        fill_cursor_updates=(
+            AccountFillReconciliationCursor(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                from_id=101,
+                start_time_ms=None,
+                last_checked_at=datetime(2026, 7, 4, tzinfo=UTC),
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="staged facts write failed"):
+        await service.persist_reconciliation_facts(result)
+    assert service._fill_cursors["BTCUSDT"].from_id == 50
+    with pytest.raises(ValueError, match="another account"):
+        await service.persist_reconciliation_facts(
+            replace(
+                result, fills=(replace(result.fills[0], account_label="account-4"),)
+            )
+        )
+    assert repository.snapshot_calls == 0
+    assert repository.process_states == []

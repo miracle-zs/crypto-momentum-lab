@@ -1,6 +1,8 @@
 import asyncio
 from inspect import signature
 
+from websockets.protocol import State
+
 import crypto_momentum_lab.execution_account.binance.user_data as user_data_module
 from crypto_momentum_lab.apps.execution_account.main import sync_command
 from crypto_momentum_lab.execution_account.binance.user_data import (
@@ -61,6 +63,7 @@ async def test_stream_replaces_listen_key_after_expiration(monkeypatch) -> None:
 
 class BlockingConnection:
     def __init__(self) -> None:
+        self.state = State.OPEN
         self.read_count = 0
         self.second_read = asyncio.Event()
         self.release_first_handler = asyncio.Event()
@@ -113,15 +116,21 @@ async def test_stream_reads_next_event_while_handler_is_still_processing(
         lambda *args, **kwargs: FakeConnectContext(connection),
     )
     stream.set_handler(handler)
+    assert stream.continuity_token is None
     task = asyncio.create_task(stream._run_connection("listen-key"))
 
     try:
         await asyncio.wait_for(connection.second_read.wait(), timeout=0.1)
+        assert stream.continuity_token == 1
+        connection.state = State.CLOSING
+        assert stream.continuity_token is None
+        connection.state = State.OPEN
     finally:
         connection.release_first_handler.set()
         stream._stopping = True
 
     await asyncio.wait_for(task, timeout=1)
+    assert stream.continuity_token is None
     assert [event.event_at.second for event in handled_events[:2]] == [0, 1]
 
 

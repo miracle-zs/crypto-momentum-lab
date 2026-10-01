@@ -765,3 +765,112 @@ def _snapshot() -> AccountSnapshot:
         positions=(),
         open_orders=(),
     )
+
+
+@pytest.mark.parametrize("stream_change", [None, "disconnect", "reconnect"])
+@pytest.mark.parametrize("event_during_fetch", [False, True])
+@pytest.mark.parametrize("expire_during_fetch", [False, True])
+async def test_background_reconciliation_never_replaces_a_newer_live_state(
+    event_during_fetch, expire_during_fetch, stream_change
+):
+    from dataclasses import replace
+
+    class StagedService(RealtimeFakeService):
+        def __init__(self):
+            super().__init__(_snapshot())
+            self.fetch_started = asyncio.Event()
+            self.release_fetch = asyncio.Event()
+            self.retained_facts = []
+
+        async def sync_once_for_realtime(self, **kwargs):
+            result = await super().sync_once_for_realtime(**kwargs)
+            if self.realtime_calls == 2:
+                self.fetch_started.set()
+                await self.release_fetch.wait()
+            if self.realtime_calls >= 3:
+                return replace(result, new_fills=(), new_fill_keys=frozenset())
+            return result
+
+        async def persist_reconciliation_facts(self, result):
+            self.retained_facts.append(result)
+
+    class ConnectedStream(BlockingStream):
+        continuity_token = 1
+
+    stream = ConnectedStream()
+    service = StagedService()
+    published = []
+    fills = []
+    applied = asyncio.Event()
+    now = [datetime(2026, 7, 4, 0, 0, 2, tzinfo=UTC)]
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+        clock=lambda: now[0],
+        on_snapshot=published.append,
+        on_event_applied=lambda event, result: applied.set(),
+        on_reconciled_fill=lambda fill, result: fills.append(fill),
+    )
+    await daemon._reconcile(include_fills=True)
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    published.clear()
+    fills.clear()
+    task = asyncio.create_task(daemon._reconcile(include_fills=True))
+    try:
+        await asyncio.wait_for(service.fetch_started.wait(), timeout=1)
+        await daemon._publish_heartbeat()
+        assert service.heartbeat_states[-1] is ExecutionAccountStatus.READY_READONLY
+        if event_during_fetch:
+            event = parse_user_data_event(
+                {
+                    "e": "ACCOUNT_UPDATE",
+                    "E": 1783123201000,
+                    "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
+                },
+                received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+            )
+            await daemon._on_event(event)
+            await asyncio.wait_for(applied.wait(), timeout=1)
+            assert daemon._state.snapshot(event.received_at).balances[
+                0
+            ].wallet_balance == Decimal("101")
+            service.snapshot = daemon._state.snapshot(event.received_at)
+        if expire_during_fetch:
+            now[0] = datetime(2026, 7, 4, 0, 3, 1, tzinfo=UTC)
+            await daemon._publish_heartbeat()
+            assert service.heartbeat_states[-1] is ExecutionAccountStatus.SYNCING
+            service.snapshot = replace(
+                service.snapshot,
+                config=replace(service.snapshot.config, observed_at=now[0]),
+            )
+        if stream_change:
+            stream.continuity_token = None if stream_change == "disconnect" else 2
+            await daemon._publish_heartbeat()
+            assert service.heartbeat_states[-1] is ExecutionAccountStatus.SYNCING
+        service.release_fetch.set()
+        result = await asyncio.wait_for(task, timeout=1)
+        assert len(published) == 1
+        if event_during_fetch or expire_during_fetch or stream_change:
+            assert service.realtime_calls == 3
+            assert len(service.retained_facts) == 1
+            expected_balance = (
+                Decimal("101")
+                if event_during_fetch
+                else _snapshot().balances[0].wallet_balance
+            )
+            assert published[0].snapshot.balances[0].wallet_balance == expected_balance
+            assert (
+                daemon._state.snapshot(now[0]).balances[0].wallet_balance
+                == expected_balance
+            )
+            assert result.new_fills == (service.fill,)
+            assert fills == [service.fill]
+        else:
+            assert service.realtime_calls == 2
+            assert service.retained_facts == []
+    finally:
+        service.release_fetch.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await daemon._stop_pipeline()
