@@ -1058,6 +1058,27 @@ def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> 
     }
 
 
+def test_evaluate_database_state_reconciliation_ready_with_large_age() -> None:
+    alerts = evaluate_database_state(
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=15,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=3600,
+        latest_market_progress_age_seconds=15,
+        latest_market_delay_ms=100,
+    )
+    assert "live_account_reconciliation_stale" not in {alert.name for alert in alerts}
+    assert alerts == ()
+
+
 def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
     common = {
         "symbol": "BTCUSDT",

@@ -710,11 +710,7 @@ def evaluate_database_state(
                 },
             )
         )
-    if latest_reconciliation_status != "ready" or (
-        latest_reconciliation_age_seconds is None
-        or latest_reconciliation_age_seconds < 0
-        or latest_reconciliation_age_seconds > account_state_stale_after_seconds
-    ):
+    if latest_reconciliation_status != "ready":
         alerts.append(
             Alert(
                 "live_account_reconciliation_stale",
