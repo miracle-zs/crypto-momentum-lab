@@ -1289,23 +1289,13 @@ class OrderExecutionCoordinator:
         plan: OrderExecutionPlan,
         snapshot: ExchangeOrderSnapshot,
     ) -> OrderExecutionResult:
-        async def operation() -> OrderExecutionResult:
-            res = await self._backend.apply_observed_snapshot(plan, snapshot)
-            await self._observe_returned_order_result(plan, res)
-            return res
-
-        return cast(
-            OrderExecutionResult,
-            await self._schedule(
-                plan,
-                priority=(
-                    self._EXIT_PRIORITY
-                    if plan.reduce_only
-                    else self._RECONCILE_PRIORITY
-                ),
-                operation=operation,
-            ),
-        )
+        # An observation is an exchange fact, not a command. Do not put it
+        # behind a REST command that is waiting on network I/O or backoff.
+        if self._closed:
+            raise RuntimeError("Order execution coordinator is closed")
+        result = await self._backend.apply_observed_snapshot(plan, snapshot)
+        await self._observe_returned_order_result(plan, result)
+        return result
 
     async def mark_absent_reconciled(
         self,

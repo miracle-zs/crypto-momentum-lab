@@ -2593,3 +2593,76 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
     assert reservations == ()
 
     await coord.aclose()
+
+
+@pytest.mark.parametrize("serialize_commands", [False, True])
+async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
+    serialize_commands,
+):
+    from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
+    from crypto_momentum_lab.execution_account.orders.state_machine import (
+        OrderExecutionStateMachine,
+        SubmitPolicy,
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+    plan = _plan("BTCUSDT", reduce_only=False)
+    snapshot = ExchangeOrderSnapshot(
+        client_order_id=plan.client_order_id,
+        exchange_order_id="123",
+        state=ExchangeOrderState.FILLED,
+        observed_at=NOW,
+        executed_quantity=plan.quantity,
+        average_price=Decimal("100"),
+    )
+
+    class Exchange:
+        async def query_order_by_client_id(self, _symbol, _client_order_id):
+            started.set()
+            await release.wait()
+            return snapshot
+
+    class Repository:
+        async def append_order_event(self, event):
+            if any(item.event_id == event.event_id for item in events):
+                return False
+            events.append(event)
+            return True
+
+    backend = OrderExecutionStateMachine(
+        exchange=Exchange(),
+        repository=object(),
+        event_repository=Repository(),
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        serialize_commands=serialize_commands,
+    )
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    recovery = asyncio.create_task(coordinator.reconcile_order(plan))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        observed = await asyncio.wait_for(
+            coordinator.apply_observed_snapshot(plan, snapshot),
+            timeout=1,
+        )
+        assert not recovery.done()
+        assert observed.state is ExchangeOrderState.FILLED
+        assert len(events) == 1
+        assert events[0].details["executed_quantity"] == str(plan.quantity)
+    finally:
+        release.set()
+        await recovery
+        await coordinator.aclose()
+    # The later REST response is the same fact, so its replay does not append again.
+    assert len(events) == 1
+
+
+async def test_closed_coordinator_rejects_independent_fact():
+    coordinator = OrderExecutionCoordinator(backend=object(), account_label="primary")
+    await coordinator.aclose()
+    with pytest.raises(RuntimeError, match="closed"):
+        await coordinator.apply_observed_snapshot(
+            _plan("BTCUSDT", reduce_only=False), object()
+        )

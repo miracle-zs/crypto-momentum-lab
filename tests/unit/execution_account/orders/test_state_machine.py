@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -570,3 +571,46 @@ def _snapshot(
         average_price=Decimal("30000") if fills else Decimal("0"),
         fills=fills,
     )
+
+
+async def test_fact_commits_remain_serial_without_holding_command_network_lock():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    class Repository:
+        async def append_order_event(self, event):
+            events.append(event)
+            if len(events) == 1:
+                started.set()
+                await release.wait()
+            return True
+
+    machine = OrderExecutionStateMachine(
+        exchange=object(),
+        repository=object(),
+        event_repository=Repository(),
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        serialize_commands=False,
+    )
+    first = asyncio.create_task(
+        machine.apply_observed_snapshot(
+            _plan(), _snapshot(ExchangeOrderState.ACKNOWLEDGED)
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        machine.apply_observed_snapshot(_plan(), _snapshot(ExchangeOrderState.FILLED))
+    )
+    try:
+        await asyncio.sleep(0)
+        assert len(events) == 1
+        assert not second.done()
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+    assert [event.state for event in events] == [
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.FILLED,
+    ]

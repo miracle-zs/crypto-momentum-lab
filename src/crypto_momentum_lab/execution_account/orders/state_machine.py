@@ -208,6 +208,7 @@ class OrderExecutionStateMachine:
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
         self._sleep = sleep
         self._lock = asyncio.Lock() if serialize_commands else None
+        self._observation_lock = asyncio.Lock()
 
     async def execute_approved_intent(
         self,
@@ -387,11 +388,8 @@ class OrderExecutionStateMachine:
         plan: OrderExecutionPlan,
         snapshot: ExchangeOrderSnapshot,
     ) -> OrderExecutionResult:
-        """Persist a snapshot already obtained by an exit recovery read."""
-        if self._lock is None:
-            return await self._apply_snapshot(plan, snapshot)
-        async with self._lock:
-            return await self._apply_snapshot(plan, snapshot)
+        """Persist an exchange fact without waiting for command network I/O."""
+        return await self._apply_snapshot(plan, snapshot)
 
     async def mark_absent_reconciled(
         self,
@@ -605,6 +603,16 @@ class OrderExecutionStateMachine:
         )
 
     async def _apply_snapshot(
+        self,
+        plan: OrderExecutionPlan,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> OrderExecutionResult:
+        # All command responses and independently observed facts use this
+        # short commit path. Network requests never hold the observation lock.
+        async with self._observation_lock:
+            return await self._persist_snapshot(plan, snapshot)
+
+    async def _persist_snapshot(
         self,
         plan: OrderExecutionPlan,
         snapshot: ExchangeOrderSnapshot,
