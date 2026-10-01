@@ -88,3 +88,27 @@
 最后日志检查发现新的验收遗留：09:47:21 账户 2 和 4 的报价退出各出现一次 RuntimeError('live context changed during load')，随后多次短暂 EXIT_ONLY 并恢复。账户 WS 更新在完整上下文读取期间推进 cache epoch，PostgresLiveContextProvider 的三次稳定读取失败保护拒绝旧结果；ExitExecutionLane 将该异常记为 fatal_failure，扩大成账户退出故障。此次未改动该保护逻辑，没有通过忽略所有 RuntimeError 或降低门槛处理。部署与持续消费检查通过，业务异常验收仍未全部通过。
 
 后续优先收敛上下文失效协议：保留上下文/提交 fencing，将“事实已推进，需要重新读取”与实际数据库、订单执行故障区分，在既有最新值退出通道中等待下一次新事实/报价重新评估，避免账户范围故障抖动；不新建任务、队列或独立恢复框架。需用真实提供者与退出通道回归验证连续账户更新不能用旧上下文提交、稳定后能够继续、真正执行异常仍阻断。
+
+## b5b21fb4 累积简化发布（2026-10-01 20:18 北京时间）
+
+用户授权提交、推送并部署。运行版本 `b5b21fb46eb118829b923c5c43c473e822d6246b` 已推送 main，沿既有 update_server.sh --live --refresh-approvals 流程发布；脚本退出码 0，总耗时 701 秒。四账户审批、预检、续租及最终 readiness 验证通过，11 个应用容器使用目标镜像。无数据库迁移，保留原风险参数、交易规则与服务器未跟踪的环境备份文件。
+
+发布前启用 Hub 网络测试的相关回归 2187 项通过，1 项既有 Starlette 弃用警告；最新四项清理的四个源文件 mypy 通过，diff 检查通过。未执行新一轮数据库集成测试。
+
+最终只读采样为 12:18:04 UTC（北京时间 20:18:04）：12 个容器全部 healthy，重启数 0，无 OOM；四策略启动时间均为 12:14:03 UTC，与先前采样一致。四策略 entry_enabled=true，原因 live_entry_prerequisites_ready，行情年龄约 0.88–0.89 秒。Dashboard app/database 状态均 UP。
+
+| 账户 | 12:17:02 UTC 采样检查点 | 12:18:04 UTC 采样检查点 |
+| --- | --- | --- |
+| primary | 12:17:00 | 12:18:00 |
+| account-2 | 12:16:17 | 12:17:15 |
+| account-3 | 12:16:30 | 12:17:30 |
+| account-4 | 12:16:45 | 12:17:45 |
+
+部署与持续消费检查通过，但业务验收仍有遗留：
+
+- account-4 启动后两次历史 `龙虾USDT` 退出回执恢复查询 HTTP 400，命令尾缀 1f58b59272f413a0、d6b3499aea3c33e3。
+- primary 的 BTWUSDT 退出持续出现 OrderPreSubmissionError：Execution reservation settlement requires recovery。12:17–12:18 的有界日志中重复发生，不能视为已经恢复。
+- account-2 启动后出现一次 account_snapshot_execution_book_conflicts；本轮未逐项核对冲突与真实成交。
+- 启动阶段有风险控制流恢复引起的短暂 EXIT_ONLY，最终采样已允许开仓；不能据最终绿色状态证明全部退出均可执行。
+
+未手工修改持仓、成交、预留或待处理退出，未绕过恢复保护。没有人为下单验证成交闭环，也没有将日志尾部采样当作完整交易历史审计。后续应先核对上述真实业务问题，避免继续增加抽象层或假设故障分支。本节后续文档提交不改变运行镜像版本。
