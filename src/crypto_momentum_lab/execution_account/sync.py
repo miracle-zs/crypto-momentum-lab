@@ -293,7 +293,17 @@ class ExecutionAccountSyncService:
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
-            for position in active_positions:
+            # A prior explicit REST zero also anchors tracked closed symbols.
+            # Durable history sparsification can omit unchanged zero rows; use
+            # the real prior observation rather than a polling cursor or an
+            # invented zero at the current cut.
+            for position in positions:
+                if (
+                    position.position_amt == 0
+                    and position.symbol.strip().upper()
+                    not in self._tracked_fill_symbols
+                ):
+                    continue
                 identity = (
                     position.symbol.strip().upper(),
                     position.position_side.strip().upper(),

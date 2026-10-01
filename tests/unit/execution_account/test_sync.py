@@ -1078,3 +1078,76 @@ async def test_reconciliation_run_records_full_state_when_history_is_sparse() ->
     # The immutable detail history is sparse within the coalescing window:
     # ETH was not re-written, while BTC's close was.
     assert [row.symbol for row in repository.positions[-1:]] == ["BTCUSDT"]
+
+
+async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
+    from crypto_momentum_lab.domain.account.models import AccountFillPageScan
+    from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+        stable_snapshot_anchor_id,
+    )
+
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+
+    class ProvenanceClient(FakeClient):
+        cut = start
+        calls = []
+
+        async def fetch_positions(self):
+            return (
+                AccountPositionSnapshot(
+                    "live",
+                    "primary",
+                    "BTCUSDT",
+                    "LONG",
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("100"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    5,
+                    "cross",
+                    self.cut,
+                    {"symbol": "BTCUSDT", "positionAmt": "0"},
+                ),
+            )
+
+        async def fetch_fills_with_provenance(
+            self, symbol, *, start_time_ms, checked_through
+        ):
+            self.calls.append((symbol, start_time_ms, checked_through))
+            return (), AccountFillPageScan(
+                symbol,
+                "rest-flat-proof",
+                start_time_ms,
+                None,
+                1,
+                True,
+                False,
+                checked_through,
+            )
+
+    client = ProvenanceClient()
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            observed_at=start,
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            recent_fill_symbols=("BTCUSDT",),
+        ),
+    )
+    initial = await service.sync_once_for_realtime(include_fills=False)
+    client.cut = start + timedelta(seconds=30)
+    result = await service.sync_once_for_realtime(observed_at=client.cut)
+    assert len(result.fill_load_scans) == 1
+    scan = result.fill_load_scans[0]
+    assert scan.source_anchor_event_cut == start
+    assert scan.source_anchor_snapshot == initial.snapshot.positions[0]
+    assert scan.source_anchor_id == stable_snapshot_anchor_id(
+        initial.snapshot.positions[0]
+    )
+    assert scan.page_scan.page_exhausted
+    assert client.calls == [("BTCUSDT", int(start.timestamp() * 1000), client.cut)]
