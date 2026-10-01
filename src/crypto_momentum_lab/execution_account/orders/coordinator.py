@@ -123,6 +123,11 @@ class OrderExecutionPort(Protocol):
         snapshot: ExchangeOrderSnapshot,
     ) -> OrderExecutionResult: ...
 
+    async def mark_reconciliation_pending(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult: ...
+
     async def mark_absent_reconciled(
         self,
         plan: OrderExecutionPlan,
@@ -1294,6 +1299,18 @@ class OrderExecutionCoordinator:
         if self._closed:
             raise RuntimeError("Order execution coordinator is closed")
         result = await self._backend.apply_observed_snapshot(plan, snapshot)
+        await self._observe_returned_order_result(plan, result)
+        return result
+
+    async def mark_reconciliation_pending(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        if self._closed:
+            raise RuntimeError("Order execution coordinator is closed")
+        result = await self._backend.mark_reconciliation_pending(
+            plan,
+        )
         await self._observe_returned_order_result(plan, result)
         return result
 

@@ -30,9 +30,6 @@ import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
-from crypto_momentum_lab.domain.execution.order_read_repository import (
-    OrderReadRepository,
-)
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -75,7 +72,6 @@ from crypto_momentum_lab.execution_account.hub import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
-    OrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -1966,26 +1962,12 @@ async def _run_account_event_channel(
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
     order_reconciliation: AccountEventOrderReconciler | None = None,
-    order_repository: OrderReadRepository | None = None,
-    state_machine: OrderExecutionPort | None = None,
     run_id: str | None = None,
     telemetry: AccountFillSink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
     on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None] | None = None,
     on_account_snapshot_recovery: Callable[[str], None] | None = None,
 ) -> None:
-    if (
-        order_reconciliation is None
-        and order_repository is not None
-        and state_machine is not None
-        and run_id is not None
-    ):
-        order_reconciliation = LiveOrderReconciliation(
-            order_repository=order_repository,
-            state_machine=state_machine,
-            run_id=run_id,
-            on_unknown_order=on_account_snapshot_recovery,
-        )
     runtime = LiveAccountEventRuntime(
         daemon=daemon,
         latest_market_states=latest_market_states,

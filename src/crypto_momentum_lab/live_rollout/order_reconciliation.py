@@ -1,12 +1,12 @@
 """Durable order reconciliation for a live strategy session.
 
 Complete account WebSocket order facts update the existing durable state machine.
-REST reconciles incomplete events and periodically repairs unresolved orders.
+The existing repair worker reconciles incomplete events and unresolved orders.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -31,8 +31,8 @@ class LiveOrderReconciliation:
     """Coordinate immediate and periodic reconciliation for one live run.
 
     ``reconcile_account_event`` is deliberately narrow: callers invoke it
-    before publishing the account projection so an order-trade update cannot
-    make a newly opened position visible before its durable order state.
+    before publishing the account projection: complete facts become durable
+    observations, incomplete updates become durable uncertainty.
     ``run_periodically`` is best-effort and never replaces the durable order
     state machine; it only retries unresolved orders after transient failures.
     """
@@ -42,6 +42,11 @@ class LiveOrderReconciliation:
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     on_unknown_order: Callable[[str], None] | None = None
+    _requested: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+
+    _requested_runs: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -77,7 +82,11 @@ class LiveOrderReconciliation:
                 )
                 return
             if snapshot is None:
-                await self.state_machine.reconcile_order(persisted.plan)
+                await self.state_machine.mark_reconciliation_pending(
+                    persisted.plan,
+                )
+                self._requested_runs.add(persisted.plan.run_id)
+                self._requested.set()
             elif snapshot.executed_quantity < persisted.executed_quantity or (
                 snapshot.executed_quantity == persisted.executed_quantity
                 and snapshot.observed_at < persisted.updated_at
@@ -101,18 +110,32 @@ class LiveOrderReconciliation:
     async def reconcile_all(self) -> None:
         """Reconcile every unresolved order for the live session."""
 
-        for order in await self.order_repository.load_unresolved_orders(self.run_id):
-            await self.state_machine.reconcile_order(order.plan)
+        # WS can report a still-open order from an earlier run. Keep its run
+        # scope in the same worker rather than dropping that repair request.
+        runs = self._requested_runs | {self.run_id}
+        self._requested_runs.clear()
+        try:
+            for run_id in sorted(runs):
+                for order in await self.order_repository.load_unresolved_orders(run_id):
+                    await self.state_machine.reconcile_order(order.plan)
+        except BaseException:
+            self._requested_runs.update(runs)
+            raise
 
-    async def run_periodically(
-        self,
-        *,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ) -> None:
-        """Run the eventual-consistency safety net until cancelled."""
+    async def run_periodically(self) -> None:
+        """Run the existing repair worker on request or periodic timeout."""
 
         while True:
-            await sleep(self.interval_seconds)
+            try:
+                await asyncio.wait_for(
+                    self._requested.wait(),
+                    timeout=self.interval_seconds,
+                )
+            except TimeoutError:
+                pass
+            # Clear before the scan so a request arriving during REST work
+            # remains set and triggers another scan after this one finishes.
+            self._requested.clear()
             try:
                 await self.reconcile_all()
             except asyncio.CancelledError:

@@ -20,10 +20,10 @@ from crypto_momentum_lab.live_rollout.order_reconciliation import (
 
 
 @pytest.mark.asyncio
-async def test_account_event_reconciles_only_the_matching_unresolved_order() -> None:
+async def test_incomplete_account_event_marks_only_matching_order_uncertain() -> None:
     plans = [
-        SimpleNamespace(client_order_id="entry-1"),
-        SimpleNamespace(client_order_id="entry-2"),
+        SimpleNamespace(client_order_id="entry-1", run_id="run-1"),
+        SimpleNamespace(client_order_id="entry-2", run_id="run-1"),
     ]
     reconciled: list[object] = []
 
@@ -36,7 +36,7 @@ async def test_account_event_reconciles_only_the_matching_unresolved_order() -> 
             )
 
     class StateMachine:
-        async def reconcile_order(self, plan) -> None:
+        async def mark_reconciliation_pending(self, plan) -> None:
             reconciled.append(plan)
 
     reconciliation = LiveOrderReconciliation(
@@ -46,17 +46,20 @@ async def test_account_event_reconciles_only_the_matching_unresolved_order() -> 
     )
 
     await reconciliation.reconcile_account_event(
-        SimpleNamespace(client_order_id="entry-2", order_update=None)  # type: ignore[arg-type]
+        SimpleNamespace(
+            client_order_id="entry-2",
+            order_update=None,
+            exchange_event_at=None,
+            event_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )  # type: ignore[arg-type]
     )
 
     assert reconciled == [plans[1]]
 
 
 @pytest.mark.asyncio
-async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache() -> (
-    None
-):
-    plan = SimpleNamespace(client_order_id="entry-1")
+async def test_incomplete_account_event_marks_persisted_order_uncertain() -> None:
+    plan = SimpleNamespace(client_order_id="entry-1", run_id="run-1")
     reconciled: list[object] = []
 
     class Repository:
@@ -71,7 +74,7 @@ async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache(
             )
 
     class StateMachine:
-        async def reconcile_order(self, reconciled_plan) -> None:
+        async def mark_reconciliation_pending(self, reconciled_plan) -> None:
             reconciled.append(reconciled_plan)
 
     reconciliation = LiveOrderReconciliation(
@@ -81,7 +84,12 @@ async def test_account_event_reconciles_persisted_order_not_in_unresolved_cache(
     )
 
     await reconciliation.reconcile_account_event(
-        SimpleNamespace(client_order_id="entry-1", order_update=None)  # type: ignore[arg-type]
+        SimpleNamespace(
+            client_order_id="entry-1",
+            order_update=None,
+            exchange_event_at=None,
+            event_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )  # type: ignore[arg-type]
     )
 
     assert reconciled == [plan]
@@ -117,8 +125,8 @@ async def test_account_event_missing_from_local_journal_requests_snapshot_recove
 @pytest.mark.asyncio
 async def test_reconcile_all_reconciles_every_unresolved_order() -> None:
     plans = [
-        SimpleNamespace(client_order_id="entry-1"),
-        SimpleNamespace(client_order_id="entry-2"),
+        SimpleNamespace(client_order_id="entry-1", run_id="run-1"),
+        SimpleNamespace(client_order_id="entry-2", run_id="run-1"),
     ]
     reconciled: list[object] = []
 
@@ -143,32 +151,26 @@ async def test_reconcile_all_reconciles_every_unresolved_order() -> None:
 
 @pytest.mark.asyncio
 async def test_periodic_reconcile_is_cancelled_between_attempts() -> None:
-    calls = 0
-    delays: list[float] = []
+    scanned = asyncio.Event()
 
     class Repository:
         async def load_unresolved_orders(self, run_id: str):
-            nonlocal calls
-            calls += 1
+            scanned.set()
             return ()
 
-    async def controlled_sleep(delay: float) -> None:
-        delays.append(delay)
-        if len(delays) == 2:
-            raise asyncio.CancelledError
-
     reconciliation = LiveOrderReconciliation(
-        order_repository=Repository(),  # type: ignore[arg-type]
-        state_machine=object(),  # type: ignore[arg-type]
+        order_repository=Repository(),
+        state_machine=object(),
         run_id="run-1",
-        interval_seconds=60,
+        interval_seconds=0.01,
     )
-
-    with pytest.raises(asyncio.CancelledError):
-        await reconciliation.run_periodically(sleep=controlled_sleep)
-
-    assert calls == 1
-    assert delays == [60, 60]
+    worker = asyncio.create_task(reconciliation.run_periodically())
+    try:
+        await asyncio.wait_for(scanned.wait(), timeout=1)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
 
 def _ws_order_case():
@@ -296,7 +298,7 @@ async def test_ws_identity_conflict_cannot_apply_or_fall_back_to_rest(field, val
         ("ap", "Infinity"),
     ],
 )
-async def test_incomplete_ws_fact_uses_rest_recovery(field, value):
+async def test_incomplete_ws_fact_marks_uncertainty_without_inline_rest(field, value):
     order, event = _ws_order_case()
     event.order_update[field] = value
     reconciled = []
@@ -306,7 +308,7 @@ async def test_incomplete_ws_fact_uses_rest_recovery(field, value):
             return order
 
     class StateMachine:
-        async def reconcile_order(self, plan):
+        async def mark_reconciliation_pending(self, plan):
             reconciled.append(plan)
 
     runtime = LiveOrderReconciliation(Repository(), StateMachine(), "run-1")
@@ -404,3 +406,90 @@ async def test_terminal_cancel_does_not_hide_late_additional_ws_fill():
     await runtime.reconcile_account_event(event)
     assert applied[0].state is ExchangeOrderState.FILLED
     assert applied[0].executed_quantity == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_incomplete_event_wakes_existing_worker_and_does_not_block_next_fact():
+    order, event = _ws_order_case()
+    uncertain = asyncio.Event()
+    rest_started = asyncio.Event()
+    release_rest = asyncio.Event()
+    applied = []
+    scans = 0
+    second_scan = asyncio.Event()
+
+    class Repository:
+        async def load_order(self, _client_order_id):
+            return order
+
+        async def load_unresolved_orders(self, _run_id):
+            nonlocal scans
+            scans += 1
+            if scans == 2:
+                second_scan.set()
+            return (order,)
+
+    class StateMachine:
+        async def mark_reconciliation_pending(self, plan):
+            assert plan == order.plan
+            uncertain.set()
+
+        async def reconcile_order(self, _plan):
+            rest_started.set()
+            await release_rest.wait()
+
+        async def apply_observed_snapshot(self, _plan, snapshot):
+            applied.append(snapshot)
+
+    reconciliation = LiveOrderReconciliation(
+        Repository(), StateMachine(), "run-1", interval_seconds=3600
+    )
+    worker = asyncio.create_task(reconciliation.run_periodically())
+    try:
+        await asyncio.wait_for(
+            reconciliation.reconcile_account_event(replace(event, order_update=None)),
+            timeout=1,
+        )
+        assert uncertain.is_set()
+        await asyncio.wait_for(rest_started.wait(), timeout=1)
+        # A complete event continues even while the existing REST worker is waiting.
+        await asyncio.wait_for(reconciliation.reconcile_account_event(event), timeout=1)
+        assert len(applied) == 1
+        # A new request arriving during REST must not disappear when it finishes.
+        await reconciliation.reconcile_account_event(replace(event, order_update=None))
+        release_rest.set()
+        await asyncio.wait_for(second_scan.wait(), timeout=1)
+    finally:
+        release_rest.set()
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_incomplete_earlier_run_order_is_repaired_by_existing_worker():
+    order, event = _ws_order_case()
+    order = replace(order, plan=replace(order.plan, run_id="earlier-run"))
+    repaired = []
+    scopes = []
+
+    class Repository:
+        async def load_order(self, _client_order_id):
+            return order
+
+        async def load_unresolved_orders(self, run_id):
+            scopes.append(run_id)
+            return (order,) if run_id == "earlier-run" else ()
+
+    class StateMachine:
+        async def mark_reconciliation_pending(self, _plan):
+            pass
+
+        async def reconcile_order(self, plan):
+            repaired.append(plan)
+
+    reconciliation = LiveOrderReconciliation(Repository(), StateMachine(), "run-1")
+    await reconciliation.reconcile_account_event(replace(event, order_update=None))
+    await reconciliation.reconcile_all()
+    assert repaired == [order.plan]
+    assert set(scopes) == {"earlier-run", "run-1"}

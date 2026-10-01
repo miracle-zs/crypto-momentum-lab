@@ -2666,3 +2666,38 @@ async def test_closed_coordinator_rejects_independent_fact():
         await coordinator.apply_observed_snapshot(
             _plan("BTCUSDT", reduce_only=False), object()
         )
+
+
+async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_without_rest():
+    from crypto_momentum_lab.execution_account.orders.state_machine import (
+        OrderExecutionStateMachine,
+        SubmitPolicy,
+    )
+    from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
+
+    events = []
+    plan = _plan("BTCUSDT", reduce_only=False)
+
+    class Repository:
+        async def append_order_event(self, event):
+            events.append(event)
+            return True
+
+    backend = OrderExecutionStateMachine(
+        exchange=object(),
+        repository=object(),
+        event_repository=Repository(),
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+    )
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    try:
+        result = await coordinator.mark_reconciliation_pending(plan)
+        assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+        assert len(events) == 1
+        assert events[0].occurred_at == NOW
+        assert order_state_is_uncertain(events[0].state)
+        assert events[0].details["reason"] == "incomplete_ws_order_update"
+    finally:
+        await coordinator.aclose()

@@ -391,6 +391,24 @@ class OrderExecutionStateMachine:
         """Persist an exchange fact without waiting for command network I/O."""
         return await self._apply_snapshot(plan, snapshot)
 
+    async def mark_reconciliation_pending(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        """Persist uncertainty without querying the exchange."""
+        async with self._observation_lock:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                details={"reason": "incomplete_ws_order_update"},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                None,
+                plan=plan,
+            )
+
     async def mark_absent_reconciled(
         self,
         plan: OrderExecutionPlan,

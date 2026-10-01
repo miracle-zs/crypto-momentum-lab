@@ -1539,35 +1539,26 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
 
 @pytest.mark.asyncio
 async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
-    calls = 0
-    delays: list[float] = []
+    scanned = asyncio.Event()
 
     class Repository:
-        async def load_symbols_at(self, **kwargs):
-            return frozenset()
-
         async def load_unresolved_orders(self, run_id: str):
-            nonlocal calls
-            calls += 1
+            scanned.set()
             return ()
 
-    async def controlled_sleep(delay: float) -> None:
-        delays.append(delay)
-        if len(delays) == 2:
-            raise asyncio.CancelledError
-
     reconciliation = LiveOrderReconciliation(
-        order_repository=Repository(),  # type: ignore[arg-type]
-        state_machine=object(),  # type: ignore[arg-type]
+        order_repository=Repository(),
+        state_machine=object(),
         run_id="live-manual",
-        interval_seconds=60,
+        interval_seconds=0.01,
     )
-
-    with pytest.raises(asyncio.CancelledError):
-        await reconciliation.run_periodically(sleep=controlled_sleep)
-
-    assert calls == 1
-    assert delays == [60, 60]
+    worker = asyncio.create_task(reconciliation.run_periodically())
+    try:
+        await asyncio.wait_for(scanned.wait(), timeout=1)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
 
 def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:
@@ -1969,7 +1960,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot() -> No
 
 
 @pytest.mark.asyncio
-async def test_account_event_retries_pending_position_sync(
+async def test_account_event_pending_position_does_not_wait_or_promote_failure(
     monkeypatch,
 ) -> None:
     event = SimpleNamespace(
@@ -2011,15 +2002,13 @@ async def test_account_event_retries_pending_position_sync(
         daemon=daemon,
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
-        order_repository=None,
-        state_machine=None,
         run_id="run-1",
         on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
     )
 
-    assert daemon.calls == 2
-    assert delays == [0.25]
-    assert failures == [("BTCUSDT", None)]
+    assert daemon.calls == 1
+    assert delays == []
+    assert failures == []
 
 
 @pytest.mark.asyncio
@@ -2060,8 +2049,6 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
         daemon=Daemon(),
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
-        order_repository=None,
-        state_machine=None,
         run_id="run-1",
         on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
     )
@@ -2073,7 +2060,8 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("notify", [False, True])
 async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
-    monkeypatch, notify: bool,
+    monkeypatch,
+    notify: bool,
 ) -> None:
     state = SimpleNamespace(symbol="BTCUSDT")
     failures: list[tuple[str, str | None]] = []
@@ -2115,5 +2103,6 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
     assert failures == [("BTCUSDT", "order_identity_conflict")]
     assert calls == (
         [("identity", "BTCUSDT"), ("failure", "BTCUSDT")]
-        if notify else [("failure", "BTCUSDT")]
+        if notify
+        else [("failure", "BTCUSDT")]
     )
