@@ -1093,22 +1093,25 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
         calls = []
 
         async def fetch_positions(self):
-            return (
-                AccountPositionSnapshot(
-                    "live",
-                    "primary",
-                    "BTCUSDT",
-                    "LONG",
-                    Decimal("0"),
-                    Decimal("0"),
-                    Decimal("100"),
-                    Decimal("0"),
-                    Decimal("0"),
-                    5,
-                    "cross",
-                    self.cut,
-                    {"symbol": "BTCUSDT", "positionAmt": "0"},
-                ),
+            position = AccountPositionSnapshot(
+                "live",
+                "primary",
+                "BTCUSDT",
+                "LONG",
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("100"),
+                Decimal("0"),
+                Decimal("0"),
+                5,
+                "cross",
+                self.cut,
+                {"symbol": "BTCUSDT", "positionAmt": "0"},
+            )
+            return position, replace(
+                position,
+                symbol="ETHUSDT",
+                raw_payload={"symbol": "ETHUSDT", "positionAmt": "0"},
             )
 
         async def fetch_fills_with_provenance(
@@ -1127,16 +1130,21 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
             )
 
     client = ProvenanceClient()
+
+    async def load_current_heads():
+        return {("BTCUSDT", "LONG"): None}
+
     service = ExecutionAccountSyncService(
         client=client,
         repository=FakeRepository(),
+        fill_source_anchor_loader=load_current_heads,
         config=ExecutionAccountSyncConfig(
             environment="live",
             account_label="primary",
             observed_at=start,
             expected_multi_assets_mode=False,
             expected_hedge_mode=False,
-            recent_fill_symbols=("BTCUSDT",),
+            recent_fill_symbols=("BTCUSDT", "ETHUSDT"),
         ),
     )
     initial = await service.sync_once_for_realtime(include_fills=False)

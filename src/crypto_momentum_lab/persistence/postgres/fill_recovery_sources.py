@@ -28,7 +28,7 @@ from crypto_momentum_lab.persistence.postgres.position_fact_journal_models impor
 
 async def load_fill_recovery_sources(
     sessions: async_sessionmaker[AsyncSession], *, environment: str, account_label: str
-) -> dict[tuple[str, str], AccountFillSourceAnchor]:
+) -> dict[tuple[str, str], AccountFillSourceAnchor | None]:
     """Use a verified current head checkpoint, otherwise an explicit flat row.
 
     Empty historical symbols need no private REST scan. A durable Book with
@@ -121,11 +121,15 @@ async def load_fill_recovery_sources(
             )
         ).all()
     heads_by_key = {(head.symbol, head.position_side): head for head in heads}
-    result = {}
+    # Preserve the exact heads needing recovery even when no trusted durable
+    # anchor exists. None requests a real prior REST zero, never a synthetic cut.
+    result: dict[tuple[str, str], AccountFillSourceAnchor | None] = {
+        key: None for key in heads_by_key
+    }
     for row in checkpoints:
         key = (row.symbol, row.position_side)
         head = heads_by_key[key]
-        if key in result or (row.stream_id, row.stream_epoch) != (
+        if result.get(key) is not None or (row.stream_id, row.stream_epoch) != (
             head.stream_id,
             head.stream_epoch,
         ):
@@ -159,7 +163,7 @@ async def load_fill_recovery_sources(
         )
     for flat_row in flat_rows:
         key = (flat_row.symbol, flat_row.position_side)
-        if key in result:
+        if result.get(key) is not None:
             continue
         snapshot = AccountPositionSnapshot(
             flat_row.environment,

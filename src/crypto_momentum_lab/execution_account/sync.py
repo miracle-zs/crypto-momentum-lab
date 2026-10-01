@@ -83,7 +83,7 @@ class ExecutionAccountSyncService:
         repository: AccountSyncRepository,
         config: ExecutionAccountSyncConfig,
         fill_source_anchor_loader: Callable[
-            [], Awaitable[Mapping[tuple[str, str], AccountFillSourceAnchor]]
+            [], Awaitable[Mapping[tuple[str, str], AccountFillSourceAnchor | None]]
         ]
         | None = None,
     ) -> None:
@@ -293,23 +293,25 @@ class ExecutionAccountSyncService:
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
-            # A prior explicit REST zero also anchors tracked closed symbols.
+            # A prior explicit REST zero also anchors current Book heads.
             # Durable history sparsification can omit unchanged zero rows; use
             # the real prior observation rather than a polling cursor or an
             # invented zero at the current cut.
             for position in positions:
-                if (
-                    position.position_amt == 0
-                    and position.symbol.strip().upper()
-                    not in self._tracked_fill_symbols
-                ):
-                    continue
                 identity = (
                     position.symbol.strip().upper(),
                     position.position_side.strip().upper(),
                 )
+                if (
+                    position.position_amt == 0
+                    and identity not in self._fill_source_anchors
+                ):
+                    continue
                 baseline = self._zero_position_snapshots.get(identity)
-                if identity not in self._fill_source_anchors and baseline is not None:
+                if (
+                    self._fill_source_anchors.get(identity) is None
+                    and baseline is not None
+                ):
                     self._fill_source_anchors[identity] = AccountFillSourceAnchor(
                         identity[0],
                         identity[1],
