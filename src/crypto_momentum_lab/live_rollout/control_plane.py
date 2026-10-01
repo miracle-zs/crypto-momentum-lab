@@ -15,14 +15,10 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import TradingLease
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
-)
-from crypto_momentum_lab.live_rollout.context import (
-    LiveContextProvider,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
@@ -55,7 +51,7 @@ def is_consumer_lag_reason(reason: str | None) -> bool:
     )
 
 
-class LiveControlPlaneContextProvider(LiveContextProvider, Protocol):
+class LiveControlPlaneContextProvider(Protocol):
     """Context provider operations needed by control-plane publications."""
 
     def update_account_snapshot(
@@ -69,17 +65,6 @@ class LiveControlPlaneContextProvider(LiveContextProvider, Protocol):
     def invalidate_account_snapshot(self) -> None: ...
 
     def update_lease(self, lease: TradingLease) -> None: ...
-
-    def invalidate_cache(self) -> None: ...
-
-
-class LatestMarketStateSource(Protocol):
-    """Read the latest market state required for lease recovery."""
-
-    def for_symbols(
-        self,
-        symbols: tuple[str, ...],
-    ) -> tuple[MarketState15s, ...]: ...
 
 
 LeaseReacquirer = Callable[
@@ -97,8 +82,7 @@ class LiveControlPlaneRuntime:
         *,
         session_id: str,
         context_provider: LiveControlPlaneContextProvider,
-        heartbeat_context_provider: LiveControlPlaneContextProvider,
-        latest_market_states: LatestMarketStateSource,
+        load_lease_gate: Callable[[], Awaitable[LiveGateContext]],
         reacquire_lease: LeaseReacquirer,
         market_state_available: bool,
         notify_market_state_gap: Callable[[str], None],
@@ -114,8 +98,7 @@ class LiveControlPlaneRuntime:
             raise TypeError("strategy_warmup_ready must be a bool")
         self._session_id = session_id
         self._context_provider = context_provider
-        self._heartbeat_context_provider = heartbeat_context_provider
-        self._latest_market_states = latest_market_states
+        self._load_lease_gate = load_lease_gate
         self._reacquire_lease = reacquire_lease
         self._notify_market_state_gap = notify_market_state_gap
         self._refresh_entry_gate = refresh_entry_gate
@@ -225,11 +208,6 @@ class LiveControlPlaneRuntime:
             sequence=event.sequence,
             account_state=account_state,
         )
-        self._heartbeat_context_provider.update_account_snapshot(
-            snapshot,
-            sequence=event.sequence,
-            account_state=account_state,
-        )
         self._account_snapshot_available = True
         if self._telemetry is not None and event.snapshot_kind == "full":
             self._telemetry.consumer_health(
@@ -247,7 +225,6 @@ class LiveControlPlaneRuntime:
 
         self._account_snapshot_available = False
         self._context_provider.invalidate_account_snapshot()
-        self._heartbeat_context_provider.invalidate_account_snapshot()
         if self._telemetry is not None:
             self._telemetry.consumer_health(
                 consumer="account_event_hub",
@@ -264,22 +241,20 @@ class LiveControlPlaneRuntime:
         )
 
     async def recover_live_lease(self) -> TradingLease | None:
-        """Rebuild context from the latest market state before reacquiring."""
-
-        states = self._latest_market_states.for_symbols(())
-        if not states:
+        """Reload only authorization facts before reacquiring a missing lease."""
+        if not self._account_snapshot_available or not self._market_state_available:
             return None
-        latest_state = states[-1]
-        self._heartbeat_context_provider.invalidate_cache()
-        recovery_context = await self._heartbeat_context_provider(latest_state)
-        return await self._reacquire_lease(recovery_context.gate_context)
+        gate = await self._load_lease_gate()
+        # A disconnect while the read was in flight must not authorize recovery.
+        if not self._account_snapshot_available or not self._market_state_available:
+            return None
+        return await self._reacquire_lease(gate)
 
     def on_lease_renewed(self, lease: TradingLease) -> None:
-        """Publish a committed lease renewal to both live context readers."""
+        """Publish a committed lease renewal to the live context reader."""
 
         self._lease_heartbeat_degraded = False
         self._context_provider.update_lease(lease)
-        self._heartbeat_context_provider.update_lease(lease)
         self._refresh_entry_gate()
         self._mark_database_ok()
         log.info(
@@ -302,7 +277,6 @@ class LiveControlPlaneRuntime:
 
 
 __all__ = [
-    "LatestMarketStateSource",
     "LiveControlPlaneContextProvider",
     "LiveControlPlaneRuntime",
     "is_consumer_lag_reason",

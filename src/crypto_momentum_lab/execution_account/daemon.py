@@ -292,6 +292,12 @@ class UserDataAccountSyncConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReceivedUserDataEvent:
+    event: BinanceUserDataEvent
+    stream_token: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingUserDataPersistence:
     snapshot: AccountSnapshot
     event: BinanceUserDataEvent
@@ -336,7 +342,7 @@ class UserDataAccountSyncDaemon:
         self._rest_sync_lock = asyncio.Lock()
         self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
         self._missing_fill_reconnect_requested_at: dict[FillKey, datetime] = {}
-        self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
+        self._event_queue: asyncio.Queue[_ReceivedUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
         self._receiver_session_id = uuid4().hex
@@ -581,42 +587,42 @@ class UserDataAccountSyncDaemon:
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
         self._received_event_generation += 1
+        receipt = _ReceivedUserDataEvent(
+            event,
+            getattr(self._stream, "continuity_token", None),
+        )
+        queue = self._event_queue
+        self._journal_receipts_in_flight += 1
+        if queue is None:
+            try:
+                await self._record_received_event(receipt)
+                await self._process_event(event)
+            finally:
+                self._journal_receipts_in_flight -= 1
+            return
+        try:
+            queue.put_nowait(receipt)
+        except asyncio.QueueFull:
+            self._journal_receipts_in_flight -= 1
+            self._request_pipeline_recovery(
+                "event_queue_overflow", origin_event=event
+            )
+
+    async def _record_received_event(self, receipt: _ReceivedUserDataEvent) -> None:
         record = getattr(self._service, "record_user_data_event", None)
         if callable(record):
-            self._journal_receipts_in_flight += 1
             try:
                 await record(
-                    event=event,
+                    event=receipt.event,
                     receiver_session_id=self._receiver_session_id,
-                    stream_token=getattr(self._stream, "continuity_token", None),
+                    stream_token=receipt.stream_token,
                 )
             except Exception as error:
                 self._report_error(error)
                 self._request_pipeline_recovery(
-                    "user_data_journal_failed",
-                    origin_event=event,
+                    "user_data_journal_failed", origin_event=receipt.event
                 )
                 raise
-            finally:
-                self._journal_receipts_in_flight -= 1
-        event_queue = self._event_queue
-        if event_queue is None:
-            await self._process_event(event)
-            return
-        if self._reconciliation_active or self._pipeline_recovery_event.is_set():
-            self._defer_event(event)
-            return
-        if self._state is None:
-            return
-        if not self._accept_events:
-            return
-        try:
-            event_queue.put_nowait(event)
-        except asyncio.QueueFull:
-            self._request_pipeline_recovery(
-                "event_queue_overflow",
-                origin_event=event,
-            )
 
     async def _process_event(
         self,
@@ -710,12 +716,17 @@ class UserDataAccountSyncDaemon:
 
     async def _event_worker(
         self,
-        queue: asyncio.Queue[BinanceUserDataEvent],
+        queue: asyncio.Queue[_ReceivedUserDataEvent],
     ) -> None:
         while True:
-            event = await queue.get()
+            receipt = await queue.get()
+            event = receipt.event
             try:
-                await self._process_event(event, replay=True)
+                await self._record_received_event(receipt)
+                if self._reconciliation_active or self._pipeline_recovery_event.is_set():
+                    self._defer_event(event)
+                else:
+                    await self._process_event(event, replay=True)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -725,6 +736,7 @@ class UserDataAccountSyncDaemon:
                     origin_event=event,
                 )
             finally:
+                self._journal_receipts_in_flight -= 1
                 queue.task_done()
 
     async def _persistence_worker(

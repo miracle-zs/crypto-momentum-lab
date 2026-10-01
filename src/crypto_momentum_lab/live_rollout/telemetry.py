@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
@@ -157,6 +157,7 @@ PERSISTED_ORDER_TELEMETRY_EVENTS = frozenset(
 PERSISTED_OPERATIONAL_TELEMETRY_EVENTS = frozenset(
     {
         CONSUMER_HEALTH,
+        "runtime_readiness",
         MARKET_STATE_PROGRESS,
         STRATEGY_OUTPUT_OBSERVED,
         TERMINAL_REASON,
@@ -507,6 +508,8 @@ class LiveRuntimeTelemetry:
         self._recorded_event_count = 0
         self._dropped_event_count = 0
         self._persist_failure_count = 0
+        self._last_readiness_at: datetime | None = None
+        self._last_readiness_gate: object = None
         self._last_market_progress_at: datetime | None = None
         self._last_strategy_output_at_by_symbol: dict[str, datetime] = {}
 
@@ -595,6 +598,19 @@ class LiveRuntimeTelemetry:
             occurred_at=ingress.received_at,
             details=ingress.details(),
         )
+
+    def runtime_readiness(self, payload: Mapping[str, object]) -> None:
+        """Publish the runtime result through the existing best-effort writer."""
+        now = datetime.fromisoformat(str(payload["observed_at"]))
+        gate = payload["tradeability"]
+        if (gate == self._last_readiness_gate and self._last_readiness_at is not None
+                and now - self._last_readiness_at < timedelta(seconds=60)):
+            return
+        self._last_readiness_at = now
+        self._last_readiness_gate = gate
+        # The publisher owns a JSON-compatible diagnostics payload.
+        self._record_observation(event_type="runtime_readiness", occurred_at=now,
+                                 details=cast(Mapping[str, JsonValue], payload))
 
     def consumer_health(
         self,

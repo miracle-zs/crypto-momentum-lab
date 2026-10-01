@@ -228,3 +228,31 @@ PositionLedger 仅在 checkpoint_usable 且当前覆盖 covers_range(parent.even
 相关回归启用本机 Hub 网络测试后 1912 项全部通过，修改文件 Ruff F/I、diff 检查通过。evidence_lifecycle 类型检查通过；ExecutionBook 仍有两个原有类型错误（projection_digest 的 Optional 赋值、reported_quantity 的 Optional 参数），对未修改 HEAD 重跑确认同样存在，本次未增加类型错误。
 
 本次修复尚未部署。生产仍为 aa5ab9d4，前次验收记录不能用本地回归结果更新为“业务异常已解决”。恢复集合内其他原因的阻塞，或裁剪后缺乏完整命令成交证据的情况，不做无证据清除；收盘 K 线事件保留与评估确认仍未完成。
+
+## 重新审查：75efc1eb 部署后的简化与解耦顺序
+
+审查日期 2026-10-01，代码基准 main / 829d5d93（相对生产 75efc1eb 仅增加验收文档）。这是针对主要运行链路的静态复核，结合上一轮部署记录；本次未重新登录生产，未修改运行代码。上文“修复尚未部署、生产仍 aa5ab9d4”描述属于上一阶段历史，本轮生产已经部署 75efc1eb；具体业务遗留以 live-deployment-verification-20261001.md 后续发布章节为准。
+
+### 可确认的复杂度与剩余串行依赖
+
+1. **订单身份重复计算，且规则不一致。** execution_account/orders/trade_command_executor.py:137 使用 idempotency_key 或 deterministic_client_order_id(run_id, command_id)。live_rollout/exit_receipt_recovery.py:43 的 exit_command_client_id 却对长度不超过 36 的 command_id 原样使用。中文短命令也会走原样分支。生产记录已有对应 HTTP 400，因此优先收敛身份规则；静态证据支持原因判断，但本次没有读取交易所错误正文或逐条验证全部历史记录。查询应优先采用已持久化订单身份；无持久化记录时沿用提交路径的同一确定性规则。不得改写已发订单的身份，也不得遇到无效身份就认定订单不存在。可删除恢复路径的长度判断，而不是增加第三套编码策略。
+
+2. **账户消费仍同步执行退出恢复。** runtime_orchestrator.py:1593 的 _on_account_snapshot_combined 在 observe_account_snapshot 和 bind_account_stream 后，:1622 await recover_pending_exits(limit=5)，之后才发布 control_plane 上下文。decision_facts.py:466 的恢复循环可进入 LiveExitReceiptRecovery 查询账户持仓、未结订单和订单回执，也可进入实际退出派发。前面解耦了账户触发的退出检查，却留下这一条网络同步链；limit=5 只限制数量，不保证延迟。应让该回调仅提交事实、绑定已提交版本、发布上下文和唤醒恢复。复用订单修复任务协调恢复触发，替换旧同步调用；不能以无监督 create_task 解决。恢复必须使用重新读取的 Book 版本，并保留原命令幂等及事务确认。
+
+3. **WS reader 仍等待 journal 数据库提交。** execution_account/binance/user_data.py:331 await _on_event；daemon.py:582 的回调先 await record_user_data_event，再入事件队列；sync.py:142 直接 await append_user_data_event。REST 共锁已拆，但数据库延迟仍延迟下一次应用层 socket 读取。这是结构依赖，不代表已证实网络丢包。应把已有事件队列的入口前移到接收回调，使单一有序事实工作任务先提交原始事件、再应用及发布；明确区分 received / durable / applied，只有 durable 事件可参与基线 cut。复用现有队列和监督，不新增独立“接收恢复框架”。溢出或进程退出仍可能丢失尚未持久化事件，需要现有断流/基线修复协议封闭交易；不能同时宣称任意慢数据库、不限内存、完全无损且永不背压。
+
+4. **收盘事件使用等待时间代替事实到齐。** exit_channels.py:145 的收盘通道既有异常重试，又有 pending-position 的多轮 sleep。closed_candle_feed.py:339 入队即记录去重和 last_seen_start；:275 消费只取出，没有业务评估确认。重试耗尽后 continue，已接收的收盘事件不等于已评估。应保存未完成评估的原始收盘事件，账户事实版本推进时再评估，成功后确认；沿用通道事件所有权，删除 pending_position_retry_delays 的同步等待。不同收盘周期不能合并成最新报价，不能只删 sleep 而丢掉退出触发。
+
+5. **多个地方拥有恢复预算与事实副本。** LiveExitReceiptRecovery 维护五秒 REST 持仓/未结订单缓存与账户级退避；exit_processor.py:126–127 维护每根订单尝试次数与下一次时间；order_reconciliation.py 有周期修复；decision_facts.py 有 pending outbox 轮转游标。这些阶段语义不同，不能机械合并状态机，但触发、查询预算和事实提交应只有一个所有者。先复用现有修复工作任务归并触发与查询，再让各阶段返回明确的待证据/已确认结果，删除被替代的缓存及退避；不再新增总协调器包裹全部旧路径。
+
+6. **心跳完整上下文和展示授权仍重复。** runtime_orchestrator.py:1278/1290 仍创建两份 PostgresLiveContextProvider，:1437–1438 同时失效缓存。overview_queries.py:442 起仍根据流状态、租约及 strategy_state 独立计算 FULLY_TRADEABLE；没有读取 Book 命令恢复集合。上一轮已实际看到展示绿色而历史退出恢复失败，但不能据此认定所有开仓必被拒绝。心跳应只读取续租与控制事实，保留独立数据库资源；展示应使用运行层发布的实际门槛及原因和新鲜度，缺失则未知，不自行推断授权。最终提交的批准、租约与风险复核保留。
+
+### 下一步执行顺序与删除目标
+
+- **先统一订单身份。** 从提交和回执查询共同规则入手，覆盖中文短命令、长命令、显式幂等键、已有持久化身份和历史运行身份。验收查询使用真实提交身份；异常不转换成缺席证明。这是小范围删减，并直接对应当前退出遗留。
+- **再移走账户回调中的恢复网络等待。** 用已有修复工作任务接受合并唤醒，删除 await recover_pending_exits 这条消费依赖。验收挂起 REST 时第二条账户事实仍提交和发布；并发触发与重启不重复下单，投影变化不能用旧 token 放行。
+- **随后把 journal 提交移入已有有序事实任务。** 删除接收回调中的数据库 await；以真实 socket 回调和挂起 journal 写入验证接收继续，并检验未提交事件不能证明基线连续。保留明确的容量限制、失败监督和断流修复。
+- **然后以评估确认替换收盘同步退避。** 保留每个未评估收盘事件，事实版本推进时重算，删掉 pending-position sleep 配置及耗尽分支。验收不同 symbol 互不阻塞、同一 symbol 的不同收盘周期不丢失、重放不重复提交退出。
+- **最后清理重复上下文、展示推导与残余恢复预算。** 按上述职责迁移删除旧实现，持续记录删除了哪些状态、参数和同步依赖。没有实际可变需求的薄 Protocol / 转发包装不再增加；文件数量下降不是验收目标。
+
+目标职责保持简单：共享行情与各账户 WS 负责接收；账户事实模块负责有序持久化和投影；已有修复工作任务只在启动、断流、事实缺口或未知回执时补 REST 证据；策略读取已提交视图、输出幂等命令；控制事实负责批准、租约与风险；展示读取结果。事实账本、逐笔成交、累计订单水位、reservation 和 outbox 各解决不同的不确定性，保留它们；简化的是多重所有者和等待链，不能用少一张表或只用 WS 代替缺失证据。

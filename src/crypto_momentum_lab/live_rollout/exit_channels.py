@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -11,8 +12,8 @@ import structlog
 
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
-    DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     ORDER_IDENTITY_CONFLICT_REASON,
+    is_pending_candle_evaluation,
     is_pending_position_sync_failure,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.live_rollout.closed_candle_feed import ClosedCandle15mEvent
 
 log = structlog.get_logger()
+_MAX_RETAINED_CANDLES = 4096
 
 
 
@@ -47,14 +49,7 @@ class LiveExitChannelRuntime:
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
         on_order_identity_conflict: Callable[[str], None] | None = None,
-        pending_position_retry_delays: tuple[float, ...] = (
-            DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
-        ),
     ) -> None:
-        if not pending_position_retry_delays:
-            raise ValueError("pending_position_retry_delays must not be empty")
-        if any(delay <= 0 for delay in pending_position_retry_delays):
-            raise ValueError("pending position retry delays must be positive")
         self._daemon = daemon
         self._latest_market_quotes = latest_market_quotes
         self._latest_market_states = latest_market_states
@@ -64,7 +59,11 @@ class LiveExitChannelRuntime:
         )
         self._on_exit_failure = on_exit_failure
         self._on_order_identity_conflict = on_order_identity_conflict
-        self._pending_position_retry_delays = pending_position_retry_delays
+        self._candle_facts_changed = asyncio.Event()
+        self._pending_candles: dict[tuple[str, datetime], ClosedCandle15mEvent] = {}
+        self._evaluated_candles: set[tuple[str, datetime]] = set()
+        self._evaluated_order: deque[tuple[str, datetime]] = deque()
+
 
     async def run_quote_channel(
         self,
@@ -142,109 +141,92 @@ class LiveExitChannelRuntime:
                 if self._on_exit_failure is not None:
                     self._on_exit_failure(quote.symbol, None)
 
+    def note_account_facts_changed(self) -> None:
+        """Wake candle evaluation only after committed account facts are published."""
+        self._candle_facts_changed.set()
+
     async def run_closed_candle_channel(
         self,
         *,
         source: AsyncIterable[ClosedCandle15mEvent],
     ) -> None:
-        async for event in source:
-            quote = next(
-                iter(self._latest_market_quotes.for_symbols((event.candle.symbol,))),
-                None,
-            )
-            failure: str | None = None
-            for attempt in range(3):
-                try:
-                    failure = await self._daemon.process_closed_candle(
-                        event,
-                        latest_quote=quote,
-                    )
-                    break
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    if self._is_order_identity_conflict(error):
-                        failure = ORDER_IDENTITY_CONFLICT_REASON
-                        if self._on_order_identity_conflict is not None:
-                            self._on_order_identity_conflict(
-                                event.candle.symbol
-                            )
-                        break
-                    if not self._is_transient_error(error):
-                        raise
-                    if attempt == 2:
-                        raise
-                    delay_seconds = float(2**attempt)
-                    log.warning(
-                        "live_closed_candle_processing_retry",
-                        symbol=event.candle.symbol,
-                        candle_start=event.candle.candle_start.isoformat(),
-                        attempt=attempt + 1,
-                        retry_delay_seconds=delay_seconds,
-                        error_type=type(error).__name__,
-                    )
-                    await asyncio.sleep(delay_seconds)
-            if failure is not None:
-                if is_pending_position_sync_failure(failure):
-                    for attempt, delay in enumerate(
-                        self._pending_position_retry_delays,
-                        start=1,
-                    ):
-                        log.warning(
-                            "live_closed_candle_position_sync_retry",
-                            symbol=event.candle.symbol,
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=failure,
-                        )
-                        await asyncio.sleep(delay)
-                        try:
-                            failure = await self._daemon.process_closed_candle(
-                                event,
-                                latest_quote=next(
-                                    iter(self._latest_market_quotes.for_symbols(
-                                        (event.candle.symbol,)
-                                    )),
-                                    None,
-                                ),
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as error:
-                            if not self._is_transient_error(error):
-                                raise
-                            log.warning(
-                                "live_closed_candle_position_sync_degraded",
-                                symbol=event.candle.symbol,
-                                attempt=attempt,
-                                error_type=type(error).__name__,
-                            )
+        iterator = aiter(source)
+        next_event: asyncio.Future[ClosedCandle15mEvent] | None = asyncio.ensure_future(anext(iterator))
+        changed = asyncio.create_task(self._candle_facts_changed.wait())
+        try:
+            while next_event is not None or self._pending_candles:
+                waiting: set[asyncio.Future[ClosedCandle15mEvent] | asyncio.Task[bool]] = {changed}
+                if next_event is not None:
+                    waiting.add(next_event)
+                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                if changed in done:
+                    self._candle_facts_changed.clear()
+                    changed = asyncio.create_task(self._candle_facts_changed.wait())
+                    for key in sorted(self._pending_candles, key=lambda k: (k[1], k[0])):
+                        await self._evaluate_candle(key)
+                if next_event is not None and next_event in done:
+                    try:
+                        event = next_event.result()
+                    except StopAsyncIteration:
+                        next_event = None
+                    else:
+                        next_event = asyncio.ensure_future(anext(iterator))
+                        key = (event.candle.symbol, event.candle.candle_start)
+                        if key in self._evaluated_candles or key in self._pending_candles:
                             continue
-                        if not is_pending_position_sync_failure(failure):
-                            break
-                if failure is None:
-                    if self._on_exit_failure is not None:
-                        self._on_exit_failure(event.candle.symbol, None)
-                    continue
-                if is_pending_position_sync_failure(failure):
-                    # Time cannot establish ownership. The pending-position
-                    # view already protects entry; do not invent an exit fault.
-                    log.warning(
-                        "live_closed_candle_position_sync_pending",
-                        symbol=event.candle.symbol,
-                        reason=failure,
-                    )
-                    continue
-                if failure is not None and self._on_exit_failure is not None:
-                    self._on_exit_failure(event.candle.symbol, failure)
-                log.error(
-                    "live_closed_candle_exit_degraded",
-                    symbol=event.candle.symbol,
-                    reason=failure,
+                        # Bounded retention fails explicitly instead of discarding
+                        # an unevaluated official closing event.
+                        if len(self._pending_candles) >= _MAX_RETAINED_CANDLES:
+                            raise RuntimeError("unevaluated closed-candle capacity exceeded")
+                        self._pending_candles[key] = event
+                        await self._evaluate_candle(key)
+        finally:
+            tasks = [changed] + ([] if next_event is None else [next_event])
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _evaluate_candle(self, key: tuple[str, datetime]) -> None:
+        event = self._pending_candles[key]
+        failure: str | None = None
+        for attempt in range(3):
+            try:
+                failure = await self._daemon.process_closed_candle(
+                    event,
+                    latest_quote=next(iter(self._latest_market_quotes.for_symbols(
+                        (event.candle.symbol,)
+                    )), None),
                 )
-                continue
-            if self._on_exit_failure is not None:
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if self._is_order_identity_conflict(error):
+                    failure = ORDER_IDENTITY_CONFLICT_REASON
+                    if self._on_order_identity_conflict is not None:
+                        self._on_order_identity_conflict(event.candle.symbol)
+                    break
+                if not self._is_transient_error(error) or attempt == 2:
+                    raise
+                await asyncio.sleep(float(2**attempt))
+        if failure is None:
+            del self._pending_candles[key]
+            self._evaluated_candles.add(key)
+            self._evaluated_order.append(key)
+            if len(self._evaluated_order) > _MAX_RETAINED_CANDLES:
+                self._evaluated_candles.discard(self._evaluated_order.popleft())
+            if self._on_exit_failure is not None and not any(
+                pending[0] == event.candle.symbol for pending in self._pending_candles
+            ):
                 self._on_exit_failure(event.candle.symbol, None)
+        elif is_pending_candle_evaluation(failure):
+            log.warning("live_closed_candle_position_sync_pending",
+                        symbol=event.candle.symbol, reason=failure)
+        else:
+            if self._on_exit_failure is not None:
+                self._on_exit_failure(event.candle.symbol, failure)
+            log.error("live_closed_candle_exit_degraded",
+                      symbol=event.candle.symbol, reason=failure)
 
     async def run_grace_timeout_channel(self, *, interval_seconds: float = 1.0) -> None:
         if interval_seconds <= 0:

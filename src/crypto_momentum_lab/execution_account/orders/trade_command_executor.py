@@ -18,9 +18,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.execution_account.orders.ids import (
-    deterministic_client_order_id,
-)
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
 )
@@ -134,10 +131,7 @@ class TradeCommandExecutor:
             else FuturesPositionSide.BOTH
         )
 
-        client_order_id = command.idempotency_key or deterministic_client_order_id(
-            run_id,
-            command.command_id,
-        )
+        client_order_id = command.client_order_id(run_id)
 
         allocations = (
             tuple(command.allocation_plan.allocations)

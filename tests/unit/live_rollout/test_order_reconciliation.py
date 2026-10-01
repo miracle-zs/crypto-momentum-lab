@@ -495,3 +495,68 @@ async def test_incomplete_earlier_run_order_is_repaired_by_existing_worker():
     await reconciliation.reconcile_all()
     assert repaired == [order.plan]
     assert set(scopes) == {"earlier-run", "run-1"}
+
+
+@pytest.mark.asyncio
+async def test_exit_recovery_uses_existing_worker_and_retains_inflight_request():
+    from unittest.mock import AsyncMock
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    second = asyncio.Event()
+    calls = 0
+
+    async def recover():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+        else:
+            second.set()
+
+    repository = SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=()))
+    worker = LiveOrderReconciliation(
+        order_repository=repository,
+        state_machine=SimpleNamespace(),
+        run_id="run",
+        interval_seconds=3600,
+        recover_exits=recover,
+    )
+    task = asyncio.create_task(worker.run_periodically())
+    try:
+        worker.request_recovery()
+        await asyncio.wait_for(started.wait(), 1)
+        # The caller remains synchronous while exchange recovery is blocked.
+        worker.request_recovery()
+        worker.request_recovery()
+        assert calls == 1
+        release.set()
+        await asyncio.wait_for(second.wait(), 1)
+        assert calls == 2
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_failed_exit_recovery_does_not_kill_existing_worker():
+    from unittest.mock import AsyncMock
+
+    recover = AsyncMock(side_effect=[TimeoutError("REST unavailable"), None])
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=())),
+        state_machine=SimpleNamespace(), run_id="run", interval_seconds=0.01,
+        recover_exits=recover,
+    )
+    task = asyncio.create_task(worker.run_periodically())
+    try:
+        async with asyncio.timeout(1):
+            while recover.await_count < 2:
+                await asyncio.sleep(0.001)
+        assert not task.done()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

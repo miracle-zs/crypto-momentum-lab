@@ -54,10 +54,18 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     StrategyLiveStateRow,
     StrategyRuntimeCheckpointRow,
+    StrategyRuntimeEventRow,
     TradingLeaseRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
+
+
+def published_tradeability(account: LiveAccountSummaryResponse, now: datetime) -> TradeabilityDetailResponse | None:
+    observed = account.runtime_observed_at
+    if observed is None or not 0 <= (now - observed).total_seconds() <= 180:
+        return None
+    return account.runtime_tradeability
 
 
 def latest_live_account_process_statement() -> Select[Any]:
@@ -285,10 +293,6 @@ class OverviewQueries:
         for acc in accounts_resp.accounts:
             observed = acc.observed_at or now
             lag = max(0.0, (now - observed).total_seconds())
-            lease_active = (
-                acc.lease_expires_at is not None and acc.lease_expires_at > now
-            )
-            strategy_active = acc.strategy_state in ("active", "running")
 
             head = heads_by_account.get(acc.account_label)
             if head is not None:
@@ -304,21 +308,12 @@ class OverviewQueries:
                 recon_matched = False
                 recon_details = "unconfirmed_reconciliation_head_absent"
 
-            # Report the failed prerequisite itself. Missing strategy state
-            # is not evidence that an otherwise valid lease has expired.
-            if not recon_matched:
-                capability_reason = "reconciliation_mismatched"
-            elif not lease_active:
-                capability_reason = "lease_expired_or_inactive"
-            elif acc.strategy_state is None:
-                capability_reason = "strategy_state_unconfirmed"
-            elif not strategy_active:
-                capability_reason = "strategy_not_active"
-            elif acc.status != OperationalStatus.READY:
-                capability_reason = "account_not_ready"
-            else:
-                capability_reason = "ready"
-            cap_ok = capability_reason == "ready"
+            runtime_gate = published_tradeability(acc, now)
+            capability_reason = (
+                runtime_gate.entry_gate_reason if runtime_gate is not None
+                else "runtime_readiness_missing_or_stale"
+            )
+            cap_ok = runtime_gate is not None and runtime_gate.entry_gate_open
 
             acc_view = evaluate_standard_health(
                 scope=f"account:{acc.account_label}",
@@ -401,13 +396,13 @@ class OverviewQueries:
                 observed_at=now,
                 liveness={"app_status": "UP", "database_status": "DOWN"},
                 tradeability=TradeabilityDetailResponse(
-                    mode="HALTED",
+                    mode="UNKNOWN",
                     entry_gate_open=False,
                     entry_gate_reason=f"readiness_query_failed: {exc}",
                     exit_gate_open=False,
                     exit_gate_reason=f"readiness_query_failed: {exc}",
                     unmanaged_risk_clear=False,
-                    halt_active=True,
+                    halt_active=False,
                 ),
                 stream_readiness=StreamReadinessDetailResponse(
                     overall="DOWN",
@@ -419,6 +414,7 @@ class OverviewQueries:
         has_halt = overview_resp.active_halt_count > 0 or any(
             a.status == OperationalStatus.HALTED for a in accounts_resp.accounts
         )
+        observed_halt = has_halt
         database_up = liveness.get("database_status") == "UP"
 
         streams_dict: dict[str, str] = {}
@@ -439,101 +435,38 @@ class OverviewQueries:
             streams_dict and all(v == "READY" for v in streams_dict.values())
         )
 
-        # To be FULLY_TRADEABLE, we must satisfy all conditions:
-        # 1. No active halt and database is UP
-        # 2. Market data and execution streams are FRESH/READY
-        # 3. Accounts exist, are fresh, have valid active leases, and strategy is active
-        accounts_tradeable = bool(accounts_resp.accounts) and all(
-            a.status == OperationalStatus.READY
-            and a.observed_at is not None
-            and (now - a.observed_at).total_seconds() <= 180.0
-            and a.lease_expires_at is not None
-            and a.lease_expires_at > now
-            and a.strategy_state in ("active", "running")
-            for a in accounts_resp.accounts
-        )
-
-        can_trade = (
-            not has_halt and database_up and streams_all_ready and accounts_tradeable
-        )
-
-        if has_halt:
-            status = OperationalStatus.HALTED
-            mode = "HALTED"
-            entry_gate_open = False
-            entry_gate_reason = "halt_active"
-            exit_gate_open = False
-            exit_gate_reason = "halt_active"
-            unmanaged_risk_clear = False
-        elif not database_up:
-            status = OperationalStatus.DOWN
-            mode = "HALTED"
-            entry_gate_open = False
-            entry_gate_reason = "database_down"
-            exit_gate_open = False
-            exit_gate_reason = "database_down"
-            unmanaged_risk_clear = False
-        elif can_trade:
-            status = OperationalStatus.READY
-            mode = "FULLY_TRADEABLE"
-            entry_gate_open = True
-            entry_gate_reason = "live_entry_prerequisites_ready"
-            exit_gate_open = True
-            exit_gate_reason = "normal"
-            unmanaged_risk_clear = True
-        elif accounts_resp.accounts:
-            # Accounts are present, exit channels remain open, but entry is blocked
-            status = (
-                OperationalStatus.STALE
-                if any(
-                    a.status == OperationalStatus.STALE for a in accounts_resp.accounts
-                )
-                else OperationalStatus.DEGRADED
-            )
-            mode = "EXIT_ONLY"
-            entry_gate_open = False
-            if not streams_all_ready:
-                unready_stream = next(
-                    (name for name, state in streams_dict.items() if state != "READY"),
-                    None,
-                )
-                entry_gate_reason = (
-                    f"{unready_stream.replace('-', '_')}_not_ready"
-                    if unready_stream is not None
-                    else "streams_not_ready"
-                )
-            elif any(
-                a.lease_expires_at is None or a.lease_expires_at <= now
-                for a in accounts_resp.accounts
-            ):
-                entry_gate_reason = "trading_lease_missing_or_expired"
-            elif any(a.strategy_state is None for a in accounts_resp.accounts):
-                entry_gate_reason = "strategy_state_unconfirmed"
-            elif any(
-                a.strategy_state not in ("active", "running")
-                for a in accounts_resp.accounts
-            ):
-                entry_gate_reason = "strategy_not_active"
-            elif any(
-                a.observed_at is None or (now - a.observed_at).total_seconds() > 180.0
-                for a in accounts_resp.accounts
-            ):
-                entry_gate_reason = "account_stale"
-            elif any(a.readiness == "syncing" for a in accounts_resp.accounts):
-                entry_gate_reason = "account_syncing"
-            else:
-                entry_gate_reason = "account_not_ready"
-            exit_gate_open = True
-            exit_gate_reason = "normal"
-            unmanaged_risk_clear = True
+        published = [published_tradeability(a, now) for a in accounts_resp.accounts]
+        confirmed = bool(published) and all(item is not None for item in published)
+        if confirmed:
+            gates = [item for item in published if item is not None]
+            blocked = next((item for item in gates if not item.entry_gate_open), gates[0])
+            entry_gate_open = all(item.entry_gate_open for item in gates)
+            exit_gate_open = all(item.exit_gate_open for item in gates)
+            entry_gate_reason = blocked.entry_gate_reason
+            exit_gate_reason = next((item.exit_gate_reason for item in gates
+                                     if not item.exit_gate_open), gates[0].exit_gate_reason)
+            unmanaged_risk_clear = all(item.unmanaged_risk_clear for item in gates)
+            has_halt = any(item.halt_active for item in gates)
+            mode = "HALTED" if has_halt else ("FULLY_TRADEABLE" if entry_gate_open else "EXIT_ONLY" if exit_gate_open else "DEGRADED")
+            status = OperationalStatus.READY if entry_gate_open else OperationalStatus.HALTED if has_halt else OperationalStatus.DEGRADED
         else:
             status = OperationalStatus.UNKNOWN
-            mode = "DEGRADED"
-            entry_gate_open = False
-            entry_gate_reason = "no_accounts_configured"
-            exit_gate_open = False
-            exit_gate_reason = "no_accounts_configured"
-            unmanaged_risk_clear = False
+            mode = "UNKNOWN"
+            entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
+            entry_gate_reason = exit_gate_reason = "runtime_readiness_missing_or_stale"
+            has_halt = False
+        if not database_up:
+            status = OperationalStatus.DOWN
+            mode = "UNKNOWN"
+            entry_gate_open = exit_gate_open = False
+            entry_gate_reason = exit_gate_reason = "runtime_readiness_unavailable"
+
+        if observed_halt:
+            status = OperationalStatus.HALTED
+            mode = "HALTED"
+            has_halt = True
+            entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
+            entry_gate_reason = exit_gate_reason = "halt_active"
 
         stream_overall = (
             "READY"
@@ -599,6 +532,28 @@ class OverviewQueries:
             leases,
             now=now,
         )
+        async with self._session_factory() as session:
+            for account in accounts:
+                row = await session.scalar(select(StrategyRuntimeEventRow).where(
+                    StrategyRuntimeEventRow.event_type == "runtime_readiness",
+                    StrategyRuntimeEventRow.occurred_at >= now - timedelta(seconds=180),
+                    StrategyRuntimeEventRow.occurred_at <= now,
+                    StrategyRuntimeEventRow.details["account_label"].astext == account.account_label,
+                ).order_by(StrategyRuntimeEventRow.occurred_at.desc()).limit(1))
+                if row is None:
+                    continue
+                payload = row.details
+                lease = next((l for l in leases if l.account_label == account.account_label), None)
+                if (payload.get("schema_version") != 1 or lease is None
+                        or payload.get("code_commit") != lease.code_generation
+                        or payload.get("session_id") != row.run_id):
+                    continue
+                try:
+                    account.runtime_tradeability = TradeabilityDetailResponse.model_validate(payload["tradeability"], strict=True)
+                    account.runtime_observed_at = row.occurred_at
+                except (ValueError, KeyError, TypeError):
+                    continue
+
         return LiveAccountsResponse(
             status=live_account_fleet_status(accounts),
             accounts=accounts,

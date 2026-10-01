@@ -43,7 +43,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryClient,
-    ExitRecoveryInspectionUnknownError,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -122,7 +121,6 @@ class LiveExitProcessor:
         self._invalidate_context_cache = invalidate_context_cache
         self._context_is_current = context_is_current
         self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
-        self._exit_recovery_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._exit_recovery_attempts: dict[str, int] = {}
         self._exit_recovery_next_attempt_at: dict[str, datetime] = {}
 
@@ -195,7 +193,14 @@ class LiveExitProcessor:
                 context=context,
             )
             if recovery_outcome is not None:
-                return recovery_outcome
+                # Recovery is not evaluation of the official closing event.
+                # Revisit it after committed order/account facts refresh context.
+                return replace(
+                    recovery_outcome,
+                    failure=recovery_outcome.failure or (
+                        f"pending_exit_order_recovery:{event.candle.symbol}"
+                    ),
+                )
             if not self._context_is_current(context):
                 return ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_closed_candle(
@@ -381,89 +386,30 @@ class LiveExitProcessor:
         next_attempt_at = self._exit_recovery_next_attempt_at.get(root)
         if next_attempt_at is not None and now < next_attempt_at:
             return None
-        lock_key = (plan.symbol, plan.position_side.value)
-        lock = self._exit_recovery_locks.setdefault(lock_key, asyncio.Lock())
-        async with lock:
-            now = self._clock()
-            current_attempt = max(
-                current_attempt,
-                self._exit_recovery_attempts.get(root, 0),
+        # All production callers already own the shared symbol decision lock.
+        try:
+            observation = await recovery_client.inspect_exit_order(plan)
+        except Exception as error:
+            # A malformed or incomplete read is still an unknown exchange
+            # outcome.  Keep the exit lane alive and retry after the same
+            # short backoff instead of making the whole daemon halt.
+            self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
             )
-            next_attempt_at = self._exit_recovery_next_attempt_at.get(root)
-            if next_attempt_at is not None and now < next_attempt_at:
-                return None
-            if current_attempt >= _EXIT_RECOVERY_MAX_ATTEMPTS:
-                return None
-            try:
-                observation = await recovery_client.inspect_exit_order(plan)
-            except ExitRecoveryInspectionUnknownError as error:
-                self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
-                )
-                log.warning(
-                    "live_exit_recovery_inspection_deferred",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-                return None
-            except Exception as error:
-                # A malformed or incomplete read is still an unknown exchange
-                # outcome.  Keep the exit lane alive and retry after the same
-                # short backoff instead of making the whole daemon halt.
-                self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
-                )
-                log.warning(
-                    "live_exit_recovery_inspection_deferred",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-                return None
+            log.warning(
+                "live_exit_recovery_inspection_deferred",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                error_type=type(error).__name__,
+            )
+            return None
 
-            observed_result: OrderExecutionResult | None = None
-            if observation.order is not None:
-                if not observation.order.state.terminal:
-                    log.info(
-                        "live_exit_recovery_original_order_still_active",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                        active_order_client_ids=(
-                            list(observation.active_exit_order_client_ids)
-                        ),
-                    )
-                    return None
-                observed_result = await self._state_machine.apply_observed_snapshot(
-                    plan,
-                    observation.order,
-                )
-                if (
-                    observation.order.state is ExchangeOrderState.FILLED
-                    and observation.position_quantity <= 0
-                ):
-                    self._exit_recovery_attempts.pop(root, None)
-                    self._exit_recovery_next_attempt_at.pop(root, None)
-                    return observed_result
-            elif plan.client_order_id not in observation.active_exit_order_client_ids:
-                observed_result = await self._state_machine.mark_absent_reconciled(
-                    plan,
-                    details={
-                        "reason": "exit_recovery_original_absent",
-                        "recovery": True,
-                        "position_quantity": str(observation.position_quantity),
-                        "active_exit_order_client_ids": list(
-                            observation.active_exit_order_client_ids
-                        ),
-                        "observed_at": observation.observed_at.isoformat(),
-                    },
-                )
-            if observation.active_exit_order_client_ids:
+        observed_result: OrderExecutionResult | None = None
+        if observation.order is not None:
+            if not observation.order.state.terminal:
                 log.info(
-                    "live_exit_recovery_other_exit_order_active",
+                    "live_exit_recovery_original_order_still_active",
                     run_id=self._config.run_id,
                     symbol=plan.symbol,
                     client_order_id=plan.client_order_id,
@@ -471,122 +417,157 @@ class LiveExitProcessor:
                         list(observation.active_exit_order_client_ids)
                     ),
                 )
+                return None
+            observed_result = await self._state_machine.apply_observed_snapshot(
+                plan,
+                observation.order,
+            )
+            if (
+                observation.order.state is ExchangeOrderState.FILLED
+                and observation.position_quantity <= 0
+            ):
+                self._exit_recovery_attempts.pop(root, None)
+                self._exit_recovery_next_attempt_at.pop(root, None)
                 return observed_result
-            if observation.position_quantity <= 0:
-                if observed_result is not None:
-                    self._exit_recovery_attempts.pop(root, None)
-                    self._exit_recovery_next_attempt_at.pop(root, None)
-                    return observed_result
-                details: dict[str, JsonValue] = {
-                    "reason": "exit_recovery_position_flat",
+        elif plan.client_order_id not in observation.active_exit_order_client_ids:
+            observed_result = await self._state_machine.mark_absent_reconciled(
+                plan,
+                details={
+                    "reason": "exit_recovery_original_absent",
                     "recovery": True,
                     "position_quantity": str(observation.position_quantity),
                     "active_exit_order_client_ids": list(
                         observation.active_exit_order_client_ids
                     ),
                     "observed_at": observation.observed_at.isoformat(),
-                }
-                resolved = await self._state_machine.mark_absent_reconciled(
-                    plan,
-                    details=details,
-                )
-                self._exit_recovery_attempts.pop(root, None)
-                self._exit_recovery_next_attempt_at.pop(root, None)
-                return resolved
-
-            # The exchange position is the authoritative remaining close
-            # quantity.  Do not cap it by the previous order's quantity: that
-            # would under-close after a partial fill on an earlier recovery
-            # attempt.  The order is reduce-only (or position-side scoped in
-            # hedge mode), so an exchange-side quantity check still prevents
-            # opening or reversing a position.
-            recovery_quantity = observation.position_quantity
-            if recovery_quantity <= 0:
-                log.error(
-                    "live_exit_recovery_position_quantity_inconsistent",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    position_quantity=str(observation.position_quantity),
-                    order_quantity=str(plan.quantity),
-                    known_executed_quantity=str(known_executed_quantity),
-                )
-                return observed_result
-            recovery_attempt = current_attempt + 1
-            recovery_candidate = _build_exit_recovery_candidate(
-                plan=plan,
-                source_candidate=source_candidate,
-                context=context,
-                state=state,
-                now=now,
-                reference_price=reference_price,
-                root_client_order_id=root,
-                attempt=recovery_attempt,
-                quantity=recovery_quantity,
-                recovery_entry_type=recovery_entry_type,
-                recovery_limit_price=recovery_limit_price,
+                },
             )
-            if recovery_candidate is None:
-                return observed_result
-            self._exit_recovery_attempts[root] = recovery_attempt
-            delay_index = min(
-                recovery_attempt - 1,
-                len(_EXIT_RECOVERY_RETRY_DELAYS_SECONDS) - 1,
-            )
-            self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[delay_index]
-            )
-            try:
-                recovery_result = await self._submission.execute(
-                    recovery_candidate,
-                    requested_quantity=recovery_quantity,
-                    state=state,
-                    context=context,
-                    reference_price=reference_price,
-                )
-            except Exception as error:
-                if not (
-                    _is_position_readiness_guard(error)
-                    or _is_missing_position_facts(error)
-                ):
-                    raise
-                # No POST passed the guard, so this did not consume a retry.
-                self._exit_recovery_attempts[root] = current_attempt
-                self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
-                )
-                log.warning(
-                    "live_exit_recovery_position_not_ready",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                )
-                return observed_result
-            if recovery_result is None:
-                log.error(
-                    "live_exit_recovery_not_submitted",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    recovery_attempt=recovery_attempt,
-                )
-                return observed_result
-            log.warning(
-                "live_exit_recovery_submitted",
+        if observation.active_exit_order_client_ids:
+            log.info(
+                "live_exit_recovery_other_exit_order_active",
                 run_id=self._config.run_id,
                 symbol=plan.symbol,
-                original_client_order_id=root,
-                recovery_client_order_id=recovery_result.client_order_id,
-                recovery_attempt=recovery_attempt,
-                order_type=recovery_candidate.entry_type.value,
-                quantity=str(recovery_quantity),
-                position_quantity=str(observation.position_quantity),
-                known_executed_quantity=str(known_executed_quantity),
-                outcome=recovery_result.state.value,
+                client_order_id=plan.client_order_id,
+                active_order_client_ids=(
+                    list(observation.active_exit_order_client_ids)
+                ),
             )
-            if recovery_result.state is ExchangeOrderState.FILLED:
+            return observed_result
+        if observation.position_quantity <= 0:
+            if observed_result is not None:
+                self._exit_recovery_attempts.pop(root, None)
                 self._exit_recovery_next_attempt_at.pop(root, None)
-            return recovery_result
+                return observed_result
+            details: dict[str, JsonValue] = {
+                "reason": "exit_recovery_position_flat",
+                "recovery": True,
+                "position_quantity": str(observation.position_quantity),
+                "active_exit_order_client_ids": list(
+                    observation.active_exit_order_client_ids
+                ),
+                "observed_at": observation.observed_at.isoformat(),
+            }
+            resolved = await self._state_machine.mark_absent_reconciled(
+                plan,
+                details=details,
+            )
+            self._exit_recovery_attempts.pop(root, None)
+            self._exit_recovery_next_attempt_at.pop(root, None)
+            return resolved
+
+        # The exchange position is the authoritative remaining close
+        # quantity.  Do not cap it by the previous order's quantity: that
+        # would under-close after a partial fill on an earlier recovery
+        # attempt.  The order is reduce-only (or position-side scoped in
+        # hedge mode), so an exchange-side quantity check still prevents
+        # opening or reversing a position.
+        recovery_quantity = observation.position_quantity
+        if recovery_quantity <= 0:
+            log.error(
+                "live_exit_recovery_position_quantity_inconsistent",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                position_quantity=str(observation.position_quantity),
+                order_quantity=str(plan.quantity),
+                known_executed_quantity=str(known_executed_quantity),
+            )
+            return observed_result
+        recovery_attempt = current_attempt + 1
+        recovery_candidate = _build_exit_recovery_candidate(
+            plan=plan,
+            source_candidate=source_candidate,
+            context=context,
+            state=state,
+            now=now,
+            reference_price=reference_price,
+            root_client_order_id=root,
+            attempt=recovery_attempt,
+            quantity=recovery_quantity,
+            recovery_entry_type=recovery_entry_type,
+            recovery_limit_price=recovery_limit_price,
+        )
+        if recovery_candidate is None:
+            return observed_result
+        self._exit_recovery_attempts[root] = recovery_attempt
+        delay_index = min(
+            recovery_attempt - 1,
+            len(_EXIT_RECOVERY_RETRY_DELAYS_SECONDS) - 1,
+        )
+        self._exit_recovery_next_attempt_at[root] = now + timedelta(
+            seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[delay_index]
+        )
+        try:
+            recovery_result = await self._submission.execute(
+                recovery_candidate,
+                requested_quantity=recovery_quantity,
+                state=state,
+                context=context,
+                reference_price=reference_price,
+            )
+        except Exception as error:
+            if not (
+                _is_position_readiness_guard(error)
+                or _is_missing_position_facts(error)
+            ):
+                raise
+            # No POST passed the guard, so this did not consume a retry.
+            self._exit_recovery_attempts[root] = current_attempt
+            self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+            )
+            log.warning(
+                "live_exit_recovery_position_not_ready",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+            )
+            return observed_result
+        if recovery_result is None:
+            log.error(
+                "live_exit_recovery_not_submitted",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                recovery_attempt=recovery_attempt,
+            )
+            return observed_result
+        log.warning(
+            "live_exit_recovery_submitted",
+            run_id=self._config.run_id,
+            symbol=plan.symbol,
+            original_client_order_id=root,
+            recovery_client_order_id=recovery_result.client_order_id,
+            recovery_attempt=recovery_attempt,
+            order_type=recovery_candidate.entry_type.value,
+            quantity=str(recovery_quantity),
+            position_quantity=str(observation.position_quantity),
+            known_executed_quantity=str(known_executed_quantity),
+            outcome=recovery_result.state.value,
+        )
+        if recovery_result.state is ExchangeOrderState.FILLED:
+            self._exit_recovery_next_attempt_at.pop(root, None)
+        return recovery_result
 
     async def _refresh_context_if_stale(
         self,

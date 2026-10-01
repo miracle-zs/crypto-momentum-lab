@@ -13,6 +13,7 @@ from uuid import uuid4
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
     FuturesPositionSide,
+    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
@@ -178,6 +179,12 @@ class TradeCommand:
     idempotency_key: str | None = None
     expected_projection_version: str | None = None
     reservation_id: str | None = None
+
+    def client_order_id(self, run_id: str) -> str:
+        """Use the same exchange identity for submission and receipt recovery."""
+        return self.idempotency_key or deterministic_client_order_id(
+            run_id, self.command_id
+        )
 
     def __post_init__(self) -> None:
         if not self.command_id.strip():

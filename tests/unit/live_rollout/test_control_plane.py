@@ -76,15 +76,13 @@ def _runtime(
         reacquire_calls.append(gate_context)
         return _lease()
 
-    class States:
-        def for_symbols(self, _symbols: tuple[str, ...]) -> tuple[object, ...]:
-            return states
+    async def load_gate():
+        return heartbeat_provider.recovery_context.gate_context
 
     runtime = LiveControlPlaneRuntime(
         session_id="live-1",
         context_provider=provider,
-        heartbeat_context_provider=heartbeat_provider,
-        latest_market_states=States(),
+        load_lease_gate=load_gate,
         reacquire_lease=reacquire,
         market_state_available=market_state_available,
         notify_market_state_gap=market_gap_calls.append,
@@ -155,7 +153,7 @@ def test_account_snapshot_recovery_fails_closed_until_full_snapshot() -> None:
     runtime.on_account_snapshot_recovery("account_event_sequence_gap")
     assert runtime.account_snapshot_available is False
     assert provider.account_invalidations == 1
-    assert heartbeat_provider.account_invalidations == 1
+    assert heartbeat_provider.account_invalidations == 0
     assert telemetry.events[-1] == {
         "consumer": "account_event_hub",
         "available": False,
@@ -167,12 +165,12 @@ def test_account_snapshot_recovery_fails_closed_until_full_snapshot() -> None:
     runtime.on_account_snapshot(_account_event(snapshot=_snapshot()))
     assert runtime.account_snapshot_available is True
     assert len(provider.account_updates) == 1
-    assert len(heartbeat_provider.account_updates) == 1
+    assert heartbeat_provider.account_updates == []
     assert telemetry.events[-1]["recovery"] is True
     assert len(refreshes) == 2
 
 
-async def test_lease_callbacks_publish_state_and_recover_from_latest_market_state() -> (
+async def test_lease_callbacks_publish_state_and_recover_from_control_facts() -> (
     None
 ):
     provider = FakeContextProvider()
@@ -194,13 +192,13 @@ async def test_lease_callbacks_publish_state_and_recover_from_latest_market_stat
     runtime.on_lease_renewed(lease)
     assert runtime.lease_heartbeat_degraded is False
     assert provider.lease_updates == [lease]
-    assert heartbeat_provider.lease_updates == [lease]
+    assert heartbeat_provider.lease_updates == []
     assert database_markers == [True]
 
     recovered = await runtime.recover_live_lease()
     assert recovered == lease
-    assert heartbeat_provider.loaded_states == [latest_states[-1]]
-    assert heartbeat_provider.cache_invalidations == 1
+    assert heartbeat_provider.loaded_states == []
+    assert heartbeat_provider.cache_invalidations == 0
     assert reacquire_calls == [gate_context]
     assert len(refreshes) == 2
 
@@ -249,3 +247,35 @@ def test_strategy_warmup_transition_refreshes_entry_gate() -> None:
     assert runtime.strategy_warmup_ready is True
     assert runtime.strategy_warmup_reason == "strategy_warmup_ready"
     assert len(refreshes) == 1
+
+
+async def test_account_recovery_during_gate_read_cannot_reacquire_lease():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    provider = FakeContextProvider()
+    runtime, _, _, calls, _, _ = _runtime(
+        provider=provider, heartbeat_provider=FakeContextProvider()
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def load_gate():
+        started.set()
+        await release.wait()
+        return object()
+
+    runtime._load_lease_gate = load_gate
+    task = asyncio.create_task(runtime.recover_live_lease())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        runtime.on_account_snapshot_recovery("sequence_gap")
+        release.set()
+        assert await task is None
+        assert calls == []
+        runtime._load_lease_gate = AsyncMock(side_effect=AssertionError("must not read"))
+        assert await runtime.recover_live_lease() is None
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -110,7 +110,6 @@ from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProce
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exit_receipt_recovery import (
     LiveExitReceiptRecovery,
-    exit_command_client_id,
 )
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -843,7 +842,7 @@ async def run_live_daemon(
             allocs = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
-            exit_client_order_id = exit_command_client_id(session_id, cmd)
+            exit_client_order_id = cmd.client_order_id(session_id)
             candidate_id = f"intent_exit_{cmd.command_id}"
             signal_id = f"sig_exit_{cmd.command_id}"
 
@@ -963,10 +962,14 @@ async def run_live_daemon(
             repository=order_adoption_repository,
             run_id=session_id,
         )
+        async def recover_decision_exits() -> None:
+            await fact_source.recover_pending_exits(limit=5)
+
         order_reconciliation = LiveOrderReconciliation(
             order_repository=order_read_repository,
             state_machine=execution_coordinator,
             run_id=session_id,
+            recover_exits=recover_decision_exits,
         )
         await order_reconciliation.reconcile_all()
         log_startup_phase("order_state_reconciled")
@@ -1072,6 +1075,7 @@ async def run_live_daemon(
             raise RuntimeError("live strategy does not expose required data")
         live_readiness = LiveReadinessPublisher(
             health=health,
+            on_publish=telemetry.runtime_readiness,
             account_label=account_label,
             session_id=session_id,
             strategy=strategy_name,
@@ -1287,20 +1291,7 @@ async def run_live_daemon(
             lease_owner=lease_owner,
             approval_id=approval.approval_id,
         )
-        heartbeat_context_provider = PostgresLiveContextProvider(
-            execution_session_factory=heartbeat_factory,
-            market_session_factory=market_factory,
-            account_label=account_label,
-            run_id=session_id,
-            strategy_name=strategy_name,
-            strategy_config_hash=strategy_config_hash,
-            git_commit_hash=git_commit_hash,
-            migration_revision=migration_revision,
-            lease_owner=lease_owner,
-            approval_id=approval.approval_id,
-        )
         context_provider.set_execution_book(execution_book)
-        heartbeat_context_provider.set_execution_book(execution_book)
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
         entry_universe_context_provider = entry_runtime.entry_universe_context_provider
@@ -1435,7 +1426,6 @@ async def run_live_daemon(
 
         def invalidate_live_contexts() -> None:
             context_provider.invalidate_cache()
-            heartbeat_context_provider.invalidate_cache()
 
         def refresh_entry_enabled() -> None:
             if (
@@ -1487,11 +1477,13 @@ async def run_live_daemon(
                 lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
             )
 
+        async def load_lease_gate() -> LiveGateContext:
+            return await context_provider.load_lease_gate(heartbeat_factory)
+
         control_plane_runtime = LiveControlPlaneRuntime(
             session_id=session_id,
             context_provider=context_provider,
-            heartbeat_context_provider=heartbeat_context_provider,
-            latest_market_states=latest_market_states,
+            load_lease_gate=load_lease_gate,
             reacquire_lease=reacquire_live_lease,
             market_state_available=(
                 True
@@ -1619,8 +1611,10 @@ async def run_live_daemon(
                 # A durable accepted exit is dispatchable only after the
                 # account facts for the current Hub epoch have reached the
                 # restored Book and its original projection token still wins.
-                await fact_source.recover_pending_exits(limit=5)
+                order_reconciliation.request_recovery()
             control_plane_runtime.on_account_snapshot(event)
+            if event.account_snapshot is not None or event.fills:
+                exit_channel_runtime.note_account_facts_changed()
 
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,

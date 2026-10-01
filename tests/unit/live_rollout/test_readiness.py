@@ -408,3 +408,32 @@ def test_readiness_compute_dynamic_market_age_and_published_at(
     payload = json.loads(health.readiness_path.read_text())
     assert "published_at" in payload
     assert payload["latest_market_state_at"] == t0.isoformat()
+
+
+def test_readiness_publishes_same_payload_to_existing_telemetry_and_file(tmp_path):
+    from crypto_momentum_lab.live_rollout.telemetry import LiveRuntimeTelemetry
+    health, publisher = _publisher(tmp_path)
+    telemetry = LiveRuntimeTelemetry(run_id="live-primary-v1")
+    publisher._on_publish = telemetry.runtime_readiness
+    publisher.publish()
+    event = telemetry.recent_events[-1]
+    assert event.event_type == "runtime_readiness"
+    assert json.loads((tmp_path / "health" / "readiness").read_text()) == dict(event.details)
+    assert event.details["account_label"] == "primary"
+    assert event.details["tradeability"]["entry_gate_open"] is False
+    publisher.publish()
+    assert len(telemetry.recent_events) == 1
+    publisher._entry_enabled = True
+    publisher._entry_enabled_reason = "ready"
+    publisher.publish()
+    assert len(telemetry.recent_events) == 2
+    assert telemetry.recent_events[-1].details["tradeability"]["entry_gate_open"] is True
+
+
+def test_failed_telemetry_sink_does_not_prevent_local_readiness(tmp_path):
+    health, publisher = _publisher(tmp_path)
+    def fail(payload):
+        raise RuntimeError("writer unavailable")
+    publisher._on_publish = fail
+    publisher.publish()
+    assert (tmp_path / "health" / "readiness").exists()

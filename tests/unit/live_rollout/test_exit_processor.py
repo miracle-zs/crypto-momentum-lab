@@ -504,3 +504,66 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
     assert result == (0, 0, "position_not_ready")
     assert not book.get_active_reservations(scope.to_position_key())
     backend.submit.assert_not_called()
+
+
+async def test_state_and_quote_recovery_share_one_decision_lock_and_budget():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    processor = _processor(RecordingSubmission(_acknowledged_result()))
+    processor._exit_manager = object()
+    state = _state()
+    plan = SimpleNamespace(symbol=state.symbol, reduce_only=True,
+                           client_order_id="unknown-exit", intent_id="exit",
+                           position_side=SimpleNamespace(value="LONG"))
+    context = SimpleNamespace(unresolved_orders=(SimpleNamespace(
+        plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        executed_quantity=Decimal("0"), updated_at=NOW),))
+
+    async def inspect(plan):
+        calls.append(plan.client_order_id)
+        started.set()
+        await release.wait()
+        raise TimeoutError("unknown exchange receipt")
+
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
+    first = asyncio.create_task(processor.process_state(state, context))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        second = asyncio.create_task(processor.process_quote(
+            SimpleNamespace(symbol=state.symbol), state, context))
+        await asyncio.sleep(0)
+        assert calls == ["unknown-exit"]
+        assert not second.done()
+        release.set()
+        outcomes = await asyncio.wait_for(asyncio.gather(first, second), 1)
+        assert calls == ["unknown-exit"]
+        assert all(o.submitted_order_count == 0 for o in outcomes)
+    finally:
+        release.set()
+        first.cancel()
+        if second is not None:
+            second.cancel()
+        await asyncio.gather(first, *([] if second is None else [second]), return_exceptions=True)
+
+
+async def test_candle_recovery_does_not_confirm_unevaluated_closing_event():
+    from unittest.mock import AsyncMock
+
+
+    processor = _processor(RecordingSubmission(_acknowledged_result()))
+    processor._exit_manager = SimpleNamespace(requests_for_closed_candle=AsyncMock())
+    state = _state()
+    plan = SimpleNamespace(symbol=state.symbol, reduce_only=True,
+                           client_order_id="unknown-exit", intent_id="exit",
+                           position_side=SimpleNamespace(value="LONG"))
+    context = SimpleNamespace(unresolved_orders=(SimpleNamespace(
+        plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        executed_quantity=Decimal("0"), updated_at=NOW),))
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(side_effect=TimeoutError("unknown receipt")))
+    event = SimpleNamespace(candle=SimpleNamespace(symbol=state.symbol))
+    outcome = await processor.process_closed_candle(event, state, context, None)
+    assert outcome.failure == f"pending_exit_order_recovery:{event.candle.symbol}"
+    processor._exit_manager.requests_for_closed_candle.assert_not_awaited()

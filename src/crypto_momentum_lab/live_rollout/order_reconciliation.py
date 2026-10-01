@@ -5,7 +5,7 @@ The existing repair worker reconciles incomplete events and unresolved orders.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import structlog
@@ -42,6 +42,7 @@ class LiveOrderReconciliation:
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     on_unknown_order: Callable[[str], None] | None = None
+    recover_exits: Callable[[], Awaitable[None]] | None = None
     _requested: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
     )
@@ -51,6 +52,10 @@ class LiveOrderReconciliation:
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
+
+    def request_recovery(self) -> None:
+        """Wake the existing repair worker without awaiting exchange work."""
+        self._requested.set()
 
     async def reconcile_account_event(self, event: AccountEvent) -> None:
         """Reconcile the unresolved order identified by an account event."""
@@ -138,6 +143,8 @@ class LiveOrderReconciliation:
             self._requested.clear()
             try:
                 await self.reconcile_all()
+                if self.recover_exits is not None:
+                    await self.recover_exits()
             except asyncio.CancelledError:
                 raise
             except Exception:

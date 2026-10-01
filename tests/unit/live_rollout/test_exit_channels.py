@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -55,121 +56,126 @@ async def test_quote_channel_updates_cache_and_reports_success() -> None:
     assert outcomes == [("BTCUSDT", None)]
 
 
-@pytest.mark.asyncio
-async def test_closed_candle_channel_retries_pending_position_sync(
-    monkeypatch,
-) -> None:
-    candle = SimpleNamespace(
-        symbol="BTCUSDT",
-        candle_start=datetime(2026, 8, 4, tzinfo=UTC),
-    )
-    event = SimpleNamespace(candle=candle)
-    failures: list[tuple[str, str | None]] = []
-    sleeps: list[float] = []
-
-    async def controlled_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(exit_channels.asyncio, "sleep", controlled_sleep)
-
-    class QuoteCache:
-        def for_symbols(self, _symbols):
-            return ()
-
-    class StateCache:
-        def for_symbols(self, _symbols):
-            return ()
-
-    class Daemon:
-        managed_position_symbols = frozenset({"BTCUSDT"})
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def process_closed_candle(self, _event, *, latest_quote):
-            del latest_quote
-            self.calls += 1
-            if self.calls == 1:
-                return "pending_live_positions:BTCUSDT"
-            return None
-
-    class Source:
-        def __aiter__(self):
-            async def stream():
-                yield event
-
-            return stream()
-
-    daemon = Daemon()
-    runtime = LiveExitChannelRuntime(
-        daemon=daemon,  # type: ignore[arg-type]
-        latest_market_quotes=QuoteCache(),  # type: ignore[arg-type]
-        latest_market_states=StateCache(),  # type: ignore[arg-type]
-        is_transient_error=lambda _error: False,
-        on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
-        pending_position_retry_delays=(0.25,),
-    )
-
-    await runtime.run_closed_candle_channel(source=Source())  # type: ignore[arg-type]
-
-    assert daemon.calls == 2
-    assert sleeps == [0.25]
-    assert failures == [("BTCUSDT", None)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("retry_failure", "expected"),
-    [
-        ("pending_live_positions:BTCUSDT", []),
-        ("unmanaged_live_positions:BTCUSDT", [("BTCUSDT", "unmanaged_live_positions:BTCUSDT")]),
-        (None, [("BTCUSDT", None)]),
-    ],
-)
-async def test_candle_retry_preserves_facts_and_consumes_next_symbol(
-    monkeypatch, retry_failure, expected,
-) -> None:
+async def test_pending_candles_wait_for_facts_without_blocking_other_symbols(monkeypatch):
     events = [SimpleNamespace(candle=SimpleNamespace(
-        symbol=symbol, candle_start=datetime(2026, 8, 4, tzinfo=UTC),
-    )) for symbol in ("BTCUSDT", "ETHUSDT")]
-    quotes = [SimpleNamespace(symbol="BTCUSDT", price=price) for price in (100, 101)]
-    current_quote = quotes[0]
+        symbol=symbol, candle_start=datetime(2026, 8, 4, tzinfo=UTC) + timedelta(minutes=15*i)
+    )) for i, symbol in enumerate(("BTCUSDT", "BTCUSDT", "ETHUSDT"))]
     calls = []
     outcomes = []
+    ready = False
+    consumed = asyncio.Event()
+    quote = SimpleNamespace(price=100)
 
-    async def sleep(_delay):
-        nonlocal current_quote
-        current_quote = quotes[1]
+    async def forbidden_sleep(delay):
+        pytest.fail("pending positions must wait for facts, not sleep")
 
-    monkeypatch.setattr(exit_channels.asyncio, "sleep", sleep)
-
-    class Cache:
-        def for_symbols(self, symbols):
-            return (current_quote,) if symbols == ("BTCUSDT",) else ()
+    monkeypatch.setattr(exit_channels.asyncio, "sleep", forbidden_sleep)
 
     class Daemon:
         async def process_closed_candle(self, event, *, latest_quote):
             calls.append((event, latest_quote))
             if event.candle.symbol == "ETHUSDT":
+                consumed.set()
                 return None
-            return "pending_live_positions:BTCUSDT" if len(calls) == 1 else retry_failure
+            return None if ready else "pending_live_positions:BTCUSDT"
 
     async def source():
         for event in events:
             yield event
+        yield events[0]  # A duplicate pending event must not trigger reevaluation.
+        yield events[2]  # A duplicate confirmed event must not submit another exit.
+
+    cache = SimpleNamespace(for_symbols=lambda symbols: (quote,))
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(), latest_market_quotes=cache, latest_market_states=cache,
+        is_transient_error=lambda error: False,
+        on_exit_failure=lambda symbol, failure: outcomes.append((symbol, failure)),
+    )
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    try:
+        await asyncio.wait_for(consumed.wait(), 1)
+        assert [e for e, q in calls] == events
+        assert outcomes == [("ETHUSDT", None)]
+        assert len(runtime._pending_candles) == 2
+        ready = True
+        quote = SimpleNamespace(price=101)
+        runtime.note_account_facts_changed()
+        runtime.note_account_facts_changed()
+        await asyncio.wait_for(task, 1)
+        assert [e for e, q in calls] == events + events[:2]
+        assert all(q.price == 101 for e, q in calls[3:])
+        assert not runtime._pending_candles
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("pending_reason", ["pending_live_positions:BTCUSDT", "pending_exit_order_recovery:BTCUSDT"])
+async def test_candle_notification_during_evaluation_is_retained(pending_reason):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    event = SimpleNamespace(candle=SimpleNamespace(
+        symbol="BTCUSDT", candle_start=datetime(2026, 8, 4, tzinfo=UTC)))
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+                return pending_reason
+            return None
+
+    async def source():
+        yield event
 
     runtime = LiveExitChannelRuntime(
-        daemon=Daemon(),  # type: ignore[arg-type]
-        latest_market_quotes=Cache(),  # type: ignore[arg-type]
-        latest_market_states=Cache(),  # type: ignore[arg-type]
-        is_transient_error=lambda _error: False,
-        on_exit_failure=lambda symbol, failure: outcomes.append((symbol, failure)),
-        pending_position_retry_delays=(0.25,),
+        daemon=Daemon(), latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(), is_transient_error=lambda error: False,
     )
-    await runtime.run_closed_candle_channel(source=source())  # type: ignore[arg-type]
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        runtime.note_account_facts_changed()
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert calls == 2
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-    assert calls == [(events[0], quotes[0]), (events[0], quotes[1]), (events[1], None)]
-    assert outcomes == expected + [("ETHUSDT", None)]
+
+async def test_pending_candle_survives_cancellation_and_restarts():
+    event = SimpleNamespace(candle=SimpleNamespace(
+        symbol="BTCUSDT", candle_start=datetime(2026, 8, 4, tzinfo=UTC)))
+    seen = asyncio.Event()
+    ready = False
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            seen.set()
+            return None if ready else "pending_live_positions:BTCUSDT"
+
+    async def source():
+        yield event
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(), latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(), is_transient_error=lambda error: False,
+    )
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    await asyncio.wait_for(seen.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(runtime._pending_candles) == 1
+    ready = True
+    runtime.note_account_facts_changed()
+    await asyncio.wait_for(runtime.run_closed_candle_channel(source=source()), 1)
+    assert not runtime._pending_candles
 
 
 @pytest.mark.parametrize("notify", [False, True])
@@ -231,3 +237,43 @@ async def test_quote_channel_requires_managed_position_symbols() -> None:
     )
     with pytest.raises(AttributeError, match="managed_position_symbols"):
         await runtime.run_quote_channel(source=Source())
+
+
+async def test_candle_conflict_stays_pending_until_success():
+    event = SimpleNamespace(candle=SimpleNamespace(
+        symbol="BTCUSDT", candle_start=datetime(2026, 8, 4, tzinfo=UTC)))
+    calls = 0
+    failures = []
+    reported = asyncio.Event()
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("identity conflict")
+            return None
+
+    def failure(symbol, reason):
+        failures.append(reason)
+        reported.set()
+
+    async def source():
+        yield event
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(), latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(), is_transient_error=lambda error: False,
+        is_order_identity_conflict=lambda error: True, on_exit_failure=failure,
+    )
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    try:
+        await asyncio.wait_for(reported.wait(), 1)
+        assert failures == ["order_identity_conflict"]
+        assert len(runtime._pending_candles) == 1
+        runtime.note_account_facts_changed()
+        await asyncio.wait_for(task, 1)
+        assert failures == ["order_identity_conflict", None]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

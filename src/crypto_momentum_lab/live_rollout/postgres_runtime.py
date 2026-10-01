@@ -553,6 +553,42 @@ class PostgresLiveContextProvider(LiveContextReader):
                 return context
         raise RuntimeError("live context changed during load")
 
+    async def load_lease_gate(
+        self, sessions: async_sessionmaker[AsyncSession]
+    ) -> LiveGateContext:
+        """Read only lease-recovery prerequisites on the isolated heartbeat pool."""
+        now = datetime.now(UTC)
+        epoch = self._cache_epoch
+        live = PostgresLiveRolloutRepository(sessions)
+        risk = PostgresRiskRepository(sessions)
+        orders = PostgresOrderReadRepository(sessions)
+        approval = await live.load_active_approval(
+            account_label=self._account_label, strategy_name=self._strategy_name, now=now
+        )
+        config = await _latest_risk_config(sessions, self._account_label)
+        lease = await risk.load_active_lease("live", self._account_label, now)
+        halts = await risk.load_active_halts("live", self._account_label)
+        unresolved = await orders.load_unresolved_orders(self._run_id)
+        account_state = self._realtime_account_state
+        if account_state is None:
+            account_state = await _latest_account_state(sessions, self._account_label)
+        if epoch != self._cache_epoch:
+            raise RuntimeError("account control facts changed during lease recovery")
+        if approval is not None and approval.approval_id != self._approval_id:
+            approval = None
+        return LiveGateContext(
+            now=now, live_submit_enabled=True,
+            account_label=self._account_label, strategy_name=self._strategy_name,
+            strategy_config_hash=self._strategy_config_hash,
+            git_commit_hash=self._git_commit_hash,
+            database_migration_revision=self._migration_revision,
+            required_lease_owner=self._lease_owner,
+            requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
+            active_lease=lease, risk_config=config, approval=approval,
+            account_state=account_state, active_halts=halts,
+            unresolved_order_states=tuple(order.state for order in unresolved),
+        )
+
     async def _load_context_once(
         self,
         state: MarketState15s,

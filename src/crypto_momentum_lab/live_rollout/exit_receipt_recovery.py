@@ -20,7 +20,6 @@ from crypto_momentum_lab.domain.decision.ports import ExitRecoveryDisposition
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
-    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -38,14 +37,6 @@ class ExitReceiptExchange(Protocol):
     async def query_order_by_client_id(
         self, symbol: str, client_order_id: str
     ) -> ExchangeOrderSnapshot | None: ...
-
-
-def exit_command_client_id(run_id: str, command: TradeCommand) -> str:
-    return command.idempotency_key or (
-        command.command_id
-        if len(command.command_id) <= 36
-        else deterministic_client_order_id(run_id, command.command_id)
-    )
 
 
 class LiveExitReceiptRecovery:
@@ -87,7 +78,7 @@ class LiveExitReceiptRecovery:
         # a reliable receipt. Recent incident commands remain inside this bound.
         if not timedelta(0) <= now - command.created_at <= timedelta(days=2):
             return pending("exchange_receipt_history_window_unconfirmed")
-        expected_id = exit_command_client_id(self._run_id, command)
+        expected_id = command.client_order_id(self._run_id)
         async with self._sessions() as session:
             row = await session.scalar(
                 select(ExchangeOrderRow).where(
@@ -110,10 +101,17 @@ class LiveExitReceiptRecovery:
             if row is not None and (
                 row.run_id != self._run_id
                 or row.symbol != key.symbol
-                or row.client_order_id != expected_id
+                or (
+                    command.idempotency_key is not None
+                    and row.client_order_id != command.idempotency_key
+                )
                 or not row.reduce_only
             ):
                 return pending("durable_order_identity_mismatch")
+            if row is not None:
+                # An already submitted order owns its durable identity. Never
+                # recalculate a legacy receipt under the new submission rule.
+                expected_id = row.client_order_id
         # Pending exits share one short-lived account cut. Re-fetching all
         # positions/orders per command can exhaust the private API budget.
         if (

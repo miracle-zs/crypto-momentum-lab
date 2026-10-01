@@ -28,6 +28,9 @@ from crypto_momentum_lab.live_rollout.exit_event_ports import (
     ExitEventLane,
     ExitEventProcessor,
 )
+from crypto_momentum_lab.live_rollout.exit_failure_policy import (
+    is_pending_candle_evaluation,
+)
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 
 log = structlog.get_logger()
@@ -165,7 +168,7 @@ class LiveExitEventCoordinator:
             context,
             latest_quote,
         )
-        if outcome.failure is not None:
+        if outcome.failure is not None and not is_pending_candle_evaluation(outcome.failure):
             log.error(
                 "live_closed_candle_exit_failed",
                 run_id=self._run_id,

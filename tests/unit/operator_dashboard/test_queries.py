@@ -1321,10 +1321,10 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
     queries = StubOverviewQueries()
     resp = await queries.readiness()
     # Must NOT be FULLY_TRADEABLE
-    assert resp.tradeability.mode == "EXIT_ONLY"
+    assert resp.tradeability.mode == "UNKNOWN"
     assert resp.tradeability.entry_gate_open is False
     assert resp.stream_readiness.overall == "RECOVERING"
-    assert resp.status in (OperationalStatus.DEGRADED, OperationalStatus.STALE)
+    assert resp.status == OperationalStatus.UNKNOWN
 
 
 async def test_readiness_identifies_stale_strategy_stream_without_blame_on_market_data() -> None:
@@ -1390,7 +1390,7 @@ async def test_readiness_identifies_stale_strategy_stream_without_blame_on_marke
             )
 
     response = await StubOverviewQueries().readiness()
-    assert response.tradeability.entry_gate_reason == "strategy_runner_not_ready"
+    assert response.tradeability.entry_gate_reason == "runtime_readiness_missing_or_stale"
     assert response.stream_readiness.streams["market-data"] == "READY"
 
 
@@ -1403,6 +1403,7 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
         LiveAccountSummaryResponse,
         ServiceStatusResponse,
         SystemOverviewResponse,
+        TradeabilityDetailResponse,
     )
 
     now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
@@ -1432,6 +1433,13 @@ async def test_readiness_allows_fully_tradeable_when_services_include_database_r
                         strategy_name="orderflow_impulse",
                         strategy_state="running",
                         lease_expires_at=now + timedelta(minutes=10),
+                        runtime_observed_at=now,
+                        runtime_tradeability=TradeabilityDetailResponse(
+                            mode="FULLY_TRADEABLE", entry_gate_open=True,
+                            entry_gate_reason="live_entry_prerequisites_ready",
+                            exit_gate_open=True, exit_gate_reason="normal",
+                            unmanaged_risk_clear=True, halt_active=False,
+                        ),
                     )
                 ],
             )
@@ -1499,7 +1507,7 @@ async def test_readiness_shields_exceptions_to_degraded_response() -> None:
     queries = FailingOverviewQueries()
     resp = await queries.readiness()
     assert resp.status == OperationalStatus.DEGRADED
-    assert resp.tradeability.mode == "HALTED"
+    assert resp.tradeability.mode == "UNKNOWN"
     assert resp.tradeability.entry_gate_open is False
     assert resp.tradeability.exit_gate_open is False
     assert "readiness_query_failed" in resp.tradeability.entry_gate_reason

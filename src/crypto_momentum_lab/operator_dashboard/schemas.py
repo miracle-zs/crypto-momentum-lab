@@ -51,6 +51,16 @@ class DecisionSLOResponse(DashboardSchema):
     consumers: list[DecisionSLOConsumerResponse] = Field(default_factory=list)
 
 
+class TradeabilityDetailResponse(DashboardSchema):
+    mode: str
+    entry_gate_open: bool
+    entry_gate_reason: str
+    exit_gate_open: bool
+    exit_gate_reason: str
+    unmanaged_risk_clear: bool
+    halt_active: bool
+
+
 class LiveAccountSummaryResponse(DashboardSchema):
     """Operational state for one configured live account."""
 
@@ -62,6 +72,8 @@ class LiveAccountSummaryResponse(DashboardSchema):
     strategy_name: str | None = None
     strategy_state: str | None = None
     lease_expires_at: datetime | None = None
+    runtime_tradeability: TradeabilityDetailResponse | None = None
+    runtime_observed_at: datetime | None = None
 
 
 class LiveAccountMetricPointResponse(DashboardSchema):
@@ -364,16 +376,6 @@ class SystemPerformanceResponse(DashboardSchema):
     persistence: PersistencePerformanceResponse
     market_data: MarketDataPerformanceResponse
     host_resources: HostResourcesResponse
-
-
-class TradeabilityDetailResponse(DashboardSchema):
-    mode: str
-    entry_gate_open: bool
-    entry_gate_reason: str
-    exit_gate_open: bool
-    exit_gate_reason: str
-    unmanaged_risk_clear: bool
-    halt_active: bool
 
 
 class StreamReadinessDetailResponse(DashboardSchema):

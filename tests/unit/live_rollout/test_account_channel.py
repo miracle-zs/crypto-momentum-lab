@@ -273,3 +273,53 @@ async def test_async_snapshot_is_applied_before_account_decision(
     else:
         await runtime._process_event(event)
         assert ordering == ["snapshot", "decision"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_exit_repair_does_not_block_account_publication():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.live_rollout.order_reconciliation import (
+        LiveOrderReconciliation,
+    )
+
+    started = asyncio.Event()
+    published: list[int] = []
+
+    async def recover():
+        started.set()
+        await asyncio.Event().wait()
+
+    repair = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=())),
+        state_machine=SimpleNamespace(), run_id="run", interval_seconds=3600,
+        recover_exits=recover,
+    )
+    class Cache:
+        def for_symbols(self, symbols):
+            return ()
+
+    async def publish(event):
+        # Mirrors the production callback after its durable fact commit.
+        published.append(event.sequence)
+        repair.request_recovery()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(), latest_market_states=Cache(), latest_market_quotes=Cache(),
+        order_reconciliation=repair, is_transient_error=lambda error: False,
+        on_account_snapshot=publish,
+    )
+    worker = asyncio.create_task(repair.run_periodically())
+    event = SimpleNamespace(event_type="ACCOUNT_UPDATE", client_order_id=None,
+                            has_fill=False, symbols=(), sequence=1)
+    try:
+        await runtime._process_event(event)
+        await asyncio.wait_for(started.wait(), 1)
+        event.sequence = 2
+        await asyncio.wait_for(runtime._process_event(event), 1)
+        assert published == [1, 2]
+        assert not worker.done()
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker

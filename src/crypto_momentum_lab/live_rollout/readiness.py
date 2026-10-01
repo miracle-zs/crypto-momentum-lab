@@ -328,6 +328,7 @@ class LiveReadinessPublisher:
         entry_universe_target_count: int | None,
         warmup_required_buckets: int,
         alert_manager: TradeabilityAlertManager | None = None,
+        on_publish: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         for value, field_name in (
             (account_label, "account_label"),
@@ -343,6 +344,7 @@ class LiveReadinessPublisher:
         if warmup_required_buckets <= 0:
             raise ValueError("warmup_required_buckets must be positive")
         self._health = health
+        self._on_publish = on_publish
         self._account_label = account_label
         self._session_id = session_id
         self._strategy = strategy
@@ -608,7 +610,7 @@ class LiveReadinessPublisher:
     def publish(self) -> None:
         """Best-effort atomic publication of the current JSON snapshot."""
 
-        if self._health is None:
+        if self._health is None and self._on_publish is None:
             return
         tradeability = self.current_tradeability()
         streams = self.current_stream_readiness()
@@ -650,12 +652,18 @@ class LiveReadinessPublisher:
             },
         }
         try:
-            self._health.write_readiness(payload)
+            if self._health is not None:
+                self._health.write_readiness(payload)
         except Exception as error:
             log.warning(
                 "live_readiness_publish_failed",
                 error_type=type(error).__name__,
             )
+        if self._on_publish is not None:
+            try:
+                self._on_publish(payload)
+            except Exception as error:
+                log.warning("live_readiness_sink_failed", error_type=type(error).__name__)
 
 
 def _normalized_symbols(symbols: Collection[str]) -> frozenset[str]:
