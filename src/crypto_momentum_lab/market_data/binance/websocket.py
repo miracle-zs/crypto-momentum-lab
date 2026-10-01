@@ -459,6 +459,16 @@ class BinanceWebSocketConnection:
                             raise BinanceControlAckTimeout(
                                 "Binance control ACK timed out"
                             )
+                        # The reader can receive data while this wait remains
+                        # pending. Recheck its current timestamp before treating
+                        # the original wait deadline as transport silence.
+                        if (
+                            silence_timeout is not None
+                            and self._last_received_monotonic is not None
+                            and time.monotonic() - self._last_received_monotonic
+                            < silence_timeout
+                        ):
+                            continue
                         raise TimeoutError("Binance WebSocket is silent")
 
                     if dispatch_task in done:
