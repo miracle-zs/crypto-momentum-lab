@@ -40,10 +40,12 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     CommandConflict,
     ExecutionBook,
     ExecutionRequest,
+    PositionNotReady,
     StaleView,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
+    ExecutionReadinessError,
 )
 from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
     assemble_legacy_execution_book,
@@ -904,10 +906,15 @@ class OrderExecutionCoordinator:
             ) from err
 
         if isinstance(act_res, Blocked):
+            cause = (
+                ExecutionReadinessError(act_res.reason)
+                if isinstance(act_res, PositionNotReady)
+                else None
+            )
             raise OrderPreSubmissionError(
                 f"Failed to create position reservation for "
                 f"{plan.client_order_id}: {act_res.reason}"
-            )
+            ) from cause
         if isinstance(act_res, StaleView):
             raise OrderPreSubmissionError(
                 f"Failed to create position reservation (stale view) for "

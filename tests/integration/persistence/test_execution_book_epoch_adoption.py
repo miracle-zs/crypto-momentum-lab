@@ -400,9 +400,11 @@ async def test_new_epoch_without_checkpoint_adoption_fails_closed(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("complete", [True, False])
+@pytest.mark.parametrize("empty_suffix", [True, False])
 async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically(
     async_database_url,
     complete,
+    empty_suffix,
 ):
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
@@ -424,7 +426,9 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
     from dataclasses import replace
 
     baseline = replace(
-        _snapshot(key, start, "0", "0"),
+        _snapshot(
+            key, start + timedelta(minutes=2) if empty_suffix else start, "0", "0"
+        ),
         raw_payload={"symbol": "BTCUSDT", "positionAmt": "0.000", "updateTime": 0},
     )
     target = _snapshot(key, start + timedelta(minutes=3), "0", "0")
@@ -445,6 +449,26 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         )
         assert isinstance(result, Applied)
         assert (await book.read(scope)).total_quantity == 2
+        # Legacy head diagnostic counts are global, not evidence for this key.
+        from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+            ExecutionBookHeadRow,
+        )
+
+        async with factory() as session, session.begin():
+            session.add(
+                ExecutionBookHeadRow(
+                    environment="live",
+                    account_label=account,
+                    symbol="ETHUSDT",
+                    position_side="LONG",
+                    stream_id="hub",
+                    stream_epoch="old",
+                    revision=1,
+                    projection_version="pv_initial",
+                    state_payload={"seen_trade_count": 999},
+                    updated_at=start,
+                )
+            )
         from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
         from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
             load_fill_recovery_sources,
@@ -468,13 +492,14 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
                     notional=Decimal("0"),
                     leverage=2,
                     margin_type="cross",
-                    observed_at=start,
+                    observed_at=baseline.observed_at,
                     raw_payload=baseline.raw_payload,
                 )
             )
         initial_sources = await load_fill_recovery_sources(
             factory, environment="live", account_label=account
         )
+        assert ("ETHUSDT", "LONG") not in initial_sources
         planned = plan_fill_scan(target, initial_sources[("BTCUSDT", "LONG")])
         assert planned is not None
         scan = AccountFillLoadScan(
@@ -485,7 +510,7 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             AccountFillPageScan(
                 "BTCUSDT",
                 "repair-scan",
-                int(start.timestamp() * 1000),
+                planned.start_time_ms,
                 None,
                 1,
                 complete,
@@ -531,7 +556,7 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         )
         await coordinator.observe_account_snapshot(
             target,
-            fills=(entry, exit_fill),
+            fills=() if empty_suffix else (entry, exit_fill),
             fill_load_scans=(scan,),
             stream_id="hub",
             stream_epoch="new",

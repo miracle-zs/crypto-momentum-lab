@@ -14,7 +14,10 @@ from crypto_momentum_lab.domain.execution.evidence_codec import (
 from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
 from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
-from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
+from crypto_momentum_lab.domain.execution.position_ledger import (
+    PositionLedger,
+    checkpoint_suffix_facts,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     AccountFillLoadProvenance,
@@ -86,13 +89,19 @@ def create_verified_recovery_checkpoint(
     else:
         return None
 
-    checkpoint = PositionLedger(key).create_recovery_checkpoint(
-        replace(
-            facts,
-            prefix_facts_complete=False,
+    checkpoint_facts = facts
+    if adoption is not None:
+        checkpoint_facts = replace(facts, prefix_facts_complete=False)
+    elif (
+        provenance.source_anchor_kind == "recovery_checkpoint"
+        and previous_checkpoint is not None
+    ):
+        checkpoint_facts = replace(
+            checkpoint_suffix_facts(facts, previous_checkpoint.event_cut),
+            recovery_checkpoint=previous_checkpoint,
         )
-        if adoption is not None
-        else facts,
+    checkpoint = PositionLedger(key).create_recovery_checkpoint(
+        checkpoint_facts,
         source_revision=journal.revision,
         event_cut=proof.checkpoint_event_cut,
         stream_adoption=adoption,
@@ -215,8 +224,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             or (payload.get("journal_revision") != journal.revision)
             or (not isinstance(stored_reservations, list))
             or any(
-                not isinstance(value, str) or not value
-                for value in stored_reservations
+                not isinstance(value, str) or not value for value in stored_reservations
             )
         ):
             raise RuntimeError("durable execution head is malformed")
@@ -306,7 +314,10 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             last_sequence = stored_sequence
         else:
             diagnostics.append(
-                ("durable_execution_head_sequence_invalid", {"sequence": stored_sequence})
+                (
+                    "durable_execution_head_sequence_invalid",
+                    {"sequence": stored_sequence},
+                )
             )
             last_sequence = 0
         head_revision = head.revision

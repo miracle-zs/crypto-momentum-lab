@@ -407,3 +407,100 @@ async def test_unrelated_submission_corruption_still_propagates():
             state=_state(),
             context=_context(),
         )
+
+
+async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinator():
+    from unittest.mock import MagicMock
+
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillEvent,
+        AccountPositionSnapshot,
+    )
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    book = ExecutionBook()
+    fill = AccountFillEvent(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "entry",
+        "order",
+        "BUY",
+        Decimal("100"),
+        Decimal("1"),
+        Decimal("0"),
+        Decimal("0"),
+        "USDT",
+        NOW,
+        {"positionSide": "LONG"},
+    )
+    snap = AccountPositionSnapshot(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "LONG",
+        Decimal("1"),
+        Decimal("100"),
+        Decimal("100"),
+        Decimal("0"),
+        Decimal("100"),
+        5,
+        "cross",
+        NOW,
+        {},
+    )
+    await book.observe(ExecutionEvidence("open", scope, NOW, fill=fill, snapshot=snap))
+    view = await book.read(scope)
+    assert not view.is_ready_for_trade and view.batches
+    backend = MagicMock()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=book,
+        reservation_repository=MagicMock(),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="exit",
+        run_id="live",
+        client_order_id="exit-guard",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=NOW,
+        batch_id=view.batches[0].batch_id,
+        projection_version=view.projection_version,
+    )
+
+    class GuardedSubmission:
+        async def execute(self, *_args, **_kwargs):
+            await coordinator._ensure_reservation(plan)
+            raise AssertionError("unready exit was permitted")
+
+    processor = _processor(GuardedSubmission())
+    result = await processor.process_requests(
+        (
+            LiveExitOrderRequest(
+                candidate=replace(_intent(), reduce_only=True), quantity=Decimal("1")
+            ),
+        ),
+        state=_state(),
+        context=_context(),
+    )
+    assert result == (0, 0, "position_not_ready")
+    assert not book.get_active_reservations(scope.to_position_key())
+    backend.submit.assert_not_called()

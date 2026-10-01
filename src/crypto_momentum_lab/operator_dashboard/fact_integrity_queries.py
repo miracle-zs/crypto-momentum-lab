@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, or_, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.evidence_codec import (
@@ -16,6 +16,9 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.models import AccountReconciliationHeadRow
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionRecoveryCheckpointRow,
+)
+from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
+    relevant_recovery_head,
 )
 
 
@@ -41,18 +44,7 @@ async def load_fact_integrity(
                 select(ExecutionBookHeadRow).where(
                     ExecutionBookHeadRow.environment == "live",
                     ExecutionBookHeadRow.account_label.in_(tuple(accounts)),
-                    or_(
-                        cast(
-                            ExecutionBookHeadRow.state_payload[
-                                "seen_trade_count"
-                            ].astext,
-                            Integer,
-                        )
-                        > 0,
-                        ExecutionBookHeadRow.state_payload["recovery_checkpoint"][
-                            "checkpoint_id"
-                        ].astext.is_not(None),
-                    ),
+                    relevant_recovery_head(),
                 )
             )
         ).all()

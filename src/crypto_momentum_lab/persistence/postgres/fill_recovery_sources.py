@@ -2,7 +2,7 @@
 
 from typing import cast as typing_cast
 
-from sqlalchemy import Integer, cast, func, or_, select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account.models import (
@@ -24,6 +24,9 @@ from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnaps
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionRecoveryCheckpointRow,
 )
+from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
+    relevant_recovery_head,
+)
 
 
 async def load_fill_recovery_sources(
@@ -40,18 +43,7 @@ async def load_fill_recovery_sources(
                 select(ExecutionBookHeadRow).where(
                     ExecutionBookHeadRow.environment == environment,
                     ExecutionBookHeadRow.account_label == account_label,
-                    or_(
-                        cast(
-                            ExecutionBookHeadRow.state_payload[
-                                "seen_trade_count"
-                            ].astext,
-                            Integer,
-                        )
-                        > 0,
-                        ExecutionBookHeadRow.state_payload["recovery_checkpoint"][
-                            "checkpoint_id"
-                        ].astext.is_not(None),
-                    ),
+                    relevant_recovery_head(),
                 )
             )
         ).all()

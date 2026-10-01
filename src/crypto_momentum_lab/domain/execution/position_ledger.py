@@ -170,7 +170,7 @@ class PositionLedger:
             recovery_checkpoint=None,
         )
         if parent is not None:
-            suffix = _facts_after_checkpoint(prefix, parent.event_cut)
+            suffix = checkpoint_suffix_facts(prefix, parent.event_cut)
             suffix_facts_hash = suffix.compute_facts_hash()
             facts_hash = compute_checkpoint_chain_hash(
                 scope=facts.stream_scope,
@@ -1315,9 +1315,12 @@ def _checkpoint_error(
             if prefix.compute_facts_hash() != checkpoint.facts_hash:
                 return "prefix facts hash mismatch"
         else:
-            if checkpoint.parent_event_cut is None or checkpoint.suffix_facts_hash is None:
+            if (
+                checkpoint.parent_event_cut is None
+                or checkpoint.suffix_facts_hash is None
+            ):
                 return "checkpoint parent chain incomplete"
-            suffix = _facts_after_checkpoint(prefix, checkpoint.parent_event_cut)
+            suffix = checkpoint_suffix_facts(prefix, checkpoint.parent_event_cut)
             if suffix.compute_facts_hash() != checkpoint.suffix_facts_hash:
                 return "checkpoint suffix facts hash mismatch"
             expected_hash = compute_checkpoint_chain_hash(
@@ -1514,7 +1517,7 @@ def _facts_at_cut(
     )
 
 
-def _facts_after_checkpoint(
+def checkpoint_suffix_facts(
     facts: AccountFacts,
     parent_event_cut: datetime,
 ) -> AccountFacts:
@@ -1589,25 +1592,35 @@ def _has_verified_flat_snapshot_anchor(
         or not coverage.covers(event_cut)
         or provenance != coverage.load_provenance
         or provenance.source_anchor_kind != "zero_snapshot"
-        or provenance.source_anchor_event_cut != event_cut
+        or provenance.source_anchor_event_cut > event_cut
+        or not coverage.covers_range(provenance.source_anchor_event_cut, event_cut)
         or provenance.checked_through != event_cut
         or provenance.observed_at != event_cut
-        or coverage.checkpoint_id != provenance.source_anchor_id
+        or coverage.checkpoint_id
+        not in (provenance.source_anchor_id, provenance.load_id)
     ):
         return False
     from crypto_momentum_lab.domain.execution.snapshot_encoding import (
         stable_snapshot_anchor_id,
     )
 
-    return any(
+    target_flat = any(
+        snapshot.observed_at == event_cut
+        and snapshot.position_amt == Decimal("0")
+        and snapshot.environment == facts.position_key.environment
+        and snapshot.account_label == facts.position_key.account_label
+        and snapshot.symbol == facts.position_key.symbol
+        and snapshot.position_side == facts.position_key.position_side.value
+        for snapshot in facts.snapshots
+    )
+    return target_flat and any(
         snapshot.environment == facts.position_key.environment
         and snapshot.account_label == facts.position_key.account_label
         and snapshot.symbol == facts.position_key.symbol
         and snapshot.position_side == facts.position_key.position_side.value
         and snapshot.position_amt == Decimal("0")
-        and snapshot.observed_at == event_cut
-        and stable_snapshot_anchor_id(snapshot)
-        == provenance.source_anchor_id
+        and snapshot.observed_at == provenance.source_anchor_event_cut
+        and stable_snapshot_anchor_id(snapshot) == provenance.source_anchor_id
         for snapshot in facts.snapshots
     )
 

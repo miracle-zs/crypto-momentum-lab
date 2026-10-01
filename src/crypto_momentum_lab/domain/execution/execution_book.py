@@ -235,6 +235,11 @@ class Blocked:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionNotReady(Blocked):
+    """A typed position readiness guard refused a command before submission."""
+
+
+@dataclass(frozen=True, slots=True)
 class CommandConflict:
     request_id: str
     reason: str
@@ -1247,7 +1252,7 @@ class ExecutionBook:
 
         # 3. Trade readiness check
         if not view.is_ready_for_trade and not request.target_batch_ids:
-            return Blocked(
+            return PositionNotReady(
                 reason=(
                     f"PositionView is not ready for trade (status={view.health_status})"
                 ),
@@ -1348,7 +1353,12 @@ class ExecutionBook:
                     VersionConflictError,
                     ExecutionReadinessError,
                 ) as err:
-                    return Blocked(
+                    blocked_type = (
+                        PositionNotReady
+                        if isinstance(err, ExecutionReadinessError)
+                        else Blocked
+                    )
+                    return blocked_type(
                         reason=str(err),
                         diagnostics=(type(err).__name__,),
                     )
