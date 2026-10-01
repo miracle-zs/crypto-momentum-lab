@@ -609,15 +609,7 @@ class WebSocketMarketStateSource:
             if client_receive_queue_size is not None
             else _CLIENT_RECEIVE_QUEUE_SIZE
         )
-        self._availability_clock = availability_clock or StreamAvailabilityClock(
-            StreamAvailabilityConfig(
-                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
-                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
-                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
-            ),
-            stream_name="market-state hub",
-            clock=lambda: time.monotonic(),
-        )
+        self._availability_clock = availability_clock
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
         self._stream_id: str | None = None
@@ -627,6 +619,16 @@ class WebSocketMarketStateSource:
 
     @property
     def availability_clock(self) -> StreamAvailabilityClock:
+        if self._availability_clock is None:
+            self._availability_clock = StreamAvailabilityClock(
+                StreamAvailabilityConfig(
+                    startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                    disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                    recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+                ),
+                stream_name="market-state hub",
+                clock=lambda: time.monotonic(),
+            )
         return self._availability_clock
 
     def stop(self) -> None:
@@ -690,6 +692,9 @@ class WebSocketMarketStateSource:
             await _close_async_iterator(batches)
 
     async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
+        # Local checkpoint/spool recovery precedes consumption and is not
+        # transport unavailability. Retain the clock across later reconnects.
+        availability_clock = self.availability_clock
         self._notify_connection_change(False, "connecting")
         _unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
@@ -781,7 +786,7 @@ class WebSocketMarketStateSource:
                         and self._last_sequence >= ready_latest_sequence
                     ):
                         self._notify_connection_change(True, None)
-                        self._availability_clock.mark_connected(needs_recovery=False)
+                        availability_clock.mark_connected(needs_recovery=False)
                     else:
                         reason = (
                             "market_state_rewarming"
@@ -789,7 +794,7 @@ class WebSocketMarketStateSource:
                             else "market_state_replaying"
                         )
                         self._notify_connection_change(False, reason)
-                        self._availability_clock.mark_connected(
+                        availability_clock.mark_connected(
                             needs_recovery=True,
                             reason=reason,
                         )
@@ -806,7 +811,7 @@ class WebSocketMarketStateSource:
                     )
                     try:
                         while not self._stopping:
-                            remaining = self._availability_clock.remaining_budget()
+                            remaining = availability_clock.remaining_budget()
                             if remaining < float("inf"):
                                 item = await asyncio.wait_for(
                                     receive_queue.get(),
@@ -822,7 +827,7 @@ class WebSocketMarketStateSource:
                                     False,
                                     "market_state_consumer_lagged",
                                 )
-                                self._availability_clock.mark_recovering(
+                                availability_clock.mark_recovering(
                                     "market_state_consumer_lagged"
                                 )
                                 raise MarketStateHubSequenceGap(
@@ -867,7 +872,7 @@ class WebSocketMarketStateSource:
                             yield batch
                             self._last_sequence = batch.sequence
                             self._notify_cursor_change()
-                            self._availability_clock.mark_ready()
+                            availability_clock.mark_ready()
                             if self._rewarm_required:
                                 self._rewarm_required = False
                                 self._notify_connection_change(True, None)
@@ -904,8 +909,8 @@ class WebSocketMarketStateSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                self._availability_clock.mark_disrupted(str(error))
-                self._availability_clock.check_timeout(
+                availability_clock.mark_disrupted(str(error))
+                availability_clock.check_timeout(
                     error_factory=MarketStateHubError,
                     custom_message=(
                         f"market-state hub unavailable for "

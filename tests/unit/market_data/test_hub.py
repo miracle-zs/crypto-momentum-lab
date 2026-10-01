@@ -1207,3 +1207,68 @@ async def test_market_state_source_raises_after_continuous_unavailable_timeout(
         match="market-state hub unavailable for 60.0 seconds",
     ):
         await anext(source.batches())
+
+
+async def test_startup_budget_begins_at_consumption_after_local_recovery(monkeypatch):
+    current_time = 1000.0
+    monkeypatch.setattr(hub_module.time, "monotonic", lambda: current_time)
+    state = fixture_state("BTCUSDT", 0)
+    attempts = 0
+
+    class Connection:
+        async def __aenter__(self):
+            nonlocal attempts, current_time
+            attempts += 1
+            current_time += 1.0
+            if attempts == 1:
+                raise ConnectionRefusedError("temporary Hub failure")
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if not hasattr(self, "ready_sent"):
+                self.ready_sent = True
+                return json.dumps(
+                    {
+                        "type": "market_state_hub_ready",
+                        "environment": "research",
+                        "stream_id": "stream-test",
+                        "replay_available": True,
+                        "latest_sequence": 1,
+                        "oldest_sequence": 1,
+                    }
+                )
+            if not hasattr(self, "batch_sent"):
+                self.batch_sent = True
+                return encode_market_state_batch(
+                    (state,),
+                    sequence=1,
+                    published_at=state.bucket_end,
+                    stream_id="stream-test",
+                )
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(hub_module, "connect", lambda *_args, **_kwargs: Connection())
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,), unavailable_timeout_seconds=120
+        ),
+    )
+    # The collector rebuilds its durable spool before it starts the source.
+    current_time += 180.0
+    iterator = source.batches()
+    try:
+        batch = await anext(iterator)
+        assert batch.sequence == 1
+        assert attempts == 2
+    finally:
+        source.stop()
+        await iterator.aclose()
