@@ -1096,9 +1096,10 @@ class UserDataAccountSyncDaemon:
                 if not account_ws_state_matches(live_snapshot, result.snapshot):
                     self._request_pipeline_recovery("periodic_check_state_mismatch")
                 else:
-                    # Keep audit/coverage progress for existing consumers, but
-                    # publish the WS projection rather than the REST candidate.
-                    self._notify_snapshot(replace(result, snapshot=live_snapshot))
+                    # Coverage belongs to the exact REST position cut. Publish
+                    # that verified observation without replacing WS state or
+                    # relabeling its per-position exchange timestamps.
+                    self._notify_snapshot(result)
                     self._schedule_reconciliation_persistence(result)
         if _is_usable_result(result):
             # Publish real trade identities even if persistence fails, without

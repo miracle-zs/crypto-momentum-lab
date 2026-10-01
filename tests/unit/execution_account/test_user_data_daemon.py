@@ -849,12 +849,7 @@ async def test_periodic_check_keeps_ws_live_without_replacing_or_refetching(
         assert not daemon._deferred_events
         assert len(published) == (0 if concurrent_event else 1)
         if published:
-            assert (
-                published[0].snapshot.balances
-                == daemon._state.snapshot(
-                    published[0].snapshot.config.observed_at
-                ).balances
-            )
+            assert published[0].snapshot is result.snapshot
         assert service.realtime_calls == 1
         assert service.facts == [result]
         assert fills == [service.fill]
@@ -1197,3 +1192,54 @@ async def test_periodic_mismatch_runs_separate_recovery_in_the_main_loop():
         "999"
     )
     assert not daemon._pipeline_recovery_event.is_set()
+
+
+async def test_periodic_audit_preserves_exact_position_cut_for_real_book():
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from tests.unit.execution_account.orders.test_fill_scan_ingestion import (
+        NOW,
+        coordinator,
+        scan,
+        snapshot,
+    )
+    baseline = replace(_snapshot(), positions=(snapshot(NOW - timedelta(seconds=30)),))
+    rest_snapshot = replace(baseline,
+        config=replace(baseline.config, observed_at=NOW - timedelta(seconds=1)),
+        positions=(snapshot(),))
+    proof_scan = scan()
+
+    class Service(RealtimeFakeService):
+        async def sync_once_for_realtime(self, **kwargs):
+            return ExecutionAccountSyncResult(
+                status=ExecutionAccountStatus.READY_READONLY,
+                reconciliation_id="audit-cut", mismatch_count=0,
+                snapshot=rest_snapshot, fill_load_scans=(proof_scan,),
+            )
+
+        async def persist_reconciliation_facts(self, result):
+            pass
+
+    stream = BlockingStream()
+    stream.continuity_token = 1
+    published = []
+    daemon = UserDataAccountSyncDaemon(service=Service(baseline), stream=stream,
+        config=UserDataAccountSyncConfig(), clock=lambda: NOW, on_snapshot=published.append)
+    await daemon._reconcile(include_fills=True)
+    published.clear()
+    state = daemon._state
+    try:
+        await daemon._check_periodic()
+        assert daemon._state is state
+        assert len(published) == 1
+        runtime, book = coordinator()
+        event = published[0]
+        await runtime.observe_account_snapshot(event.snapshot,
+            stream_id="hub", stream_epoch="epoch", sequence=1,
+            fill_load_scans=event.fill_load_scans)
+        evidence = book.observe.await_args.args[0]
+        assert evidence.coverage_evidence.checkpoint_event_cut == NOW
+        assert event.snapshot.positions[0].observed_at == NOW
+    finally:
+        await daemon._stop_pipeline()

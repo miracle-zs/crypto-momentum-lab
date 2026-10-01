@@ -190,3 +190,11 @@ apply_observed_snapshot 不再进入持仓命令优先队列，而是直接调�
 WebSocketMarketStateSource 默认 availability clock 原先在对象构造时启动，把消费者尚未连接期间的本地恢复也计入网络启动预算。改为首次使用时创建，消费开始时获取一次，后续连接重试沿用同一时钟，不因重连刷新预算；显式注入的时钟保持调用者语义。没有提高超时阈值、跳过历史恢复或丢弃消费游标。
 
 新增可控时间回归先复现本地恢复 180 秒后第一次短暂连接失败即触发 120 秒超时，修复后第二次连接正常收取行情；原连续不可用及健康期间断开恢复测试保留。行情、research-collector 和 health 的 97 项测试通过，Hub 模块类型检查通过。
+
+## 发布验收修复：周期扫描证据保持原始观测切面
+
+生产验收捕获 fill scan cut does not match account snapshot：周期检查比对通过后，原代码把 WS snapshot(config.observed_at) 与 REST fill_load_scans 组装成同一个通知。REST 持仓的 observed_at 可来自独立交易所 cut，与配置观测时间不同；WS 快照构建又统一调整实体观测时间，真实 Book 的 coverage_from_scan 因此正确拒绝了错误配对，导致策略关键账户任务退出。
+
+修改为仅在原有静默、连续性和账户事实一致检查全部通过后，通知该次已验证的 REST 观测及其原始扫描证据，不修改证据时间、持仓 cut 或覆盖检查。WS 内存状态保持同一对象，不执行 replace_snapshot，后续 WS 仍实时更新事实；扫描中有新事件的暂缓比较流程保持不变。这里修正的是通知的证据归属，不是让正常 REST 扫描接管实时投影。先前“向消费者发布 WS 快照并携带 REST 覆盖材料”的描述由本段纠正。
+
+新增 daemon 周期检查接真实 OrderExecutionCoordinator 的回归：REST 配置观测与持仓 cut 相差一秒，先复现同一 ValueError，修复后 Book 收到与扫描完全相同的持仓切面，并确认 WS 状态对象未替换。不能用删除一致性校验或修改时间戳解决此问题。
