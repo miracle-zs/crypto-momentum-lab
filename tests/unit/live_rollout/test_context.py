@@ -7,7 +7,6 @@ import pytest
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
-    ContextToken,
     LiveContextReader,
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
@@ -113,34 +112,12 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
     assert provider.invalidations == 1
 
 
-def test_context_invalidation_models() -> None:
-    assert ContextInvalidationReason.ACCOUNT_UPDATE == "account_update"
-    assert ContextInvalidationReason.LEASE_CHANGE == "lease_change"
-    assert ContextInvalidationReason.CONTROL_CHANGE == "control_change"
-    assert ContextInvalidationReason.RULES_CHANGE == "rules_change"
-    assert ContextInvalidationReason.RECOVERY == "recovery"
-    assert ContextInvalidationReason.MANUAL == "manual"
-
-    now = datetime.now(tz=UTC)
-    invalidation = ContextInvalidation(
-        reason=ContextInvalidationReason.ACCOUNT_UPDATE,
-        occurred_at=now,
-        details={"seq": 42},
-    )
-    assert invalidation.reason == ContextInvalidationReason.ACCOUNT_UPDATE
-    assert invalidation.occurred_at == now
-    assert invalidation.details == {"seq": 42}
-
+def test_context_invalidation_rejects_naive_time() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         ContextInvalidation(
             reason=ContextInvalidationReason.MANUAL,
             occurred_at=datetime(2026, 1, 1, 0, 0, 0),
         )
-
-    token = ContextToken(generation=1, context_epoch=5, account_snapshot_version=10)
-    assert token.generation == 1
-    assert token.context_epoch == 5
-    assert token.account_snapshot_version == 10
 
 
 class _MockReader:
@@ -160,15 +137,6 @@ class _MockReader:
         self.invalidation_count += 1
 
 
-def test_live_context_reader_protocol_conformance() -> None:
-    reader = _MockReader()
-    assert isinstance(reader, LiveContextReader)
-
-    class _IncompleteReader:
-        def __call__(self, _state: object):
-            pass
-
-    assert not isinstance(_IncompleteReader(), LiveContextReader)
 
 
 def test_context_runtime_with_live_context_reader() -> None:

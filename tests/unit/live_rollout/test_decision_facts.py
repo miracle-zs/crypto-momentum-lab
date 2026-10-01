@@ -341,7 +341,7 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
     assert src.policy_revision == 1
 
 
-def _pending_exit_case():
+def _pending_exit_case(*, request_exit_recovery=lambda: None):
     from unittest.mock import AsyncMock, create_autospec
 
     from crypto_momentum_lab.domain.decision.ports import DecisionUnitOfWorkPort
@@ -398,6 +398,7 @@ def _pending_exit_case():
         decision_unit_of_work=uow,
         execution_book=book,
         register_account_stream=book.register_active_stream,
+        request_exit_recovery=request_exit_recovery,
     )
     handler = AsyncMock(return_value=SimpleNamespace(state="submitted"))
     source.set_exit_handler(handler)
@@ -431,7 +432,12 @@ async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
 async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     mismatch: str,
 ) -> None:
-    source, uow, book, view, handler, command = _pending_exit_case()
+    from unittest.mock import Mock
+
+    request = Mock()
+    source, uow, book, view, handler, command = _pending_exit_case(
+        request_exit_recovery=request
+    )
     if mismatch == "projection":
         view.projection_version = "pv_newer"
     elif mismatch == "not_ready":
@@ -476,6 +482,7 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     receipt = await source.commit_decision(trace, result, None)
 
     assert receipt.decision_id == "incident-decision"
+    request.assert_called_once_with()
     assert source.current_policy_state == next_state
     assert source.policy_revision == 1
     if mismatch.startswith("dispatch_"):

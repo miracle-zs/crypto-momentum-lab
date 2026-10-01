@@ -23,9 +23,6 @@ class _RecordingRepo:
     async def save_process_state(self, state) -> None:
         return None
 
-    async def save_balance_position_snapshot(self, *, balances, positions) -> None:
-        self.positions.extend(positions)
-
     async def save_reconciliation_snapshot(self, **kwargs) -> None:
         self.positions.extend(kwargs["positions"])
 

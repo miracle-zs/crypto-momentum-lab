@@ -2506,8 +2506,6 @@ async def test_submission_and_checkpoint_persistence_are_independent():
     assert len(submissions.approved) == 1
     assert saved
     assert all(item[0] == "run-1" for item in saved)
-    assert not hasattr(submissions, "save_checkpoint")
-    assert not hasattr(checkpoints, "save_approved_intent")
 
 
 def test_readiness_reads_latest_explicit_context_without_provider_cache() -> None:

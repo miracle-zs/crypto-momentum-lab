@@ -90,27 +90,7 @@ class AccountSyncRepository(Protocol):
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         pass
 
-    async def save_balance_snapshot(self, snapshot: AccountBalanceSnapshot) -> None:
-        pass
-
     async def save_position_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
-        pass
-
-    async def save_balance_position_snapshot(
-        self,
-        *,
-        balances: tuple[AccountBalanceSnapshot, ...],
-        positions: tuple[AccountPositionSnapshot, ...],
-    ) -> None:
-        pass
-
-    async def upsert_open_order(self, order: AccountOpenOrderSnapshot) -> None:
-        pass
-
-    async def save_fill_event(self, fill: AccountFillEvent) -> None:
-        pass
-
-    async def save_config_snapshot(self, snapshot: AccountConfigSnapshot) -> None:
         pass
 
     async def save_reconciliation_run(self, run: AccountReconciliationRun) -> None:

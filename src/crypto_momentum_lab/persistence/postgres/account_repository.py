@@ -227,43 +227,11 @@ class PostgresAccountRepository:
                 for row in rows
             )
 
-    async def save_balance_snapshot(self, snapshot: AccountBalanceSnapshot) -> None:
-        await self._insert(AccountBalanceSnapshotRow, balance_snapshot_row(snapshot))
-
     async def save_position_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
         await self._insert(
             AccountPositionSnapshotRow,
             position_snapshot_row(snapshot),
         )
-
-    async def save_balance_position_snapshot(
-        self,
-        *,
-        balances: tuple[AccountBalanceSnapshot, ...],
-        positions: tuple[AccountPositionSnapshot, ...],
-    ) -> None:
-        """Persist a lightweight account-state observation atomically."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                await self._insert_in_session(
-                    session,
-                    AccountBalanceSnapshotRow,
-                    [balance_snapshot_row(item) for item in balances],
-                )
-                await self._insert_in_session(
-                    session,
-                    AccountPositionSnapshotRow,
-                    [position_snapshot_row(item) for item in positions],
-                )
-
-    async def upsert_open_order(self, order: AccountOpenOrderSnapshot) -> None:
-        await self._insert(AccountOpenOrderRow, open_order_snapshot_row(order))
-
-    async def save_fill_event(self, fill: AccountFillEvent) -> None:
-        await self._insert(AccountFillEventRow, fill_event_row(fill))
-
-    async def save_config_snapshot(self, snapshot: AccountConfigSnapshot) -> None:
-        await self._insert(AccountConfigSnapshotRow, config_snapshot_row(snapshot))
 
     async def save_reconciliation_run(self, run: AccountReconciliationRun) -> None:
         async with self._session_factory() as session:

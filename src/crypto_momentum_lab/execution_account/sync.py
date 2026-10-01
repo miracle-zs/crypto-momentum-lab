@@ -153,71 +153,6 @@ class ExecutionAccountSyncService:
             account_label=self._config.account_label,
         )
 
-    async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
-        """Persist a lightweight balance/position observation.
-
-        This path deliberately skips account configuration, open orders, and
-        historical fill lookups.  Those endpoints remain part of the slower
-        authoritative reconciliation loop.
-        """
-        resolved_observed_at = (
-            self._config.observed_at if observed_at is None else observed_at
-        )
-        if (
-            resolved_observed_at.tzinfo is None
-            or resolved_observed_at.utcoffset() is None
-        ):
-            raise ValueError("observed_at must be timezone-aware")
-        balances = await self._client.fetch_balances()
-        positions = await self._client.fetch_positions()
-        async with self._observation_write_lock:
-            if (
-                self._latest_observation_at is not None
-                and resolved_observed_at < self._latest_observation_at
-            ):
-                return
-            active_positions = tuple(
-                position for position in positions if position.position_amt != 0
-            )
-            active_position_keys = _position_keys(active_positions)
-            closed_position_keys = self._active_position_keys - active_position_keys
-            positions_to_save = tuple(
-                position
-                for position in positions
-                if (
-                    (position.symbol, position.position_side) in active_position_keys
-                    or (
-                        (position.symbol, position.position_side)
-                        in closed_position_keys
-                    )
-                )
-            )
-            normalized_balances = tuple(
-                replace(balance, observed_at=resolved_observed_at)
-                for balance in balances
-            )
-            persisted_balances = select_balance_history(
-                normalized_balances, self._last_balance_values
-            )
-            normalized_positions = tuple(
-                replace(position, observed_at=resolved_observed_at)
-                for position in positions_to_save
-            )
-            persisted_positions = self._positions_to_persist(
-                normalized_positions,
-                observed_at=resolved_observed_at,
-            )
-            await self._repository.save_balance_position_snapshot(
-                balances=persisted_balances,
-                positions=persisted_positions,
-            )
-            self._remember_balance_values(normalized_balances)
-            self._remember_position_signatures(
-                persisted_positions,
-                observed_at=resolved_observed_at,
-            )
-            self._active_position_keys = active_position_keys
-            self._remember_observation(resolved_observed_at)
 
     async def sync_once(
         self,
@@ -574,28 +509,6 @@ class ExecutionAccountSyncService:
                     pass
             raise
 
-    async def persist_reconciliation_facts(
-        self, result: ExecutionAccountSyncResult
-    ) -> None:
-        """Retain a staged scan without publishing its potentially stale baseline."""
-        async with self._observation_write_lock:
-            scopes = [(row.environment, row.account_label) for row in result.fills]
-            scopes.extend(
-                (row.environment, row.account_label)
-                for row in result.fill_cursor_updates
-            )
-            if any(
-                scope != (self._config.environment, self._config.account_label)
-                for scope in scopes
-            ):
-                raise ValueError(
-                    "staged reconciliation facts belong to another account"
-                )
-            if result.fills or result.fill_cursor_updates:
-                await self._repository.save_reconciliation_fills_and_cursors(
-                    fills=result.fills, cursors=result.fill_cursor_updates
-                )
-                self._update_fill_cursors_monotonically(result.fill_cursor_updates)
 
     async def persist_reconciliation_result(
         self,
@@ -664,7 +577,7 @@ class ExecutionAccountSyncService:
                     symbol for symbol in sorted(incomplete_fill_symbols(self._client))
                 ]
             details.update(position_state_details(snapshot.positions))
-            # Same sparsify rule as snapshot_once / user-data persist: the in-memory
+            # Same sparsify rule as user-data persist: the in-memory
             # snapshot keeps every asset, but durable history only stores non-zero
             # balances and the zero that closes a previously non-zero asset.
             # persist_reconciliation_result is the daemon's main write path and had

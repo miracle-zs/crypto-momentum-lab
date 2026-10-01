@@ -18,9 +18,6 @@ from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrato
 from crypto_momentum_lab.live_rollout.lease_recovery import (
     should_auto_reacquire_live_lease,
 )
-from crypto_momentum_lab.live_rollout.order_reconciliation import (
-    LiveOrderReconciliation,
-)
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     restore_live_strategy_from_checkpoint,
     validate_live_warmup_coverage,
@@ -1537,28 +1534,6 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
     assert set(seen["last_processed_at_by_symbol"]) == {"BTCUSDT", "4USDT"}
 
 
-@pytest.mark.asyncio
-async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
-    scanned = asyncio.Event()
-
-    class Repository:
-        async def load_unresolved_orders(self, run_id: str):
-            scanned.set()
-            return ()
-
-    reconciliation = LiveOrderReconciliation(
-        order_repository=Repository(),
-        state_machine=object(),
-        run_id="live-manual",
-        interval_seconds=0.01,
-    )
-    worker = asyncio.create_task(reconciliation.run_periodically())
-    try:
-        await asyncio.wait_for(scanned.wait(), timeout=1)
-    finally:
-        worker.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await worker
 
 
 def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:

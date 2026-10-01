@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.live_rollout.order_event_runtime import (
     LiveOrderEventRuntime,
 )
@@ -33,7 +34,24 @@ async def test_telemetry_failure_does_not_skip_order_observers() -> None:
 
     await runtime.handle(
         SimpleNamespace(symbol="BTCUSDT", client_order_id="entry-1"),  # type: ignore[arg-type]
-        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(state=ExchangeOrderState.ACKNOWLEDGED),  # type: ignore[arg-type]
     )
 
     assert observed == ["lifecycle", "daemon"]
+
+
+@pytest.mark.parametrize("state", [
+    ExchangeOrderState.ACKNOWLEDGED,
+    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+])
+async def test_only_unknown_order_results_request_repair(state):
+    from unittest.mock import AsyncMock, Mock
+
+    request = Mock()
+    runtime = LiveOrderEventRuntime(
+        telemetry=SimpleNamespace(order_event=AsyncMock()), request_recovery=request
+    )
+    await runtime.handle(SimpleNamespace(), SimpleNamespace(state=state))
+    assert request.call_count == (
+        1 if state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION else 0
+    )

@@ -622,6 +622,10 @@ class LiveStrategyDaemon:
         self._exit_processor.request_exit_recovery(
             plan=order.plan, known_executed_quantity=order.executed_quantity, state=state)
 
+    @property
+    def has_pending_exit_recovery(self) -> bool:
+        return self._exit_processor.has_pending_recovery
+
     async def recover_requested_exits(self) -> bool:
         outcomes = await self._exit_processor.recover_requested_exits()
         for symbol, outcome in outcomes:

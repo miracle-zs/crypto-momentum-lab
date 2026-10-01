@@ -7,6 +7,7 @@ supplies only cash, risk, and operational posture; it never reconstructs lots.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
@@ -164,6 +165,7 @@ class LiveDecisionFactSource:
         register_account_stream: AccountStreamRegistrar | None = None,
         decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
+        request_exit_recovery: Callable[[], None] = lambda: None,
     ) -> None:
         if not account_label.strip() or not strategy_name.strip():
             raise ValueError("account and strategy identity must not be empty")
@@ -174,6 +176,7 @@ class LiveDecisionFactSource:
         self._register_account_stream = register_account_stream
         self._decision_uow = decision_unit_of_work
         self._hedge_mode = hedge_mode
+        self._request_exit_recovery = request_exit_recovery
         self._context: LiveDaemonRuntimeContext | None = None
         self._policy_state = PolicyState()
         self._policy_revision = 0
@@ -456,14 +459,17 @@ class LiveDecisionFactSource:
             self._policy_digest = receipt.next_state_digest
 
             if result.exit_command is not None:
-                await self._dispatch_exit(
-                    receipt.decision_id,
-                    result.exit_command,
-                )
+                try:
+                    await self._dispatch_exit(
+                        receipt.decision_id,
+                        result.exit_command,
+                    )
+                finally:
+                    self._request_exit_recovery()
             del decision_input
             return receipt
 
-    async def recover_pending_exits(self, *, limit: int | None = None) -> None:
+    async def recover_pending_exits(self, *, limit: int | None = None) -> bool:
         if self._decision_uow is None:
             raise RuntimeError("live decision persistence UoW is required")
         if self._exit_handler is None:
@@ -537,6 +543,8 @@ class LiveDecisionFactSource:
                     decision_id=decision_id,
                     command_id=command.command_id,
                 )
+        # One final pass confirms resolved work is gone, then the worker sleeps.
+        return bool(pending)
 
     async def _read_book_view(self, command: TradeCommand) -> PositionView | None:
         book = self._execution_book
@@ -570,7 +578,11 @@ class LiveDecisionFactSource:
         *,
         view: PositionView | None = None,
     ) -> bool:
-        if command.expected_projection_version is None:
+        if (
+            command.expected_projection_version is None
+            or self._stream_id is None
+            or self._stream_epoch is None
+        ):
             return False
         if view is None:
             view = await self._read_book_view(command)

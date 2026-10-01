@@ -116,20 +116,8 @@ class FakeRepository:
     async def save_process_state(self, state):
         self.process_states.append(state)
 
-    async def save_balance_snapshot(self, snapshot):
-        self.balances.append(snapshot)
-
     async def save_position_snapshot(self, snapshot):
         raise AssertionError("no positions expected")
-
-    async def upsert_open_order(self, order):
-        raise AssertionError("no open orders expected")
-
-    async def save_fill_event(self, fill):
-        raise AssertionError("no fills expected")
-
-    async def save_config_snapshot(self, snapshot):
-        self.configs.append(snapshot)
 
     async def save_reconciliation_run(self, run):
         self.reconciliation_runs.append(run)
@@ -1176,85 +1164,7 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
     assert client.calls == [("BTCUSDT", int(start.timestamp() * 1000), client.cut)]
 
 
-async def test_staged_fact_retention_never_publishes_baseline_or_process_state():
-    repository = FakeRepository()
-    service = ExecutionAccountSyncService(
-        client=FakeClient(), repository=repository, config=_config()
-    )
-    observed_at = datetime(2026, 7, 4, tzinfo=UTC)
-    cursor = AccountFillReconciliationCursor(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        from_id=101,
-        start_time_ms=None,
-        last_checked_at=observed_at,
-    )
-    result = ExecutionAccountSyncResult(
-        status=ExecutionAccountStatus.READY_READONLY,
-        reconciliation_id="staged",
-        mismatch_count=0,
-        fills=(_fill("BTCUSDT", "101"),),
-        fill_cursor_updates=(cursor,),
-    )
-    await service.persist_reconciliation_facts(result)
-    assert repository.snapshot_calls == 0
-    assert repository.process_states == []
-    assert repository.fills == list(result.fills)
-    assert repository.fill_cursor_calls == [(cursor,)]
-    assert service._fill_cursors["BTCUSDT"].from_id == 101
-    assert service._latest_observation_at is None
-
-
-async def test_staged_fact_retention_failure_keeps_cursor_and_rejects_other_account():
-    from dataclasses import replace
-
-    import pytest
-
-    from crypto_momentum_lab.execution_account.fill_progress import FillCursor
-
-    class FailingRepository(FakeRepository):
-        async def save_reconciliation_fills_and_cursors(self, **kwargs):
-            raise RuntimeError("staged facts write failed")
-
-    repository = FailingRepository()
-    service = ExecutionAccountSyncService(
-        client=FakeClient(), repository=repository, config=_config()
-    )
-    service._fill_cursors["BTCUSDT"] = FillCursor(from_id=50, start_time_ms=None)
-    result = ExecutionAccountSyncResult(
-        status=ExecutionAccountStatus.READY_READONLY,
-        reconciliation_id="staged",
-        mismatch_count=0,
-        fills=(_fill("BTCUSDT", "101"),),
-        fill_cursor_updates=(
-            AccountFillReconciliationCursor(
-                environment="live",
-                account_label="primary",
-                symbol="BTCUSDT",
-                from_id=101,
-                start_time_ms=None,
-                last_checked_at=datetime(2026, 7, 4, tzinfo=UTC),
-            ),
-        ),
-    )
-    with pytest.raises(RuntimeError, match="staged facts write failed"):
-        await service.persist_reconciliation_facts(result)
-    assert service._fill_cursors["BTCUSDT"].from_id == 50
-    with pytest.raises(ValueError, match="another account"):
-        await service.persist_reconciliation_facts(
-            replace(
-                result, fills=(replace(result.fills[0], account_label="account-4"),)
-            )
-        )
-    assert repository.snapshot_calls == 0
-    assert repository.process_states == []
-
-
-@pytest.mark.parametrize("full_reconciliation", [False, True])
-async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history(
-    full_reconciliation,
-):
+async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history():
     class BlockingClient(FakeClient):
         def __init__(self):
             super().__init__()
@@ -1279,21 +1189,14 @@ async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history(
             await self.release.wait()
             return ()
 
-    class SnapshotRepository(FakeRepository):
-        async def save_balance_position_snapshot(self, *, balances, positions):
-            self.balances.extend(balances)
-            self.positions.extend(positions)
-
     client = BlockingClient()
-    repository = SnapshotRepository()
+    repository = FakeRepository()
     service = ExecutionAccountSyncService(
         client=client, repository=repository, config=_config()
     )
     service._remember_balance_values(await client.fetch_balances())
     initial_at = _config().observed_at
-    fetch = (
-        service.sync_once_for_realtime if full_reconciliation else service.snapshot_once
-    )
+    fetch = service.sync_once_for_realtime
     task = asyncio.create_task(fetch(observed_at=initial_at))
     try:
         await asyncio.wait_for(client.started.wait(), timeout=1)
@@ -1321,15 +1224,14 @@ async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history(
         assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
         client.release.set()
         result = await asyncio.wait_for(task, timeout=1)
-        if full_reconciliation:
-            await service.persist_reconciliation_result(result)
+        await service.persist_reconciliation_result(result)
         # The delayed REST cut must neither overwrite history nor reset the
         # sparsification cache: the next unchanged observation writes no row.
         assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
         client.wallet = Decimal("0")
-        await service.snapshot_once(observed_at=initial_at + timedelta(seconds=2))
+        await service.persist_user_data_event(snapshot=snapshot, event=event)
         assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
-        assert repository.snapshot_calls == 1
+        assert repository.snapshot_calls == 2
     finally:
         client.release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -1342,19 +1244,18 @@ async def test_materialized_rest_commit_finishes_before_newer_ws_commit():
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def save_balance_position_snapshot(self, *, balances, positions):
+        async def save_reconciliation_snapshot(self, **kwargs):
             self.started.set()
             await self.release.wait()
-            self.balances.extend(balances)
+            await super().save_reconciliation_snapshot(**kwargs)
 
     client = FakeClient()
     repository = BlockingRepository()
     service = ExecutionAccountSyncService(
         client=client, repository=repository, config=_config()
     )
-    rest_task = asyncio.create_task(
-        service.snapshot_once(observed_at=_config().observed_at)
-    )
+    result = await service.sync_once_for_realtime(observed_at=_config().observed_at)
+    rest_task = asyncio.create_task(service.persist_reconciliation_result(result))
     ws_task = None
     try:
         await asyncio.wait_for(repository.started.wait(), timeout=1)

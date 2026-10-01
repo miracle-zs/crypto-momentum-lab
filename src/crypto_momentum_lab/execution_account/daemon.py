@@ -1,8 +1,8 @@
 import asyncio
 import inspect
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Protocol, TypeVar, cast
@@ -23,15 +23,11 @@ from crypto_momentum_lab.execution_account.binance.user_data_models import (
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
 )
-from crypto_momentum_lab.execution_account.snapshot_changes import (
-    account_ws_state_matches,
-)
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncResult,
-    FillKey,
 )
 from crypto_momentum_lab.execution_account.user_data_models import (
     AccountUserDataUpdate,
@@ -43,8 +39,6 @@ from crypto_momentum_lab.execution_account.user_data_sync import (
 log = structlog.get_logger(__name__)
 
 _QueueItem = TypeVar("_QueueItem")
-_MISSING_FILL_RECONNECT_RETRY_SECONDS = 60.0
-_DEFAULT_MISSING_FILL_MAX_AGE_SECONDS = 5 * 60.0
 
 
 def _accepts_state_kwarg(func: object) -> bool:
@@ -193,8 +187,6 @@ class ContinuousAccountSyncDaemon:
 
 
 class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
-    async def snapshot_once(self, *, observed_at: datetime) -> None: ...
-
     async def publish_user_data_heartbeat(
         self,
         *,
@@ -249,33 +241,15 @@ class UserDataAccountEventStream(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class UserDataAccountSyncConfig:
-    rest_reconciliation_interval_seconds: float = 120.0
-    snapshot_interval_seconds: float = 15.0
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0
     failure_backoff_max_seconds: float = 300.0
     event_queue_size: int = 256
     persistence_queue_size: int = 256
     deferred_event_buffer_size: int = 512
-    # A REST-only historical fill may never be replayed by a newly connected
-    # user-data stream. Keep a bounded, non-blocking retry window so that one
-    # such fill cannot trigger reconnects forever.
-    missing_fill_max_age_seconds: float = _DEFAULT_MISSING_FILL_MAX_AGE_SECONDS
-
     def __post_init__(self) -> None:
-        if self.rest_reconciliation_interval_seconds <= 0:
-            raise ValueError("rest_reconciliation_interval_seconds must be positive")
-        if self.missing_fill_max_age_seconds <= 0:
-            raise ValueError("missing_fill_max_age_seconds must be positive")
-        if self.snapshot_interval_seconds <= 0:
-            raise ValueError("snapshot_interval_seconds must be positive")
         if self.heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive")
-        if self.heartbeat_interval_seconds > self.rest_reconciliation_interval_seconds:
-            raise ValueError(
-                "heartbeat_interval_seconds must not exceed "
-                "rest_reconciliation_interval_seconds"
-            )
         if self.failure_backoff_initial_seconds <= 0:
             raise ValueError("failure_backoff_initial_seconds must be positive")
         if self.failure_backoff_max_seconds < self.failure_backoff_initial_seconds:
@@ -340,14 +314,10 @@ class UserDataAccountSyncDaemon:
         self._accept_events = False
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
-        self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
-        self._missing_fill_reconnect_requested_at: dict[FillKey, datetime] = {}
         self._event_queue: asyncio.Queue[_ReceivedUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
         self._receiver_session_id = uuid4().hex
-        self._journal_receipts_in_flight = 0
-        self._received_event_generation = 0
         self._persistence_queue: (
             asyncio.Queue[_PendingUserDataPersistence | None] | None
         ) = None
@@ -367,8 +337,6 @@ class UserDataAccountSyncDaemon:
         log.info("execution_account_startup_started")
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Task[None] | None = None
-        reconciliation_task: asyncio.Future[None] | None = None
-        snapshot_task: asyncio.Future[None] | None = None
         recovery_task: asyncio.Task[None] | None = None
         stop_task = (
             asyncio.create_task(
@@ -389,11 +357,8 @@ class UserDataAccountSyncDaemon:
                     return
                 if self._state is None:
                     try:
-                        # Bring balances/positions online first.  The first
-                        # historical fill audit runs in the scheduled REST
-                        # reconciliation so a large closed-symbol universe
-                        # cannot delay the user-data stream startup.
-                        result = await self._reconcile(include_fills=False)
+                        # Restore account and fills once before accepting live events.
+                        result = await self._reconcile(include_fills=True)
                         if not _is_ready_result(result):
                             consecutive_failures += 1
                             await self._sleep_for_failure(consecutive_failures, None)
@@ -443,14 +408,6 @@ class UserDataAccountSyncDaemon:
                         name="binance-user-data-stream",
                     )
 
-                if reconciliation_task is None or reconciliation_task.done():
-                    reconciliation_task = asyncio.ensure_future(
-                        self._sleep(self._config.rest_reconciliation_interval_seconds)
-                    )
-                if snapshot_task is None or snapshot_task.done():
-                    snapshot_task = asyncio.ensure_future(
-                        self._sleep(self._config.snapshot_interval_seconds)
-                    )
                 if recovery_task is None or recovery_task.done():
                     recovery_task = asyncio.create_task(
                         self._wait_for_pipeline_recovery(),
@@ -458,8 +415,6 @@ class UserDataAccountSyncDaemon:
                     )
                 wait_tasks: set[asyncio.Future[None]] = {
                     heartbeat_task,
-                    reconciliation_task,
-                    snapshot_task,
                     stream_task,
                     recovery_task,
                 }
@@ -477,12 +432,6 @@ class UserDataAccountSyncDaemon:
                     return
                 if recovery_task in done:
                     recovery_task = None
-                    if reconciliation_task is not None:
-                        await _cancel_task(reconciliation_task)
-                    if snapshot_task is not None:
-                        await _cancel_task(snapshot_task)
-                    reconciliation_task = None
-                    snapshot_task = None
                     try:
                         result = await self._recover_pipeline()
                         if _is_usable_result(result):
@@ -522,12 +471,6 @@ class UserDataAccountSyncDaemon:
                     self._request_pipeline_recovery("persistence_worker_stopped")
                     continue
                 if stream_task in done:
-                    if reconciliation_task is not None:
-                        await _cancel_task(reconciliation_task)
-                    if snapshot_task is not None:
-                        await _cancel_task(snapshot_task)
-                    reconciliation_task = None
-                    snapshot_task = None
                     self._observe_stream_failure(stream_task)
                     continue
                 if heartbeat_task in done:
@@ -539,31 +482,6 @@ class UserDataAccountSyncDaemon:
                         self._run_heartbeat_loop(),
                         name="execution-account-heartbeat-loop",
                     )
-                if reconciliation_task in done:
-                    reconciliation_task = None
-                    try:
-                        result = await self._check_periodic()
-                        if _is_usable_result(result):
-                            consecutive_failures = 0
-                        else:
-                            consecutive_failures += 1
-                    except Exception as error:
-                        consecutive_failures += 1
-                        self._report_error(error)
-                        await self._sleep_for_failure(
-                            consecutive_failures,
-                            _retry_after_seconds(error),
-                        )
-                if snapshot_task in done:
-                    snapshot_task = None
-                    try:
-                        await self._snapshot()
-                    except Exception as error:
-                        if self._event_queue is not None:
-                            self._request_pipeline_recovery(
-                                f"snapshot_failed:{type(error).__name__}"
-                            )
-                        self._report_error(error)
         finally:
             self._accept_events = False
             await self._stream.stop()
@@ -571,10 +489,6 @@ class UserDataAccountSyncDaemon:
                 await _cancel_task(stop_task)
             if heartbeat_task is not None:
                 await _cancel_task(heartbeat_task)
-            if reconciliation_task is not None:
-                await _cancel_task(reconciliation_task)
-            if snapshot_task is not None:
-                await _cancel_task(snapshot_task)
             if recovery_task is not None:
                 await _cancel_task(recovery_task)
             await self._stop_pipeline()
@@ -586,24 +500,18 @@ class UserDataAccountSyncDaemon:
                     pass
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
-        self._received_event_generation += 1
         receipt = _ReceivedUserDataEvent(
             event,
             getattr(self._stream, "continuity_token", None),
         )
         queue = self._event_queue
-        self._journal_receipts_in_flight += 1
         if queue is None:
-            try:
-                await self._record_received_event(receipt)
-                await self._process_event(event)
-            finally:
-                self._journal_receipts_in_flight -= 1
+            await self._record_received_event(receipt)
+            await self._process_event(event)
             return
         try:
             queue.put_nowait(receipt)
         except asyncio.QueueFull:
-            self._journal_receipts_in_flight -= 1
             self._request_pipeline_recovery(
                 "event_queue_overflow", origin_event=event
             )
@@ -736,7 +644,6 @@ class UserDataAccountSyncDaemon:
                     origin_event=event,
                 )
             finally:
-                self._journal_receipts_in_flight -= 1
                 queue.task_done()
 
     async def _persistence_worker(
@@ -1060,72 +967,6 @@ class UserDataAccountSyncDaemon:
             except Exception as error:
                 self._report_error(error)
 
-    async def _check_periodic(self) -> ExecutionAccountSyncResult:
-        """Audit REST against quiet WS state; only a discrepancy requests repair."""
-        fetch = getattr(self._service, "sync_once_for_realtime", None)
-        retain = getattr(self._service, "persist_reconciliation_facts", None)
-        last = self._last_sync_result
-        if (
-            self._state is None
-            or last is None
-            or not _is_ready_result(last)
-            or last.fills_catching_up
-            or not callable(fetch)
-            or not callable(retain)
-            or not hasattr(self._stream, "continuity_token")
-        ):
-            return await self._reconcile(include_fills=True)
-        async with self._rest_sync_lock:
-            token = self._stream.continuity_token
-            generation = self._received_event_generation
-            quiet_at_start = self._journal_receipts_in_flight == 0 and (
-                self._event_queue is None or self._event_queue.empty()
-            )
-            result = await cast(
-                Callable[..., Awaitable[ExecutionAccountSyncResult]], fetch
-            )(
-                observed_at=self._now(),
-                publish_transient_states=False,
-                include_fills=True,
-            )
-        # An audit never replaces the in-memory WS projection.
-        async with self._state_lock:
-            if token is None or token != self._stream.continuity_token:
-                self._request_pipeline_recovery("periodic_check_connection_changed")
-            elif not _is_ready_result(result) or result.fills_catching_up:
-                self._request_pipeline_recovery("periodic_check_not_ready")
-            elif (
-                quiet_at_start
-                and generation == self._received_event_generation
-                and self._journal_receipts_in_flight == 0
-                and (self._event_queue is None or self._event_queue.empty())
-                and self._accept_events
-                and not self._reconciliation_active
-                and not self._pipeline_recovery_event.is_set()
-            ):
-                assert self._state is not None and result.snapshot is not None
-                live_snapshot = self._state.snapshot(result.snapshot.config.observed_at)
-                if not account_ws_state_matches(live_snapshot, result.snapshot):
-                    self._request_pipeline_recovery("periodic_check_state_mismatch")
-                else:
-                    # Coverage belongs to the exact REST position cut. Publish
-                    # that verified observation without replacing WS state or
-                    # relabeling its per-position exchange timestamps.
-                    self._notify_snapshot(result)
-                    self._schedule_reconciliation_persistence(result)
-        if _is_usable_result(result):
-            # Publish real trade identities even if persistence fails, without
-            # letting their notification claim readiness during known recovery.
-            notification = (
-                replace(result, status=ExecutionAccountStatus.SYNCING)
-                if self._pipeline_recovery_event.is_set()
-                else result
-            )
-            self._notify_reconciled_fills(notification)
-            await retain(result)
-        await self._inspect_reconciliation(result)
-        return result
-
     async def _reconcile(
         self,
         *,
@@ -1236,7 +1077,7 @@ class UserDataAccountSyncDaemon:
                     if not self._pipeline_recovery_event.is_set():
                         self._reconciliation_active = False
                         self._accept_events = True
-        await self._inspect_reconciliation(result)
+        self._check_stream_queue_health()
         return result
 
     def _notify_heartbeat(self) -> None:
@@ -1247,156 +1088,6 @@ class UserDataAccountSyncDaemon:
         except Exception as error:
             self._report_error(error)
 
-    async def _snapshot(self) -> None:
-        """Persist a REST observation without replacing the live account state.
-
-        Lightweight snapshots do not reconcile orders or trade coverage and
-        never replace ``AccountUserDataState``. Only REST requests are serialized
-        here; observation commits are serialized by the sync module. Pausing
-        the event pipeline would turn monitoring I/O into a false readiness
-        transition. Authoritative reconciliation retains
-        its drain, freeze and replay protocol.
-        """
-        async with self._rest_sync_lock:
-            await self._service.snapshot_once(observed_at=self._now())
-
-    async def _inspect_reconciliation(
-        self,
-        result: ExecutionAccountSyncResult,
-    ) -> None:
-        if not _is_ready_result(result):
-            return
-        self._check_stream_queue_health()
-        metrics = getattr(self._stream, "metrics", None)
-        stream_event_count = _metric_int(metrics, "parsed_event_count")
-        stream_fill_event_count = _metric_int(metrics, "fill_event_count")
-        if stream_event_count is None or stream_fill_event_count is None:
-            return
-
-        stream_fill_keys = _metric_fill_keys(metrics)
-        if stream_fill_keys is not None:
-            pending_before = dict(self._pending_missing_fill_keys)
-            candidates = set(pending_before)
-            candidates.update(result.new_fill_keys)
-            now = self._now()
-            pending_after: dict[FillKey, datetime] = {}
-            still_missing: set[FillKey] = set()
-            expired_missing: set[FillKey] = set()
-            for fill_key in candidates:
-                if fill_key in stream_fill_keys:
-                    continue
-                first_seen_at = pending_before.get(fill_key)
-                if first_seen_at is None:
-                    pending_after[fill_key] = now
-                    continue
-                age_seconds = (now - first_seen_at).total_seconds()
-                if age_seconds >= self._config.missing_fill_max_age_seconds:
-                    expired_missing.add(fill_key)
-                    continue
-                still_missing.add(fill_key)
-
-            reconnect_requested = False
-            pending_after.update(
-                {fill_key: pending_before[fill_key] for fill_key in still_missing}
-            )
-            reconnect_candidates = {
-                fill_key
-                for fill_key in still_missing
-                if (
-                    fill_key not in self._missing_fill_reconnect_requested_at
-                    or now - self._missing_fill_reconnect_requested_at[fill_key]
-                    >= timedelta(seconds=_MISSING_FILL_RECONNECT_RETRY_SECONDS)
-                )
-            }
-            if reconnect_candidates:
-                request_reconnect = getattr(
-                    self._stream,
-                    "request_reconnect",
-                    None,
-                )
-                if callable(request_reconnect):
-                    try:
-                        reconnect_result = request_reconnect(
-                            "rest_reconciliation_found_unmatched_fill_keys"
-                        )
-                        if inspect.isawaitable(reconnect_result):
-                            await reconnect_result
-                        reconnect_requested = True
-                        self._missing_fill_reconnect_requested_at.update(
-                            {fill_key: now for fill_key in reconnect_candidates}
-                        )
-                    except Exception as error:
-                        self._report_error(error)
-                        pending_after.update(
-                            {
-                                fill_key: pending_before[fill_key]
-                                for fill_key in reconnect_candidates
-                            }
-                        )
-                        for fill_key in reconnect_candidates:
-                            self._missing_fill_reconnect_requested_at.pop(
-                                fill_key,
-                                None,
-                            )
-            if still_missing:
-                log.warning(
-                    "binance_user_data_stream_missing_fill_events",
-                    rest_new_fill_count=len(result.new_fill_keys),
-                    unmatched_fill_count=len(still_missing),
-                    unmatched_fill_keys=sorted(still_missing)[:10],
-                    pending_fill_count=len(pending_after),
-                    parsed_event_count=stream_event_count,
-                    reconnect_requested=reconnect_requested,
-                    reconnect_deferred_count=(
-                        len(still_missing) - len(reconnect_candidates)
-                    ),
-                )
-            if expired_missing:
-                log.warning(
-                    "binance_user_data_stream_historical_unmatched_fill_events",
-                    unmatched_fill_count=len(expired_missing),
-                    unmatched_fill_keys=sorted(expired_missing)[:10],
-                    max_age_seconds=self._config.missing_fill_max_age_seconds,
-                )
-            self._pending_missing_fill_keys = pending_after
-            self._missing_fill_reconnect_requested_at = {
-                fill_key: requested_at
-                for fill_key, requested_at in (
-                    self._missing_fill_reconnect_requested_at.items()
-                )
-                if fill_key in pending_after
-            }
-
-        last_event_received_at = getattr(
-            metrics,
-            "last_event_received_at",
-            None,
-        )
-        log.info(
-            "binance_user_data_stream_health",
-            parsed_event_count=stream_event_count,
-            fill_event_count=stream_fill_event_count,
-            fill_event_key_count=(
-                None if stream_fill_keys is None else len(stream_fill_keys)
-            ),
-            rest_fill_count=result.fill_count,
-            rest_new_fill_count=len(result.new_fill_keys),
-            rest_fill_counts_by_symbol=dict(result.fill_count_by_symbol),
-            pending_fill_count=len(self._pending_missing_fill_keys),
-            event_queue_size=(
-                None if self._event_queue is None else self._event_queue.qsize()
-            ),
-            persistence_queue_size=(
-                None
-                if self._persistence_queue is None
-                else self._persistence_queue.qsize()
-            ),
-            last_event_received_at=(
-                None
-                if not isinstance(last_event_received_at, datetime)
-                else last_event_received_at.isoformat()
-            ),
-        )
 
     def _check_stream_queue_health(self) -> None:
         metrics = getattr(self._stream, "metrics", None)
@@ -1480,25 +1171,6 @@ def _metric_int(metrics: object, name: str) -> int | None:
     return None
 
 
-def _metric_fill_keys(metrics: object) -> set[FillKey] | None:
-    value = getattr(metrics, "fill_event_keys", None)
-    if value is None or isinstance(value, str | bytes):
-        return None
-    if not isinstance(value, Iterable):
-        return None
-    keys: set[FillKey] = set()
-    for item in value:
-        if not isinstance(item, tuple | list) or len(item) != 2:
-            return None
-        symbol, trade_id = item
-        if not isinstance(symbol, str) or not isinstance(trade_id, str):
-            return None
-        normalized_symbol = symbol.strip().upper()
-        normalized_trade_id = trade_id.strip()
-        if not normalized_symbol or not normalized_trade_id:
-            return None
-        keys.add((normalized_symbol, normalized_trade_id))
-    return keys
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:

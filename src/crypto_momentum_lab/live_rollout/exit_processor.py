@@ -395,6 +395,10 @@ class LiveExitProcessor:
         ):
             self._request_recovery()
 
+    @property
+    def has_pending_recovery(self) -> bool:
+        return bool(self._requested_recoveries)
+
     async def recover_requested_exits(
         self, *, limit: int = 5
     ) -> tuple[tuple[str, ExitLaneOutcome], ...]:

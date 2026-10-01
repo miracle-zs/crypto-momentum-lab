@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 import structlog
 
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
+    ExchangeOrderState,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.live_rollout.telemetry_ports import OrderEventSink
@@ -28,8 +30,14 @@ class EntryOrderEventObserver(Protocol):
 class LiveOrderEventRuntime:
     """Keep telemetry best-effort while preserving local order observers."""
 
-    def __init__(self, *, telemetry: OrderEventSink) -> None:
+    def __init__(
+        self,
+        *,
+        telemetry: OrderEventSink,
+        request_recovery: Callable[[], None] = lambda: None,
+    ) -> None:
         self._telemetry = telemetry
+        self._request_recovery = request_recovery
         self._entry_order_lifecycle: EntryOrderLifecycleObserver | None = None
         self._daemon: EntryOrderEventObserver | None = None
 
@@ -57,6 +65,8 @@ class LiveOrderEventRuntime:
                 error_type=type(error).__name__,
             )
         finally:
+            if event.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                self._request_recovery()
             if self._entry_order_lifecycle is not None:
                 self._entry_order_lifecycle.observe(plan, event)
             if self._daemon is not None:

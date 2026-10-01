@@ -169,13 +169,13 @@ async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> No
         service=service,
         stream=stream,
         config=UserDataAccountSyncConfig(
-            rest_reconciliation_interval_seconds=0.08,
             heartbeat_interval_seconds=0.01,
-            snapshot_interval_seconds=1.0,
         ),
     )
     task = asyncio.create_task(daemon.run(stop_requested=stop_requested))
     try:
+        await asyncio.wait_for(service.sync_started.wait(), timeout=1)
+        daemon._request_pipeline_recovery("test_connection_lost")
         await asyncio.wait_for(service.reconciliation_started.wait(), timeout=1)
         previous_heartbeat_count = len(service.heartbeats)
         await asyncio.sleep(0.04)
@@ -188,55 +188,6 @@ async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> No
         await asyncio.wait_for(task, timeout=1)
 
 
-async def test_lightweight_snapshot_keeps_realtime_events_and_readiness_live() -> None:
-    class BlockingSnapshotService(FakeService):
-        def __init__(self, snapshot):
-            super().__init__(snapshot)
-            self.snapshot_started = asyncio.Event()
-            self.release_snapshot = asyncio.Event()
-
-        async def snapshot_once(self, *, observed_at):
-            self.snapshot_started.set()
-            await self.release_snapshot.wait()
-
-    service = BlockingSnapshotService(_snapshot())
-    applied = asyncio.Event()
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-        on_event_applied=lambda event, result: applied.set(),
-    )
-    await daemon._reconcile(include_fills=True)
-    daemon._start_pipeline()
-    task = asyncio.create_task(daemon._snapshot())
-    try:
-        await asyncio.wait_for(service.snapshot_started.wait(), timeout=1)
-        await daemon._publish_heartbeat()
-        assert service.heartbeat_states[-1] is ExecutionAccountStatus.READY_READONLY
-        event = parse_user_data_event(
-            {
-                "e": "ACCOUNT_UPDATE",
-                "E": 1783123201000,
-                "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
-            },
-            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-        )
-        await daemon._on_event(event)
-        await asyncio.wait_for(applied.wait(), timeout=1)
-        assert not daemon._deferred_events
-        # The WS observation must reach durable storage before REST returns.
-        await asyncio.wait_for(daemon._persistence_queue.join(), timeout=0.1)
-        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
-        assert not task.done()
-        service.release_snapshot.set()
-        await asyncio.wait_for(task, timeout=1)
-        await asyncio.wait_for(daemon._persistence_queue.join(), timeout=1)
-        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
-    finally:
-        service.release_snapshot.set()
-        await asyncio.gather(task, return_exceptions=True)
-        await daemon._stop_pipeline()
 
 
 async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
@@ -287,43 +238,52 @@ async def test_publish_heartbeat_backward_compatible_with_old_signature() -> Non
     assert len(calls) == 1
 
 
-async def test_run_does_not_block_startup_on_historical_fill_reconciliation() -> None:
-    service = FakeService(_snapshot())
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-    )
-    task = asyncio.create_task(daemon.run())
-    try:
-        await asyncio.wait_for(service.sync_started.wait(), timeout=1)
-        assert service.sync_include_fills == [False]
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
 
 
-async def test_run_stops_when_stop_is_requested() -> None:
+
+
+async def test_healthy_ws_persists_events_without_rest_polling() -> None:
+    from unittest.mock import AsyncMock
+
     service = FakeService(_snapshot())
+    service.snapshot_once = AsyncMock()
+    service.sync_once_for_realtime = AsyncMock()
+    stop = asyncio.Event()
+
+    async def fast_sleep(_delay):
+        await asyncio.sleep(0.001)
+
     stream = BlockingStream()
-    stop_requested = asyncio.Event()
     daemon = UserDataAccountSyncDaemon(
         service=service,
         stream=stream,
         config=UserDataAccountSyncConfig(),
+        sleep=fast_sleep,
     )
-    task = asyncio.create_task(daemon.run(stop_requested=stop_requested))
+    task = asyncio.create_task(daemon.run(stop_requested=stop))
     try:
-        await asyncio.wait_for(service.sync_started.wait(), timeout=1)
-        stop_requested.set()
-        await asyncio.wait_for(task, timeout=1)
-        assert stream.stop_count == 1
+        await asyncio.wait_for(service.sync_started.wait(), 1)
+        event = parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE", "E": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+        await daemon._on_event(event)
+        await asyncio.wait_for(daemon._event_queue.join(), 1)
+        await asyncio.wait_for(daemon._persistence_queue.join(), 1)
+        await asyncio.sleep(0.03)
+        assert len(service.heartbeats) > 1
+        assert service.sync_calls == 1
+        assert service.sync_include_fills == [True]
+        service.snapshot_once.assert_not_awaited()
+        service.sync_once_for_realtime.assert_not_awaited()
+        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
     finally:
-        if not task.done():
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+        stop.set()
+        await asyncio.wait_for(task, 1)
+        assert stream.stop_count == 1
 
 
 class RealtimeFakeService(FakeService):
@@ -373,6 +333,44 @@ class RealtimeFakeService(FakeService):
         self.realtime_persisted_event.set()
 
 
+async def test_recovered_fills_do_not_require_replay_on_live_ws() -> None:
+    from unittest.mock import AsyncMock
+
+    service = RealtimeFakeService(_snapshot())
+    stream = FakeStream()
+    stream.metrics = SimpleNamespace(
+        parsed_event_count=1, fill_event_count=0, fill_event_keys=(),
+        event_queue_overflow_count=0,
+    )
+    stream.request_reconnect = AsyncMock()
+    recovered = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service, stream=stream, config=UserDataAccountSyncConfig(),
+        on_reconciled_fill=lambda fill, result: recovered.append(fill),
+    )
+    await daemon._reconcile(include_fills=True)
+    await daemon._reconcile(include_fills=True)
+    await daemon._reconcile(include_fills=True)
+    await asyncio.wait_for(service.realtime_persisted_event.wait(), 1)
+    assert recovered == [service.fill, service.fill]
+    assert daemon._accept_events
+    assert not daemon._pipeline_recovery_event.is_set()
+    stream.request_reconnect.assert_not_awaited()
+
+
+async def test_stream_queue_overflow_still_requests_recovery() -> None:
+    stream = FakeStream()
+    stream.metrics = SimpleNamespace(event_queue_overflow_count=1)
+    daemon = UserDataAccountSyncDaemon(
+        service=FakeService(_snapshot()), stream=stream,
+        config=UserDataAccountSyncConfig(),
+    )
+    await daemon._reconcile(include_fills=True)
+    assert daemon._pipeline_recovery_event.is_set()
+    assert daemon._pipeline_recovery_reason == "stream_event_queue_overflow"
+    assert not daemon._accept_events
+
+
 async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -> None:
     snapshot = _snapshot()
     service = FakeService(snapshot)
@@ -380,7 +378,6 @@ async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -
         service=service,
         stream=FakeStream(),
         config=UserDataAccountSyncConfig(
-            rest_reconciliation_interval_seconds=60,
             heartbeat_interval_seconds=30,
         ),
         clock=lambda: datetime(2026, 7, 4, 0, 0, 2, tzinfo=UTC),
@@ -769,100 +766,6 @@ def _snapshot() -> AccountSnapshot:
     )
 
 
-@pytest.mark.parametrize("concurrent_event", [False, True])
-async def test_periodic_check_keeps_ws_live_without_replacing_or_refetching(
-    concurrent_event,
-):
-    class AuditService(RealtimeFakeService):
-        def __init__(self):
-            super().__init__(_snapshot())
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-            self.facts = []
-
-        async def sync_once_for_realtime(self, **kwargs):
-            from dataclasses import replace
-
-            result = await super().sync_once_for_realtime(**kwargs)
-            result = replace(
-                result,
-                snapshot=replace(
-                    result.snapshot,
-                    balances=(
-                        replace(
-                            result.snapshot.balances[0], available_balance=Decimal("70")
-                        ),
-                    ),
-                ),
-            )
-            self.started.set()
-            await self.release.wait()
-            return result
-
-        async def persist_reconciliation_facts(self, result):
-            self.facts.append(result)
-
-    service = AuditService()
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    published = []
-    fills = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=stream,
-        config=UserDataAccountSyncConfig(),
-        clock=lambda: datetime(2026, 7, 4, 0, 10, tzinfo=UTC),
-        on_snapshot=published.append,
-        on_reconciled_fill=lambda fill, result: fills.append(fill),
-    )
-    await daemon._reconcile(include_fills=True)
-    published.clear()
-    daemon._start_pipeline()
-    state = daemon._state
-    task = asyncio.create_task(daemon._check_periodic())
-    try:
-        await asyncio.wait_for(service.started.wait(), timeout=1)
-        await daemon._publish_heartbeat()
-        assert service.heartbeat_states[-1] is ExecutionAccountStatus.READY_READONLY
-        assert not daemon._reconciliation_active
-        if concurrent_event:
-            await daemon._on_event(
-                parse_user_data_event(
-                    {
-                        "e": "ACCOUNT_UPDATE",
-                        "E": 1783123201000,
-                        "a": {"B": [{"a": "USDT", "wb": "101"}], "P": []},
-                    },
-                    received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
-                )
-            )
-            await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-            await asyncio.wait_for(daemon._persistence_queue.join(), timeout=1)
-            assert service.persisted[-1][0].balances[0].wallet_balance == Decimal("101")
-        service.release.set()
-        result = await asyncio.wait_for(task, timeout=1)
-        assert daemon._state is state
-        assert daemon._state.snapshot(daemon._now()).balances[
-            0
-        ].wallet_balance == Decimal("101" if concurrent_event else "100")
-        assert daemon._accept_events
-        assert not daemon._pipeline_recovery_event.is_set()
-        assert not daemon._deferred_events
-        assert len(published) == (0 if concurrent_event else 1)
-        if published:
-            assert published[0].snapshot is result.snapshot
-        assert service.realtime_calls == 1
-        assert service.facts == [result]
-        assert fills == [service.fill]
-        if not concurrent_event:
-            await asyncio.wait_for(service.realtime_persisted_event.wait(), timeout=1)
-            assert service.realtime_persisted == [result]
-        else:
-            assert service.realtime_persisted == []
-    finally:
-        service.release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        await daemon._stop_pipeline()
 
 
 @pytest.mark.parametrize("frozen", [False, True])
@@ -972,8 +875,6 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
             await self.release_fetch.wait()
             return result
 
-        async def persist_reconciliation_facts(self, result):
-            pass
 
     service = PendingReceiptService()
     daemon = UserDataAccountSyncDaemon(
@@ -1008,7 +909,7 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
         service.release_journal.set()
         await asyncio.wait_for(receipt, timeout=1)
         await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
-        assert daemon._journal_receipts_in_flight == 0
+        assert daemon._event_queue.empty()
         await asyncio.wait_for(service.fetch_started.wait(), timeout=1)
         service.release_fetch.set()
         result = await asyncio.wait_for(repair, timeout=1)
@@ -1025,229 +926,14 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
         await daemon._stop_pipeline()
 
 
-@pytest.mark.parametrize(
-    "condition", ["mismatch", "disconnect", "catchup", "failure", "receipt"]
-)
-async def test_periodic_check_only_requests_repair_for_known_account_problems(
-    condition,
-):
-    from dataclasses import replace
-
-    class AuditService(RealtimeFakeService):
-        async def persist_reconciliation_facts(self, result):
-            pass
-
-        async def sync_once_for_realtime(self, **kwargs):
-            if condition == "failure":
-                raise RuntimeError("REST timeout")
-            result = await super().sync_once_for_realtime(**kwargs)
-            if condition == "disconnect":
-                stream.continuity_token = None
-            return replace(result, fills_catching_up=condition == "catchup")
-
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    service = AuditService(_snapshot())
-    published = []
-    fill_states = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=stream,
-        config=UserDataAccountSyncConfig(),
-        on_snapshot=published.append,
-        on_reconciled_fill=lambda fill, result: fill_states.append(result.status),
-    )
-    await daemon._reconcile(include_fills=True)
-    original_state = daemon._state
-    published.clear()
-    if condition in ("mismatch", "receipt"):
-        service.snapshot = replace(
-            service.snapshot,
-            balances=(
-                replace(
-                    service.snapshot.balances[0],
-                    wallet_balance=Decimal("999"),
-                ),
-            ),
-        )
-    if condition == "receipt":
-        daemon._journal_receipts_in_flight = 1
-    if condition == "failure":
-        with pytest.raises(RuntimeError, match="REST timeout"):
-            await daemon._check_periodic()
-    else:
-        await daemon._check_periodic()
-    assert daemon._state is original_state
-    assert daemon._state.snapshot(daemon._now()).balances[0].wallet_balance == Decimal(
-        "100"
-    )
-    assert not daemon._reconciliation_active
-    assert published == []
-    assert service.realtime_persisted == []
-    should_repair = condition in ("mismatch", "disconnect", "catchup")
-    assert daemon._pipeline_recovery_event.is_set() == should_repair
-    assert daemon._accept_events == (not should_repair)
-    # No second REST fetch, even if the account needs a separate recovery.
-    assert service.realtime_calls == (0 if condition == "failure" else 1)
-    if condition != "failure":
-        assert fill_states == [
-            ExecutionAccountStatus.SYNCING
-            if should_repair
-            else ExecutionAccountStatus.READY_READONLY
-        ]
-    await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] is (
-        ExecutionAccountStatus.SYNCING
-        if should_repair
-        else ExecutionAccountStatus.READY_READONLY
-    )
 
 
-async def test_run_uses_background_check_on_the_periodic_timer():
-    class AuditService(RealtimeFakeService):
-        async def persist_reconciliation_facts(self, result):
-            stop.set()
-
-    stop = asyncio.Event()
-    service = AuditService(_snapshot())
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=stream,
-        config=UserDataAccountSyncConfig(
-            rest_reconciliation_interval_seconds=0.02,
-            heartbeat_interval_seconds=0.01,
-            snapshot_interval_seconds=1.0,
-        ),
-    )
-    await asyncio.wait_for(daemon.run(stop_requested=stop), timeout=1)
-    assert service.realtime_calls == 1
-    assert service.sync_calls == 1
-    assert not daemon._pipeline_recovery_event.is_set()
-    assert all(
-        state is ExecutionAccountStatus.READY_READONLY
-        for state in service.heartbeat_states
-    )
 
 
-async def test_periodic_fill_fact_write_failure_does_not_erase_fill_notification():
-    class AuditService(RealtimeFakeService):
-        async def persist_reconciliation_facts(self, result):
-            raise RuntimeError("facts storage unavailable")
-
-    service = AuditService(_snapshot())
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    fills = []
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=stream,
-        config=UserDataAccountSyncConfig(),
-        on_reconciled_fill=lambda fill, result: fills.append(fill),
-    )
-    await daemon._reconcile(include_fills=True)
-    with pytest.raises(RuntimeError, match="facts storage unavailable"):
-        await daemon._check_periodic()
-    assert fills == [service.fill]
-    assert daemon._accept_events
-    assert not daemon._pipeline_recovery_event.is_set()
-    await daemon._stop_pipeline()
 
 
-async def test_periodic_mismatch_runs_separate_recovery_in_the_main_loop():
-    from dataclasses import replace
-
-    class AuditService(RealtimeFakeService):
-        async def persist_reconciliation_facts(self, result):
-            pass
-
-        async def sync_once_for_realtime(self, **kwargs):
-            self.snapshot = replace(
-                self.snapshot,
-                balances=(
-                    replace(
-                        self.snapshot.balances[0],
-                        wallet_balance=Decimal("999"),
-                    ),
-                ),
-            )
-            result = await super().sync_once_for_realtime(**kwargs)
-            if self.realtime_calls == 2:
-                stop.set()
-            return result
-
-    stop = asyncio.Event()
-    service = AuditService(_snapshot())
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=stream,
-        config=UserDataAccountSyncConfig(
-            rest_reconciliation_interval_seconds=0.02,
-            heartbeat_interval_seconds=0.01,
-            snapshot_interval_seconds=1.0,
-        ),
-    )
-    await asyncio.wait_for(daemon.run(stop_requested=stop), timeout=1)
-    assert service.sync_calls == 1
-    assert service.realtime_calls == 2  # One check followed by one actual repair.
-    assert daemon._state.snapshot(daemon._now()).balances[0].wallet_balance == Decimal(
-        "999"
-    )
-    assert not daemon._pipeline_recovery_event.is_set()
 
 
-async def test_periodic_audit_preserves_exact_position_cut_for_real_book():
-    from dataclasses import replace
-    from datetime import timedelta
-
-    from tests.unit.execution_account.orders.test_fill_scan_ingestion import (
-        NOW,
-        coordinator,
-        scan,
-        snapshot,
-    )
-    baseline = replace(_snapshot(), positions=(snapshot(NOW - timedelta(seconds=30)),))
-    rest_snapshot = replace(baseline,
-        config=replace(baseline.config, observed_at=NOW - timedelta(seconds=1)),
-        positions=(snapshot(),))
-    proof_scan = scan()
-
-    class Service(RealtimeFakeService):
-        async def sync_once_for_realtime(self, **kwargs):
-            return ExecutionAccountSyncResult(
-                status=ExecutionAccountStatus.READY_READONLY,
-                reconciliation_id="audit-cut", mismatch_count=0,
-                snapshot=rest_snapshot, fill_load_scans=(proof_scan,),
-            )
-
-        async def persist_reconciliation_facts(self, result):
-            pass
-
-    stream = BlockingStream()
-    stream.continuity_token = 1
-    published = []
-    daemon = UserDataAccountSyncDaemon(service=Service(baseline), stream=stream,
-        config=UserDataAccountSyncConfig(), clock=lambda: NOW, on_snapshot=published.append)
-    await daemon._reconcile(include_fills=True)
-    published.clear()
-    state = daemon._state
-    try:
-        await daemon._check_periodic()
-        assert daemon._state is state
-        assert len(published) == 1
-        runtime, book = coordinator()
-        event = published[0]
-        await runtime.observe_account_snapshot(event.snapshot,
-            stream_id="hub", stream_epoch="epoch", sequence=1,
-            fill_load_scans=event.fill_load_scans)
-        evidence = book.observe.await_args.args[0]
-        assert evidence.coverage_evidence.checkpoint_event_cut == NOW
-        assert event.snapshot.positions[0].observed_at == NOW
-    finally:
-        await daemon._stop_pipeline()
 
 
 async def test_slow_journal_does_not_block_receive_and_captures_each_stream_token():
@@ -1281,14 +967,14 @@ async def test_slow_journal_does_not_block_receive_and_captures_each_stream_toke
         await asyncio.wait_for(service.started.wait(), 1)
         stream.continuity_token = 2
         await asyncio.wait_for(daemon._on_event(events[1]), 1)
-        assert daemon._journal_receipts_in_flight == 2
+        assert daemon._event_queue.qsize() == 1
         assert service.receipts == []
         assert daemon._state.snapshot(events[0].received_at).balances[0].wallet_balance == Decimal("100")
         service.release.set()
         await asyncio.wait_for(daemon._event_queue.join(), 1)
         assert [r["event"] for r in service.receipts] == events
         assert [r["stream_token"] for r in service.receipts] == [1, 2]
-        assert daemon._journal_receipts_in_flight == 0
+        assert daemon._event_queue.empty()
         assert daemon._state.snapshot(events[1].received_at).balances[0].wallet_balance == Decimal("102")
     finally:
         service.release.set()
@@ -1316,7 +1002,7 @@ async def test_queued_journal_failure_cannot_apply_unrecorded_event():
         assert daemon._pipeline_recovery_event.is_set()
         assert not daemon._accept_events
         assert not applied
-        assert daemon._journal_receipts_in_flight == 0
+        assert daemon._event_queue.empty()
     finally:
         await daemon._stop_pipeline()
 
@@ -1350,10 +1036,10 @@ async def test_receipt_queue_overflow_requests_repair_without_blocking_reader():
         assert daemon._pipeline_recovery_event.is_set()
         assert daemon._pipeline_recovery_reason == "event_queue_overflow"
         assert not daemon._accept_events
-        assert daemon._journal_receipts_in_flight == 2
+        assert daemon._event_queue.qsize() == 1
         service.release.set()
         await asyncio.wait_for(daemon._event_queue.join(), 1)
-        assert daemon._journal_receipts_in_flight == 0
+        assert daemon._event_queue.empty()
     finally:
         service.release.set()
         await daemon._stop_pipeline()

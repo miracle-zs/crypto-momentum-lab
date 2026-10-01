@@ -732,12 +732,20 @@ def test_sync_dashboard_option_and_ancestor_resolution(tmp_path: Path) -> None:
         f"target_commit='{target_commit}'\n"
         "previous_env_runtime_commit=''\n"
         "previous_runtime_commit=''\n"
+        "dashboard_changed=1\n"
         "sync_dashboard=0\n"
         f"{dashboard_block}\n"
         'printf "%s" "$dashboard_image"'
     )
     res1 = subprocess.check_output(["bash", "-c", cmd1], cwd=tmp_path, text=True)
     assert res1.strip() == f"crypto-momentum-lab-app:{target_commit}"
+
+    unaffected = subprocess.check_output(
+        ["bash", "-c", cmd1.replace("dashboard_changed=1", "dashboard_changed=0")],
+        cwd=tmp_path,
+        text=True,
+    )
+    assert unaffected.strip() == f"crypto-momentum-lab-app:{ancestor_commit}"
 
     # Test 2: custom non-repo image is preserved when sync_dashboard=0
     env_file.write_text(
@@ -750,6 +758,7 @@ def test_sync_dashboard_option_and_ancestor_resolution(tmp_path: Path) -> None:
         f"target_commit='{target_commit}'\n"
         "previous_env_runtime_commit=''\n"
         "previous_runtime_commit=''\n"
+        "dashboard_changed=1\n"
         "sync_dashboard=0\n"
         f"{dashboard_block}\n"
         'printf "%s" "$dashboard_image"'
@@ -764,6 +773,7 @@ def test_sync_dashboard_option_and_ancestor_resolution(tmp_path: Path) -> None:
         f"target_commit='{target_commit}'\n"
         "previous_env_runtime_commit=''\n"
         "previous_runtime_commit=''\n"
+        "dashboard_changed=1\n"
         "sync_dashboard=1\n"
         f"{dashboard_block}\n"
         'printf "%s" "$dashboard_image"'
@@ -809,15 +819,90 @@ def test_dashboard_only_deployment_mode_is_configured() -> None:
     assert "--dashboard-only" in script
     assert "--dashboard-only cannot be combined with --live" in script
     assert "--dashboard-only cannot be combined with --refresh-approvals" in script
-    assert "--dashboard-only cannot be combined with --execution-accounts-only" in script
+    assert (
+        "--dashboard-only cannot be combined with --execution-accounts-only" in script
+    )
 
     phase_start = script.index('if [[ "$dashboard_only" == 1 ]]; then')
-    phase_end = script.index('echo "market_data_services=untouched strategy_services=untouched"', phase_start)
+    phase_end = script.index(
+        'echo "market_data_services=untouched strategy_services=untouched"', phase_start
+    )
     block = script[phase_start:phase_end]
 
     assert "deploy_phase=dashboard-only" in block
     assert "compose-up:dashboard" in block
     assert "--force-recreate --no-deps dashboard" in block
     assert "set_env_value CML_DASHBOARD_IMAGE" in block
-    assert "CML_CODE_COMMIT" not in block  # CML_CODE_COMMIT must not be updated in .env.server
-    assert "exit 0" in script[phase_start:phase_end + 100]
+    assert (
+        "CML_CODE_COMMIT" not in block
+    )  # CML_CODE_COMMIT must not be updated in .env.server
+    assert "exit 0" in script[phase_start : phase_end + 100]
+
+
+@pytest.mark.parametrize(
+    ("service", "affected", "state", "expected"),
+    [
+        ("market-data", 0, "running|healthy", 0),
+        ("research-collector", 0, "running|healthy", 0),
+        ("dashboard", 0, "running|healthy", 0),
+        ("live-strategy", 1, "running|healthy", 1),
+        ("market-data", 1, "running|healthy", 1),
+        ("market-data", 0, "running|unhealthy", 1),
+        ("market-data", 0, "exited|none", 1),
+    ],
+)
+def test_restart_selection_preserves_unaffected_healthy_services(
+    service: str, affected: int, state: str, expected: int
+) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("service_requires_target_image() {")
+    end = script.index("\nlog_service_health_timings()", start)
+    invocation = (
+        script[start:end]
+        + """
+compose=(compose_stub)
+compose_stub() { printf container; }
+test_state=$3
+service_status() { printf '%s' "$test_state"; }
+docker() { printf old-image; }
+expected_image_for_service() { printf target-image; }
+market_changed=$2
+research_changed=$2
+dashboard_changed=$2
+live_changed=$2
+paper_changed=$2
+sync_dashboard=0
+dashboard_only=0
+service_is_converged "$1"
+"""
+    )
+    result = subprocess.run(
+        ["bash", "-c", invocation, "test", service, str(affected), state],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/crypto_momentum_lab/apps/execution_account/main.py",
+        "src/crypto_momentum_lab/live_rollout/daemon.py",
+    ],
+)
+def test_live_only_change_selects_only_live_group(path: str) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("runtime_changed=0\n")
+    end = script.index("\n# If the previous attempt", start)
+    invocation = (
+        "deployment_base_commit=base; target_commit=target; test_path=$1\n"
+        'git() { printf "%s" "$test_path"; }\n'
+        + script[start:end]
+        + '\nprintf "%s" "$runtime_changed|$live_changed|$market_changed|$research_changed|$dashboard_changed|$paper_changed"\n'
+    )
+    result = subprocess.check_output(
+        ["bash", "-c", invocation, "test", path], text=True
+    )
+    assert result == "1|1|0|0|0|0"

@@ -267,7 +267,7 @@ async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch)
     worker.repair_positions = runtime.repair_pending
     context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}),
         account_snapshot=SimpleNamespace(positions=(_position(),)))
-    task = asyncio.create_task(worker.run_periodically())
+    task = asyncio.create_task(worker.run_requested())
     try:
         await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
         await asyncio.wait_for(started.wait(), 1)

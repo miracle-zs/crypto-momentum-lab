@@ -1,4 +1,4 @@
-"""Durable order reconciliation for a live strategy session.
+"""Event-triggered repair of uncertain orders for a live strategy session.
 
 Complete account WebSocket order facts update the existing durable state machine.
 The existing repair worker reconciles incomplete events and unresolved orders.
@@ -32,13 +32,12 @@ DEFAULT_RECONCILE_INTERVAL_SECONDS = 60.0
 
 @dataclass(slots=True)
 class LiveOrderReconciliation:
-    """Coordinate immediate and periodic reconciliation for one live run.
+    """Apply WS facts directly and repair only explicitly requested uncertainty.
 
     ``reconcile_account_event`` is deliberately narrow: callers invoke it
     before publishing the account projection: complete facts become durable
     observations, incomplete updates become durable uncertainty.
-    ``run_periodically`` is best-effort and never replaces the durable order
-    state machine; it only retries unresolved orders after transient failures.
+    The worker sleeps while idle and retries only unfinished repair work.
     """
 
     order_repository: OrderReadRepository
@@ -46,7 +45,7 @@ class LiveOrderReconciliation:
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     on_unknown_order: Callable[[str], None] | None = None
-    recover_exits: Callable[[], Awaitable[None]] | None = None
+    recover_exits: Callable[[], Awaitable[bool]] | None = None
     repair_positions: Callable[[], Awaitable[None]] | None = None
     request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
     _requested: asyncio.Event = field(
@@ -118,16 +117,24 @@ class LiveOrderReconciliation:
         if self.on_unknown_order is not None:
             self.on_unknown_order(reason)
 
-    async def reconcile_all(self) -> None:
+    async def reconcile_all(self, *, include_confirmed: bool = False) -> bool:
         """Reconcile every unresolved order for the live session."""
 
         # WS can report a still-open order from an earlier run. Keep its run
         # scope in the same worker rather than dropping that repair request.
         runs = self._requested_runs | {self.run_id}
         self._requested_runs.clear()
+        pending = False
         try:
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
+                    if not include_confirmed and order.state in {
+                        ExchangeOrderState.ACKNOWLEDGED,
+                        ExchangeOrderState.PARTIALLY_FILLED,
+                    }:
+                        continue
+                    pending = True
+                    self._requested_runs.add(run_id)
                     if (
                         self.request_unknown_exit is not None
                         and order.plan.reduce_only
@@ -139,39 +146,46 @@ class LiveOrderReconciliation:
         except BaseException:
             self._requested_runs.update(runs)
             raise
+        return pending
 
-    async def run_periodically(self) -> None:
-        """Run the existing repair worker on request or periodic timeout."""
+    async def run_requested(self) -> None:
+        """Wait for requests; a timeout is used only while repairs remain pending."""
 
+        retry_pending = False
         while True:
-            try:
-                await asyncio.wait_for(
-                    self._requested.wait(),
-                    timeout=self.interval_seconds,
-                )
-            except TimeoutError:
-                pass
+            if retry_pending:
+                try:
+                    await asyncio.wait_for(
+                        self._requested.wait(), timeout=self.interval_seconds
+                    )
+                except TimeoutError:
+                    pass
+            else:
+                await self._requested.wait()
             # Clear before the scan so a request arriving during REST work
             # remains set and triggers another scan after this one finishes.
             self._requested.clear()
+            retry_pending = False
             if self.repair_positions is not None:
                 try:
                     await self.repair_positions()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    retry_pending = True
                     log.exception(
-                        "live_periodic_position_repair_failed", run_id=self.run_id
+                        "live_position_repair_failed", run_id=self.run_id
                     )
             try:
-                await self.reconcile_all()
+                retry_pending = await self.reconcile_all() or retry_pending
                 if self.recover_exits is not None:
-                    await self.recover_exits()
+                    retry_pending = await self.recover_exits() or retry_pending
             except asyncio.CancelledError:
                 raise
             except Exception:
+                retry_pending = True
                 log.exception(
-                    "live_periodic_order_reconcile_failed",
+                    "live_order_repair_failed",
                     run_id=self.run_id,
                     interval_seconds=self.interval_seconds,
                 )

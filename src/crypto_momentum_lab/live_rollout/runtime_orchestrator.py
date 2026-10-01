@@ -477,6 +477,7 @@ async def run_live_daemon(
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
+    order_reconciliation: LiveOrderReconciliation | None = None
     candle_source: BinanceRestClosedCandle15mSource | None = None
     closed_candle_feed: BinanceClosedCandle15mFeed | None = None
     ema_candle_source: BinanceRestClosedCandle15mSource | None = None
@@ -590,6 +591,10 @@ async def run_live_daemon(
             strategy_name=strategy_name,
             decision_unit_of_work=decision_unit_of_work,
             hedge_mode=hedge_mode,
+            request_exit_recovery=lambda: (
+                order_reconciliation.request_recovery()
+                if order_reconciliation is not None else None
+            ),
         )
         ownership_registry.register("decision_fact_source", fact_source.drain)
         signal_recorder = LiveStrategySignalRecorder(
@@ -698,7 +703,13 @@ async def run_live_daemon(
                 account_label=account_label,
             ),
         )
-        order_event_runtime = LiveOrderEventRuntime(telemetry=telemetry)
+        order_event_runtime = LiveOrderEventRuntime(
+            telemetry=telemetry,
+            request_recovery=lambda: (
+                order_reconciliation.request_recovery()
+                if order_reconciliation is not None else None
+            ),
+        )
 
         target_notional = getattr(config.execution, "target_notional", None)
         if target_notional is None:
@@ -971,10 +982,13 @@ async def run_live_daemon(
             repository=order_adoption_repository,
             run_id=session_id,
         )
-        async def recover_decision_exits() -> None:
+        async def recover_decision_exits() -> bool:
             if daemon is not None and await daemon.recover_requested_exits():
                 exit_channel_runtime.note_account_facts_changed()
-            await fact_source.recover_pending_exits(limit=5)
+            pending = await fact_source.recover_pending_exits(limit=5)
+            return pending or (
+                daemon is not None and daemon.has_pending_exit_recovery
+            )
 
         order_reconciliation = LiveOrderReconciliation(
             order_repository=order_read_repository,
@@ -982,7 +996,7 @@ async def run_live_daemon(
             run_id=session_id,
             recover_exits=recover_decision_exits,
         )
-        await order_reconciliation.reconcile_all()
+        await order_reconciliation.reconcile_all(include_confirmed=True)
         log_startup_phase("order_state_reconciled")
         draining = await session_state.session_is_draining(live_repository, session_id)
         if not draining:
@@ -1754,7 +1768,8 @@ async def run_live_daemon(
             entry_symbol_cache_task,
         ) = entry_runtime.start()
         lease_task = asyncio.create_task(lease_heartbeat.run())
-        reconcile_task = asyncio.create_task(order_reconciliation.run_periodically())
+        order_reconciliation.request_recovery()
+        reconcile_task = asyncio.create_task(order_reconciliation.run_requested())
         local_health_task: asyncio.Task[None] | None = None
 
         if health is not None:

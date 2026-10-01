@@ -309,7 +309,7 @@ async def test_blocked_exit_repair_does_not_block_account_publication():
         order_reconciliation=repair, is_transient_error=lambda error: False,
         on_account_snapshot=publish,
     )
-    worker = asyncio.create_task(repair.run_periodically())
+    worker = asyncio.create_task(repair.run_requested())
     event = SimpleNamespace(event_type="ACCOUNT_UPDATE", client_order_id=None,
                             has_fill=False, symbols=(), sequence=1)
     try:

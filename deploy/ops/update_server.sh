@@ -554,6 +554,7 @@ while IFS= read -r changed_path; do
       ;;
     src/crypto_momentum_lab/live_rollout/*|\
     src/crypto_momentum_lab/apps/live_rollout/*|\
+    src/crypto_momentum_lab/apps/execution_account/*|\
     src/crypto_momentum_lab/execution_account/*)
       runtime_changed=1
       live_changed=1
@@ -701,6 +702,8 @@ set_env_value() {
 current_dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
 if [[ "${dashboard_only:-0}" == 1 ]]; then
   dashboard_image="crypto-momentum-lab-app:${target_commit}"
+elif [[ "$dashboard_changed" == 0 && "$sync_dashboard" == 0 && -n "$current_dashboard_image" ]]; then
+  dashboard_image="$current_dashboard_image"
 elif [[ "$sync_dashboard" == 1 ]]; then
   dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
 elif [[ -z "$current_dashboard_image" \
@@ -1066,12 +1069,29 @@ is_healthy() {
   [[ "$(service_status "$service")" == "running|healthy" ]]
 }
 
+service_requires_target_image() {
+  case "$1" in
+    dashboard) [[ "$dashboard_changed" == 1 || "$sync_dashboard" == 1 || "$dashboard_only" == 1 ]] ;;
+    market-data) [[ "$market_changed" == 1 ]] ;;
+    research-collector) [[ "$research_changed" == 1 ]] ;;
+    paper-*) [[ "$paper_changed" == 1 ]] ;;
+    execution-account-live*|live-strategy*) [[ "$live_changed" == 1 ]] ;;
+    *) return 0 ;;
+  esac
+}
+
 service_is_converged() {
   local service="$1"
   local container_id state image expected_image
   container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || return 1
   state="$(service_status "$service")"
+  [[ "$state" == "running|healthy" ]] || return 1
+  # An unaffected healthy process may keep its previous image. New or failed
+  # services still use the target image when restarted by Compose.
+  if ! service_requires_target_image "$service"; then
+    return 0
+  fi
   image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
   expected_image="$(expected_image_for_service "$service")"
   [[ "$state" == "running|healthy" \

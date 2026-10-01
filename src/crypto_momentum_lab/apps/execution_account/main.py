@@ -306,10 +306,6 @@ def sync_command(
         int,
         typer.Option("--risk-control-hub-port", min=0, max=65535),
     ] = 8769,
-    rest_reconciliation_interval_seconds: Annotated[
-        float,
-        typer.Option("--rest-reconciliation-interval-seconds", min=30),
-    ] = 120.0,
     historical_fill_reconciliation_interval_seconds: Annotated[
         float,
         typer.Option(
@@ -434,7 +430,6 @@ def sync_command(
             account_event_hub_port=account_event_hub_port,
             risk_control_hub_host=risk_control_hub_host,
             risk_control_hub_port=risk_control_hub_port,
-            rest_reconciliation_interval_seconds=(rest_reconciliation_interval_seconds),
             historical_fill_reconciliation_interval_seconds=(
                 historical_fill_reconciliation_interval_seconds
             ),
@@ -555,7 +550,6 @@ async def sync_continuously(
     websocket_url: str,
     account_event_hub_host: str,
     account_event_hub_port: int,
-    rest_reconciliation_interval_seconds: float,
     historical_fill_reconciliation_interval_seconds: float,
     historical_fill_reconciliation_batch_size: int,
     snapshot_retention_days: int,
@@ -719,10 +713,6 @@ async def sync_continuously(
                 service=service,
                 stream=stream,
                 config=UserDataAccountSyncConfig(
-                    rest_reconciliation_interval_seconds=(
-                        rest_reconciliation_interval_seconds
-                    ),
-                    snapshot_interval_seconds=interval_seconds,
                 ),
                 on_error=_handle_sync_error,
                 on_event_applied=publish_account_event,

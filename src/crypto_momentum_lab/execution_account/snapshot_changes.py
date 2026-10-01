@@ -76,50 +76,6 @@ def diff_account_snapshots(
     )
 
 
-def account_ws_state_matches(live: AccountSnapshot, rest: AccountSnapshot) -> bool:
-    """Compare account facts, excluding prices/PnL and REST-only availability.
-
-    REST can enumerate inactive zero rows omitted by WS; those are equivalent
-    to absent entities. This is a drift check, not permission to replace state.
-    """
-    _require_snapshot_scope_match(live, rest)
-    return (
-        _config_signature(live.config) == _config_signature(rest.config)
-        and {
-            row.asset: row.wallet_balance for row in live.balances if row.wallet_balance
-        }
-        == {
-            row.asset: row.wallet_balance for row in rest.balances if row.wallet_balance
-        }
-        and {
-            (row.symbol, row.position_side): (
-                row.position_amt,
-                row.entry_price,
-                row.margin_type,
-                row.leverage,
-            )
-            for row in live.positions
-            if row.position_amt
-        }
-        == {
-            (row.symbol, row.position_side): (
-                row.position_amt,
-                row.entry_price,
-                row.margin_type,
-                row.leverage,
-            )
-            for row in rest.positions
-            if row.position_amt
-        }
-        and {
-            (row.symbol, row.order_id): _open_order_signature(row)
-            for row in live.open_orders
-        }
-        == {
-            (row.symbol, row.order_id): _open_order_signature(row)
-            for row in rest.open_orders
-        }
-    )
 
 
 def apply_account_snapshot_delta(
