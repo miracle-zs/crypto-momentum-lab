@@ -154,3 +154,8 @@ rtk proxy .venv/bin/python -m pytest -q   tests/unit/live_rollout/test_context_p
 前两条保留处置原因 `exchange_absence_reconciled_original_batch_closed_201148019`；最后一条补记 command 回执，dispatched_at 是回执补写时间，不是原始交易所提交时间。没有把实际成交的第三条误标为未派发或失效，没有删除记录、改写持仓/成交事实或直接执行 UPDATE SQL。处理后的独立只读验收断言通过：账户 3 PENDING=0，对账 ready，持仓/挂单/不匹配均为 0。服务未重启、未额外下单。
 
 12:03 复验三条终态与交易所证据仍一致，PENDING 仍为 0；四账户 checkpoint 和行情水位继续前进，采样年龄均小于 180 秒。
+
+
+## 2026-10-01 生产版本更新
+
+二百批结构改动已在用户授权下发布，当前生产运行版本为 `658a628b`，包含真实运行装配缺参修复。12 个常驻容器健康，四账户 checkpoint 两次采样均前进；整体 readiness 仍 DEGRADED，事实覆盖与策略状态发布未闭环，全局 PENDING 退出为 89 条。以上为新采样结果，前文保留各阶段历史记录；详见[生产发布与验收](module-decoupling-release-20261001.md)。
