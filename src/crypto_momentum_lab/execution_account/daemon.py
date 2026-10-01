@@ -2,7 +2,7 @@ import asyncio
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Protocol, TypeVar, cast
@@ -947,15 +947,37 @@ class UserDataAccountSyncDaemon:
             if is_syncing
             else ExecutionAccountStatus.READY_READONLY
         )
+        now = self._now()
         publish_heartbeat = self._service.publish_user_data_heartbeat
         if _accepts_state_kwarg(publish_heartbeat):
             await publish_heartbeat(
-                observed_at=self._now(),
+                observed_at=now,
                 state=target_state,
             )
         else:
-            await publish_heartbeat(observed_at=self._now())
+            await publish_heartbeat(observed_at=now)
         self._notify_heartbeat()
+        stream_token = getattr(self._stream, "continuity_token", 1)
+        is_stream_open = stream_token is not None
+        if not is_syncing and self._accept_events and is_stream_open:
+            snapshot_fn = getattr(self._state, "snapshot", None)
+            if callable(snapshot_fn):
+                snapshot = snapshot_fn(now)
+            elif isinstance(self._state, AccountSnapshot):
+                snapshot = replace(
+                    self._state,
+                    config=replace(self._state.config, observed_at=now),
+                )
+            else:
+                snapshot = None
+            if snapshot is not None:
+                heartbeat_result = ExecutionAccountSyncResult(
+                    status=target_state,
+                    reconciliation_id=f"heartbeat:{now.isoformat()}",
+                    mismatch_count=0,
+                    snapshot=snapshot,
+                )
+                self._notify_snapshot(heartbeat_result)
 
     async def _run_heartbeat_loop(self) -> None:
         while True:

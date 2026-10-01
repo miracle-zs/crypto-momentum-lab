@@ -1043,3 +1043,87 @@ async def test_receipt_queue_overflow_requests_repair_without_blocking_reader():
     finally:
         service.release.set()
         await daemon._stop_pipeline()
+
+
+async def test_heartbeat_publishes_keepalive_snapshot_when_stream_idle() -> None:
+    now = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    snapshot = _snapshot()
+    service = FakeService(snapshot)
+    published: list[ExecutionAccountSyncResult] = []
+    stream = FakeStream()
+    stream.continuity_token = 1
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+        clock=lambda: now,
+        on_snapshot=published.append,
+    )
+    daemon._state = AccountUserDataState(snapshot)
+    daemon._accept_events = True
+    daemon._last_sync_result = ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.READY_READONLY,
+        reconciliation_id="initial",
+        mismatch_count=0,
+        snapshot=snapshot,
+    )
+
+    await daemon._publish_heartbeat()
+
+    assert len(published) == 1
+    result = published[0]
+    assert result.status == ExecutionAccountStatus.READY_READONLY
+    assert result.snapshot is not None
+    assert result.snapshot.config.observed_at == now
+    assert result.reconciliation_id == f"heartbeat:{now.isoformat()}"
+
+
+async def test_heartbeat_does_not_publish_snapshot_when_stream_disconnected() -> None:
+    now = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    snapshot = _snapshot()
+    service = FakeService(snapshot)
+    published: list[ExecutionAccountSyncResult] = []
+    stream = FakeStream()
+    stream.continuity_token = None  # Disconnected
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+        clock=lambda: now,
+        on_snapshot=published.append,
+    )
+    daemon._state = AccountUserDataState(snapshot)
+    daemon._accept_events = True
+
+    await daemon._publish_heartbeat()
+
+    assert len(published) == 0
+
+
+async def test_heartbeat_does_not_publish_snapshot_when_syncing() -> None:
+    now = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    snapshot = _snapshot()
+    service = FakeService(snapshot)
+    published: list[ExecutionAccountSyncResult] = []
+    stream = FakeStream()
+    stream.continuity_token = 1
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+        clock=lambda: now,
+        on_snapshot=published.append,
+    )
+    daemon._state = AccountUserDataState(snapshot)
+    daemon._accept_events = True
+    daemon._last_sync_result = ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.SYNCING,
+        reconciliation_id="initial",
+        mismatch_count=0,
+        snapshot=snapshot,
+    )
+
+    await daemon._publish_heartbeat()
+
+    assert len(published) == 0
+
