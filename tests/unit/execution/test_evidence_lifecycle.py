@@ -84,6 +84,7 @@ def plan(entry, state, *, durable=True, fills=()):
         observed_at=OBSERVED,
         account_fills=fills,
         durable=durable,
+        has_active_reservations=True,
     )
 
 

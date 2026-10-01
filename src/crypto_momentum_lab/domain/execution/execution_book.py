@@ -48,7 +48,10 @@ from crypto_momentum_lab.domain.execution.evidence_digest import (
 from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
-from crypto_momentum_lab.domain.execution.evidence_lifecycle import plan_order_event
+from crypto_momentum_lab.domain.execution.evidence_lifecycle import (
+    plan_order_event,
+    terminal_settlement_is_confirmed,
+)
 from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionEvidence,
 )
@@ -2570,6 +2573,9 @@ class ExecutionBook:
                 observed_at=evidence.observed_at,
                 account_fills=journal.read_cut().fills,
                 durable=self._execution_unit_of_work is not None,
+                has_active_reservations=bool(
+                    self._find_active_reservations_for_command(cmd_id)
+                ),
             )
             if event_plan.updated is not None:
                 assert outbox is not None
@@ -2580,6 +2586,12 @@ class ExecutionBook:
                     released_qty += await self._release_command_reservations(
                         cmd_id, reason=event_plan.release_reason,
                     )
+                if event_plan.pending_trade_diagnostic is not None:
+                    # Keep admission closed while real position facts lag, but
+                    # let the account consumer continue receiving those facts.
+                    self._recovery_required_commands.add(cmd_id)
+                    if not diagnostics:
+                        diagnostics = (event_plan.pending_trade_diagnostic,)
                 if event_plan.recovery_diagnostic is not None:
                     self._recovery_required_commands.add(cmd_id)
                     settlement_recovery_required = True
@@ -2605,6 +2617,23 @@ class ExecutionBook:
             self._dispatch_reconciliation_required_commands.discard(
                 dispatch_reconciled_command_id
             )
+
+        for command_id in tuple(self._recovery_required_commands):
+            pending = self._outbox_by_command_id.get(command_id)
+            if pending is None or pending.scope.to_position_key() != key:
+                continue
+            if terminal_settlement_is_confirmed(
+                pending,
+                account_fills=journal.read_cut().fills,
+                cumulative_quantity=self._order_cumulative_fills.get(
+                    self._order_watermark_key(key, command_id), Decimal("0")
+                ),
+                reservations=tuple(
+                    self._coordinator.get_reservation(reservation_id)
+                    for reservation_id in self._command_reservations.get(command_id, ())
+                ),
+            ):
+                self._recovery_required_commands.discard(command_id)
 
         self._seen_evidence_ids.add(identity)
         updated_view = book.get_view(now=evidence.observed_at)
