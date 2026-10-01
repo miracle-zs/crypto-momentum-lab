@@ -654,3 +654,167 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         assert extended.event_cut == later.observed_at
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete", [True, False])
+@pytest.mark.parametrize("anchor_integrity", ["valid", "bad_hash", "wrong_scope"])
+async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
+    async_database_url, complete, anchor_integrity
+):
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillLoadScan,
+        AccountFillPageScan,
+    )
+    from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+        load_fill_recovery_sources,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"journal-anchor-{uuid4().hex[:12]}"
+    key = PositionKey("live", account, "XVSUSDT", "LONG")
+    scope = ExecutionScope("live", account, "XVSUSDT", key.position_side)
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    baseline = _snapshot(key, start, "0", "0")
+    entry = _fill(key, "real-entry", "BUY", "26.6", start + timedelta(minutes=1))
+    target = _snapshot(key, start + timedelta(minutes=3), "26.6", "100")
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        for sequence, snapshot, fill in [
+            (1, baseline, None),
+            (2, _snapshot(key, entry.trade_at, "26.6", "100"), entry),
+        ]:
+            assert isinstance(
+                await book.observe(
+                    ExecutionEvidence(
+                        f"old-{sequence}",
+                        scope,
+                        snapshot.observed_at,
+                        snapshot=snapshot,
+                        fill=fill,
+                        stream_id="hub",
+                        stream_epoch="old",
+                        sequence=sequence,
+                    )
+                ),
+                Applied,
+            )
+        # Earlier runtime versions persisted explicit flat observations to the
+        # immutable journal even when account snapshot retention dropped them.
+        from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+
+        old_scope = AccountFactStreamScope.for_position_key(
+            key, stream_id="hub", stream_epoch="old"
+        )
+        history = AccountJournal(key, stream_scope=old_scope)
+        history.record_snapshot(baseline)
+        async with factory() as session, session.begin():
+            await PostgresAccountJournalStore().persist_facts_in_session(
+                session,
+                scope=old_scope,
+                facts=history.read_cut(),
+                revision=1,
+            )
+        if anchor_integrity != "valid":
+            import hashlib
+            import json
+
+            from sqlalchemy import select
+
+            from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+                PositionFactJournalEventRow,
+            )
+
+            async with factory() as session, session.begin():
+                row = await session.scalar(
+                    select(PositionFactJournalEventRow).where(
+                        PositionFactJournalEventRow.account_label == account,
+                        PositionFactJournalEventRow.event_kind == "snapshot",
+                        PositionFactJournalEventRow.occurred_at == baseline.observed_at,
+                    )
+                )
+                if anchor_integrity == "bad_hash":
+                    row.payload_hash = "0" * 64
+                else:
+                    row.payload = {**row.payload, "account_label": "other-account"}
+                    row.payload_hash = hashlib.sha256(
+                        json.dumps(
+                            row.payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode()
+                    ).hexdigest()
+        sources = await load_fill_recovery_sources(
+            factory, environment="live", account_label=account
+        )
+        anchor = sources[("XVSUSDT", "LONG")]
+        if anchor_integrity != "valid":
+            assert anchor is None
+            return
+        assert anchor is not None, (
+            "real flat journal observation must survive sparse snapshot storage"
+        )
+        assert anchor.zero_snapshot == baseline
+        planned = plan_fill_scan(target, anchor)
+        assert planned is not None
+        scan = AccountFillLoadScan(
+            "live",
+            account,
+            "XVSUSDT",
+            "LONG",
+            AccountFillPageScan(
+                "XVSUSDT",
+                "journal-repair",
+                planned.start_time_ms,
+                None,
+                1,
+                complete,
+                not complete,
+                target.observed_at,
+            ),
+            target.observed_at,
+            planned.source_anchor_id,
+            planned.source_anchor_event_cut,
+            planned.source_anchor_kind,
+            planned.source_stream_id,
+            planned.source_stream_epoch,
+            source_anchor_snapshot=planned.source_anchor_snapshot,
+        )
+        coordinator = OrderExecutionCoordinator(
+            backend=object(),
+            environment="live",
+            account_label=account,
+            execution_book=book,
+        )
+        await coordinator.observe_account_snapshot(
+            target,
+            fills=(entry,),
+            fill_load_scans=(scan,),
+            stream_id="hub",
+            stream_epoch="new",
+            sequence=1,
+        )
+        checkpoint = await book.load_recovery_checkpoint(
+            AccountFactStreamScope.for_position_key(
+                key, stream_id="hub", stream_epoch="new"
+            )
+        )
+        if not complete:
+            assert checkpoint is None
+            return
+        assert checkpoint is not None and checkpoint.coverage.is_authoritative
+        assert checkpoint.projection.total_active_quantity == Decimal("26.6")
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert (
+            await restarted.read(scope, stream_id="hub", stream_epoch="new")
+        ).total_quantity == Decimal("26.6")
+    finally:
+        await engine.dispose()

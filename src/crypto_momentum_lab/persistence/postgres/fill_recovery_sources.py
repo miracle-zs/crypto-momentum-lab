@@ -1,8 +1,10 @@
 """Load source anchors without deriving completeness from polling cursors."""
 
+import hashlib
+import json
 from typing import cast as typing_cast
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import Numeric, cast, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account.models import (
@@ -22,6 +24,7 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 )
 from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+    PositionFactJournalEventRow,
     PositionRecoveryCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
@@ -112,6 +115,44 @@ async def load_fill_recovery_sources(
                 )
             )
         ).all()
+        # Snapshot-table retention omits unchanged flat rows. The immutable
+        # Book journal is another durable source of actual observations.
+        journal_flat_rows = (
+            await session.scalars(
+                select(PositionFactJournalEventRow)
+                .where(
+                    PositionFactJournalEventRow.environment == environment,
+                    PositionFactJournalEventRow.account_label == account_label,
+                    PositionFactJournalEventRow.event_kind == "snapshot",
+                    cast(
+                        PositionFactJournalEventRow.payload["position_amt"].astext,
+                        Numeric,
+                    )
+                    == 0,
+                    func.mod(
+                        func.extract(
+                            "microseconds", PositionFactJournalEventRow.occurred_at
+                        ),
+                        1000,
+                    )
+                    == 0,
+                    tuple_(
+                        PositionFactJournalEventRow.symbol,
+                        PositionFactJournalEventRow.position_side,
+                    ).in_(keys),
+                )
+                .distinct(
+                    PositionFactJournalEventRow.symbol,
+                    PositionFactJournalEventRow.position_side,
+                )
+                .order_by(
+                    PositionFactJournalEventRow.symbol,
+                    PositionFactJournalEventRow.position_side,
+                    PositionFactJournalEventRow.occurred_at.desc(),
+                    PositionFactJournalEventRow.recorded_at.desc(),
+                )
+            )
+        ).all()
     heads_by_key = {(head.symbol, head.position_side): head for head in heads}
     # Preserve the exact heads needing recovery even when no trusted durable
     # anchor exists. None requests a real prior REST zero, never a synthetic cut.
@@ -179,6 +220,37 @@ async def load_fill_recovery_sources(
             snapshot.observed_at,
             "exchange_snapshot",
             str(flat_row.snapshot_id),
+            zero_snapshot=snapshot,
+        )
+    for journal_row in journal_flat_rows:
+        key = (journal_row.symbol, journal_row.position_side)
+        if result.get(key) is not None:
+            continue
+        encoded = json.dumps(
+            journal_row.payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if hashlib.sha256(encoded).hexdigest() != journal_row.payload_hash:
+            continue
+        snapshot = PositionRecoveryCodec.decode_snapshot(journal_row.payload)
+        if (
+            snapshot.environment != environment
+            or snapshot.account_label != account_label
+            or (snapshot.symbol, snapshot.position_side) != key
+            or snapshot.observed_at != journal_row.occurred_at
+            or snapshot.position_amt != 0
+        ):
+            continue
+        anchor_id = stable_snapshot_anchor_id(snapshot)
+        result[key] = AccountFillSourceAnchor(
+            journal_row.symbol,
+            journal_row.position_side,
+            anchor_id,
+            snapshot.observed_at,
+            "exchange_snapshot",
+            journal_row.event_record_id,
             zero_snapshot=snapshot,
         )
     return result
