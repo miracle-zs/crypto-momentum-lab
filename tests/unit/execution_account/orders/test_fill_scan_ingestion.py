@@ -35,7 +35,7 @@ def snapshot(at=NOW):
         5,
         "cross",
         at,
-        {},
+        {"symbol": "BTCUSDT", "positionAmt": "0.000", "updateTime": 1790800000000},
     )
 
 
@@ -147,7 +147,7 @@ async def test_scan_without_matching_explicit_snapshot_is_rejected():
     book.observe.assert_not_awaited()
 
 
-def test_scan_baseline_round_trips_through_real_hub_codec():
+async def test_scan_baseline_round_trips_through_real_hub_codec():
     from crypto_momentum_lab.execution_account.hub import (
         AccountEvent,
         decode_account_event,
@@ -173,4 +173,18 @@ def test_scan_baseline_round_trips_through_real_hub_codec():
     assert (
         decoded.fill_load_scans[0].source_anchor_snapshot
         == source.source_anchor_snapshot
+    )
+
+    runtime, book = coordinator()
+    await runtime.observe_account_snapshot(
+        snapshot(),
+        stream_id="hub",
+        stream_epoch="epoch",
+        sequence=1,
+        fill_load_scans=decoded.fill_load_scans,
+    )
+    evidence = book.observe.await_args.args[0]
+    assert (
+        stable_snapshot_anchor_id(evidence.source_anchor_snapshot)
+        == source.source_anchor_id
     )

@@ -1610,7 +1610,10 @@ def _encode_account_fill_load_scan(
         "source_stream_epoch": scan.source_stream_epoch,
         "source_anchor_snapshot": None
         if scan.source_anchor_snapshot is None
-        else _encode_position_snapshot(scan.source_anchor_snapshot),
+        else {
+            **_encode_position_snapshot(scan.source_anchor_snapshot),
+            "raw_payload": scan.source_anchor_snapshot.raw_payload,
+        },
     }
 
 
@@ -1837,6 +1840,9 @@ def _decode_position_snapshot(
         expected_environment=expected_environment,
         expected_account_label=expected_account_label,
     )
+    raw_payload = payload.get("raw_payload", {})
+    if not isinstance(raw_payload, dict):
+        raise AccountEventHubProtocolError("position raw_payload must be an object")
     return AccountPositionSnapshot(
         environment=expected_environment,
         account_label=expected_account_label,
@@ -1850,7 +1856,7 @@ def _decode_position_snapshot(
         leverage=_optional_int_value(payload, "leverage"),
         margin_type=_optional_string(payload, "margin_type"),
         observed_at=_parse_datetime(payload, "observed_at"),
-        raw_payload={},
+        raw_payload={str(key): item for key, item in raw_payload.items()},
     )
 
 

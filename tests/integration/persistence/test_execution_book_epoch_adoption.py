@@ -421,7 +421,12 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
     entry = _fill(key, "entry", "BUY", "2", start + timedelta(minutes=1))
     exit_fill = _fill(key, "exit", "SELL", "2", start + timedelta(minutes=2))
     old_snapshot = _snapshot(key, start + timedelta(minutes=1), "2", "100")
-    baseline = _snapshot(key, start, "0", "0")
+    from dataclasses import replace
+
+    baseline = replace(
+        _snapshot(key, start, "0", "0"),
+        raw_payload={"symbol": "BTCUSDT", "positionAmt": "0.000", "updateTime": 0},
+    )
     target = _snapshot(key, start + timedelta(minutes=3), "0", "0")
     try:
         book = _book(factory)
@@ -495,6 +500,29 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             planned.source_stream_epoch,
             source_anchor_snapshot=planned.source_anchor_snapshot,
         )
+        from crypto_momentum_lab.execution_account.hub import (
+            AccountEvent,
+            decode_account_event,
+            encode_account_event,
+        )
+
+        transported = decode_account_event(
+            encode_account_event(
+                AccountEvent(
+                    "live",
+                    account,
+                    "snapshot",
+                    "proof",
+                    target.observed_at,
+                    target.observed_at,
+                    fill_load_scans=(scan,),
+                ),
+                sequence=1,
+            ),
+            expected_environment="live",
+            expected_account_label=account,
+        )
+        scan = transported.fill_load_scans[0]
         coordinator = OrderExecutionCoordinator(
             backend=object(),
             environment="live",
