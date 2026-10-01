@@ -20,6 +20,10 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
     compute_policy_state_digest,
     serialize_policy_state,
 )
+from crypto_momentum_lab.domain.execution.evidence_digest import (
+    legacy_trade_payload_digest,
+    trade_payload_digest,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
     FuturesPositionSide,
@@ -48,6 +52,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     JournalFactDelta,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
     DurableJournalCut,
     JournalPersistResult,
@@ -91,6 +96,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     MarketRevisionRefRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+    PositionFactJournalEventRow,
     PositionRecoveryCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.reservation_store_ports import (
@@ -282,7 +288,12 @@ class ExecutionTransaction:
                 or existing.quantity != trade.quantity
                 or existing.price != trade.price
                 or existing.side != trade.side
-                or existing.payload_digest != trade.payload_digest
+                or (
+                    existing.payload_digest != trade.payload_digest
+                    and not await self._verified_legacy_trade_replay(
+                        key, existing, trade
+                    )
+                )
             ):
                 raise _DecisionCommitConflict(
                     f"trade {trade.trade_id} conflicts with its durable identity"
@@ -301,6 +312,52 @@ class ExecutionTransaction:
             )
         )
         return True
+
+    async def _verified_legacy_trade_replay(
+        self,
+        key: PositionKey,
+        existing: ExecutionTradeIdentityRow,
+        trade: _ExecutionTradeIdentity,
+    ) -> bool:
+        # Do not rewrite immutable historical identities. Accept a new digest
+        # only when a hash-verified original fact proves all business fields.
+        rows = (
+            await self.session.scalars(
+                select(PositionFactJournalEventRow).where(
+                    PositionFactJournalEventRow.environment == key.environment,
+                    PositionFactJournalEventRow.account_label == key.account_label,
+                    PositionFactJournalEventRow.symbol == key.symbol,
+                    PositionFactJournalEventRow.position_side
+                    == key.position_side.value,
+                    PositionFactJournalEventRow.event_kind == "fill",
+                    PositionFactJournalEventRow.payload["trade_id"].astext
+                    == trade.trade_id,
+                    PositionFactJournalEventRow.occurred_at == existing.first_seen_at,
+                )
+            )
+        ).all()
+        for row in rows:
+            raw = json.dumps(
+                row.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+            if hashlib.sha256(raw).hexdigest() != row.payload_hash:
+                continue
+            fill = PositionRecoveryCodec.decode_fill(row.payload)
+            if (
+                fill.environment != key.environment
+                or fill.account_label != key.account_label
+                or fill.symbol != key.symbol
+                or fill.raw_position_side != key.position_side.value
+                or fill.trade_id != trade.trade_id
+                or fill.trade_at != row.occurred_at
+            ):
+                continue
+            if (
+                legacy_trade_payload_digest(fill) == existing.payload_digest
+                and trade_payload_digest(fill) == trade.payload_digest
+            ):
+                return True
+        return False
 
     async def persist_watermark(
         self,

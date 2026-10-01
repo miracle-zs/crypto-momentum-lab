@@ -30,9 +30,28 @@ def digest_json_payload(payload: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def trade_payload_digest(fill: AccountFillEvent) -> str:
-    """Hash global trade identity independently of the transport stream epoch."""
+def legacy_trade_payload_digest(fill: AccountFillEvent) -> str:
+    """Recognize existing identities written before transport-neutral hashing."""
     return digest_json_payload(asdict(fill))
+
+
+def trade_payload_digest(fill: AccountFillEvent) -> str:
+    """Hash immutable business facts, independent of REST/WS payload formatting."""
+    payload = asdict(fill)
+    payload.pop("raw_payload")
+    payload["position_side"] = fill.raw_position_side
+    payload["identity_schema_version"] = 2
+    for field in ("price", "quantity", "realized_pnl", "fee"):
+        value = payload[field]
+        rendered = format(value, "f")
+        payload[field] = (
+            "0"
+            if value == 0
+            else rendered.rstrip("0").rstrip(".")
+            if "." in rendered
+            else rendered
+        )
+    return digest_json_payload(payload)
 
 
 def view_projection_digest(view: PositionView) -> str:

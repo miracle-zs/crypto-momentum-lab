@@ -659,8 +659,9 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
 @pytest.mark.asyncio
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("anchor_integrity", ["valid", "bad_hash", "wrong_scope"])
+@pytest.mark.parametrize("trade_integrity", ["valid", "changed_fee", "bad_fact_hash"])
 async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
-    async_database_url, complete, anchor_integrity
+    async_database_url, complete, anchor_integrity, trade_integrity
 ):
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
@@ -705,6 +706,51 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                 ),
                 Applied,
             )
+        # Existing deployments hashed transport payloads as part of identity.
+        # Keep that historical row intact while replaying the same REST trade.
+        from dataclasses import asdict, replace
+
+        from sqlalchemy import update
+
+        from crypto_momentum_lab.domain.execution.evidence_digest import (
+            digest_json_payload,
+        )
+        from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+            ExecutionTradeIdentityRow,
+        )
+
+        async with factory() as session, session.begin():
+            await session.execute(
+                update(ExecutionTradeIdentityRow)
+                .where(
+                    ExecutionTradeIdentityRow.account_label == account,
+                    ExecutionTradeIdentityRow.trade_id == entry.trade_id,
+                )
+                .values(payload_digest=digest_json_payload(asdict(entry)))
+            )
+        rest_entry = replace(
+            entry,
+            quantity=Decimal("26.600000000000000000"),
+            price=Decimal("100.000000000000000000"),
+            fee=Decimal("0.000000000000000000"),
+            raw_payload={"positionSide": "LONG", "source": "rest_user_trades"},
+        )
+        if trade_integrity == "changed_fee":
+            rest_entry = replace(rest_entry, fee=Decimal("0.2"))
+        elif trade_integrity == "bad_fact_hash":
+            from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+                PositionFactJournalEventRow,
+            )
+
+            async with factory() as session, session.begin():
+                await session.execute(
+                    update(PositionFactJournalEventRow)
+                    .where(
+                        PositionFactJournalEventRow.account_label == account,
+                        PositionFactJournalEventRow.event_kind == "fill",
+                    )
+                    .values(payload_hash="0" * 64)
+                )
         # Earlier runtime versions persisted explicit flat observations to the
         # immutable journal even when account snapshot retention dropped them.
         from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
@@ -813,7 +859,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                 "complete-proof",
                 target.observed_at,
                 target.observed_at,
-                fills=(entry,),
+                fills=(rest_entry,),
                 fill_load_scans=(scan,),
             )
         )
@@ -822,7 +868,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
             expected_environment="live",
             expected_account_label=account,
         )
-        assert transported.fills == (entry,)
+        assert transported.fills == (rest_entry,)
         coordinator = OrderExecutionCoordinator(
             backend=object(),
             environment="live",
@@ -842,7 +888,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                 key, stream_id="hub", stream_epoch="new"
             )
         )
-        if not complete:
+        if not complete or trade_integrity != "valid":
             assert checkpoint is None
             return
         assert checkpoint is not None and checkpoint.coverage.is_authoritative
