@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crypto_momentum_lab.live_rollout import exit_channels, exit_failure_policy
+from crypto_momentum_lab.live_rollout import exit_channels
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 
 
@@ -114,17 +114,62 @@ async def test_closed_candle_channel_retries_pending_position_sync(
 
     assert daemon.calls == 2
     assert sleeps == [0.25]
-    assert failures == []
+    assert failures == [("BTCUSDT", None)]
 
 
-def test_pending_position_failure_is_promoted_after_retries() -> None:
-    assert exit_failure_policy.is_pending_position_sync_failure(
-        "pending_live_positions:BTCUSDT"
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retry_failure", "expected"),
+    [
+        ("pending_live_positions:BTCUSDT", []),
+        ("unmanaged_live_positions:BTCUSDT", [("BTCUSDT", "unmanaged_live_positions:BTCUSDT")]),
+        (None, [("BTCUSDT", None)]),
+    ],
+)
+async def test_candle_retry_preserves_facts_and_consumes_next_symbol(
+    monkeypatch, retry_failure, expected,
+) -> None:
+    events = [SimpleNamespace(candle=SimpleNamespace(
+        symbol=symbol, candle_start=datetime(2026, 8, 4, tzinfo=UTC),
+    )) for symbol in ("BTCUSDT", "ETHUSDT")]
+    quotes = [SimpleNamespace(symbol="BTCUSDT", price=price) for price in (100, 101)]
+    current_quote = quotes[0]
+    calls = []
+    outcomes = []
+
+    async def sleep(_delay):
+        nonlocal current_quote
+        current_quote = quotes[1]
+
+    monkeypatch.setattr(exit_channels.asyncio, "sleep", sleep)
+
+    class Cache:
+        def for_symbols(self, symbols):
+            return (current_quote,) if symbols == ("BTCUSDT",) else ()
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            calls.append((event, latest_quote))
+            if event.candle.symbol == "ETHUSDT":
+                return None
+            return "pending_live_positions:BTCUSDT" if len(calls) == 1 else retry_failure
+
+    async def source():
+        for event in events:
+            yield event
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),  # type: ignore[arg-type]
+        latest_market_quotes=Cache(),  # type: ignore[arg-type]
+        latest_market_states=Cache(),  # type: ignore[arg-type]
+        is_transient_error=lambda _error: False,
+        on_exit_failure=lambda symbol, failure: outcomes.append((symbol, failure)),
+        pending_position_retry_delays=(0.25,),
     )
-    assert (
-        exit_failure_policy.promote_pending_position_failure("pending_live_positions:BTCUSDT")
-        == "unmanaged_live_positions:BTCUSDT"
-    )
+    await runtime.run_closed_candle_channel(source=source())  # type: ignore[arg-type]
+
+    assert calls == [(events[0], quotes[0]), (events[0], quotes[1]), (events[1], None)]
+    assert outcomes == expected + [("ETHUSDT", None)]
 
 
 @pytest.mark.parametrize("notify", [False, True])

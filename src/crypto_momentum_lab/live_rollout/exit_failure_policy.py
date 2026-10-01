@@ -16,13 +16,3 @@ ORDER_IDENTITY_CONFLICT_REASON = "order_identity_conflict"
 
 def is_pending_position_sync_failure(failure: str | None) -> bool:
     return bool(failure is not None and failure.startswith("pending_live_positions:"))
-
-
-def promote_pending_position_failure(failure: str) -> str:
-    if not is_pending_position_sync_failure(failure):
-        return failure
-    return failure.replace(
-        "pending_live_positions:",
-        "unmanaged_live_positions:",
-        1,
-    )

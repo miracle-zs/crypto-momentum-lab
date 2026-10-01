@@ -14,7 +14,6 @@ from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     ORDER_IDENTITY_CONFLICT_REASON,
     is_pending_position_sync_failure,
-    promote_pending_position_failure,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
@@ -202,7 +201,12 @@ class LiveExitChannelRuntime:
                         try:
                             failure = await self._daemon.process_closed_candle(
                                 event,
-                                latest_quote=quote,
+                                latest_quote=next(
+                                    iter(self._latest_market_quotes.for_symbols(
+                                        (event.candle.symbol,)
+                                    )),
+                                    None,
+                                ),
                             )
                         except asyncio.CancelledError:
                             raise
@@ -218,11 +222,19 @@ class LiveExitChannelRuntime:
                             continue
                         if not is_pending_position_sync_failure(failure):
                             break
-                    failure = (
-                        promote_pending_position_failure(failure)
-                        if failure is not None
-                        else None
+                if failure is None:
+                    if self._on_exit_failure is not None:
+                        self._on_exit_failure(event.candle.symbol, None)
+                    continue
+                if is_pending_position_sync_failure(failure):
+                    # Time cannot establish ownership. The pending-position
+                    # view already protects entry; do not invent an exit fault.
+                    log.warning(
+                        "live_closed_candle_position_sync_pending",
+                        symbol=event.candle.symbol,
+                        reason=failure,
                     )
+                    continue
                 if failure is not None and self._on_exit_failure is not None:
                     self._on_exit_failure(event.candle.symbol, failure)
                 log.error(

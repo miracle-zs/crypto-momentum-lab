@@ -25,16 +25,6 @@ _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 15.0
-_PENDING_POSITION_RETRY_DELAYS_SECONDS = (
-    0.25,
-    0.5,
-    1.0,
-    2.0,
-    4.0,
-    8.0,
-    16.0,
-    32.0,
-)
 def _live_strategy_config(
     profile: LiveOrderFlowImpulseProfile,
 ) -> dict[str, object]:

@@ -168,7 +168,6 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_LEASE_RENEW_BEFORE_SECONDS,
     _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
     _LIVE_STARTUP_BUFFER_LIMIT,
-    _PENDING_POSITION_RETRY_DELAYS_SECONDS,
     LiveRuntimeConfig,
     _live_strategy_config,
     _live_strategy_config_hash,
@@ -1589,7 +1588,6 @@ async def run_live_daemon(
             is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             on_order_identity_conflict=daemon.note_order_identity_conflict,
-            pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
 
         async def _on_account_snapshot_combined(event: AccountEvent) -> None:
@@ -2003,6 +2001,5 @@ async def _run_grace_timeout_channel(
         is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         on_order_identity_conflict=on_order_identity_conflict,
-        pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
