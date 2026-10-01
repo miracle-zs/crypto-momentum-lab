@@ -181,6 +181,11 @@ export function updateLiveAccountsDynamic(root, data) {
     fleetKpisEl.innerHTML = tiles.join("");
   }
 
+  const isSectionHidden = root?.hidden === true || Boolean(root?.closest?.("[hidden]")) || root?.isConnected === false;
+  if (isSectionHidden) {
+    return Promise.resolve();
+  }
+
   const slot = root.querySelector(sel.liveAccountDetail());
   const requestJson = root.__requestJson || defaultAccountRequestJson;
   const currentDetailLabel = slot?.dataset.accountLabel

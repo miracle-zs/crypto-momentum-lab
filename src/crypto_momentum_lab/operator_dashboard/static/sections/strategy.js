@@ -71,6 +71,8 @@ function computeUnrealizedPnlRatio(unrealizedPnl, entryNotional) {
 
 export function createStrategySection({ requestJson = defaultRequestJson } = {}) {
   let selectedPaperAccount = 0;
+  let paperDetailRequestId = 0;
+  let paperHistoryRequestId = 0;
   const paperHistoryByRun = new Map();
   const paperHistoryRequests = new Map();
   const paperDetailsByRun = new Map();
@@ -511,17 +513,18 @@ async function loadPaperAccountDetail(body, account, index) {
     button.disabled = true;
     button.textContent = "加载中…";
   }
+  const reqId = ++paperDetailRequestId;
   const request = (async () => {
     try {
       const runId = encodeURIComponent(account.run_id);
       const detail = await requestJson(`api/paper-accounts/${runId}`);
       paperDetailsByRun.set(account.run_id, detail);
       paperDetailLoadedAt.set(account.run_id, Date.now());
-      if (currentPaperAccountIs(account)) {
+      if (reqId === paperDetailRequestId && body.isConnected !== false && currentPaperAccountIs(account)) {
         mountPaperDetail(body, account, index);
       }
     } catch (error) {
-      if (currentPaperAccountIs(account)) {
+      if (reqId === paperDetailRequestId && body.isConnected !== false && currentPaperAccountIs(account)) {
         replacePaperDetail(body, paperDetailPlaceholder(account, index, `详情加载失败 · ${error.message}`));
         wirePaperDetailButton(body, account, index);
       }
@@ -603,6 +606,7 @@ async function loadPaperAccountHistory(body, account, index) {
     button.disabled = true;
     button.textContent = "加载中…";
   }
+  const reqId = ++paperHistoryRequestId;
   const request = (async () => {
     try {
       const runId = encodeURIComponent(account.run_id);
@@ -612,13 +616,13 @@ async function loadPaperAccountHistory(body, account, index) {
         `api/paper-accounts/${runId}/history${fullHistory ? "?full=true" : ""}`,
       );
       paperHistoryByRun.set(account.run_id, history);
-      if (currentPaperAccountIs(account)) {
+      if (reqId === paperHistoryRequestId && body.isConnected !== false && currentPaperAccountIs(account)) {
         const merged = withPaperHistory(withPaperDetail(account));
         replacePaperDetail(body, accountDetail(merged, index));
         wirePaperHistoryButton(body, merged, index);
       }
     } catch (error) {
-      if (button && currentPaperAccountIs(account)) {
+      if (reqId === paperHistoryRequestId && button && body.isConnected !== false && currentPaperAccountIs(account)) {
         button.disabled = false;
         button.textContent = `加载失败 · ${error.message}`;
       }
@@ -634,6 +638,9 @@ async function loadPaperAccountHistory(body, account, index) {
     render: renderStrategy,
     refresh: refreshStrategy,
     wire: wirePaperAccountTabs,
+    loadDetail: loadPaperAccountDetail,
+    loadHistory: loadPaperAccountHistory,
+    currentAccountIs: currentPaperAccountIs,
   };
 }
 

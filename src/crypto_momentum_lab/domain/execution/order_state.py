@@ -130,6 +130,12 @@ class OrderExecutionPlan:
                 raise ValueError("expires_at must be after created_at")
         if self.time_in_force == "GTD" and self.expires_at is None:
             raise ValueError("GTD orders require expires_at")
+        if self.batch_quantities is not None:
+            object.__setattr__(
+                self,
+                "batch_quantities",
+                dict(self.batch_quantities),
+            )
 
 
 @dataclass(frozen=True, slots=True)

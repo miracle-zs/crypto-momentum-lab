@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  asNumber,
   esc,
   money,
   statusClass,
@@ -20,6 +21,7 @@ import {
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
 import {
   buildChartOption,
+  chartPayloadSignature,
   getChartPayload,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-chart-engine.js";
 import { readinessStatusForSection } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-readiness.js";
@@ -178,6 +180,19 @@ test("operator formatters keep status and money output stable", () => {
   assert.equal(esc('<live status="READY">'), "&lt;live status=&quot;READY&quot;&gt;");
   assert.equal(statusClass("live"), "status-LIVE");
   assert.equal(money(12.5), "$12.50");
+  assert.equal(asNumber("12.5"), 12.5);
+  assert.equal(asNumber(0), 0);
+  assert.equal(asNumber("0"), 0);
+  assert.equal(asNumber(null), null);
+  assert.equal(asNumber(undefined), null);
+  assert.equal(asNumber(""), null);
+  assert.equal(asNumber("   "), null);
+  assert.equal(asNumber(true), null);
+  assert.equal(asNumber(false), null);
+  assert.equal(asNumber(Infinity), null);
+  assert.equal(asNumber(-Infinity), null);
+  assert.equal(asNumber(NaN), null);
+  assert.equal(asNumber("invalid"), null);
 });
 
 test("global readiness uses database status for the overview section", () => {
@@ -660,6 +675,159 @@ test("strategy return and unrealized pnl calculations defend against bad inputs"
   assert.equal(computeUnrealizedPnlRatio("10", "0"), null);
   assert.equal(computeUnrealizedPnlRatio("10", null), null);
   assert.equal(computeUnrealizedPnlRatio(null, "100"), null);
+});
+
+test("chartPayloadSignature detects series.values and point mutations without object coercion", () => {
+  const initialComparison = {
+    kind: "comparison",
+    title: "Strategy Comparison",
+    points: [{ at: 1000 }, { at: 2000 }],
+    series: [
+      { label: "Account 1", color: "#34d399", values: [0, 10] },
+      { label: "Account 2", color: "#7aa2f7", values: [0, -5] },
+    ],
+  };
+
+  const sig1 = chartPayloadSignature(initialComparison);
+  assert.ok(sig1.length > 0);
+  assert.doesNotMatch(sig1, /\[object Object\]/);
+
+  // Reproduction case: values change from [0, 10] to [0, 99]
+  const updatedComparison = {
+    ...initialComparison,
+    series: [
+      { label: "Account 1", color: "#34d399", values: [0, 99] },
+      { label: "Account 2", color: "#7aa2f7", values: [0, -5] },
+    ],
+  };
+  const sig2 = chartPayloadSignature(updatedComparison);
+  assert.notEqual(sig1, sig2, "Signature must differ when series.values change from [0, 10] to [0, 99]");
+
+  // Identical values must produce identical signature
+  const identicalComparison = {
+    ...initialComparison,
+    series: [
+      { label: "Account 1", color: "#34d399", values: [0, 10] },
+      { label: "Account 2", color: "#7aa2f7", values: [0, -5] },
+    ],
+  };
+  assert.equal(sig1, chartPayloadSignature(identicalComparison));
+
+  // Equity kind: point mutations must change signature and never produce [object Object]
+  const initialEquity = {
+    kind: "equity",
+    title: "Account Equity",
+    points: [
+      { atMs: 1000, equity: 1000 },
+      { atMs: 2000, equity: 1010 },
+    ],
+  };
+  const eqSig1 = chartPayloadSignature(initialEquity);
+  assert.doesNotMatch(eqSig1, /\[object Object\]/);
+
+  const updatedEquity = {
+    ...initialEquity,
+    points: [
+      { atMs: 1000, equity: 1000 },
+      { atMs: 2000, equity: 1050 },
+    ],
+  };
+  const eqSig2 = chartPayloadSignature(updatedEquity);
+  assert.notEqual(eqSig1, eqSig2, "Signature must differ when equity point value changes");
+});
+
+test("strategy section defends against race conditions and unmounted nodes during history fetch", async () => {
+  let resolveHistory0;
+  const history0Promise = new Promise((resolve) => {
+    resolveHistory0 = resolve;
+  });
+
+  const requestedUrls = [];
+  const strategy = createStrategySection({
+    requestJson: async (url) => {
+      requestedUrls.push(url);
+      if (url.includes("acc-0/history")) {
+        return history0Promise;
+      }
+      return { closed_trades: [], trade_events: [] };
+    },
+  });
+
+  const data = {
+    status: "READY",
+    accounts: [
+      {
+        run_id: "acc-0",
+        strategy_name: "orderflow_impulse",
+        exit_mode: "candle_15m",
+        portfolio_summary: { equity: 1000 },
+      },
+      {
+        run_id: "acc-1",
+        strategy_name: "orderflow_impulse",
+        exit_mode: "candle_15m",
+        portfolio_summary: { equity: 2000 },
+      },
+    ],
+  };
+
+  strategy.render(data);
+  assert.equal(strategy.currentAccountIs(data.accounts[0]), true);
+  assert.equal(strategy.currentAccountIs(data.accounts[1]), false);
+
+  let replaceCalled = false;
+  const mockButton = { disabled: false, textContent: "" };
+  const unmountedBody = {
+    isConnected: false,
+    querySelector: (sel) => {
+      if (sel.includes("data-load-paper-history")) return mockButton;
+      if (sel.includes("paper-account-panel") || sel.includes("paper-account-detail")) {
+        return {
+          replaceWith: () => { replaceCalled = true; },
+        };
+      }
+      return null;
+    },
+  };
+
+  // Launch history request on unmounted body
+  const pendingHistory = strategy.loadHistory(unmountedBody, data.accounts[0], 0);
+  assert.equal(mockButton.disabled, true);
+  assert.equal(mockButton.textContent, "加载中…");
+
+  // In-flight request deduplication: calling again does not fire another HTTP request
+  const dupHistory = strategy.loadHistory(unmountedBody, data.accounts[0], 0);
+  assert.equal(requestedUrls.filter((u) => u.includes("acc-0/history")).length, 1);
+
+  // Resolve network response
+  resolveHistory0({
+    history_complete: true,
+    closed_trades: [{ symbol: "BTCUSDT", realized_pnl: 100 }],
+    trade_events: [],
+  });
+
+  await pendingHistory;
+
+  // Unmounted body must not have replaced DOM
+  assert.equal(replaceCalled, false);
+
+  // Cross-account protection: when active account is acc-0, acc-1 request must not touch DOM
+  let crossAccountReplaced = false;
+  const connectedBody = {
+    isConnected: true,
+    querySelector: (sel) => {
+      if (sel.includes("paper-account-panel") || sel.includes("paper-account-detail")) {
+        return {
+          replaceWith: () => { crossAccountReplaced = true; },
+        };
+      }
+      return null;
+    },
+  };
+
+  const acc1Promise = strategy.loadHistory(connectedBody, data.accounts[1], 1);
+  await acc1Promise;
+  assert.equal(crossAccountReplaced, false);
 });
 
 test("equity charts register an ECharts payload with native metrics", () => {

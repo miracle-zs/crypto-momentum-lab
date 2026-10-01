@@ -847,10 +847,10 @@ async def run_live_daemon(
                 on_exchange_request=telemetry.exchange_request_started,
                 on_exchange_response=telemetry.exchange_response_received,
             ),
+            submission_repository=submission_repository,
         )
         execution_book = execution_runtime.book
         execution_coordinator = execution_runtime.coordinator
-        execution_coordinator.configure_submission(submission_repository)
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )

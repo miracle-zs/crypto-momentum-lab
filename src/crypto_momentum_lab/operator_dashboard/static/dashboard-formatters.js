@@ -39,9 +39,10 @@ const displayTimeParts = (value) => {
 };
 
 export const asNumber = (value) => {
-  if (value == null || value === "") return null;
+  if (value == null || typeof value === "boolean") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const parsed = Number(value);
-  return Number.isNaN(parsed) ? null : parsed;
+  return Number.isFinite(parsed) ? parsed : null;
 };
 
 export const num = (value, digits = 2) => {

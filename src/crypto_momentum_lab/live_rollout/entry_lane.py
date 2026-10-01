@@ -381,9 +381,16 @@ class EntryExecutionLane:
                     self._entry_symbols = await self._config.entry_symbol_loader(
                         state.bucket_start
                     )
-                except Exception:
+                except Exception as exc:
                     # Entry-pool lookup is fail-closed. Exit handling remains
                     # independent, so an outage cannot strand open positions.
+                    log.error(
+                        "entry_symbols_load_failed",
+                        bucket_start=state.bucket_start.isoformat(),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        exc_info=True,
+                    )
                     self._entry_symbols = frozenset()
                 self._entry_symbols_loaded_at = state.bucket_start
 
@@ -400,8 +407,15 @@ class EntryExecutionLane:
                 entry_filter_context = await self._config.entry_filter_context_loader(
                     state
                 )
-            except Exception:
+            except Exception as exc:
                 # Missing or stale EMA data must not authorize a live entry.
+                log.error(
+                    "entry_filter_context_load_failed",
+                    bucket_start=state.bucket_start.isoformat(),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    exc_info=True,
+                )
                 entry_filter_context = None
         if self._telemetry is not None:
             await self._telemetry.entry_filter_ready(

@@ -399,6 +399,9 @@ class OrderExecutionCoordinator:
         reservation_repository: object | None = None,
         execution_book: ExecutionBook | None = None,
         initial_reservations: Iterable[PositionReservation] | None = None,
+        submission_repository: OrderSubmissionRepository | None = None,
+        submission_admission: FinalSubmissionAdmission | None = None,
+        submission_clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -410,9 +413,9 @@ class OrderExecutionCoordinator:
             raise ValueError(
                 "exit_headroom must be non-negative and less than max_queue_depth"
             )
-        self._submission_repository: OrderSubmissionRepository | None = None
-        self._submission_admission: FinalSubmissionAdmission | None = None
-        self._submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+        self._submission_repository = submission_repository
+        self._submission_admission = submission_admission
+        self._submission_clock = submission_clock or (lambda: datetime.now(UTC))
         self._backend = backend
         self._environment = environment.strip()
         self._account_label = account_label.strip()
@@ -764,8 +767,8 @@ class OrderExecutionCoordinator:
                     position_side=plan.position_side,
                 )
                 current_view = await self._execution_book.read(scope)
-                proj_ver = getattr(plan, "projection_version", None)
-                if not isinstance(proj_ver, str) or not proj_ver.strip():
+                proj_ver = plan.projection_version
+                if not proj_ver or not proj_ver.strip():
                     raise OrderPreSubmissionError(
                         f"entry {plan.client_order_id} has no Book projection token"
                     )
@@ -775,33 +778,21 @@ class OrderExecutionCoordinator:
                         f"projection {proj_ver}; current projection is "
                         f"{current_view.projection_version}"
                     )
-                strategy_name = getattr(plan, "strategy_name", None)
-                if not strategy_name or not str(strategy_name).strip():
-                    strategy_name = (
-                        getattr(self, "_strategy_name", None) or "orderflow_impulse"
-                    )
-                strategy_version = getattr(plan, "strategy_version", None)
-                if not strategy_version or not str(strategy_version).strip():
-                    strategy_version = getattr(self, "_strategy_version", None) or "v0"
+                strategy_name = (plan.strategy_name or "").strip() or "orderflow_impulse"
+                strategy_version = (plan.strategy_version or "").strip() or "v0"
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,
                     scope=scope,
-                    strategy_name=str(strategy_name).strip(),
-                    strategy_version=str(strategy_version).strip(),
-                    run_id=getattr(plan, "run_id", self._account_label),
-                    decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
+                    strategy_name=strategy_name,
+                    strategy_version=strategy_version,
+                    run_id=plan.run_id,
+                    decision_ref=plan.client_order_id,
                     expected_view_token=proj_ver,
                     expected_projection_version=proj_ver,
                     action=TradeCommandType.ENTRY,
-                    requested_quantity=Decimal(str(plan.quantity)),
-                    order_type=(
-                        str(plan.order_type.value)
-                        if hasattr(plan.order_type, "value")
-                        else str(plan.order_type)
-                    ),
-                    limit_price=(
-                        Decimal(str(plan.price)) if plan.price is not None else None
-                    ),
+                    requested_quantity=plan.quantity,
+                    order_type=plan.order_type,
+                    limit_price=plan.price,
                     reduce_only=False,
                     target_batch_ids=(),
                     batch_quantities=None,
@@ -853,8 +844,8 @@ class OrderExecutionCoordinator:
                 position_side=plan.position_side,
             )
             current_view = await self._execution_book.read(scope)
-            proj_ver = getattr(plan, "projection_version", None)
-            if not isinstance(proj_ver, str) or not proj_ver.strip():
+            proj_ver = plan.projection_version
+            if not proj_ver or not proj_ver.strip():
                 raise OrderPreSubmissionError(
                     f"exit {plan.client_order_id} has no Book projection token"
                 )
@@ -865,60 +856,44 @@ class OrderExecutionCoordinator:
                     f"{current_view.projection_version}"
                 )
 
-            allocations = getattr(plan, "allocations", ())
-            batch_quantities = getattr(plan, "batch_quantities", None)
+            allocations = plan.allocations
+            batch_quantities = plan.batch_quantities
             if allocations:
                 target_batch_ids = tuple(a.batch_id for a in allocations)
                 if batch_quantities is None:
                     batch_quantities = {
                         a.batch_id: a.allocated_quantity for a in allocations
                     }
-            elif getattr(plan, "batch_id", None):
+            elif plan.batch_id:
                 target_batch_ids = (str(plan.batch_id),)
                 if batch_quantities is None:
-                    batch_quantities = {str(plan.batch_id): Decimal(str(plan.quantity))}
+                    batch_quantities = {str(plan.batch_id): plan.quantity}
             else:
                 raise OrderPreSubmissionError(
                     f"Exit order {plan.client_order_id} has no allocated batches "
                     f"or batch_id; cannot invent synthetic batch"
                 )
 
-            strategy_name = getattr(plan, "strategy_name", None)
-            if not strategy_name or not str(strategy_name).strip():
-                strategy_name = (
-                    getattr(self, "_strategy_name", None) or "orderflow_impulse"
-                )
-            strategy_version = getattr(plan, "strategy_version", None)
-            if not strategy_version or not str(strategy_version).strip():
-                strategy_version = getattr(self, "_strategy_version", None) or "v0"
+            strategy_name = (plan.strategy_name or "").strip() or "orderflow_impulse"
+            strategy_version = (plan.strategy_version or "").strip() or "v0"
 
             req = ExecutionRequest(
                 request_id=plan.client_order_id,
                 scope=scope,
-                strategy_name=str(strategy_name).strip(),
-                strategy_version=str(strategy_version).strip(),
-                run_id=getattr(plan, "run_id", self._account_label),
-                decision_ref=getattr(plan, "decision_ref", plan.client_order_id),
+                strategy_name=strategy_name,
+                strategy_version=strategy_version,
+                run_id=plan.run_id,
+                decision_ref=plan.client_order_id,
                 expected_view_token=proj_ver,
                 expected_projection_version=proj_ver,
                 action=TradeCommandType.EXIT,
-                requested_quantity=Decimal(str(plan.quantity)),
-                order_type=(
-                    str(plan.order_type.value)
-                    if hasattr(plan.order_type, "value")
-                    else str(plan.order_type)
-                ),
-                limit_price=(
-                    Decimal(str(plan.price)) if plan.price is not None else None
-                ),
+                requested_quantity=plan.quantity,
+                order_type=plan.order_type,
+                limit_price=plan.price,
                 reduce_only=True,
                 target_batch_ids=target_batch_ids,
                 batch_quantities=batch_quantities,
-                exit_policy_mode=getattr(
-                    plan,
-                    "exit_policy_mode",
-                    ExitPolicyMode.TARGET_BATCHES_ONLY,
-                ),
+                exit_policy_mode=ExitPolicyMode.TARGET_BATCHES_ONLY,
                 created_at=plan.created_at,
             )
             act_res = await self._execution_book.act(req)
@@ -976,24 +951,16 @@ class OrderExecutionCoordinator:
             position_side=plan.position_side,
         )
         now_dt = datetime.now(UTC)
-        cumulative_quantity = Decimal(str(res.executed_quantity))
+        cumulative_quantity = res.executed_quantity
         if cumulative_quantity < Decimal("0"):
             raise ValueError("exchange cumulative executed quantity cannot be negative")
-        average_price = (
-            Decimal(str(res.average_price)) if res.average_price is not None else None
-        )
-        if cumulative_quantity > Decimal("0") and (
-            average_price is None or average_price <= Decimal("0")
-        ):
+        average_price = res.average_price
+        if cumulative_quantity > Decimal("0") and average_price <= Decimal("0"):
             raise RuntimeError(
                 "positive cumulative fill has no positive cumulative average price; "
                 "execution facts require recovery"
             )
-        cumulative_quote = (
-            cumulative_quantity * average_price
-            if average_price is not None
-            else Decimal("0")
-        )
+        cumulative_quote = cumulative_quantity * average_price
         position_side = (
             plan.position_side.value
             if hasattr(plan.position_side, "value")

@@ -4,6 +4,7 @@ The caller owns the exchange client and database sessions, and registers the
 returned coordinator with its shutdown lifecycle.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -13,6 +14,10 @@ from crypto_momentum_lab.domain.execution.command_repository import CommandRepos
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
+)
+from crypto_momentum_lab.domain.execution.order_submission import (
+    FinalSubmissionAdmission,
+    OrderSubmissionRepository,
 )
 from crypto_momentum_lab.domain.execution.ports import ExecutionUnitOfWorkPort
 from crypto_momentum_lab.domain.execution.reservation_repository import (
@@ -70,6 +75,9 @@ async def build_live_execution_runtime(
     account_label: str,
     strategy_name: str,
     callbacks: LiveExecutionCallbacks,
+    submission_repository: OrderSubmissionRepository | None = None,
+    submission_admission: FinalSubmissionAdmission | None = None,
+    submission_clock: Callable[[], datetime] | None = None,
 ) -> LiveExecutionRuntime:
     backend = OrderExecutionStateMachine(
         exchange=exchange,
@@ -113,5 +121,8 @@ async def build_live_execution_runtime(
         reservation_repository=reservations,
         domain_coordinator=domain_coordinator,
         execution_book=book,
+        submission_repository=submission_repository,
+        submission_admission=submission_admission,
+        submission_clock=submission_clock,
     )
     return LiveExecutionRuntime(book=book, coordinator=coordinator)

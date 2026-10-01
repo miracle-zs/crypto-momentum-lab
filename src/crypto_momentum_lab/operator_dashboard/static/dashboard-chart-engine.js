@@ -20,16 +20,18 @@ const WIRED_ROOTS = new WeakSet();
 const ROOT_LIFECYCLES = new WeakMap();
 const APPLIED_PAYLOAD_SIGNATURES = new WeakMap();
 
-function chartPayloadSignature(payload) {
+export function chartPayloadSignature(payload) {
   if (!payload) return "";
+  if (payload.kind === "equity") {
+    const points = payload.points || [];
+    const ptsSig = points.map((p) => `${p.atMs ?? p.time ?? ""}:${p.equity ?? ""}`).join(",");
+    return `equity|${payload.title ?? ""}|${payload.domainStart ?? ""}|${payload.domainEnd ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.baseline ?? ""}|${payload.delta ?? ""}|${payload.lastUp ?? ""}|${ptsSig}`;
+  }
   const points = payload.points || [];
   const series = payload.series || [];
-  const pLen = points.length;
-  const sLen = series.length;
-  const pFirst = pLen > 0 ? (points[0]?.time ?? points[0]?.observed_at ?? points[0]) : "";
-  const pLast = pLen > 0 ? (points[pLen - 1]?.equity ?? points[pLen - 1]?.value ?? points[pLen - 1]) : "";
-  const sMeta = sLen > 0 ? series.map((s) => `${s.label}:${s.points?.length || 0}:${s.delta ?? ""}`).join(",") : "";
-  return `${payload.kind || ""}|${pLen}|${sLen}|${payload.startAt || ""}|${payload.endAt || ""}|${payload.baseline || ""}|${pFirst}|${pLast}|${sMeta}`;
+  const ptsTimes = points.map((p) => p.at ?? p.atMs ?? "").join(",");
+  const seriesSig = series.map((s) => `${s.label ?? ""}:${s.color ?? ""}:${s.delta ?? ""}:${(s.values || []).join(",")}`).join(";");
+  return `${payload.kind || "comparison"}|${payload.title ?? ""}|${payload.domainStart ?? payload.startAt ?? ""}|${payload.domainEnd ?? payload.endAt ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.valueFormat ?? ""}|${ptsTimes}|${seriesSig}`;
 }
 
 const FALLBACK_COLORS = {

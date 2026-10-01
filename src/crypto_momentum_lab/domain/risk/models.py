@@ -137,6 +137,7 @@ class RiskEvaluation:
             raise ValueError("decision must be a RiskDecision")
         _require_non_empty(self.reason, "reason")
         _require_aware(self.evaluated_at, "evaluated_at")
+        object.__setattr__(self, "details", dict(self.details))
 
 
 def _require_common(environment: str, account_label: str) -> None:

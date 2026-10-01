@@ -344,13 +344,13 @@ class LiveCandidateSubmission:
             return None
         plan = execution_result.plan
         resolved_strat_name = (
-            getattr(plan, "strategy_name", None)
+            plan.strategy_name
             or executable_candidate.strategy_name
             or context.gate_context.strategy_name
             or "orderflow_impulse"
         )
         resolved_strat_ver = (
-            getattr(plan, "strategy_version", None)
+            plan.strategy_version
             or executable_candidate.strategy_version
             or "v0"
         )
@@ -516,11 +516,7 @@ class LiveCandidateSubmission:
         else:
             position_side = FuturesPositionSide.BOTH
 
-        account_label = (
-            getattr(candidate, "account_label", None) or self._config.account_label
-        )
-        if not account_label or not str(account_label).strip():
-            raise ValueError("account_label must not be empty")
+        account_label = self._config.account_label
         position_key = PositionKey(
             environment="live",
             account_label=account_label,

@@ -22,6 +22,9 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission as _PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+import structlog
+
+log = structlog.get_logger()
 
 
 class SubmitPolicy(StrEnum):
@@ -752,9 +755,16 @@ class OrderExecutionStateMachine:
             return
         try:
             await callback(plan, phase, self._now())
-        except Exception:
+        except Exception as exc:
             # Telemetry is deliberately not allowed to block an exchange
             # command or change its failure semantics.
+            log.warning(
+                "exchange_boundary_telemetry_failed",
+                client_order_id=plan.client_order_id,
+                phase=phase,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return
 
     def _now(self) -> datetime:

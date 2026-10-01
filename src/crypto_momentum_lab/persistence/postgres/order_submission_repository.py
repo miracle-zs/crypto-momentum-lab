@@ -1,7 +1,6 @@
 """Atomic approved-intent claims and fenced order submission preparation."""
 
 from collections.abc import Mapping
-from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -42,6 +41,31 @@ from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 from crypto_momentum_lab.persistence.postgres.submission_identity import (
     _same_order_identity,
 )
+
+
+def _serialize_candidate_intent(intent: OrderIntentCandidate) -> dict[str, object]:
+    return {
+        "candidate_id": intent.candidate_id,
+        "signal_id": intent.signal_id,
+        "run_id": intent.run_id,
+        "strategy_name": intent.strategy_name,
+        "strategy_version": intent.strategy_version,
+        "config_hash": intent.config_hash,
+        "symbol": intent.symbol,
+        "side": intent.side.value if hasattr(intent.side, "value") else str(intent.side),
+        "entry_type": (
+            intent.entry_type.value
+            if hasattr(intent.entry_type, "value")
+            else str(intent.entry_type)
+        ),
+        "limit_price": jsonable(intent.limit_price),
+        "desired_notional": jsonable(intent.desired_notional),
+        "reduce_only": intent.reduce_only,
+        "expires_at": jsonable(intent.expires_at),
+        "created_at": jsonable(intent.created_at),
+        "reason": intent.reason,
+        "features": jsonable(intent.features),
+    }
 
 
 class _SubmissionAlreadyPrepared(Exception):
@@ -98,7 +122,7 @@ class PostgresOrderSubmissionRepository:
             "symbol": intent.symbol,
             "state": ExchangeOrderState.INTENT_APPROVED.value,
             "approved_at": evaluation.evaluated_at,
-            "details": jsonable(asdict(intent)),
+            "details": _serialize_candidate_intent(intent),
         }
         async with self._session_factory() as session:
             async with session.begin():
@@ -156,7 +180,7 @@ class PostgresOrderSubmissionRepository:
             "symbol": intent.symbol,
             "state": ExchangeOrderState.SUBMITTING.value,
             "approved_at": evaluation.evaluated_at,
-            "details": jsonable(asdict(intent)),
+            "details": _serialize_candidate_intent(intent),
         }
         order_values = {
             "client_order_id": plan.client_order_id,
