@@ -15,6 +15,8 @@
 
 6. 首次业务修复部署在旧策略停止确认阶段失败。主机监控的维护窗口只过滤告警，检查中已执行的自愈 Compose restart 仍可能与部署冲突；新增真实监控 runner 回归确认维护期间发生重启，修复在重启动作前检查窗口。停机窗口暂停自愈用于本次恢复，随后恢复新监控。
 
+7. 第二轮验收发现新增零仓 loader 的来源标记被误传为历史 stream，真实 `AccountFillLoadScan` 因 zero snapshot belongs to target stream 校验而失败。新增 loader→plan→transport 构造回归在修复前失败；修复使零仓基线只携带原始快照/身份摘要，历史 stream 仅用于 checkpoint adoption。先通过只读账户恢复部署，再执行策略发布。
+
 ## 发布前证据
 
 - 原错误由运行状态发布、Hub 证明传输、真实 Book epoch 恢复、平仓 outbox 边界回归复现。

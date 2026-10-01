@@ -40,8 +40,12 @@ def plan_fill_scan(
             if source_anchor.zero_snapshot is not None
             else "recovery_checkpoint"
         )
-        source_stream_id = source_anchor.stream_id
-        source_stream_epoch = source_anchor.stream_epoch
+        source_stream_id = (
+            source_anchor.stream_id if source_anchor.zero_snapshot is None else None
+        )
+        source_stream_epoch = (
+            source_anchor.stream_epoch if source_anchor.zero_snapshot is None else None
+        )
     elif position.position_amt == Decimal("0"):
         source_anchor_id = stable_snapshot_anchor_id(position)
         source_anchor_cut = position.observed_at

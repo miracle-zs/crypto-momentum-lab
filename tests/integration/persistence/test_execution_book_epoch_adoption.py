@@ -440,6 +440,38 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         )
         assert isinstance(result, Applied)
         assert (await book.read(scope)).total_quantity == 2
+        from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
+        from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+            load_fill_recovery_sources,
+        )
+        from crypto_momentum_lab.persistence.postgres.models import (
+            AccountPositionSnapshotRow,
+        )
+
+        async with factory() as session, session.begin():
+            session.add(
+                AccountPositionSnapshotRow(
+                    snapshot_id=uuid4(),
+                    environment="live",
+                    account_label=account,
+                    symbol="BTCUSDT",
+                    position_side="LONG",
+                    position_amt=Decimal("0"),
+                    entry_price=Decimal("0"),
+                    mark_price=baseline.mark_price,
+                    unrealized_pnl=Decimal("0"),
+                    notional=Decimal("0"),
+                    leverage=2,
+                    margin_type="cross",
+                    observed_at=start,
+                    raw_payload=baseline.raw_payload,
+                )
+            )
+        initial_sources = await load_fill_recovery_sources(
+            factory, environment="live", account_label=account
+        )
+        planned = plan_fill_scan(target, initial_sources[("BTCUSDT", "LONG")])
+        assert planned is not None
         scan = AccountFillLoadScan(
             "live",
             account,
@@ -456,10 +488,12 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
                 target.observed_at,
             ),
             target.observed_at,
-            stable_snapshot_anchor_id(baseline),
-            start,
-            "zero_snapshot",
-            source_anchor_snapshot=baseline,
+            planned.source_anchor_id,
+            planned.source_anchor_event_cut,
+            planned.source_anchor_kind,
+            planned.source_stream_id,
+            planned.source_stream_epoch,
+            source_anchor_snapshot=planned.source_anchor_snapshot,
         )
         coordinator = OrderExecutionCoordinator(
             backend=object(),
