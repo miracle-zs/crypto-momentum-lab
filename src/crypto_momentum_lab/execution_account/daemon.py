@@ -13,6 +13,10 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.baseline_repair import (
+    BaselineRepairAttempt,
+    baseline_is_fresh,
+)
 from crypto_momentum_lab.execution_account.binance.user_data import (
     UserDataEventSink,
 )
@@ -336,8 +340,7 @@ class UserDataAccountSyncDaemon:
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
         self._received_event_generation = 0
-        self._staged_reconciliation_baseline_at: datetime | None = None
-        self._staged_stream_token: int | None = None
+        self._baseline_repair_attempt: BaselineRepairAttempt | None = None
         self._persistence_queue: (
             asyncio.Queue[_PendingUserDataPersistence | None] | None
         ) = None
@@ -989,22 +992,20 @@ class UserDataAccountSyncDaemon:
         if self._state is None or not (
             self._accept_events
             or self._reconciliation_active
-            or self._staged_reconciliation_baseline_at is not None
+            or self._baseline_repair_attempt is not None
         ):
             return
         last_sync_result = self._last_sync_result
-        baseline_at = self._staged_reconciliation_baseline_at
-        staged_baseline_expired = baseline_at is not None and not _baseline_is_fresh(
-            baseline_at, now=self._now()
-        )
+        attempt = self._baseline_repair_attempt
         is_syncing = (
             self._reconciliation_active
             or self._pipeline_recovery_event.is_set()
-            or staged_baseline_expired
             or (
-                baseline_at is not None
-                and getattr(self._stream, "continuity_token", None)
-                != self._staged_stream_token
+                attempt is not None
+                and not attempt.can_serve_live(
+                    stream_token=getattr(self._stream, "continuity_token", None),
+                    now=self._now(),
+                )
             )
         ) or (
             last_sync_result is not None
@@ -1046,7 +1047,7 @@ class UserDataAccountSyncDaemon:
     ) -> ExecutionAccountSyncResult:
         try:
             prepared = None
-            prepared_generation = self._received_event_generation
+            attempt = None
             stream_token = getattr(self._stream, "continuity_token", None)
             fetch = getattr(self._service, "sync_once_for_realtime", None)
             retain = getattr(self._service, "persist_reconciliation_facts", None)
@@ -1066,9 +1067,7 @@ class UserDataAccountSyncDaemon:
                 and last.status is ExecutionAccountStatus.READY_READONLY
                 and not last.fills_catching_up
                 and last.snapshot is not None
-                and _baseline_is_fresh(
-                    last.snapshot.config.observed_at, now=self._now()
-                )
+                and baseline_is_fresh(last.snapshot.config.observed_at, now=self._now())
                 and not self._deferred_events
                 and (self._event_queue is None or self._event_queue.empty())
                 and (self._persistence_queue is None or self._persistence_queue.empty())
@@ -1077,10 +1076,13 @@ class UserDataAccountSyncDaemon:
                 assert (
                     callable(fetch) and last is not None and last.snapshot is not None
                 )
-                self._staged_stream_token = stream_token
-                self._staged_reconciliation_baseline_at = (
-                    last.snapshot.config.observed_at
+                assert isinstance(stream_token, int)
+                attempt = BaselineRepairAttempt(
+                    event_generation=self._received_event_generation,
+                    stream_token=stream_token,
+                    baseline_observed_at=last.snapshot.config.observed_at,
                 )
+                self._baseline_repair_attempt = attempt
                 try:
                     async with self._rest_sync_lock:
                         prepared = await fetch(
@@ -1089,14 +1091,12 @@ class UserDataAccountSyncDaemon:
                             include_fills=include_fills,
                         )
                 finally:
-                    self._staged_reconciliation_baseline_at = None
-                    self._staged_stream_token = None
+                    self._baseline_repair_attempt = None
             return await self._reconcile_impl(
                 include_fills=include_fills,
                 wait_for_pipeline=wait_for_pipeline,
                 prepared_result=prepared,
-                prepared_generation=prepared_generation,
-                prepared_stream_token=stream_token,
+                prepared_attempt=attempt,
             )
         except Exception:
             if not self._pipeline_recovery_event.is_set():
@@ -1112,8 +1112,7 @@ class UserDataAccountSyncDaemon:
         include_fills: bool,
         wait_for_pipeline: bool = True,
         prepared_result: ExecutionAccountSyncResult | None = None,
-        prepared_generation: int = 0,
-        prepared_stream_token: int | None = None,
+        prepared_attempt: BaselineRepairAttempt | None = None,
     ) -> ExecutionAccountSyncResult:
         self._reconciliation_active = True
         if wait_for_pipeline and self._event_queue is not None:
@@ -1158,15 +1157,17 @@ class UserDataAccountSyncDaemon:
                 )
                 discarded_result = None
                 if prepared_result is not None and (
-                    prepared_generation != self._received_event_generation
-                    or getattr(self._stream, "continuity_token", None)
-                    != prepared_stream_token
-                    or self._pipeline_recovery_event.is_set()
-                    or (
-                        prepared_result.snapshot is not None
-                        and not _baseline_is_fresh(
-                            prepared_result.snapshot.config.observed_at, now=self._now()
-                        )
+                    prepared_attempt is None
+                    or not prepared_attempt.can_commit(
+                        event_generation=self._received_event_generation,
+                        stream_token=getattr(self._stream, "continuity_token", None),
+                        recovery_required=self._pipeline_recovery_event.is_set(),
+                        candidate_observed_at=(
+                            prepared_result.snapshot.config.observed_at
+                            if prepared_result.snapshot is not None
+                            else None
+                        ),
+                        now=self._now(),
                     )
                 ):
                     discarded_result = prepared_result
@@ -1556,12 +1557,6 @@ def _event_applied_result(
         fill_count_by_symbol=_fill_counts_by_symbol(fills),
         fills_catching_up=fills_catching_up,
     )
-
-
-def _baseline_is_fresh(observed_at: datetime, *, now: datetime) -> bool:
-    # Same bounded evidence age used by account readiness. Heartbeats are not
-    # a substitute for the time of the verified account baseline.
-    return 0 <= (now - observed_at).total_seconds() <= 180.0
 
 
 def _event_readiness_status(
