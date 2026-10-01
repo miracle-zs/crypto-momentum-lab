@@ -27,7 +27,12 @@ import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { renderCollector } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/collector.js";
-import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
+import {
+  DEFAULT_INITIAL_CAPITAL,
+  computePaperAccountReturn,
+  computeUnrealizedPnlRatio,
+  createStrategySection,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
 import { renderPerformance } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/performance.js";
 import {
@@ -640,6 +645,21 @@ test("strategy section hides fixed TP/SL accounts consistently", () => {
   assert.equal(status, "READY");
   assert.doesNotMatch(html, /固定 TP \/ SL/);
   assert.match(html, /15M 收线退出/);
+});
+
+test("strategy return and unrealized pnl calculations defend against bad inputs", () => {
+  assert.equal(DEFAULT_INITIAL_CAPITAL, 1000);
+  assert.equal(computePaperAccountReturn("1100"), 0.1);
+  assert.equal(computePaperAccountReturn("900"), -0.1);
+  assert.equal(computePaperAccountReturn(null), null);
+  assert.equal(computePaperAccountReturn(undefined), null);
+  assert.equal(computePaperAccountReturn("invalid"), null);
+
+  assert.equal(computeUnrealizedPnlRatio("10", "100"), 0.1);
+  assert.equal(computeUnrealizedPnlRatio("-5", "100"), -0.05);
+  assert.equal(computeUnrealizedPnlRatio("10", "0"), null);
+  assert.equal(computeUnrealizedPnlRatio("10", null), null);
+  assert.equal(computeUnrealizedPnlRatio(null, "100"), null);
 });
 
 test("equity charts register an ECharts payload with native metrics", () => {

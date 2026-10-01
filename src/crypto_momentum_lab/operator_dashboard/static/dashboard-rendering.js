@@ -1,24 +1,21 @@
-function cloneSnapshot(data) {
-  return JSON.parse(JSON.stringify(data));
-}
-
 /**
  * Build the identity used to decide whether a section needs a DOM rebuild.
  * Heartbeat timestamps are refreshed frequently but do not change the
  * account/strategy structure that the user is interacting with.
  */
 export function sectionRenderKey(id, data) {
-  const snapshot = cloneSnapshot(data);
+  if (!data || typeof data !== "object") return String(data);
+  const snapshot = { ...data };
   delete snapshot.generated_at;
 
   if (id === "overview") {
-    for (const service of snapshot.services || []) {
-      delete service.age_seconds;
-      delete service.observed_at;
+    if (Array.isArray(snapshot.services)) {
+      snapshot.services = snapshot.services.map(({ age_seconds, observed_at, ...rest }) => rest);
     }
-    for (const account of snapshot.account_statuses || []) {
-      delete account.observed_at;
-      delete account.lease_expires_at;
+    if (Array.isArray(snapshot.account_statuses)) {
+      snapshot.account_statuses = snapshot.account_statuses.map(
+        ({ observed_at, lease_expires_at, ...rest }) => rest,
+      );
     }
   }
 

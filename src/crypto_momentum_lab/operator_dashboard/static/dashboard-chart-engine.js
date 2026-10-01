@@ -18,6 +18,19 @@ const CHART_PAYLOADS = new Map();
 const CHART_INSTANCES = new Map();
 const WIRED_ROOTS = new WeakSet();
 const ROOT_LIFECYCLES = new WeakMap();
+const APPLIED_PAYLOAD_SIGNATURES = new WeakMap();
+
+function chartPayloadSignature(payload) {
+  if (!payload) return "";
+  const points = payload.points || [];
+  const series = payload.series || [];
+  const pLen = points.length;
+  const sLen = series.length;
+  const pFirst = pLen > 0 ? (points[0]?.time ?? points[0]?.observed_at ?? points[0]) : "";
+  const pLast = pLen > 0 ? (points[pLen - 1]?.equity ?? points[pLen - 1]?.value ?? points[pLen - 1]) : "";
+  const sMeta = sLen > 0 ? series.map((s) => `${s.label}:${s.points?.length || 0}:${s.delta ?? ""}`).join(",") : "";
+  return `${payload.kind || ""}|${pLen}|${sLen}|${payload.startAt || ""}|${payload.endAt || ""}|${payload.baseline || ""}|${pFirst}|${pLast}|${sMeta}`;
+}
 
 const FALLBACK_COLORS = {
   up: "#34d399",
@@ -332,6 +345,7 @@ function mountChart(shell, doc) {
   }
   const chart = chartLibrary.init(surface, null, { renderer: "svg" });
   chart.setOption(buildChartOption(payload), { notMerge: true, lazyUpdate: false });
+  APPLIED_PAYLOAD_SIGNATURES.set(chart, chartPayloadSignature(payload));
   const group = payload.group || shell.dataset.echartGroup;
   if (group) {
     chart.group = group;
@@ -426,7 +440,11 @@ export function refreshEcharts(root = document) {
     if (!payload) return;
     const chart = CHART_INSTANCES.get(shell);
     if (chart) {
-      chart.setOption(buildChartOption(payload), { notMerge: false, lazyUpdate: true });
+      const sig = chartPayloadSignature(payload);
+      if (APPLIED_PAYLOAD_SIGNATURES.get(chart) !== sig) {
+        chart.setOption(buildChartOption(payload), { notMerge: false, lazyUpdate: true });
+        APPLIED_PAYLOAD_SIGNATURES.set(chart, sig);
+      }
     } else {
       mountChart(shell, doc);
     }

@@ -55,9 +55,24 @@ async function defaultRequestJson(url) {
   return response.json();
 }
 
+// Standard initial capital for paper accounts ($1,000 baseline)
+const DEFAULT_INITIAL_CAPITAL = 1000;
+
+function computePaperAccountReturn(equity, initialCapital = DEFAULT_INITIAL_CAPITAL) {
+  const eq = asNumber(equity);
+  return eq == null || initialCapital <= 0 ? null : (eq - initialCapital) / initialCapital;
+}
+
+function computeUnrealizedPnlRatio(unrealizedPnl, entryNotional) {
+  const upnl = asNumber(unrealizedPnl);
+  const notional = asNumber(entryNotional);
+  return upnl != null && notional && Number.isFinite(notional) ? upnl / notional : null;
+}
+
 export function createStrategySection({ requestJson = defaultRequestJson } = {}) {
   let selectedPaperAccount = 0;
   const paperHistoryByRun = new Map();
+  const paperHistoryRequests = new Map();
   const paperDetailsByRun = new Map();
   const paperDetailLoadedAt = new Map();
   const paperDetailRequests = new Map();
@@ -122,8 +137,7 @@ const paperAccountPanelId = () => "paper-account-panel";
 
 function accountCard(account, index) {
   const summary = account.portfolio_summary || {};
-  const equity = asNumber(summary.equity);
-  const returnSinceStart = equity == null ? null : equity / 1000 - 1;
+  const returnSinceStart = computePaperAccountReturn(summary.equity);
   const isCandle = account.exit_mode === "candle_15m";
   const hasEquity = Array.isArray(account.equity_curve);
   const windowDelta = hasEquity ? accountWindowDelta(account) : null;
@@ -232,8 +246,7 @@ function accountDetail(account, index) {
   const summary = account.portfolio_summary || {};
   const positions = (account.open_positions || []).map((row) => ({
     ...row,
-    upnl_pct: asNumber(row.unrealized_pnl) != null && asNumber(row.entry_notional)
-      ? asNumber(row.unrealized_pnl) / asNumber(row.entry_notional) : null,
+    upnl_pct: computeUnrealizedPnlRatio(row.unrealized_pnl, row.entry_notional),
   }));
   const equityDelta = asNumber(summary.unrealized_pnl);
   const sampleMinutes = Math.round(
@@ -582,28 +595,39 @@ function wirePaperHistoryButton(body, account, index) {
 }
 
 async function loadPaperAccountHistory(body, account, index) {
+  if (!account?.run_id) return;
+  const existingRequest = paperHistoryRequests.get(account.run_id);
+  if (existingRequest) return existingRequest;
   const button = body.querySelector(sel.loadPaperHistory());
   if (button) {
     button.disabled = true;
     button.textContent = "加载中…";
   }
-  try {
-    const runId = encodeURIComponent(account.run_id);
-    const loadedHistory = paperHistoryByRun.get(account.run_id);
-    const fullHistory = loadedHistory?.history_complete === false;
-    const history = await requestJson(
-      `api/paper-accounts/${runId}/history${fullHistory ? "?full=true" : ""}`,
-    );
-    paperHistoryByRun.set(account.run_id, history);
-    const merged = withPaperHistory(withPaperDetail(account));
-    replacePaperDetail(body, accountDetail(merged, index));
-    wirePaperHistoryButton(body, merged, index);
-  } catch (error) {
-    if (button) {
-      button.disabled = false;
-      button.textContent = `加载失败 · ${error.message}`;
+  const request = (async () => {
+    try {
+      const runId = encodeURIComponent(account.run_id);
+      const loadedHistory = paperHistoryByRun.get(account.run_id);
+      const fullHistory = loadedHistory?.history_complete === false;
+      const history = await requestJson(
+        `api/paper-accounts/${runId}/history${fullHistory ? "?full=true" : ""}`,
+      );
+      paperHistoryByRun.set(account.run_id, history);
+      if (currentPaperAccountIs(account)) {
+        const merged = withPaperHistory(withPaperDetail(account));
+        replacePaperDetail(body, accountDetail(merged, index));
+        wirePaperHistoryButton(body, merged, index);
+      }
+    } catch (error) {
+      if (button && currentPaperAccountIs(account)) {
+        button.disabled = false;
+        button.textContent = `加载失败 · ${error.message}`;
+      }
+    } finally {
+      paperHistoryRequests.delete(account.run_id);
     }
-  }
+  })();
+  paperHistoryRequests.set(account.run_id, request);
+  return request;
 }
 
   return {
@@ -612,3 +636,10 @@ async function loadPaperAccountHistory(body, account, index) {
     wire: wirePaperAccountTabs,
   };
 }
+
+export {
+  DEFAULT_INITIAL_CAPITAL,
+  computePaperAccountReturn,
+  computeUnrealizedPnlRatio,
+};
+
