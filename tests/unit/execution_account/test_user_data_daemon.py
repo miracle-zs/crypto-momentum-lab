@@ -188,6 +188,56 @@ async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> No
         await asyncio.wait_for(task, timeout=1)
 
 
+async def test_lightweight_snapshot_keeps_realtime_events_and_readiness_live() -> None:
+    class BlockingSnapshotService(FakeService):
+        def __init__(self, snapshot):
+            super().__init__(snapshot)
+            self.snapshot_started = asyncio.Event()
+            self.release_snapshot = asyncio.Event()
+
+        async def snapshot_once(self, *, observed_at):
+            self.snapshot_started.set()
+            await self.release_snapshot.wait()
+
+    service = BlockingSnapshotService(_snapshot())
+    applied = asyncio.Event()
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda event, result: applied.set(),
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    task = asyncio.create_task(daemon._snapshot())
+    try:
+        await asyncio.wait_for(service.snapshot_started.wait(), timeout=1)
+        await daemon._publish_heartbeat()
+        assert service.heartbeat_states[-1] is ExecutionAccountStatus.READY_READONLY
+        event = parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+        await daemon._on_event(event)
+        await asyncio.wait_for(applied.wait(), timeout=1)
+        assert not daemon._deferred_events
+        # Persistence remains serialized with the REST observation, while the
+        # in-memory facts are available immediately to execution consumers.
+        assert service.persisted == []
+        service.release_snapshot.set()
+        await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(daemon._persistence_queue.join(), timeout=1)
+        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
+    finally:
+        service.release_snapshot.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await daemon._stop_pipeline()
+
+
 async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
     class FailingService(FakeService):
         def __init__(self, snapshot: AccountSnapshot) -> None:

@@ -519,8 +519,10 @@ class OverviewQueries:
                 for a in accounts_resp.accounts
             ):
                 entry_gate_reason = "account_stale"
+            elif any(a.readiness == "syncing" for a in accounts_resp.accounts):
+                entry_gate_reason = "account_syncing"
             else:
-                entry_gate_reason = "account_readonly_mode"
+                entry_gate_reason = "account_not_ready"
             exit_gate_open = True
             exit_gate_reason = "normal"
             unmanaged_risk_clear = True

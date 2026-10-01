@@ -104,3 +104,19 @@ async def test_process_state_does_not_invent_a_fact_gap_count(status):
     assert fact["status"] == "unknown"
     assert fact["metric_value"] is None
     assert "unconfirmed" in fact["details"]
+
+
+async def test_syncing_account_reports_syncing_not_readonly_permission():
+    queries = Queries(strategy_state="active", status=OperationalStatus.DEGRADED)
+    readiness = await queries.readiness()
+    assert readiness.tradeability.mode == "EXIT_ONLY"
+    assert readiness.tradeability.entry_gate_reason == "account_syncing"
+    assert not readiness.tradeability.entry_gate_open
+    assert readiness.tradeability.exit_gate_open
+
+
+async def test_ready_readonly_observer_can_support_live_strategy():
+    queries = Queries(strategy_state="active")
+    readiness = await queries.readiness()
+    assert readiness.tradeability.mode == "FULLY_TRADEABLE"
+    assert readiness.tradeability.entry_gate_reason == "live_entry_prerequisites_ready"

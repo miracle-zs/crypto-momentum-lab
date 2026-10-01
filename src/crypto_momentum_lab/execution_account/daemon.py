@@ -1143,34 +1143,16 @@ class UserDataAccountSyncDaemon:
             self._report_error(error)
 
     async def _snapshot(self) -> None:
-        pipeline_active = self._event_queue is not None
-        if pipeline_active:
-            async with self._state_lock:
-                self._reconciliation_active = True
-                self._accept_events = False
-            if self._event_queue is not None:
-                if not await self._wait_for_queue_drain(
-                    self._event_queue,
-                    "event snapshot",
-                ):
-                    self._request_pipeline_recovery("event_queue_drain_timeout")
-                    return
-            if self._persistence_queue is not None:
-                if not await self._wait_for_queue_drain(
-                    self._persistence_queue,
-                    "persistence snapshot",
-                ):
-                    self._request_pipeline_recovery("persistence_queue_drain_timeout")
-                    return
-        async with self._state_lock:
-            async with self._rest_sync_lock:
-                await self._service.snapshot_once(observed_at=self._now())
-        if pipeline_active and not self._pipeline_recovery_event.is_set():
-            await self._replay_deferred_events()
-            async with self._state_lock:
-                if not self._pipeline_recovery_event.is_set():
-                    self._reconciliation_active = False
-                    self._accept_events = self._state is not None
+        """Persist a REST observation without replacing the live account state.
+
+        Lightweight snapshots do not reconcile orders or trade coverage and
+        never replace ``AccountUserDataState``. They therefore serialize only
+        with persistence; pausing the event pipeline would turn monitoring I/O
+        into a false readiness transition. Authoritative reconciliation retains
+        its drain, freeze and replay protocol.
+        """
+        async with self._rest_sync_lock:
+            await self._service.snapshot_once(observed_at=self._now())
 
     async def _inspect_reconciliation(
         self,
