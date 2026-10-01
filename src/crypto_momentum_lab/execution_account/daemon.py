@@ -717,12 +717,11 @@ class UserDataAccountSyncDaemon:
                     return
                 if self._pipeline_recovery_event.is_set():
                     continue
-                async with self._rest_sync_lock:
-                    result = await self._service.persist_user_data_event(
-                        snapshot=pending.snapshot,
-                        event=pending.event,
-                        fills=pending.fills,
-                    )
+                result = await self._service.persist_user_data_event(
+                    snapshot=pending.snapshot,
+                    event=pending.event,
+                    fills=pending.fills,
+                )
                 self._notify_persisted(pending.event, result)
             except asyncio.CancelledError:
                 raise
@@ -953,8 +952,7 @@ class UserDataAccountSyncDaemon:
         result: ExecutionAccountSyncResult,
     ) -> None:
         try:
-            async with self._rest_sync_lock:
-                await persist(result)
+            await persist(result)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -1256,9 +1254,10 @@ class UserDataAccountSyncDaemon:
         """Persist a REST observation without replacing the live account state.
 
         Lightweight snapshots do not reconcile orders or trade coverage and
-        never replace ``AccountUserDataState``. They therefore serialize only
-        with persistence; pausing the event pipeline would turn monitoring I/O
-        into a false readiness transition. Authoritative reconciliation retains
+        never replace ``AccountUserDataState``. Only REST requests are serialized
+        here; observation commits are serialized by the sync module. Pausing
+        the event pipeline would turn monitoring I/O into a false readiness
+        transition. Authoritative reconciliation retains
         its drain, freeze and replay protocol.
         """
         async with self._rest_sync_lock:

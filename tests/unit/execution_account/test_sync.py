@@ -1,6 +1,9 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
@@ -1234,3 +1237,151 @@ async def test_staged_fact_retention_failure_keeps_cursor_and_rejects_other_acco
         )
     assert repository.snapshot_calls == 0
     assert repository.process_states == []
+
+
+@pytest.mark.parametrize("full_reconciliation", [False, True])
+async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history(
+    full_reconciliation,
+):
+    class BlockingClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.wallet = Decimal("100")
+
+        async def fetch_balances(self):
+            balances = await super().fetch_balances()
+            return (
+                replace(
+                    balances[0],
+                    wallet_balance=self.wallet,
+                    available_balance=Decimal("0")
+                    if self.wallet == 0
+                    else Decimal("80"),
+                ),
+            )
+
+        async def fetch_positions(self):
+            self.started.set()
+            await self.release.wait()
+            return ()
+
+    class SnapshotRepository(FakeRepository):
+        async def save_balance_position_snapshot(self, *, balances, positions):
+            self.balances.extend(balances)
+            self.positions.extend(positions)
+
+    client = BlockingClient()
+    repository = SnapshotRepository()
+    service = ExecutionAccountSyncService(
+        client=client, repository=repository, config=_config()
+    )
+    service._remember_balance_values(await client.fetch_balances())
+    initial_at = _config().observed_at
+    fetch = (
+        service.sync_once_for_realtime if full_reconciliation else service.snapshot_once
+    )
+    task = asyncio.create_task(fetch(observed_at=initial_at))
+    try:
+        await asyncio.wait_for(client.started.wait(), timeout=1)
+        event = parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
+            },
+            received_at=initial_at + timedelta(seconds=1),
+        )
+        balance = replace(
+            (await client.fetch_balances())[0],
+            wallet_balance=Decimal("0"),
+            available_balance=Decimal("0"),
+            observed_at=event.received_at,
+        )
+        snapshot = AccountSnapshot(
+            config=client.config, balances=(balance,), positions=(), open_orders=()
+        )
+        await asyncio.wait_for(
+            service.persist_user_data_event(snapshot=snapshot, event=event), timeout=1
+        )
+        assert not task.done()
+        assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
+        client.release.set()
+        result = await asyncio.wait_for(task, timeout=1)
+        if full_reconciliation:
+            await service.persist_reconciliation_result(result)
+        # The delayed REST cut must neither overwrite history nor reset the
+        # sparsification cache: the next unchanged observation writes no row.
+        assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
+        client.wallet = Decimal("0")
+        await service.snapshot_once(observed_at=initial_at + timedelta(seconds=2))
+        assert [row.wallet_balance for row in repository.balances] == [Decimal("0")]
+        assert repository.snapshot_calls == 1
+    finally:
+        client.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_materialized_rest_commit_finishes_before_newer_ws_commit():
+    class BlockingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def save_balance_position_snapshot(self, *, balances, positions):
+            self.started.set()
+            await self.release.wait()
+            self.balances.extend(balances)
+
+    client = FakeClient()
+    repository = BlockingRepository()
+    service = ExecutionAccountSyncService(
+        client=client, repository=repository, config=_config()
+    )
+    rest_task = asyncio.create_task(
+        service.snapshot_once(observed_at=_config().observed_at)
+    )
+    ws_task = None
+    try:
+        await asyncio.wait_for(repository.started.wait(), timeout=1)
+        event = parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
+            },
+            received_at=_config().observed_at + timedelta(seconds=1),
+        )
+        balance = replace(
+            (await client.fetch_balances())[0],
+            wallet_balance=Decimal("101"),
+            observed_at=event.received_at,
+        )
+        snapshot = AccountSnapshot(
+            config=client.config, balances=(balance,), positions=(), open_orders=()
+        )
+        entered = asyncio.Event()
+
+        async def persist_ws():
+            entered.set()
+            await service.persist_user_data_event(snapshot=snapshot, event=event)
+
+        ws_task = asyncio.create_task(persist_ws())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert not ws_task.done()
+        assert repository.snapshot_calls == 0
+        repository.release.set()
+        await asyncio.wait_for(asyncio.gather(rest_task, ws_task), timeout=1)
+        assert [row.wallet_balance for row in repository.balances] == [
+            Decimal("100"),
+            Decimal("101"),
+        ]
+    finally:
+        repository.release.set()
+        await asyncio.gather(
+            rest_task,
+            *([ws_task] if ws_task is not None else []),
+            return_exceptions=True,
+        )

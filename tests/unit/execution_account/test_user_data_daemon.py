@@ -225,9 +225,10 @@ async def test_lightweight_snapshot_keeps_realtime_events_and_readiness_live() -
         await daemon._on_event(event)
         await asyncio.wait_for(applied.wait(), timeout=1)
         assert not daemon._deferred_events
-        # Persistence remains serialized with the REST observation, while the
-        # in-memory facts are available immediately to execution consumers.
-        assert service.persisted == []
+        # The WS observation must reach durable storage before REST returns.
+        await asyncio.wait_for(daemon._persistence_queue.join(), timeout=0.1)
+        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
+        assert not task.done()
         service.release_snapshot.set()
         await asyncio.wait_for(task, timeout=1)
         await asyncio.wait_for(daemon._persistence_queue.join(), timeout=1)
@@ -833,6 +834,9 @@ async def test_background_reconciliation_never_replaces_a_newer_live_state(
             )
             await daemon._on_event(event)
             await asyncio.wait_for(applied.wait(), timeout=1)
+            await asyncio.wait_for(daemon._persistence_queue.join(), timeout=1)
+            assert service.persisted[-1][0].balances[0].wallet_balance == Decimal("101")
+            assert not task.done()
             assert daemon._state.snapshot(event.received_at).balances[
                 0
             ].wallet_balance == Decimal("101")
