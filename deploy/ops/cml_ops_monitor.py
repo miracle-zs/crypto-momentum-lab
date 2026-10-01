@@ -1990,6 +1990,12 @@ class OpsMonitor:
         budget.
         """
 
+        # Filtering alerts after evaluation cannot undo a Compose restart.
+        # The deploy owns lifecycle changes throughout its declared window.
+        window = read_maintenance_window(default_maintenance_path())
+        if window is not None and window.is_active(now=now_utc()):
+            return ()
+
         restart_states = self._state.setdefault("live_restart_state", {})
         if not isinstance(restart_states, dict):
             restart_states = {}

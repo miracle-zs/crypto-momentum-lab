@@ -1913,8 +1913,9 @@ def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) 
     assert delivered[2]["details"].get("flap_count") == 1
 
 
+@pytest.mark.parametrize("maintenance", [False, True])
 def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
-    tmp_path,
+    tmp_path, monkeypatch, maintenance,
 ) -> None:
     class Runner:
         def __init__(self) -> None:
@@ -1987,6 +1988,22 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
         clock=lambda: now[0],
     )
 
+    if maintenance:
+        from deploy.ops.maintenance_window import (
+            clear_maintenance_window,
+            write_maintenance_window,
+        )
+        marker = tmp_path / "maintenance.json"
+        monkeypatch.setenv("CML_MAINTENANCE_WINDOW_FILE", str(marker))
+        write_maintenance_window(
+            marker, started_at=datetime.now(UTC), expected_seconds=900
+        )
+        monitor.run_once()
+        assert not [
+            call for call in runner.calls if call[:2] == ["docker", "compose"]
+        ]
+        assert not monitor._state.get("live_restart_state")
+        clear_maintenance_window(marker)
     first_alerts = monitor.run_once()
     restart_commands = [
         call for call in runner.calls if call[:2] == ["docker", "compose"]
