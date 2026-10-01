@@ -851,11 +851,13 @@ def _account_event_from_user_data(
     symbol: str | None = None
     client_order_id: str | None = None
     order_status: str | None = None
+    order_update: dict[str, object] | None = None
     has_fill = False
     trade_id: str | None = None
     if event.event_type == "ORDER_TRADE_UPDATE":
         order = event.payload.get("o")
         if isinstance(order, dict):
+            order_update = dict(order)
             symbol = _event_text(order.get("s"))
             client_order_id = _event_text(order.get("c"))
             order_status = _event_text(order.get("X"))
@@ -887,6 +889,7 @@ def _account_event_from_user_data(
         symbol=symbol,
         client_order_id=client_order_id,
         order_status=order_status,
+        order_update=order_update,
         reason=result.status.value,
         has_fill=has_fill,
         trade_id=trade_id,

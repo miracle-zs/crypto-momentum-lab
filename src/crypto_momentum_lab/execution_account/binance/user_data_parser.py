@@ -4,8 +4,17 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.binance.order_status import (
+    exchange_order_state,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
@@ -163,3 +172,75 @@ def _optional_update_id(value: object, field_name: str) -> int | None:
             f"user data event field {field_name} must be non-negative"
         )
     return parsed
+
+
+def order_snapshot_from_update(
+    order: Mapping[str, object],
+    plan: OrderExecutionPlan,
+) -> ExchangeOrderSnapshot | None:
+    """Validate a complete WS fact; incomplete facts require a recovery read."""
+    required = {"c", "s", "S", "o", "q", "p", "R", "ps", "i", "X", "z", "ap", "T"}
+    if not required.issubset(order):
+        return None
+    try:
+        quantity = Decimal(str(order["q"]))
+        price = Decimal(str(order["p"]))
+        executed = Decimal(str(order["z"]))
+        average = Decimal(str(order["ap"]))
+        state = exchange_order_state(str(order["X"]))
+        if not all(value.is_finite() for value in (quantity, price, executed, average)):
+            return None
+        if (
+            quantity <= 0
+            or price < 0
+            or executed < 0
+            or executed > quantity
+            or average < 0
+            or (executed > 0 and average <= 0)
+        ):
+            return None
+        if not isinstance(order["R"], bool):
+            return None
+        if (
+            isinstance(order["i"], bool)
+            or not str(order["i"]).isdigit()
+            or int(str(order["i"])) <= 0
+        ):
+            return None
+        if (
+            isinstance(order["T"], bool)
+            or not str(order["T"]).isdigit()
+            or int(str(order["T"])) <= 0
+        ):
+            return None
+        observed_at = datetime.fromtimestamp(int(str(order["T"])) / 1000, tz=UTC)
+    except (ValueError, InvalidOperation, OverflowError, OSError):
+        return None
+    if (
+        str(order["c"]) != plan.client_order_id
+        or str(order["s"]) != plan.symbol
+        or str(order["S"]) != plan.side
+        or str(order["o"]) != plan.order_type
+        or str(order["ps"]) != plan.position_side.value
+        or order["R"] != plan.reduce_only
+        or quantity != plan.quantity
+        or (plan.price is not None and price != plan.price)
+    ):
+        raise ValueError("WS order update conflicts with its durable identity")
+    if (
+        state is ExchangeOrderState.FILLED
+        and executed != quantity
+        or state is ExchangeOrderState.ACKNOWLEDGED
+        and executed != 0
+        or state is ExchangeOrderState.PARTIALLY_FILLED
+        and not 0 < executed < quantity
+    ):
+        return None
+    return ExchangeOrderSnapshot(
+        client_order_id=plan.client_order_id,
+        exchange_order_id=str(order["i"]),
+        state=state,
+        observed_at=observed_at,
+        executed_quantity=executed,
+        average_price=average,
+    )

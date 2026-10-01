@@ -1220,4 +1220,29 @@ def test_account_event_with_fills_roundtrip() -> None:
     assert decoded.fills[0].trade_id == "12345"
     assert decoded.fills[0].quantity == Decimal("0.1")
     assert decoded.fills[0].price == Decimal("50000.0")
-    assert decoded.fills[0].raw_payload == {"source": "user_data_stream", "row": {"ps": "LONG"}}
+    assert decoded.fills[0].raw_payload == {
+        "source": "user_data_stream",
+        "row": {"ps": "LONG"},
+    }
+
+
+def test_account_event_preserves_complete_terminal_order_fact() -> None:
+    order = {"i": 123, "z": "2", "ap": "100", "R": False, "X": "FILLED"}
+    event = replace(_event(), order_update=order)
+    decoded = decode_account_event(
+        encode_account_event(event, sequence=1),
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert decoded.order_update == order
+
+
+def test_account_event_without_order_fact_remains_decodable() -> None:
+    payload = json.loads(encode_account_event(_event(), sequence=1))
+    del payload["order_update"]
+    decoded = decode_account_event(
+        payload,
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert decoded.order_update is None

@@ -643,11 +643,18 @@ class OrderExecutionStateMachine:
         occurred_at: datetime | None = None,
     ) -> None:
         event_at = occurred_at or self._now()
+        # Multiple partial fills can share the exchange millisecond. Their
+        # cumulative quantities distinguish facts; exact replays retain one ID.
+        cumulative_key = (
+            f":{details['executed_quantity']}:{details.get('average_price')}"
+            if details is not None and "executed_quantity" in details
+            else ""
+        )
         event_id = str(
             uuid5(
                 NAMESPACE_URL,
                 f"order-event:{plan.client_order_id}:{state.value}:"
-                f"{event_at.isoformat()}",
+                f"{event_at.isoformat()}{cumulative_key}",
             )
         )
         event = ExchangeOrderEvent(

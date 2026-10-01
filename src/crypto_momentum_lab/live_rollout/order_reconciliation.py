@@ -1,9 +1,7 @@
 """Durable order reconciliation for a live strategy session.
 
-The account WebSocket is an acceleration path, not the source of truth.  This
-module owns both sides of that contract: reconcile an affected order before an
-account snapshot is published, and periodically reconcile every unresolved
-order as the eventual-consistency safety net.
+Complete account WebSocket order facts update the existing durable state machine.
+REST reconciles incomplete events and periodically repairs unresolved orders.
 """
 
 import asyncio
@@ -15,7 +13,9 @@ import structlog
 from crypto_momentum_lab.domain.execution.order_read_repository import (
     OrderReadRepository,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.execution_account.binance.user_data_parser import (
+    order_snapshot_from_update,
+)
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -52,21 +52,23 @@ class LiveOrderReconciliation:
 
         if not event.client_order_id:
             return
-        unresolved = await self.order_repository.load_unresolved_orders(self.run_id)
-        for order in unresolved:
-            if order.plan.client_order_id == event.client_order_id:
-                await self.state_machine.reconcile_order(order.plan)
-                return
-        load_order = getattr(self.order_repository, "load_order", None)
-        if callable(load_order):
-            persisted = await load_order(event.client_order_id)
-            if persisted is not None:
-                if persisted.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                    await self.state_machine.reconcile_order(persisted.plan)
-                    return
-                if not persisted.state.terminal:
-                    await self.state_machine.reconcile_order(persisted.plan)
-                    return
+        persisted = await self.order_repository.load_order(event.client_order_id)
+        if persisted is not None:
+            snapshot = (
+                None
+                if event.order_update is None
+                else order_snapshot_from_update(event.order_update, persisted.plan)
+            )
+            if (
+                snapshot is not None
+                and persisted.exchange_order_id is not None
+                and (snapshot.exchange_order_id != persisted.exchange_order_id)
+            ):
+                raise ValueError("WS order update conflicts with its durable identity")
+            if persisted.state.terminal and (
+                snapshot is None
+                or snapshot.executed_quantity <= persisted.executed_quantity
+            ):
                 log.info(
                     "live_account_event_duplicate_terminal_order",
                     run_id=self.run_id,
@@ -74,6 +76,19 @@ class LiveOrderReconciliation:
                     state=persisted.state.value,
                 )
                 return
+            if snapshot is None:
+                await self.state_machine.reconcile_order(persisted.plan)
+            elif snapshot.executed_quantity < persisted.executed_quantity or (
+                snapshot.executed_quantity == persisted.executed_quantity
+                and snapshot.observed_at < persisted.updated_at
+            ):
+                # Replayed facts must not roll back a newer observation.
+                return
+            else:
+                await self.state_machine.apply_observed_snapshot(
+                    persisted.plan, snapshot
+                )
+            return
         reason = "account_event_order_missing_from_local_journal"
         log.warning(
             "live_account_event_order_missing_from_local_journal",

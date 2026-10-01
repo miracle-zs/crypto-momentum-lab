@@ -137,6 +137,8 @@ class AccountEvent:
     account_snapshot: AccountSnapshot | None = None
     snapshot_kind: str = _SNAPSHOT_KIND_NOTIFICATION
     account_delta: AccountSnapshotDelta | None = None
+    # Complete exchange order fact, including terminal updates absent from open orders.
+    order_update: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         for text_value, field_name in (
@@ -181,6 +183,11 @@ class AccountEvent:
                 isinstance(value, bool) or not isinstance(value, int) or value < 0
             ):
                 raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.order_update is not None and (
+            self.event_type != "ORDER_TRADE_UPDATE"
+            or not isinstance(self.order_update, dict)
+        ):
+            raise ValueError("order_update requires an ORDER_TRADE_UPDATE object")
         if not isinstance(self.has_fill, bool):
             raise TypeError("has_fill must be a bool")
         if (
@@ -1267,6 +1274,7 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "symbol": event.symbol,
             "client_order_id": event.client_order_id,
             "order_status": event.order_status,
+            "order_update": event.order_update,
             "reason": event.reason,
             "has_fill": event.has_fill,
             "trade_id": event.trade_id,
@@ -1373,6 +1381,11 @@ def decode_account_event(
         symbol=_optional_string(payload, "symbol"),
         client_order_id=_optional_string(payload, "client_order_id"),
         order_status=_optional_string(payload, "order_status"),
+        order_update=(
+            None
+            if payload.get("order_update") is None
+            else _mapping_field(payload, "order_update")
+        ),
         reason=_optional_string(payload, "reason"),
         has_fill=_optional_bool(payload, "has_fill"),
         trade_id=_optional_string(payload, "trade_id"),

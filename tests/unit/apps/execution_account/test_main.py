@@ -296,3 +296,49 @@ async def test_snapshot_event_keeps_scan_proof_and_full_replay_fills():
     )
     assert event.fill_load_scans == (scan,)
     assert event.fills == (fill,)
+
+
+def test_user_data_order_fact_survives_account_hub_transport() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+    from crypto_momentum_lab.execution_account.binance.user_data_parser import (
+        parse_user_data_event,
+    )
+    from crypto_momentum_lab.execution_account.hub import (
+        decode_account_event,
+        encode_account_event,
+    )
+
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    fact = {
+        "c": "entry",
+        "s": "BTCUSDT",
+        "X": "FILLED",
+        "z": "2",
+        "ap": "100",
+        "i": 123,
+    }
+    source = parse_user_data_event(
+        {"e": "ORDER_TRADE_UPDATE", "E": int(now.timestamp() * 1000), "o": fact},
+        received_at=now,
+    )
+    result = SimpleNamespace(
+        status=ExecutionAccountStatus.READY_READONLY,
+        fills=(),
+        new_fills=(),
+        fill_load_scans=(),
+        snapshot=None,
+        delta=None,
+    )
+    event = main._account_event_from_user_data(
+        source, result, environment="live", account_label="primary"
+    )
+    decoded = decode_account_event(
+        encode_account_event(event, sequence=1),
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert decoded.order_update == fact
+    assert decoded.client_order_id == "entry"
