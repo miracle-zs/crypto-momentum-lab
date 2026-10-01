@@ -1642,7 +1642,6 @@ async def run_live_daemon(
             on_account_snapshot_recovery=(
                 control_plane_runtime.on_account_snapshot_recovery
             ),
-            pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
         if risk_control_enabled and risk_control_hub_url:
             risk_control_source = WebSocketRiskControlSource(
@@ -1999,7 +1998,6 @@ async def _run_account_event_channel(
         on_exit_failure=on_exit_failure,
         on_account_snapshot=on_account_snapshot,
         on_account_snapshot_recovery=on_account_snapshot_recovery,
-        pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run(source)
 

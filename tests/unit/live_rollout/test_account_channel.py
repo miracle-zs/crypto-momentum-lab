@@ -55,7 +55,7 @@ async def test_runtime_reconciles_order_before_publishing_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_retries_pending_position_sync(
+async def test_pending_position_does_not_delay_next_account_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event = SimpleNamespace(
@@ -66,11 +66,11 @@ async def test_runtime_retries_pending_position_sync(
         symbols=("BTCUSDT",),
     )
     state = SimpleNamespace(symbol="BTCUSDT")
-    delays: list[float] = []
+    snapshots: list[int] = []
     failures: list[tuple[str, str | None]] = []
 
     async def controlled_sleep(delay: float) -> None:
-        delays.append(delay)
+        pytest.fail(f"account consumer slept for {delay}")
 
     monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
 
@@ -85,6 +85,7 @@ async def test_runtime_retries_pending_position_sync(
             quote: object,
         ) -> str | None:
             del quote
+            assert len(snapshots) == self.calls + 1
             self.calls += 1
             if self.calls == 1:
                 return "pending_live_positions:BTCUSDT"
@@ -93,6 +94,7 @@ async def test_runtime_retries_pending_position_sync(
     class Source:
         def __aiter__(self) -> AsyncIterator[object]:
             async def stream() -> AsyncIterator[object]:
+                yield event
                 yield event
 
             return stream()
@@ -113,13 +115,13 @@ async def test_runtime_retries_pending_position_sync(
         run_id="run-1",
         is_transient_error=lambda _error: False,
         on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
-        pending_position_retry_delays=(0.25,),
+        on_account_snapshot=lambda _event: snapshots.append(len(snapshots)),
     )
 
     await runtime.run(Source())  # type: ignore[arg-type]
 
     assert daemon.calls == 2
-    assert delays == [0.25]
+    assert snapshots == [0, 1]
     assert failures == [("BTCUSDT", None)]
 
 

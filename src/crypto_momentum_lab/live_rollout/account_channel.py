@@ -13,10 +13,8 @@ from crypto_momentum_lab.live_rollout.account_event_ports import (
     AccountEventOrderReconciler,
 )
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
-    DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     ORDER_IDENTITY_CONFLICT_REASON,
     is_pending_position_sync_failure,
-    promote_pending_position_failure,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
@@ -54,14 +52,7 @@ class LiveAccountEventRuntime:
         on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None]
         | None = None,
         on_account_snapshot_recovery: Callable[[str], None] | None = None,
-        pending_position_retry_delays: tuple[float, ...] = (
-            DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
-        ),
     ) -> None:
-        if not pending_position_retry_delays:
-            raise ValueError("pending_position_retry_delays must not be empty")
-        if any(delay <= 0 for delay in pending_position_retry_delays):
-            raise ValueError("pending position retry delays must be positive")
         self._daemon = daemon
         self._latest_market_states = latest_market_states
         self._latest_market_quotes = latest_market_quotes
@@ -75,7 +66,6 @@ class LiveAccountEventRuntime:
         self._on_exit_failure = on_exit_failure
         self._on_account_snapshot = on_account_snapshot
         self._on_account_snapshot_recovery = on_account_snapshot_recovery
-        self._pending_position_retry_delays = pending_position_retry_delays
         self._seen_fill_keys: set[tuple[str, str]] = set()
         self._seen_fill_order: deque[tuple[str, str]] = deque(
             maxlen=_MAX_SEEN_FILL_KEYS
@@ -130,38 +120,16 @@ class LiveAccountEventRuntime:
                     quote=quote,
                 )
                 if is_pending_position_sync_failure(failure):
-                    for attempt, delay in enumerate(
-                        self._pending_position_retry_delays,
-                        start=1,
-                    ):
-                        log.warning(
-                            "live_account_event_position_sync_retry",
-                            run_id=event_run_id,
-                            symbol=state.symbol,
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=failure,
-                        )
-                        await asyncio.sleep(delay)
-                        failure = await self._daemon.process_account_event(
-                            state,
-                            quote=quote,
-                        )
-                        if failure is None:
-                            log.info(
-                                "live_account_event_position_sync_recovered",
-                                run_id=event_run_id,
-                                symbol=state.symbol,
-                                attempt=attempt,
-                            )
-                            break
-                        if not is_pending_position_sync_failure(failure):
-                            break
-                    failure = (
-                        promote_pending_position_failure(failure)
-                        if failure is not None
-                        else None
+                    # Context publication already sets the pending-position
+                    # entry gate. Later account/market events refresh that view;
+                    # waiting here would prevent newer account facts arriving.
+                    log.warning(
+                        "live_account_event_position_sync_pending",
+                        run_id=event_run_id,
+                        symbol=state.symbol,
+                        reason=failure,
                     )
+                    continue
                 if failure is not None:
                     if self._on_exit_failure is not None:
                         self._on_exit_failure(state.symbol, failure)
