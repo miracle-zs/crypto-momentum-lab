@@ -84,4 +84,3 @@ async def maybe_auto_reacquire_live_lease(
         lease_expires_at=lease.expires_at.isoformat(),
     )
     return lease
-

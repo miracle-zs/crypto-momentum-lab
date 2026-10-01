@@ -43,5 +43,3 @@ def is_durable_order_identity_conflict(error: Exception) -> bool:
         return True
     cause = error.__cause__
     return isinstance(cause, Exception) and is_durable_order_identity_conflict(cause)
-
-

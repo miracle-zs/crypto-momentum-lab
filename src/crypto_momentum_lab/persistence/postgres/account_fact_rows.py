@@ -26,5 +26,3 @@ def account_fill_from_row(row: AccountFillEventRow) -> AccountFillEvent:
         trade_at=row.trade_at,
         raw_payload=row.raw_payload,
     )
-
-

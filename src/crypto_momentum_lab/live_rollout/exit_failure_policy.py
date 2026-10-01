@@ -26,4 +26,3 @@ def promote_pending_position_failure(failure: str) -> str:
         "unmanaged_live_positions:",
         1,
     )
-

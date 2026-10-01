@@ -80,5 +80,3 @@ class PositionRepairUnitOfWork(Protocol):
     def transaction(
         self, key: PositionKey
     ) -> AbstractAsyncContextManager[PositionRepairTransaction]: ...
-
-
