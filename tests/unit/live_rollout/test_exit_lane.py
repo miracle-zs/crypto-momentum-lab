@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import timedelta
 from typing import cast
@@ -73,3 +74,64 @@ async def test_market_lane_keeps_latest_state_and_merges_outcomes() -> None:
         approved_intent_count=1,
         submitted_order_count=1,
     )
+
+
+async def test_outcome_callback_failure_does_not_leave_shutdown_waiting_forever():
+    async def process(state, context):
+        return ExitLaneOutcome()
+
+    async def process_quote(quote, state, context):
+        return ExitLaneOutcome()
+
+    def failed_callback(symbol, outcome):
+        raise RuntimeError("outcome publication failed")
+
+    lane = ExitExecutionLane(process, process_quote, on_outcome=failed_callback)
+    await lane.start()
+    await lane.submit_market(_state(), cast(LiveDaemonRuntimeContext, object()))
+    outcome = await asyncio.wait_for(lane.stop(), timeout=1)
+    assert outcome.fatal_failure
+    assert outcome.failure == "exit_outcome_publication_failed:RuntimeError"
+
+
+async def test_older_account_trigger_keeps_newer_price_and_state_with_fresh_context():
+    states = []
+    quotes = []
+    old_context = cast(LiveDaemonRuntimeContext, object())
+    fresh_context = cast(LiveDaemonRuntimeContext, object())
+    old_state = _state()
+    newer_state = replace(
+        old_state,
+        bucket_start=old_state.bucket_start + timedelta(seconds=15),
+        bucket_end=old_state.bucket_end + timedelta(seconds=15),
+    )
+    old_quote = RealtimeMarketQuote(
+        exchange=old_state.exchange,
+        environment=old_state.environment,
+        symbol=old_state.symbol,
+        event_at=old_state.bucket_end,
+        received_at=old_state.bucket_end,
+        bid_price=old_state.close_price,
+        ask_price=old_state.close_price,
+    )
+    newer_quote = replace(
+        old_quote, event_at=newer_state.bucket_end, received_at=newer_state.bucket_end
+    )
+
+    async def process(state, context):
+        states.append((state, context))
+        return ExitLaneOutcome()
+
+    async def process_quote(quote, state, context):
+        quotes.append((quote, state, context))
+        return ExitLaneOutcome()
+
+    lane = ExitExecutionLane(process, process_quote)
+    await lane.start()
+    await lane.submit_market(newer_state, old_context)
+    await lane.submit_market(old_state, fresh_context)
+    await lane.submit_quote(newer_quote, newer_state, old_context)
+    await lane.submit_quote(old_quote, old_state, fresh_context)
+    await lane.stop()
+    assert states == [(newer_state, fresh_context)]
+    assert quotes == [(newer_quote, newer_state, fresh_context)]

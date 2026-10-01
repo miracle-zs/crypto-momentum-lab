@@ -139,8 +139,6 @@ class LiveAccountEventRuntime:
                         reason=failure,
                     )
                     continue
-                if self._on_exit_failure is not None:
-                    self._on_exit_failure(state.symbol, None)
         except asyncio.CancelledError:
             raise
         except Exception as error:

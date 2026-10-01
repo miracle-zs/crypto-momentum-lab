@@ -181,3 +181,13 @@ def test_entry_control_set_exit_failure_change_tracking() -> None:
 
     # Clearing again returns False
     assert gate.set_exit_failure("BTCUSDT", None) is False
+
+
+def test_exit_failure_blocks_entry_immediately_without_prerequisite_refresh() -> None:
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=object())
+    gate.set_entry_enabled(True, reason="ready")
+    gate.set_exit_failure("BTCUSDT", "recovery_failed")
+    assert not gate.entry_enabled
+    assert gate.entry_enabled_reason == "exit_failure:BTCUSDT:recovery_failed"
+    gate.set_exit_failure("BTCUSDT", None)
+    assert gate.entry_enabled

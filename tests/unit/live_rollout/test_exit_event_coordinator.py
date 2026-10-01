@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -82,19 +83,18 @@ class _Lane:
     def __init__(self, outcome: ExitLaneOutcome | None = None) -> None:
         self.outcome = outcome or ExitLaneOutcome()
         self.start_calls = 0
-        self.account_calls: list[tuple[object, object]] = []
+        self.market_calls: list[tuple[object, object]] = []
         self.quote_calls: list[tuple[object, object, object]] = []
 
     async def start(self) -> None:
         self.start_calls += 1
 
-    async def submit_account(
+    async def submit_market(
         self,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome:
-        self.account_calls.append((state, context))
-        return self.outcome
+    ) -> None:
+        self.market_calls.append((state, context))
 
     async def submit_quote(
         self,
@@ -162,7 +162,7 @@ def _quote(*, symbol: str = "BTCUSDT") -> RealtimeMarketQuote:
 
 
 @pytest.mark.asyncio
-async def test_account_event_refreshes_context_and_uses_account_lane() -> None:
+async def test_account_event_refreshes_context_and_uses_existing_market_lane() -> None:
     processor = _Processor()
     lane = _Lane()
     coordinator, events = _coordinator(
@@ -178,9 +178,9 @@ async def test_account_event_refreshes_context_and_uses_account_lane() -> None:
     assert len(events["provider"]) == 1
     assert len(events["sync"]) == 1
     assert len(events["publish"]) == 1
-    assert len(events["invalidate"]) == 2
+    assert len(events["invalidate"]) == 1
     assert lane.start_calls == 1
-    assert len(lane.account_calls) == 1
+    assert len(lane.market_calls) == 1
     assert processor.calls == []
 
 
@@ -285,3 +285,99 @@ async def test_disabled_exit_coordinator_skips_all_collaborators(trigger: str) -
     else:
         result = await coordinator.process_grace_timeout(_state(), now=NOW)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_account_quote_uses_existing_quote_lane_without_inline_processing():
+    processor = _Processor()
+    lane = _Lane()
+    coordinator, events = _coordinator(processor=processor, lane=lane, run_active=True)
+    state = cast(MarketState15s, _state())
+    quote = _quote()
+    assert await coordinator.process_account_event(state, quote=quote) is None
+    assert len(lane.quote_calls) == 1
+    assert processor.calls == []
+    assert len(events["invalidate"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_quote", [False, True])
+async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiting(
+    with_quote,
+):
+    from crypto_momentum_lab.execution_account.hub import AccountEvent
+    from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    snapshots = []
+    outcomes = []
+    state = cast(MarketState15s, _state())
+    quote = _quote()
+    context = cast(
+        LiveDaemonRuntimeContext,
+        SimpleNamespace(
+            pending_position_symbols=frozenset(),
+            unmanaged_position_symbols=frozenset(),
+        ),
+    )
+
+    class Processor(_Processor):
+        async def process_state(self, state, context):
+            started.set()
+            await release.wait()
+            return ExitLaneOutcome(failure="exit_recovery_failed")
+
+        async def process_quote(self, quote, state, context):
+            return await self.process_state(state, context)
+
+    processor = Processor()
+    lane = ExitExecutionLane(
+        processor.process_state,
+        processor.process_quote,
+        on_outcome=lambda symbol, outcome: outcomes.append((symbol, outcome.failure)),
+    )
+    coordinator, _events = _coordinator(
+        processor=processor, lane=lane, run_active=True, context=context
+    )
+    first = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ACCOUNT_UPDATE",
+        event_id="first",
+        event_at=NOW,
+        received_at=NOW,
+        symbols=(state.symbol,),
+    )
+
+    class Source:
+        def __aiter__(self):
+            async def events():
+                yield first
+                # The first exit is actually waiting, rather than merely queued.
+                await asyncio.wait_for(started.wait(), timeout=1)
+                yield replace(first, event_id="second")
+
+            return events()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=coordinator,
+        latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
+        latest_market_quotes=SimpleNamespace(
+            for_symbols=lambda _symbols: (quote,) if with_quote else ()
+        ),
+        is_transient_error=lambda _error: False,
+        on_account_snapshot=lambda event: snapshots.append(event.event_id),
+        on_exit_failure=lambda _symbol, _failure: pytest.fail(
+            "queue admission is not an exit outcome"
+        ),
+    )
+    try:
+        await asyncio.wait_for(runtime.run(Source()), timeout=1)
+        assert snapshots == ["first", "second"]
+        assert outcomes == []
+    finally:
+        release.set()
+        await lane.stop()
+    assert outcomes
+    assert all(failure == "exit_recovery_failed" for _symbol, failure in outcomes)

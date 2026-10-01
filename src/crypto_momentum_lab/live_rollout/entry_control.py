@@ -34,6 +34,7 @@ class LiveEntryControlGate:
             and not self._risk_control_entry_blocked
             and not self._scheduled_entry_blocked
             and not self._pending_position_symbols
+            and not self._exit_failure_by_symbol
         )
 
     @property
@@ -45,6 +46,9 @@ class LiveEntryControlGate:
         if self._pending_position_symbols:
             symbols = ",".join(sorted(self._pending_position_symbols))
             return f"account_position_sync_pending:{symbols}"
+        if self._entry_enabled and self._exit_failure_by_symbol:
+            symbol, failure = next(iter(self._exit_failure_by_symbol.items()))
+            return f"exit_failure:{symbol}:{failure}"
         return self._entry_enabled_reason
 
     def set_pending_position_symbols(

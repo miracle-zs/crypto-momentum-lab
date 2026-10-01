@@ -73,7 +73,13 @@ from crypto_momentum_lab.live_rollout.exit_control import LiveExitControlGate
 from crypto_momentum_lab.live_rollout.exit_event_coordinator import (
     LiveExitEventCoordinator,
 )
-from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
+from crypto_momentum_lab.live_rollout.exit_failure_policy import (
+    is_pending_position_sync_failure,
+)
+from crypto_momentum_lab.live_rollout.exit_lane import (
+    ExitExecutionLane,
+    ExitLaneOutcome,
+)
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
     LiveExitProcessor,
@@ -381,6 +387,7 @@ class LiveStrategyDaemon:
         self._exit_lane = ExitExecutionLane(
             self._exit_processor.process_state,
             self._exit_processor.process_quote,
+            on_outcome=self._on_exit_lane_outcome,
         )
         self._exit_events = LiveExitEventCoordinator(
             run_id=config.run_id,
@@ -516,6 +523,11 @@ class LiveStrategyDaemon:
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         self._entry_control.set_entry_enabled(enabled, reason=reason)
+
+    def _on_exit_lane_outcome(self, symbol: str, outcome: ExitLaneOutcome) -> None:
+        failure = self._exit_lane.failure or outcome.failure
+        if not is_pending_position_sync_failure(failure):
+            self._entry_control.set_exit_failure(symbol, failure)
 
     def set_exit_failure(
         self,

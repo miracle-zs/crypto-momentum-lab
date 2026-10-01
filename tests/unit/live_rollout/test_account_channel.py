@@ -122,7 +122,7 @@ async def test_pending_position_does_not_delay_next_account_snapshot(
 
     assert daemon.calls == 2
     assert snapshots == [0, 1]
-    assert failures == [("BTCUSDT", None)]
+    assert failures == []
 
 
 @pytest.mark.asyncio

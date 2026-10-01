@@ -78,15 +78,10 @@ class LiveExitEventCoordinator:
         if self._run_active():
             await self._exit_lane.start()
             if quote is None:
-                outcome = await self._exit_lane.submit_account(state, context)
+                await self._exit_lane.submit_market(state, context)
             else:
-                # Account events have their own channel; do not let a newer
-                # ticker replace this account-triggered quote check.
-                outcome = await self._exit_processor.process_quote(
-                    quote,
-                    state,
-                    context,
-                )
+                await self._exit_lane.submit_quote(quote, state, context)
+            return None
         else:
             outcome = (
                 await self._exit_processor.process_state(state, context)

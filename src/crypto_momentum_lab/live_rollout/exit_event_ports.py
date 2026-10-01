@@ -49,9 +49,9 @@ class ExitEventProcessor(Protocol):
 class ExitEventLane(Protocol):
     async def start(self) -> None: ...
 
-    async def submit_account(
+    async def submit_market(
         self, state: MarketState15s, context: LiveDaemonRuntimeContext
-    ) -> ExitFailureResult: ...
+    ) -> None: ...
 
     async def submit_quote(
         self,
