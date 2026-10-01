@@ -11,6 +11,7 @@ from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
@@ -29,7 +30,6 @@ from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 from tests.unit.shadow_operation.test_service import _state
 

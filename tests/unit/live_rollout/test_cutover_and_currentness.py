@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -16,9 +19,6 @@ from crypto_momentum_lab.domain.execution.position_batches import (
     PositionOrderFact,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
-)
 from crypto_momentum_lab.live_rollout.position_batches import _build_position_batches
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,

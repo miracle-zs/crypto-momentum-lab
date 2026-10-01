@@ -5,8 +5,8 @@ from typing import Literal, cast
 
 from pydantic import TypeAdapter
 
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
 
 
 @dataclass(frozen=True, slots=True)

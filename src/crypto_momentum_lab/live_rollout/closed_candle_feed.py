@@ -24,10 +24,10 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
 from crypto_momentum_lab.market_data.binance.websocket import (
     BinanceWebSocketConnection,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 log = structlog.get_logger()
 

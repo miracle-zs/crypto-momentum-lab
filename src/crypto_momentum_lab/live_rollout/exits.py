@@ -37,7 +37,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import (
+from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitMode,
     PositionExitPolicy,

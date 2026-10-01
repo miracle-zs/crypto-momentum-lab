@@ -8,6 +8,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.binance.order_status import (
     is_open_order_status,
     should_discard_position_expectation,
@@ -21,9 +24,6 @@ from crypto_momentum_lab.execution_account.expectations import (
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     build_account_snapshot,
     diff_account_snapshots,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.user_data_fields import (
     event_raw_payload,

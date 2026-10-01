@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     OrderIdentityEvent,
     PersistedExchangeOrder,
@@ -41,9 +44,6 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
-)
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,

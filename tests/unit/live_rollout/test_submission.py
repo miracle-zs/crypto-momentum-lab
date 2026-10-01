@@ -17,7 +17,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
+    CoordinatedOrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -80,21 +80,6 @@ class RecordingCoordinator:
         )
 
 
-class LegacyStateMachine:
-    def __init__(self) -> None:
-        self.events: list[str] = []
-
-    async def execute_approved_intent(self, plan, *, prepared_submission=None):
-        del prepared_submission
-        self.events.append("exchange")
-        return OrderExecutionResult(
-            client_order_id=plan.client_order_id,
-            state=ExchangeOrderState.ACKNOWLEDGED,
-            exchange_order_id="exchange-1",
-            plan=plan,
-        )
-
-
 def _submission(
     *,
     repository,
@@ -111,7 +96,7 @@ def _submission(
             max_gross_exposure=Decimal("25"),
         ),
         repository=repository,
-        state_machine=cast(OrderExecutionPort, state_machine),
+        state_machine=cast(CoordinatedOrderExecutionPort, state_machine),
         config=LiveSubmissionConfig(
             run_id="run-1",
             account_label="account-1",
@@ -208,34 +193,6 @@ async def test_submission_preserves_policy_quantized_quantity() -> None:
     assert result is not None
     assert result.plan.quantity == Decimal("0.02")
     assert result.plan.quantity * reference_price == Decimal("22.2222")
-
-
-async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
-    class LegacyRepository:
-        def __init__(self) -> None:
-            self.events: list[str] = []
-
-        async def save_approved_intent(self, intent, evaluation) -> None:
-            del intent, evaluation
-            self.events.append("save")
-
-    repository = LegacyRepository()
-    state_machine = LegacyStateMachine()
-    submission = _submission(
-        repository=repository,
-        state_machine=state_machine,
-    )
-
-    result = await submission.execute(
-        replace(_intent(), desired_notional=Decimal("20")),
-        requested_quantity=None,
-        state=_state(),
-        context=_runtime_context(),
-    )
-
-    assert result is not None
-    assert repository.events == ["save"]
-    assert state_machine.events == ["exchange"]
 
 
 async def test_submission_strictly_obeys_requested_quantity() -> None:
@@ -610,3 +567,31 @@ async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts()
     assert result is None
     assert not repository.prepare_calls
     assert repository.saved_intents == 0
+
+
+async def test_queued_entry_with_invalidated_context_never_prepares_or_posts():
+    repository = RecordingPreparedRepository()
+    current = [True]
+    posts = []
+
+    class DelayedCoordinator:
+        async def prepare_and_execute(self, plan, *, prepare_submission):
+            current[0] = False
+            prepared = await prepare_submission()
+            if prepared is not None:
+                posts.append(plan)
+            return None
+
+    submission = _submission(
+        repository=repository, state_machine=DelayedCoordinator(),
+    )
+    submission._context_is_current = lambda context: current[0]
+    result = await submission.execute(
+        replace(_intent(), desired_notional=Decimal("20")),
+        requested_quantity=None,
+        state=_state(),
+        context=_runtime_context(),
+    )
+    assert result is None
+    assert repository.prepare_calls == []
+    assert posts == []

@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
 )
@@ -32,9 +35,6 @@ from crypto_momentum_lab.execution_account.hub import (
 )
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     diff_account_snapshots,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 
 

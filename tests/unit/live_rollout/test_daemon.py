@@ -20,6 +20,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
@@ -29,6 +32,14 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,
     StrategyDecision,
     universe_snapshot_for_symbols,
+)
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    ClosedCandle15m,
+    PositionExitMode,
+    PositionExitPolicy,
+)
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
@@ -61,11 +72,6 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.strategy_runner.position_exit import (
-    ClosedCandle15m,
-    PositionExitMode,
-    PositionExitPolicy,
-)
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,
@@ -2073,6 +2079,20 @@ class FakeLiveRepository:
     ) -> None:
         pass
 
+    async def prepare_submission(self, *, intent, evaluation, plan, prepared_at, **kwargs):
+        await self.save_approved_intent(intent, evaluation)
+        return PreparedOrderSubmission(
+            plan=plan,
+            submitting_event=ExchangeOrderEvent(
+                event_id=f"prepared:{plan.client_order_id}",
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.SUBMITTING,
+                occurred_at=prepared_at,
+                exchange_order_id=None,
+                details={},
+            ),
+        )
+
     async def save_checkpoint(
         self,
         run_id: str,
@@ -2098,6 +2118,9 @@ class SignalingLiveRepository(FakeLiveRepository):
     ) -> None:
         await super().save_checkpoint(run_id, checkpoint, saved_at)
         self.checkpoint_saved.set()
+
+
+_created_coordinators: list[OrderExecutionCoordinator] = []
 
 
 def _daemon(
@@ -2145,6 +2168,10 @@ def _daemon(
         del state
         return _runtime_context()
 
+    coordinator = OrderExecutionCoordinator(
+        backend=machine, account_label="test_account", environment="live",
+    )
+    _created_coordinators.append(coordinator)
     submission_repository = repository or FakeLiveRepository()
     checkpoint_repository = checkpoint_repository or submission_repository
     return LiveStrategyDaemon(
@@ -2159,7 +2186,7 @@ def _daemon(
         ),
         submission_repository=submission_repository,
         persist_checkpoint=checkpoint_repository.save_checkpoint,
-        state_machine=machine,
+        state_machine=coordinator,
         context_provider=context_provider or default_context,
         signal_recorder=signal_recorder,
         config=LiveDaemonConfig(
@@ -2482,7 +2509,7 @@ async def test_history_replay_reaches_live_decision_without_loading_live_context
 
 
 async def test_submission_and_checkpoint_persistence_are_independent():
-    class SubmissionOnly:
+    class SubmissionOnly(FakeLiveRepository):
         def __init__(self):
             self.approved = []
 

@@ -36,15 +36,15 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+    AccountSnapshotDelta,
+)
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
 )
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     apply_account_snapshot_delta,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
-    AccountSnapshotDelta,
 )
 from crypto_momentum_lab.health.stream_availability import (
     StreamAvailabilityClock,

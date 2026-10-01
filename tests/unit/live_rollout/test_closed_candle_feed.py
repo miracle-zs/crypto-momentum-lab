@@ -9,6 +9,7 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mEvent,
@@ -16,7 +17,6 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandleFeedOverflow,
     decode_closed_candle_event,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 RECEIVED_AT = datetime(2026, 8, 24, 14, 45, 0, 100000, tzinfo=UTC)
 

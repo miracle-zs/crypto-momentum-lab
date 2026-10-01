@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.binance.user_data import (
     UserDataEventSink,
 )
@@ -22,9 +25,6 @@ from crypto_momentum_lab.execution_account.binance.user_data_models import (
 )
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncResult,

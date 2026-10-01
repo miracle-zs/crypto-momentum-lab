@@ -2,12 +2,12 @@ from dataclasses import replace
 
 import pytest
 
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+from crypto_momentum_lab.domain.account.baseline_checkpoint import (
     AccountBaselineCheckpoint,
     decode_baseline_checkpoint,
     encode_baseline_checkpoint,
 )
-from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from tests.unit.execution_account.test_sync import FakeClient
 
 

@@ -13,11 +13,11 @@ from typing import Any
 import yaml
 
 from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _live_strategy_config_hash,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 from crypto_momentum_lab.strategy_runner.registry import StrategyRegistryError
 
 

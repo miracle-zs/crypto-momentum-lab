@@ -17,7 +17,7 @@ async def test_timeout_then_not_found_is_durable_unknown_state() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert exchange.calls == [
         "submit",

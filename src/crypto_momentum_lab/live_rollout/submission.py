@@ -17,11 +17,11 @@ implementation retains the ordering and fail-closed invariants.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol, cast
+from typing import Protocol
 
 import structlog
 
@@ -55,7 +55,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
+    CoordinatedOrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -84,12 +84,6 @@ log = structlog.get_logger()
 
 
 class LiveSubmissionRepository(Protocol):
-    async def save_approved_intent(
-        self,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-    ) -> None: ...
-
     async def prepare_submission(
         self,
         *,
@@ -171,7 +165,7 @@ class LiveCandidateSubmission:
         risk_gateway: RiskGateway,
         limits: FixedLiveLimits,
         repository: LiveSubmissionRepository,
-        state_machine: OrderExecutionPort,
+        state_machine: CoordinatedOrderExecutionPort,
         config: LiveSubmissionConfig,
         clock: Callable[[], datetime],
         entry_enabled: Callable[[], bool],
@@ -435,140 +429,107 @@ class LiveCandidateSubmission:
                 symbol=executable_candidate.symbol,
             )
             return None
-        prepared_submission: PreparedOrderSubmission | None = None
-        prepare_submission = getattr(self._repository, "prepare_submission", None)
-        prepare_and_execute = getattr(
-            self._state_machine,
-            "prepare_and_execute",
-            None,
-        )
         intent_saved_at = self._clock()
-        if callable(prepare_submission):
 
-            async def prepare_for_execution() -> PreparedOrderSubmission | None:
-                nonlocal prepared_submission, intent_saved_at
-                if not executable_candidate.reduce_only and not self._entry_enabled():
-                    log.info(
-                        "live_entry_blocked_inside_submission_scheduler",
-                        run_id=self._config.run_id,
-                        candidate_id=executable_candidate.candidate_id,
-                        symbol=executable_candidate.symbol,
-                        reason=self._entry_enabled_reason(),
-                    )
-                    return None
-                if not self._context_is_current(context):
-                    log.info(
-                        "live_candidate_context_invalidated_inside_submission_scheduler",
-                        run_id=self._config.run_id,
-                        candidate_id=executable_candidate.candidate_id,
-                        symbol=executable_candidate.symbol,
-                    )
-                    return None
-                prepared_submission = await prepare_submission(
-                    intent=executable_candidate,
-                    evaluation=evaluation,
-                    plan=plan,
-                    prepared_at=self._clock(),
-                    environment=(
-                        None
-                        if context.active_lease is None
-                        else context.active_lease.environment
-                    ),
-                    account_label=context.gate_context.account_label,
-                    strategy_name=context.gate_context.strategy_name,
-                    required_lease_owner=(context.gate_context.required_lease_owner),
-                    required_lease_id=(
-                        None
-                        if context.active_lease is None
-                        else context.active_lease.lease_id
-                    ),
-                    required_code_generation=(
-                        None
-                        if context.active_lease is None
-                        else context.active_lease.code_generation
-                    ),
-                    required_session_id=self._config.run_id,
-                    max_open_positions=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_open_positions
-                    ),
-                    max_daily_loss=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_daily_loss
-                    ),
-                    max_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_gross_exposure
-                    ),
-                    current_daily_pnl=(
-                        None
-                        if (
-                            executable_candidate.reduce_only
-                            or context.realized_pnl is None
-                            or context.unrealized_pnl is None
-                        )
-                        else context.realized_pnl + context.unrealized_pnl
-                    ),
-                    current_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else context.gross_exposure
-                    ),
-                    open_position_symbols=(
-                        None
-                        if executable_candidate.reduce_only
-                        else risk_open_position_symbols
-                    ),
-                    exposure_notional=(
-                        None
-                        if limit_decision is None
-                        else limit_decision.capped_notional
-                    ),
+        async def prepare_for_execution() -> PreparedOrderSubmission | None:
+            nonlocal intent_saved_at
+            if not executable_candidate.reduce_only and not self._entry_enabled():
+                log.info(
+                    "live_entry_blocked_inside_submission_scheduler",
+                    run_id=self._config.run_id,
+                    candidate_id=executable_candidate.candidate_id,
+                    symbol=executable_candidate.symbol,
+                    reason=self._entry_enabled_reason(),
                 )
-                if prepared_submission is not None:
-                    intent_saved_at = prepared_submission.submitting_event.occurred_at
-                return prepared_submission
-
-            if callable(prepare_and_execute):
-                coordinated_prepare_and_execute = cast(
-                    Callable[..., Awaitable[OrderExecutionResult | None]],
-                    prepare_and_execute,
+                return None
+            if not self._context_is_current(context):
+                log.info(
+                    "live_candidate_context_invalidated_inside_submission_scheduler",
+                    run_id=self._config.run_id,
+                    candidate_id=executable_candidate.candidate_id,
+                    symbol=executable_candidate.symbol,
                 )
-                result = await coordinated_prepare_and_execute(
-                    plan,
-                    prepare_submission=prepare_for_execution,
-                )
-                if result is None:
-                    log.info(
-                        "live_duplicate_submission_suppressed",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
+                return None
+            prepared_submission = await self._repository.prepare_submission(
+                intent=executable_candidate,
+                evaluation=evaluation,
+                plan=plan,
+                prepared_at=self._clock(),
+                environment=(
+                    None
+                    if context.active_lease is None
+                    else context.active_lease.environment
+                ),
+                account_label=context.gate_context.account_label,
+                strategy_name=context.gate_context.strategy_name,
+                required_lease_owner=(context.gate_context.required_lease_owner),
+                required_lease_id=(
+                    None
+                    if context.active_lease is None
+                    else context.active_lease.lease_id
+                ),
+                required_code_generation=(
+                    None
+                    if context.active_lease is None
+                    else context.active_lease.code_generation
+                ),
+                required_session_id=self._config.run_id,
+                max_open_positions=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_open_positions
+                ),
+                max_daily_loss=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_daily_loss
+                ),
+                max_gross_exposure=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_gross_exposure
+                ),
+                current_daily_pnl=(
+                    None
+                    if (
+                        executable_candidate.reduce_only
+                        or context.realized_pnl is None
+                        or context.unrealized_pnl is None
                     )
-                    return None
-            else:
-                prepared_submission = await prepare_for_execution()
-                if prepared_submission is None:
-                    log.info(
-                        "live_duplicate_submission_suppressed",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                    )
-                    return None
-                result = await self._state_machine.execute_approved_intent(
-                    plan,
-                    prepared_submission=prepared_submission,
-                )
-        else:
-            await self._repository.save_approved_intent(
-                executable_candidate,
-                evaluation,
+                    else context.realized_pnl + context.unrealized_pnl
+                ),
+                current_gross_exposure=(
+                    None
+                    if executable_candidate.reduce_only
+                    else context.gross_exposure
+                ),
+                open_position_symbols=(
+                    None
+                    if executable_candidate.reduce_only
+                    else risk_open_position_symbols
+                ),
+                exposure_notional=(
+                    None
+                    if limit_decision is None
+                    else limit_decision.capped_notional
+                ),
             )
-            result = await self._state_machine.execute_approved_intent(plan)
+            if prepared_submission is not None:
+                intent_saved_at = prepared_submission.submitting_event.occurred_at
+            return prepared_submission
+
+        result = await self._state_machine.prepare_and_execute(
+            plan,
+            prepare_submission=prepare_for_execution,
+        )
+        if result is None:
+            log.info(
+                "live_duplicate_submission_suppressed",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+            )
+            return None
         if self._telemetry is not None:
             await self._telemetry.intent_saved(
                 executable_candidate,

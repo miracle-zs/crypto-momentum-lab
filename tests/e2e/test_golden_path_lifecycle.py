@@ -14,7 +14,6 @@ Validates the complete production lifecycle across all core bounded contexts:
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import cast
 
 import pytest
 from sqlalchemy import select
@@ -46,7 +45,7 @@ from crypto_momentum_lab.domain.universe.models import (
     PricePoint,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
+    OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
@@ -211,6 +210,18 @@ class DynamicFillingFakeExchange(FakeExchange):
         )
 
 
+_created_coordinators: list[OrderExecutionCoordinator] = []
+
+
+@pytest.fixture(autouse=True)
+async def close_submission_coordinators():
+    try:
+        yield
+    finally:
+        while _created_coordinators:
+            await _created_coordinators.pop().aclose()
+
+
 def _build_submission_service(
     *,
     order_repo: PostgresOrderPlanRepository,
@@ -227,6 +238,10 @@ def _build_submission_service(
         live_submit_enabled=True,
         clock=lambda: NOW,
     )
+    coordinator = OrderExecutionCoordinator(
+        backend=machine, account_label="primary", environment="live",
+    )
+    _created_coordinators.append(coordinator)
     return LiveCandidateSubmission(
         risk_gateway=RiskGateway(),
         limits=limits
@@ -237,7 +252,7 @@ def _build_submission_service(
             max_gross_exposure=Decimal("25"),
         ),
         repository=PostgresOrderSubmissionRepository(sessions),
-        state_machine=cast(OrderExecutionPort, machine),
+        state_machine=coordinator,
         config=LiveSubmissionConfig(
             run_id="golden-run-1",
             account_label="primary",

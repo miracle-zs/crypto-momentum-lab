@@ -23,7 +23,7 @@ async def test_small_capital_live_uses_single_submit_boundary() -> None:
         clock=lambda: NOW,
     )
 
-    result = await machine.execute_approved_intent(_plan())
+    result = await machine.submit(_plan())
 
     assert result.state is ExchangeOrderState.FILLED
     assert exchange.calls == ["submit"]

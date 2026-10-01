@@ -13,6 +13,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountConfigSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.domain.decision.decision_engine import (
     DecisionResult,
     PolicyState,
@@ -26,9 +29,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
 from crypto_momentum_lab.domain.risk import StrategyLiveState
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
-)
 from crypto_momentum_lab.live_rollout.decision_facts import (
     LiveDecisionFactSource,
     frozen_decision_inputs_from_context,

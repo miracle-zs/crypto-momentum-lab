@@ -271,7 +271,7 @@ async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> Non
 
     # State machine must wrap pre-submission failure in OrderPreSubmissionError
     with pytest.raises(OrderPreSubmissionError) as exc_info:
-        await machine.execute_approved_intent(plan)
+        await machine.submit(plan)
 
     assert "pre-submission failed: Database connection dropped or FK violation" in str(
         exc_info.value

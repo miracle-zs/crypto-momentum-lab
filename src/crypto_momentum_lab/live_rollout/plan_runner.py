@@ -203,7 +203,7 @@ async def run_live_plan(
         )
         session = LiveRolloutSession(
             repository=live_repository,
-            execute_plan=execution_coordinator.execute_approved_intent,
+            execute_plan=execution_coordinator.submit,
             config=LiveSessionConfig(
                 session_id=session_id,
                 operator=operator,

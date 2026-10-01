@@ -13,11 +13,11 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncService,
@@ -1330,7 +1330,7 @@ async def test_raw_receipt_is_account_scoped_and_independent_of_projection_commi
         {
             "environment": "live",
             "account_label": "primary",
-            "event": event,
+            "event": event.to_receipt(),
             "receiver_session_id": "receiver-a",
             "stream_token": 2,
         }
@@ -1341,7 +1341,7 @@ async def test_raw_receipt_is_account_scoped_and_independent_of_projection_commi
 
 
 async def test_checkpoint_is_saved_with_baseline_and_rejected_if_it_does_not_match():
-    from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+    from crypto_momentum_lab.domain.account.baseline_checkpoint import (
         AccountBaselineCheckpoint,
         decode_baseline_checkpoint,
     )

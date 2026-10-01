@@ -15,11 +15,11 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.risk import TradingLease
-from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.execution_account.snapshot_models import (
+from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
+from crypto_momentum_lab.domain.risk import TradingLease
+from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
 

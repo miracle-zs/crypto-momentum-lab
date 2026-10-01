@@ -63,7 +63,10 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySide,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    PositionExitMode,
+    PositionExitPolicy,
+)
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
 from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMTradeClient,
@@ -315,9 +318,6 @@ from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.candle_source import (
     BinanceRestClosedCandle15mSource,
     ClosedCandleEmaProvider,
-)
-from crypto_momentum_lab.strategy_runner.position_exit import (
-    PositionExitMode,
 )
 from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
 

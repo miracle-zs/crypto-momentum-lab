@@ -252,7 +252,7 @@ class ShadowOperationService:
                         order_payload=_order_payload(plan),
                     )
                 )
-                result = await self._state_machine.execute_approved_intent(plan)
+                result = await self._state_machine.submit(plan)
                 approved += 1
                 suppressed += int(result.suppressed)
                 await self._save_metric(

@@ -145,7 +145,6 @@ class ScheduledRiskWindowController:
         ] = {}
         self._scheduled_window_lock = asyncio.Lock()
         self._scheduled_window_day: date | None = None
-        self._scheduled_entry_blocked = False
         self._scheduled_entry_orders_cancelled = False
         self._scheduled_deadline_entry_orders_cancelled = False
         self._scheduled_flatten_attempt = 0
@@ -154,15 +153,6 @@ class ScheduledRiskWindowController:
         self._scheduled_last_verification_at: datetime | None = None
         self._scheduled_approved_intent_count = 0
         self._scheduled_submitted_order_count = 0
-
-    def _set_scheduled_entry_blocked(
-        self,
-        blocked: bool,
-        *,
-        reason: str,
-    ) -> None:
-        self._scheduled_entry_blocked = blocked
-        self._set_entry_blocked(blocked, reason=reason)
 
     @property
     def approved_intent_count(self) -> int:
@@ -243,14 +233,13 @@ class ScheduledRiskWindowController:
                 phase is ScheduledRiskWindowPhase.REOPENED
                 and self._scheduled_positions_verified
             ):
-                if self._scheduled_entry_blocked:
-                    self._set_scheduled_entry_blocked(
-                        False,
-                        reason="scheduled_risk_window_complete",
-                    )
+                self._set_entry_blocked(
+                    False,
+                    reason="scheduled_risk_window_complete",
+                )
                 return None
 
-            self._set_scheduled_entry_blocked(
+            self._set_entry_blocked(
                 True,
                 reason="scheduled_risk_window",
             )
@@ -313,7 +302,7 @@ class ScheduledRiskWindowController:
                 phase is ScheduledRiskWindowPhase.REOPENED
                 and self._scheduled_positions_verified
             ):
-                self._set_scheduled_entry_blocked(
+                self._set_entry_blocked(
                     False,
                     reason="scheduled_risk_window_complete",
                 )
@@ -363,7 +352,7 @@ class ScheduledRiskWindowController:
         self._scheduled_flatten_last_attempt_at = None
         self._scheduled_positions_verified = False
         self._scheduled_last_verification_at = None
-        self._set_scheduled_entry_blocked(
+        self._set_entry_blocked(
             False,
             reason="outside_scheduled_risk_window",
         )

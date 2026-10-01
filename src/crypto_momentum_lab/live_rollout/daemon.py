@@ -35,7 +35,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
+    CoordinatedOrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryClient,
@@ -165,7 +165,7 @@ class LiveStrategyDaemon:
         limits: FixedLiveLimits,
         submission_repository: LiveSubmissionRepository,
         persist_checkpoint: PersistCheckpoint,
-        state_machine: OrderExecutionPort,
+        state_machine: CoordinatedOrderExecutionPort,
         context_provider: LiveContextProvider,
         config: LiveDaemonConfig,
         exit_manager: LiveExitManager | None = None,
@@ -418,7 +418,7 @@ class LiveStrategyDaemon:
             exit_manager=self._exit_manager,
             scheduled_controller=self._scheduled_controller,
             scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
-            run_market_loop=self._run_market_loop,
+            run_market_loop=self._market_loop.run,
             set_run_active=self._set_run_active,
         )
 
@@ -647,13 +647,6 @@ class LiveStrategyDaemon:
     async def request_flatten(self, *, now: datetime | None = None) -> str | None:
         """Request a reduce-only flatten through the live exit processor."""
         return await self._scheduled_controller.request_flatten(now=now)
-
-    async def _run_market_loop(
-        self,
-        states: AsyncIterable[MarketState15s],
-    ) -> market_runtime_contracts.LiveDaemonResult:
-        """Run the separated ordered market loop."""
-        return await self._market_loop.run(states)
 
     def _record_signal_candidate(
         self,

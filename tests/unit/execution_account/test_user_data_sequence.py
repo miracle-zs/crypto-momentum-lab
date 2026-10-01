@@ -99,3 +99,25 @@ def test_stale_event_time_precedence_and_microsecond_boundaries(
         )
         == reason
     )
+
+
+def test_journal_receipt_preserves_exchange_evidence_and_raw_payload():
+    from dataclasses import asdict
+
+    from crypto_momentum_lab.domain.account.event_journal import AccountEventReceipt
+    from crypto_momentum_lab.execution_account.binance.user_data_parser import (
+        parse_user_data_event,
+    )
+
+    payload = {
+        "e": "ACCOUNT_UPDATE", "E": 1790784000000, "T": 1790784000000,
+        "u": 9, "pu": 8,
+        "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
+    }
+    event = parse_user_data_event(payload, received_at=datetime(2026, 10, 1, tzinfo=UTC))
+    receipt = event.to_receipt()
+    assert type(receipt) is AccountEventReceipt
+    assert asdict(receipt) == asdict(event)
+    assert receipt.payload == payload
+    assert receipt.exchange_update_id == 9
+    assert receipt.exchange_previous_update_id == 8

@@ -4,6 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from crypto_momentum_lab.domain.account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+)
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillLoadScan,
@@ -11,10 +14,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillSourceAnchor,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
+from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
     AccountSnapshotDelta,
 )

@@ -11,15 +11,15 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
 )
 from crypto_momentum_lab.execution_account.daemon import (
     UserDataAccountSyncConfig,
     UserDataAccountSyncDaemon,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncResult,

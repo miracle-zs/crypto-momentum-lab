@@ -191,3 +191,17 @@ def test_exit_failure_blocks_entry_immediately_without_prerequisite_refresh() ->
     assert gate.entry_enabled_reason == "exit_failure:BTCUSDT:recovery_failed"
     gate.set_exit_failure("BTCUSDT", None)
     assert gate.entry_enabled
+
+
+def test_schedule_reopen_does_not_release_active_risk_block():
+    state_machine = _StateMachine()
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=state_machine)
+    gate.set_scheduled_entry_blocked(True, reason="scheduled_risk_window")
+    gate.set_risk_control_entry_blocked(True, reason="risk_halt")
+    gate.set_scheduled_entry_blocked(False, reason="scheduled_risk_window_complete")
+    assert not gate.entry_enabled
+    assert gate.entry_enabled_reason == "risk_halt"
+    assert "unblock" not in state_machine.calls
+    gate.set_risk_control_entry_blocked(False, reason="risk_clear")
+    assert gate.entry_enabled
+    assert state_machine.calls[-1] == "unblock"

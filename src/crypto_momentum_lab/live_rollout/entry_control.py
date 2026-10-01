@@ -238,7 +238,9 @@ class LiveEntryControlGate:
         else:
             # Do not reopen the daemon gate if the coordinator rejected the
             # transition; the next schedule poll can retry it safely.
-            if not self._set_coordinator_entry_gate(blocked=False):
+            if not self._set_coordinator_entry_gate(
+                blocked=self._risk_control_entry_blocked,
+            ):
                 return
             self._scheduled_entry_blocked = False
             self._scheduled_entry_block_reason = reason

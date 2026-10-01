@@ -5,6 +5,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from crypto_momentum_lab.domain.account.baseline_checkpoint import (
+    encode_baseline_checkpoint,
+)
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -16,6 +19,9 @@ from crypto_momentum_lab.domain.account.models import (
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )
@@ -24,9 +30,6 @@ from crypto_momentum_lab.execution_account.balance_history import (
     BalanceValue,
     balance_value,
     select_balance_history,
-)
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
-    encode_baseline_checkpoint,
 )
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
@@ -55,9 +58,6 @@ from crypto_momentum_lab.execution_account.reconciliation_records import (
     position_state_details,
     reconciliation_run,
     user_data_reconciliation_id,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
@@ -144,7 +144,7 @@ class ExecutionAccountSyncService:
             account_label=self._config.account_label,
             receiver_session_id=receiver_session_id,
             stream_token=stream_token,
-            event=event,
+            event=event.to_receipt(),
         )
 
     async def user_data_journal_cursor(self) -> int:

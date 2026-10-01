@@ -1,14 +1,13 @@
-"""Binance user-data event values independent of WebSocket transport."""
+"""Raw account event receipts for durable storage; no exchange payload interpretation."""
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from crypto_momentum_lab.domain.account.event_journal import AccountEventReceipt
 from crypto_momentum_lab.domain.market.models import JsonValue
 
 
 @dataclass(frozen=True, slots=True)
-class BinanceUserDataEvent:
+class AccountEventReceipt:
     event_type: str
     event_at: datetime
     received_at: datetime
@@ -44,15 +43,12 @@ class BinanceUserDataEvent:
             ):
                 raise ValueError(f"{field_name} must be a non-negative integer")
 
-    def to_receipt(self) -> AccountEventReceipt:
-        """Preserve raw exchange evidence at the persistence boundary."""
-        return AccountEventReceipt(
-            event_type=self.event_type,
-            event_at=self.event_at,
-            received_at=self.received_at,
-            payload=self.payload,
-            event_id=self.event_id,
-            exchange_event_at=self.exchange_event_at,
-            exchange_update_id=self.exchange_update_id,
-            exchange_previous_update_id=self.exchange_previous_update_id,
-        )
+
+@dataclass(frozen=True, slots=True)
+class AccountEventJournalEntry:
+    sequence: int
+    environment: str
+    account_label: str
+    receiver_session_id: str
+    stream_token: int | None
+    event: AccountEventReceipt

@@ -119,7 +119,7 @@ def _session() -> tuple[
     return (
         LiveRolloutSession(
             repository=transitions,
-            execute_plan=machine.execute_approved_intent,
+            execute_plan=machine.submit,
             config=LiveSessionConfig(
                 session_id="live-1",
                 operator="operator",

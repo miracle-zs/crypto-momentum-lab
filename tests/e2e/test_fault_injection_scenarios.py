@@ -263,7 +263,7 @@ async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() 
     repository = FakeOrderRepository()
     plan = _plan()
     submitting_task = asyncio.create_task(
-        _machine(exchange, repository).execute_approved_intent(plan)
+        _machine(exchange, repository).submit(plan)
     )
 
     await asyncio.wait_for(exchange.submit_started.wait(), timeout=1)

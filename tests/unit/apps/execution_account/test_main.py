@@ -101,7 +101,7 @@ def test_account_event_from_reconciled_fill_requires_snapshot() -> None:
         AccountFillEvent,
         ExecutionAccountStatus,
     )
-    from crypto_momentum_lab.execution_account.snapshot_models import (
+    from crypto_momentum_lab.domain.account.snapshot_models import (
         AccountSnapshot,
     )
     from crypto_momentum_lab.execution_account.sync_models import (
@@ -243,7 +243,7 @@ async def test_snapshot_event_keeps_scan_proof_and_full_replay_fills():
         AccountFillPageScan,
         ExecutionAccountStatus,
     )
-    from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
+    from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
     from crypto_momentum_lab.execution_account.sync_models import (
         ExecutionAccountSyncResult,
     )

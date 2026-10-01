@@ -34,7 +34,7 @@ class FakeBackend(OrderExecutionPort):
     def __init__(self) -> None:
         self.submitted_plans: list[OrderExecutionPlan] = []
 
-    async def execute_approved_intent(
+    async def submit(
         self,
         plan: OrderExecutionPlan,
         *,

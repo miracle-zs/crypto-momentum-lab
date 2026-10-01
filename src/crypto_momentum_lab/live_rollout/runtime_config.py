@@ -6,9 +6,9 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     deterministic_config_hash,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 from crypto_momentum_lab.strategy_runner.registry import build_runtime_config
 
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 30

@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     LiveRuntimeConfig,
@@ -12,7 +13,6 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     LiveRuntimeMarket,
     LiveRuntimeStrategy,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 
 
 def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:

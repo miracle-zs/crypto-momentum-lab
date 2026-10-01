@@ -49,7 +49,7 @@ async def test_journal_is_idempotent_ordered_paged_and_account_scoped(
             account_label=account,
             receiver_session_id=session,
             stream_token=token,
-            event=item,
+            event=item.to_receipt(),
         )
 
     try:
@@ -67,13 +67,13 @@ async def test_journal_is_idempotent_ordered_paged_and_account_scoped(
             environment=environment, account_label="account-3", limit=1
         )
         assert len(rows) == 1
-        assert rows[0].event == event
+        assert rows[0].event == event.to_receipt()
         assert rows[0].receiver_session_id == "receiver-a"
         assert rows[0].stream_token == 1
         page = await repository.load_user_data_events(
             environment=environment, account_label="account-3", after_sequence=first
         )
-        assert [row.event for row in page] == [next_event]
+        assert [row.event for row in page] == [next_event.to_receipt()]
         other = await append("account-4", event)
         other_env = await append("account-3", event, env=environment + "-other")
         assert len({first, second, other, other_env}) == 4

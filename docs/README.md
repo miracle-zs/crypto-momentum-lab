@@ -7,6 +7,8 @@
 - [持仓批次上下文](../CONTEXT.md)：批次身份、平仓边界和追加开仓术语。
 - [重构蓝图](architecture/system-refactor-blueprint-20260925.md)：设计依据和带基线的实施记录；不代表当前生产状态。
 - [持仓批次一致性提案](architecture/position-batch-consistency-20260925.md)：事实账本与退出分配闭环设计。
+- [交易系统架构调整计划](architecture/trading-architecture-adjustment-plan-20261001.md)：六批结构调整与累计本地验收记录；数据库及生产验收尚未完成。
+- [调整后的交易架构](architecture/trading-architecture-after-adjustment-20261001.md)：累计改动的模块图、下单时序与剩余边界；基于本地工作树。
 
 ## 约束与操作
 

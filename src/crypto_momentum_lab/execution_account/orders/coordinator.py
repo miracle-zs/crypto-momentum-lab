@@ -86,7 +86,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.snapshot_models import (
+    from crypto_momentum_lab.domain.account.snapshot_models import (
         AccountSnapshot,
     )
 
@@ -100,7 +100,7 @@ async def _maybe_await(val: Any) -> Any:
 
 
 class OrderExecutionPort(Protocol):
-    async def execute_approved_intent(
+    async def submit(
         self,
         plan: OrderExecutionPlan,
         *,
@@ -134,6 +134,15 @@ class OrderExecutionPort(Protocol):
         *,
         details: dict[str, JsonValue],
     ) -> OrderExecutionResult: ...
+
+
+class CoordinatedOrderExecutionPort(OrderExecutionPort, Protocol):
+    async def prepare_and_execute(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        prepare_submission: Callable[[], Awaitable[PreparedOrderSubmission | None]],
+    ) -> OrderExecutionResult | None: ...
 
 
 OrderExecutionBackend = OrderExecutionPort
@@ -496,7 +505,7 @@ class OrderExecutionCoordinator:
         elif isinstance(snapshot, AccountPositionSnapshot):
             positions = (snapshot,)
         else:
-            from crypto_momentum_lab.execution_account.snapshot_models import (
+            from crypto_momentum_lab.domain.account.snapshot_models import (
                 AccountSnapshot,
             )
 
@@ -1145,12 +1154,12 @@ class OrderExecutionCoordinator:
                 await self._mark_dispatching_if_accepted(plan)
                 try:
                     res = (
-                        await self._backend.execute_approved_intent(
+                        await self._backend.submit(
                             plan,
                             prepared_submission=prepared_submission,
                         )
                         if prepared_submission is not None
-                        else await self._backend.execute_approved_intent(plan)
+                        else await self._backend.submit(plan)
                     )
                 except Exception as sub_err:
                     await self._record_submission_failure(
@@ -1211,13 +1220,14 @@ class OrderExecutionCoordinator:
                     )
                     raise
                 if prepared is None:
-                    await self._execution_book.mark_rejected(
-                        plan.client_order_id,
-                        reason="prepare_submission_returned_none",
-                    )
+                    if self._execution_book.get_outbox(plan.client_order_id) is not None:
+                        await self._execution_book.mark_rejected(
+                            plan.client_order_id,
+                            reason="prepare_submission_returned_none",
+                        )
                     return None
                 try:
-                    res = await self._backend.execute_approved_intent(
+                    res = await self._backend.submit(
                         plan,
                         prepared_submission=prepared,
                     )
@@ -1248,16 +1258,6 @@ class OrderExecutionCoordinator:
             OrderExecutionResult | None,
             await self._schedule(plan, priority=priority, operation=operation),
         )
-
-    async def execute_approved_intent(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        prepared_submission: PreparedOrderSubmission | None = None,
-    ) -> OrderExecutionResult:
-        """Compatibility name used by existing live and shadow call sites."""
-
-        return await self.submit(plan, prepared_submission=prepared_submission)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
         result = cast(
@@ -1397,6 +1397,7 @@ class OrderExecutionCoordinator:
 
 
 __all__ = [
+    "CoordinatedOrderExecutionPort",
     "OrderExecutionCoordinator",
     "OrderExecutionKey",
     "OrderExecutionBackend",

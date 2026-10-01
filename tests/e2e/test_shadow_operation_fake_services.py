@@ -25,7 +25,7 @@ async def test_shadow_operation_never_reaches_exchange_write_boundary() -> None:
         clock=lambda: NOW,
     )
 
-    result = await machine.execute_approved_intent(_plan())
+    result = await machine.submit(_plan())
 
     assert result.suppressed is True
     assert exchange.calls == []

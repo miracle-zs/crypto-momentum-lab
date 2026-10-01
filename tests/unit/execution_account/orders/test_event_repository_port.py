@@ -55,7 +55,7 @@ async def test_execution_uses_distinct_event_port_and_notifies_only_inserted(ins
         clock=lambda: NOW,
         on_event=callback,
     )
-    result = await machine.execute_approved_intent(plan)
+    result = await machine.submit(plan)
     assert result.state is ExchangeOrderState.FILLED
     orders.save_planned_order.assert_awaited_once_with(plan)
     events.save_fill.assert_awaited_once_with(fill)

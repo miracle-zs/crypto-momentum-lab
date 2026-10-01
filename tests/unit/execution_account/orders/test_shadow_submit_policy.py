@@ -29,7 +29,7 @@ async def test_shadow_submit_policy_records_suppression_without_submit() -> None
         clock=lambda: NOW,
     )
 
-    result = await machine.execute_approved_intent(_plan())
+    result = await machine.submit(_plan())
 
     assert result.suppressed is True
     assert result.state is ExchangeOrderState.SUPPRESSED
@@ -50,7 +50,7 @@ async def test_live_submit_policy_uses_submit_boundary() -> None:
         clock=lambda: NOW,
     )
 
-    await machine.execute_approved_intent(_plan())
+    await machine.submit(_plan())
 
     assert exchange.calls == ["submit"]
 
@@ -69,6 +69,6 @@ async def test_shadow_policy_still_requires_quantized_order_plan() -> None:
     )
 
     with pytest.raises(ValueError, match="must be quantized"):
-        await machine.execute_approved_intent(replace(_plan(), quantized=False))
+        await machine.submit(replace(_plan(), quantized=False))
 
     assert repository.suppressions == []

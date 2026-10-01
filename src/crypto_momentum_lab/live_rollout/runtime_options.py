@@ -17,6 +17,7 @@ from pathlib import Path
 
 from crypto_momentum_lab.config import ResolvedBinanceCredentials
 from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _DEFAULT_PERSIST_EXCHANGE_OPERATIONS,
@@ -40,7 +41,6 @@ from crypto_momentum_lab.live_rollout.runtime_manifest import (
     RuntimeManifestError,
     load_live_runtime_manifest,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 
 
 class LiveRuntimeOptionsError(ValueError):

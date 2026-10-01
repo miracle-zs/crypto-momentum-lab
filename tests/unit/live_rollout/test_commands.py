@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
-from crypto_momentum_lab.live_rollout.commands import (
+from crypto_momentum_lab.domain.live_rollout.authorization import (
     EMERGENCY_FLATTEN_CONFIRMATION,
     require_authorized_command,
 )

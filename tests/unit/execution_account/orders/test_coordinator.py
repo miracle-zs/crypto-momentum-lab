@@ -108,7 +108,7 @@ class BlockingBackend:
         self.submit_started = asyncio.Event()
         self.calls: list[str] = []
 
-    async def execute_approved_intent(
+    async def submit(
         self,
         plan: OrderExecutionPlan,
         *,
@@ -135,13 +135,13 @@ class BlockingSubmitBackend(BlockingBackend):
         super().__init__()
         self.release_submit = asyncio.Event()
 
-    async def execute_approved_intent(
+    async def submit(
         self,
         plan: OrderExecutionPlan,
         *,
         prepared_submission=None,
     ):
-        result = await super().execute_approved_intent(
+        result = await super().submit(
             plan,
             prepared_submission=prepared_submission,
         )
@@ -161,7 +161,7 @@ async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
     )
     await backend.query_started.wait()
     submit_task = asyncio.create_task(
-        coordinator.execute_approved_intent(_plan("BTCUSDT", reduce_only=True))
+        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
     )
 
     await asyncio.wait_for(backend.submit_started.wait(), timeout=0.03)
@@ -187,10 +187,10 @@ async def test_same_position_is_serial_and_exit_has_priority_over_entry() -> Non
     )
     await backend.query_started.wait()
     entry_task = asyncio.create_task(
-        coordinator.execute_approved_intent(_plan("BTCUSDT", reduce_only=False))
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
     )
     exit_task = asyncio.create_task(
-        coordinator.execute_approved_intent(_plan("BTCUSDT", reduce_only=True))
+        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
     )
     await asyncio.sleep(0)
     assert backend.calls == ["reconcile:BTCUSDT"]
@@ -775,7 +775,7 @@ async def test_multi_batch_reservations_stay_active_on_ambiguous_backend_failure
     )
 
     class FailingBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, *, prepared_submission=None
         ):
             raise RuntimeError("Exchange API rejected order")
@@ -840,7 +840,7 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
             self.reservations[res.reservation_id] = res
 
     class FillBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, *, prepared_submission=None
         ):
             return OrderExecutionResult(
@@ -924,7 +924,7 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
             return self.reservations.get(reservation_id)
 
     class PartialFillBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, *, prepared_submission=None
         ):
             return OrderExecutionResult(
@@ -993,7 +993,7 @@ async def test_reservation_save_receives_projection_version() -> None:
             return captured.get("res")
 
     class FillBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, *, prepared_submission=None
         ):
             return OrderExecutionResult(
@@ -1423,7 +1423,7 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
                 self.release_reasons[res.reservation_id] = release_reason
 
     class RejectedBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, *, prepared_submission=None
         ):
             return OrderExecutionResult(
@@ -1629,7 +1629,7 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
     )
 
     class FailingBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, **kwargs: Any
         ) -> Any:
             raise RuntimeError("Exchange API timeout")
@@ -1777,7 +1777,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
                 raise RuntimeError("acknowledgement write failed")
 
     class AcceptedBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, **kwargs: Any
         ):
             self.calls.append(f"submit:{plan.symbol}:exit")
@@ -1836,7 +1836,7 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
                 raise RuntimeError(f"{kwargs['status']} write failed")
 
     class AcceptedBackend(BlockingBackend):
-        async def execute_approved_intent(
+        async def submit(
             self, plan: OrderExecutionPlan, **kwargs: Any
         ):
             self.calls.append(f"submit:{plan.symbol}:exit")

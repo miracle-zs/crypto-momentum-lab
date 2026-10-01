@@ -8,8 +8,8 @@ from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 from tests.unit.live_rollout.test_exits import _config, _long_position
 from tests.unit.shadow_operation.test_service import _state
 

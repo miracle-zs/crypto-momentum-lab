@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.execution_account.snapshot_models import (
+from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
     AccountSnapshotDelta,
 )

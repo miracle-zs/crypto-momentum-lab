@@ -210,7 +210,7 @@ class OrderExecutionStateMachine:
         self._lock = asyncio.Lock() if serialize_commands else None
         self._observation_lock = asyncio.Lock()
 
-    async def execute_approved_intent(
+    async def submit(
         self,
         plan: OrderExecutionPlan,
         *,

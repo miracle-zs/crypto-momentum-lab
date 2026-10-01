@@ -57,7 +57,7 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
         serialize_commands=False,
     )
 
-    result = await machine.execute_approved_intent(
+    result = await machine.submit(
         plan,
         prepared_submission=PreparedOrderSubmission(
             plan=plan,
@@ -97,7 +97,7 @@ async def test_pre_submission_callback_runs_before_exchange_write() -> None:
         serialize_commands=False,
     )
 
-    result = await machine.execute_approved_intent(_plan())
+    result = await machine.submit(_plan())
 
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
     assert phases == ["pre_submission"]
@@ -127,7 +127,7 @@ async def test_failed_pre_submission_callback_blocks_exchange_write() -> None:
         serialize_commands=False,
     )
 
-    result = await machine.execute_approved_intent(_plan())
+    result = await machine.submit(_plan())
 
     assert result.state is ExchangeOrderState.REJECTED
     assert exchange.calls == []
@@ -145,7 +145,7 @@ async def test_timeout_queries_by_client_order_id_before_retry() -> None:
     exchange.query_results = [None, _snapshot(ExchangeOrderState.ACKNOWLEDGED)]
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert exchange.calls == ["submit", "query", "query"]
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
@@ -155,7 +155,7 @@ async def test_timeout_with_failed_lookup_is_marked_for_reconciliation() -> None
     exchange = QueryFailExchange()
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert repository.events[-1].details["reason"] == "lookup unavailable"
@@ -168,7 +168,7 @@ async def test_clear_reject_persists_rejected_state() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert result.state is ExchangeOrderState.REJECTED
     assert repository.events[-1].state is ExchangeOrderState.REJECTED
@@ -181,7 +181,7 @@ async def test_partial_fill_remains_unresolved() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert result.state is ExchangeOrderState.PARTIALLY_FILLED
     assert not result.state.terminal
@@ -204,7 +204,7 @@ async def test_terminal_fill_updates_order_state_and_persists_fill() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+    result = await _machine(exchange, repository).submit(_plan())
 
     assert result.state is ExchangeOrderState.FILLED
     assert repository.fills == [fill]

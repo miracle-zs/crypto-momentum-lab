@@ -35,6 +35,12 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionTransition,
     RollbackCommand,
 )
+from crypto_momentum_lab.domain.live_rollout.authorization import (
+    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+    CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
+    EMERGENCY_FLATTEN_COMMAND,
+    EMERGENCY_FLATTEN_CONFIRMATION,
+)
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     TradingLease,
@@ -43,18 +49,15 @@ from crypto_momentum_lab.domain.risk import (
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    PositionExitMode,
+)
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
     WebSocketRiskControlPublisher,
 )
 from crypto_momentum_lab.health.memory import configure_tracemalloc
-from crypto_momentum_lab.live_rollout.commands import (
-    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
-    CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
-    EMERGENCY_FLATTEN_COMMAND,
-    EMERGENCY_FLATTEN_CONFIRMATION,
-)
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.missing_order_resolution import (
     resolve_missing_live_order as _resolve_missing_live_order,
@@ -127,9 +130,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_execution_database_engine,
-)
-from crypto_momentum_lab.strategy_runner.position_exit import (
-    PositionExitMode,
 )
 
 app = typer.Typer(no_args_is_help=True)

@@ -458,7 +458,7 @@ importlib.import_module(sys.argv[1])
 @pytest.mark.parametrize(
     "module",
     [
-        "crypto_momentum_lab.execution_account.snapshot_models",
+        "crypto_momentum_lab.domain.account.snapshot_models",
         "crypto_momentum_lab.execution_account.snapshot_changes",
         "crypto_momentum_lab.execution_account.sync_models",
         "crypto_momentum_lab.execution_account.sync_ports",

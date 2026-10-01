@@ -3,12 +3,12 @@
 from dataclasses import dataclass
 
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
-from crypto_momentum_lab.execution_account.binance.user_data_models import (
-    BinanceUserDataEvent,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
+from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
     AccountSnapshotDelta,
+)
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
+    BinanceUserDataEvent,
 )
 
 

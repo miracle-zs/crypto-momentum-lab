@@ -9,6 +9,14 @@ from sqlalchemy import case, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+    decode_baseline_checkpoint,
+)
+from crypto_momentum_lab.domain.account.event_journal import (
+    AccountEventJournalEntry,
+    AccountEventReceipt,
+)
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -22,14 +30,6 @@ from crypto_momentum_lab.domain.account.models import (
     ExecutionAccountProcessState,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-    decode_baseline_checkpoint,
-)
-from crypto_momentum_lab.execution_account.binance.user_data_models import (
-    BinanceUserDataEvent,
-)
-from crypto_momentum_lab.execution_account.event_journal import AccountEventJournalEntry
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
@@ -99,7 +99,7 @@ class PostgresAccountRepository:
         account_label: str,
         receiver_session_id: str,
         stream_token: int | None,
-        event: BinanceUserDataEvent,
+        event: AccountEventReceipt,
     ) -> int:
         if (
             not environment.strip()
@@ -213,7 +213,7 @@ class PostgresAccountRepository:
                     account_label=row.account_label,
                     receiver_session_id=row.receiver_session_id,
                     stream_token=row.stream_token,
-                    event=BinanceUserDataEvent(
+                    event=AccountEventReceipt(
                         event_type=row.event_type,
                         event_at=row.event_at,
                         received_at=row.received_at,

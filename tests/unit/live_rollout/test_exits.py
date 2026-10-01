@@ -10,17 +10,17 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    ClosedCandle15m,
+    PositionExitMode,
+    PositionExitPolicy,
+)
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitConfig,
     LiveExitManager,
     ManagedLivePosition,
     ManagedLivePositionBatch,
-)
-from crypto_momentum_lab.strategy_runner.position_exit import (
-    ClosedCandle15m,
-    PositionExitMode,
-    PositionExitPolicy,
 )
 from tests.unit.shadow_operation.test_service import _state
 

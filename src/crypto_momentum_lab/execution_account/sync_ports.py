@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Protocol
 
+from crypto_momentum_lab.domain.account.event_journal import AccountEventReceipt
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -14,9 +15,6 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
     AccountReconciliationRun,
     ExecutionAccountProcessState,
-)
-from crypto_momentum_lab.execution_account.binance.user_data_models import (
-    BinanceUserDataEvent,
 )
 
 
@@ -78,7 +76,7 @@ class AccountSyncRepository(Protocol):
         account_label: str,
         receiver_session_id: str,
         stream_token: int | None,
-        event: BinanceUserDataEvent,
+        event: AccountEventReceipt,
     ) -> int:
         pass
 

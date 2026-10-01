@@ -56,9 +56,9 @@ async def test_shadow_uses_distinct_suppression_port_and_never_calls_exchange(fa
     )
     if failure:
         with pytest.raises(OrderPreSubmissionError, match="suppression failed"):
-            await machine.execute_approved_intent(_plan())
+            await machine.submit(_plan())
     else:
-        result = await machine.execute_approved_intent(_plan())
+        result = await machine.submit(_plan())
         assert result.suppressed is True
     plans.save_planned_order.assert_awaited_once_with(_plan())
     shadow.save_shadow_suppression.assert_awaited_once()

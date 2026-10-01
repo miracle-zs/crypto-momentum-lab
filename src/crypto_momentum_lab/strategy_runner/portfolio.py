@@ -7,13 +7,23 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperExitConfig as _PaperExitConfig,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperExitMode as _PaperExitMode,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperPosition as _PaperPosition,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperPositionStatus as _PaperPositionStatus,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     deterministic_position_id as _deterministic_position_id,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     position_from_entry_fill as _position_from_entry_fill,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import (
+from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitPolicy,
     first_candle_start_after_entry,

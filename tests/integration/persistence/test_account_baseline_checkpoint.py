@@ -8,19 +8,19 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+)
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountOpenOrderSnapshot,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-)
+from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     parse_user_data_event,
 )
-from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
 from crypto_momentum_lab.execution_account.sync import ExecutionAccountSyncService
 from crypto_momentum_lab.execution_account.sync_models import (
     ExecutionAccountSyncConfig,
@@ -76,7 +76,7 @@ async def test_checkpoint_binds_complete_baseline_to_journal_prefix_and_rolls_ba
             account_label=account,
             receiver_session_id="receiver-a",
             stream_token=1,
-            event=event,
+            event=event.to_receipt(),
         )
         return sequence, event
 
@@ -108,7 +108,7 @@ async def test_checkpoint_binds_complete_baseline_to_journal_prefix_and_rolls_ba
             account_label=account,
             after_sequence=loaded.journal_sequence,
         )
-        assert [(row.sequence, row.event) for row in tail] == [(second, pending)]
+        assert [(row.sequence, row.event) for row in tail] == [(second, pending.to_receipt())]
         assert (
             await reopened.load_baseline_checkpoint(
                 environment=environment, account_label="account-4"
@@ -123,7 +123,7 @@ async def test_checkpoint_binds_complete_baseline_to_journal_prefix_and_rolls_ba
             account_label="account-4",
             receiver_session_id="receiver-a",
             stream_token=1,
-            event=foreign_event,
+            event=foreign_event.to_receipt(),
         )
         wrong_cursor = replace(
             checkpoint,

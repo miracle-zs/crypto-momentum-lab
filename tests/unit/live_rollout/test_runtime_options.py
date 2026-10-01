@@ -5,11 +5,11 @@ from crypto_momentum_lab.config import (
     ResolvedBinanceCredentials,
 )
 from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.runtime_options import (
     LiveRunOptions,
     resolve_live_runtime_config,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 
 
 def _credentials() -> ResolvedBinanceCredentials:

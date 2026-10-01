@@ -11,6 +11,9 @@ from crypto_momentum_lab.domain.account import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.account.snapshot_models import (
+    AccountSnapshot,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     BinancePayloadError,
     parse_user_data_event,
@@ -22,9 +25,6 @@ from crypto_momentum_lab.execution_account.expectations import (
 from crypto_momentum_lab.execution_account.snapshot_changes import (
     apply_account_snapshot_delta,
     build_account_snapshot,
-)
-from crypto_momentum_lab.execution_account.snapshot_models import (
-    AccountSnapshot,
 )
 from crypto_momentum_lab.execution_account.user_data_models import (
     UserDataStateError,
