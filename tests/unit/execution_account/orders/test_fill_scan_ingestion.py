@@ -188,3 +188,43 @@ async def test_scan_baseline_round_trips_through_real_hub_codec():
         stable_snapshot_anchor_id(evidence.source_anchor_snapshot)
         == source.source_anchor_id
     )
+
+
+def test_hub_preserves_replayed_fills_required_by_complete_scan():
+    from crypto_momentum_lab.domain.account.models import AccountFillEvent
+    from crypto_momentum_lab.execution_account.hub import (
+        AccountEvent,
+        AccountEventHub,
+        decode_account_event,
+    )
+
+    fill = AccountFillEvent(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "1",
+        "order-1",
+        "BUY",
+        Decimal("10"),
+        Decimal("2"),
+        Decimal("0"),
+        Decimal("0"),
+        "USDT",
+        NOW - timedelta(seconds=10),
+        {"positionSide": "LONG"},
+    )
+    hub = AccountEventHub()
+    event = AccountEvent(
+        "live", "primary", "ORDER_TRADE_UPDATE", "live-fill", NOW, NOW, fills=(fill,)
+    )
+    hub.publish(event)
+    hub.publish(replace(event, event_id="recovery-proof", fill_load_scans=(scan(),)))
+    replayed = decode_account_event(
+        hub._latest_messages[("live", "primary")],
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert replayed.fills == (fill,), (
+        "complete scan must retain its already-seen trade facts"
+    )
+    assert replayed.fill_load_scans == (scan(),)

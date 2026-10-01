@@ -787,6 +787,42 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
             planned.source_stream_epoch,
             source_anchor_snapshot=planned.source_anchor_snapshot,
         )
+        from crypto_momentum_lab.execution_account.hub import (
+            AccountEvent,
+            AccountEventHub,
+            decode_account_event,
+        )
+
+        hub = AccountEventHub()
+        hub.publish(
+            AccountEvent(
+                "live",
+                account,
+                "ORDER_TRADE_UPDATE",
+                "already-seen",
+                entry.trade_at,
+                entry.trade_at,
+                fills=(entry,),
+            )
+        )
+        hub.publish(
+            AccountEvent(
+                "live",
+                account,
+                "ACCOUNT_SNAPSHOT",
+                "complete-proof",
+                target.observed_at,
+                target.observed_at,
+                fills=(entry,),
+                fill_load_scans=(scan,),
+            )
+        )
+        transported = decode_account_event(
+            hub._latest_messages[("live", account)],
+            expected_environment="live",
+            expected_account_label=account,
+        )
+        assert transported.fills == (entry,)
         coordinator = OrderExecutionCoordinator(
             backend=object(),
             environment="live",
@@ -795,8 +831,8 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
         )
         await coordinator.observe_account_snapshot(
             target,
-            fills=(entry,),
-            fill_load_scans=(scan,),
+            fills=transported.fills,
+            fill_load_scans=transported.fill_load_scans,
             stream_id="hub",
             stream_epoch="new",
             sequence=1,

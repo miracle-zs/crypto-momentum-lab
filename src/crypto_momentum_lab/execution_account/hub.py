@@ -438,7 +438,10 @@ class AccountEventHub:
                 continue
             self._remember_fill_key(fill_key)
             fresh_fills.append(fill)
-        if len(fresh_fills) != len(event.fills):
+        # A recovery scan is a complete fact set, including previously seen
+        # trades. Deduplication of live notifications must not erase evidence
+        # required to rebuild a position after reconnect or an epoch change.
+        if not event.fill_load_scans and len(fresh_fills) != len(event.fills):
             event = replace(event, fills=tuple(fresh_fills))
         if event.has_fill and event.symbol is not None and event.trade_id is not None:
             fill_key = (event.symbol, event.trade_id)
