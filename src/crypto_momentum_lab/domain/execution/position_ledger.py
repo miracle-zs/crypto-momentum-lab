@@ -1166,6 +1166,13 @@ class PositionLedger:
             elif (
                 final_active_episode is not None
                 and facts.coverage.start_at > final_active_episode.opened_at
+                and not (
+                    checkpoint_usable
+                    and checkpoint is not None
+                    and facts.coverage.covers_range(
+                        checkpoint.event_cut, facts.coverage.end_at
+                    )
+                )
             ):
                 health_status = _escalate_status(
                     health_status,

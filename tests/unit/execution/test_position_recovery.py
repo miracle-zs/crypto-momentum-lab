@@ -358,7 +358,10 @@ def test_verified_flat_snapshot_can_seed_a_scoped_stream() -> None:
     assert view.is_ready_for_trade
 
 
-def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof() -> None:
+@pytest.mark.parametrize("opening_offset", [timedelta(), timedelta(seconds=-30)])
+def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof(
+    opening_offset,
+) -> None:
     key = _key()
     old_scope = _scope(key)
     new_scope = replace(old_scope, stream_epoch="epoch-8")
@@ -421,7 +424,7 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof() 
         end=parent_cut,
         expected_scope=old_scope,
     )
-    opening = _fill(key, "old-open", "BUY", "2", "10", parent_cut)
+    opening = _fill(key, "old-open", "BUY", "2", "10", parent_cut + opening_offset)
     parent_facts = AccountFacts(
         position_key=key,
         stream_scope=old_scope,
@@ -500,6 +503,17 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof() 
         fill_load_provenance=target_provenance,
     )
 
+    # A verified prefix cannot hide a gap between the parent and suffix.
+    gap_facts = replace(
+        target_facts,
+        coverage=replace(target_coverage, start_at=parent_cut + timedelta(seconds=1)),
+    )
+    assert ledger.project(gap_facts, stream_adoption=adoption).health_status.value == "INCOMPLETE"
+    with pytest.raises(ValueError, match="covered"):
+        ledger.create_recovery_checkpoint(
+            gap_facts, source_revision=1, event_cut=target_cut,
+            stream_adoption=adoption,
+        )
     adopted = ledger.project(target_facts, stream_adoption=adoption)
     child = ledger.create_recovery_checkpoint(
         target_facts,

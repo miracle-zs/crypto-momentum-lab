@@ -198,3 +198,11 @@ WebSocketMarketStateSource 默认 availability clock 原先在对象构造时启
 修改为仅在原有静默、连续性和账户事实一致检查全部通过后，通知该次已验证的 REST 观测及其原始扫描证据，不修改证据时间、持仓 cut 或覆盖检查。WS 内存状态保持同一对象，不执行 replace_snapshot，后续 WS 仍实时更新事实；扫描中有新事件的暂缓比较流程保持不变。这里修正的是通知的证据归属，不是让正常 REST 扫描接管实时投影。先前“向消费者发布 WS 快照并携带 REST 覆盖材料”的描述由本段纠正。
 
 新增 daemon 周期检查接真实 OrderExecutionCoordinator 的回归：REST 配置观测与持仓 cut 相差一秒，先复现同一 ValueError，修复后 Book 收到与扫描完全相同的持仓切面，并确认 WS 状态对象未替换。不能用删除一致性校验或修改时间戳解决此问题。
+
+## 持续验收修复：父 checkpoint 与完整后缀衔接
+
+b39e110f 发布脚本成功后继续观察，实际账户任务报 adopted suffix does not reconcile to a complete projection，不能据容器 healthy 宣称业务恢复。日志投影数量和差额均为零，诊断实际指向 Fact coverage start does not cover active episode opened_at：持仓在父 checkpoint 前开仓，已验证父 checkpoint 覆盖该前缀，新 epoch 完整覆盖父切面以后，却被通用“覆盖必须从开仓开始”条件误判。
+
+PositionLedger 仅在 checkpoint_usable 且当前覆盖 covers_range(parent.event_cut, suffix.end_at) 时认可已验证前缀，不再重复要求新后缀覆盖父切面以前。父 checkpoint 的身份、完整性、数量、冲突和覆盖校验继续执行；无可信父 checkpoint、父后缀之间有缺口或未确认覆盖仍按原流程拒绝。没有删除恢复保护或重写历史成交。
+
+将原跨 epoch 测试增加“开仓早于父切面 30 秒”的真实形态，旧代码复现同一错误，修复后成功创建和恢复子 checkpoint；另明确验证父与后缀间一秒缺口仍被拒绝。执行域 418 项测试通过，PositionLedger 类型检查通过。
