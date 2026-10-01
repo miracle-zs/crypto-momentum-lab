@@ -14,13 +14,6 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
 )
-from crypto_momentum_lab.execution_account.baseline_checkpoint import (
-    AccountBaselineCheckpoint,
-)
-from crypto_momentum_lab.execution_account.baseline_repair import (
-    BaselineRepairAttempt,
-    baseline_is_fresh,
-)
 from crypto_momentum_lab.execution_account.binance.user_data import (
     UserDataEventSink,
 )
@@ -29,6 +22,9 @@ from crypto_momentum_lab.execution_account.binance.user_data_models import (
 )
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectationRegistry,
+)
+from crypto_momentum_lab.execution_account.snapshot_changes import (
+    account_ws_state_matches,
 )
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
@@ -346,7 +342,6 @@ class UserDataAccountSyncDaemon:
         self._receiver_session_id = uuid4().hex
         self._journal_receipts_in_flight = 0
         self._received_event_generation = 0
-        self._baseline_repair_attempt: BaselineRepairAttempt | None = None
         self._persistence_queue: (
             asyncio.Queue[_PendingUserDataPersistence | None] | None
         ) = None
@@ -541,11 +536,10 @@ class UserDataAccountSyncDaemon:
                 if reconciliation_task in done:
                     reconciliation_task = None
                     try:
-                        result = await self._reconcile(include_fills=True)
+                        result = await self._check_periodic()
                         if _is_usable_result(result):
                             consecutive_failures = 0
                         else:
-                            self._accept_events = False
                             consecutive_failures += 1
                     except Exception as error:
                         consecutive_failures += 1
@@ -1016,21 +1010,12 @@ class UserDataAccountSyncDaemon:
         if self._state is None or not (
             self._accept_events
             or self._reconciliation_active
-            or self._baseline_repair_attempt is not None
+            or self._pipeline_recovery_event.is_set()
         ):
             return
         last_sync_result = self._last_sync_result
-        attempt = self._baseline_repair_attempt
         is_syncing = (
-            self._reconciliation_active
-            or self._pipeline_recovery_event.is_set()
-            or (
-                attempt is not None
-                and not attempt.can_serve_live(
-                    stream_token=getattr(self._stream, "continuity_token", None),
-                    now=self._now(),
-                )
-            )
+            self._reconciliation_active or self._pipeline_recovery_event.is_set()
         ) or (
             last_sync_result is not None
             and (
@@ -1063,6 +1048,71 @@ class UserDataAccountSyncDaemon:
             except Exception as error:
                 self._report_error(error)
 
+    async def _check_periodic(self) -> ExecutionAccountSyncResult:
+        """Audit REST against quiet WS state; only a discrepancy requests repair."""
+        fetch = getattr(self._service, "sync_once_for_realtime", None)
+        retain = getattr(self._service, "persist_reconciliation_facts", None)
+        last = self._last_sync_result
+        if (
+            self._state is None
+            or last is None
+            or not _is_ready_result(last)
+            or last.fills_catching_up
+            or not callable(fetch)
+            or not callable(retain)
+            or not hasattr(self._stream, "continuity_token")
+        ):
+            return await self._reconcile(include_fills=True)
+        async with self._rest_sync_lock:
+            token = self._stream.continuity_token
+            generation = self._received_event_generation
+            quiet_at_start = self._journal_receipts_in_flight == 0 and (
+                self._event_queue is None or self._event_queue.empty()
+            )
+            result = await cast(
+                Callable[..., Awaitable[ExecutionAccountSyncResult]], fetch
+            )(
+                observed_at=self._now(),
+                publish_transient_states=False,
+                include_fills=True,
+            )
+        # An audit never replaces the in-memory WS projection.
+        async with self._state_lock:
+            if token is None or token != self._stream.continuity_token:
+                self._request_pipeline_recovery("periodic_check_connection_changed")
+            elif not _is_ready_result(result) or result.fills_catching_up:
+                self._request_pipeline_recovery("periodic_check_not_ready")
+            elif (
+                quiet_at_start
+                and generation == self._received_event_generation
+                and self._journal_receipts_in_flight == 0
+                and (self._event_queue is None or self._event_queue.empty())
+                and self._accept_events
+                and not self._reconciliation_active
+                and not self._pipeline_recovery_event.is_set()
+            ):
+                assert self._state is not None and result.snapshot is not None
+                live_snapshot = self._state.snapshot(result.snapshot.config.observed_at)
+                if not account_ws_state_matches(live_snapshot, result.snapshot):
+                    self._request_pipeline_recovery("periodic_check_state_mismatch")
+                else:
+                    # Keep audit/coverage progress for existing consumers, but
+                    # publish the WS projection rather than the REST candidate.
+                    self._notify_snapshot(replace(result, snapshot=live_snapshot))
+                    self._schedule_reconciliation_persistence(result)
+        if _is_usable_result(result):
+            # Publish real trade identities even if persistence fails, without
+            # letting their notification claim readiness during known recovery.
+            notification = (
+                replace(result, status=ExecutionAccountStatus.SYNCING)
+                if self._pipeline_recovery_event.is_set()
+                else result
+            )
+            self._notify_reconciled_fills(notification)
+            await retain(result)
+        await self._inspect_reconciliation(result)
+        return result
+
     async def _reconcile(
         self,
         *,
@@ -1070,81 +1120,9 @@ class UserDataAccountSyncDaemon:
         wait_for_pipeline: bool = True,
     ) -> ExecutionAccountSyncResult:
         try:
-            prepared = None
-            attempt = None
-            stream_token = getattr(self._stream, "continuity_token", None)
-            fetch = getattr(self._service, "sync_once_for_realtime", None)
-            retain = getattr(self._service, "persist_reconciliation_facts", None)
-            last = self._last_sync_result
-            # Only a previously verified, fresh and continuously applied state
-            # may stay live while I/O runs. Startup/recovery/catch-up stay frozen.
-            can_stage = (
-                wait_for_pipeline
-                and isinstance(stream_token, int)
-                and callable(fetch)
-                and callable(retain)
-                and self._state is not None
-                and self._accept_events
-                and not self._reconciliation_active
-                and self._journal_receipts_in_flight == 0
-                and not self._pipeline_recovery_event.is_set()
-                and last is not None
-                and last.status is ExecutionAccountStatus.READY_READONLY
-                and not last.fills_catching_up
-                and last.snapshot is not None
-                and baseline_is_fresh(last.snapshot.config.observed_at, now=self._now())
-                and not self._deferred_events
-                and (self._event_queue is None or self._event_queue.empty())
-                and (self._persistence_queue is None or self._persistence_queue.empty())
-            )
-            if can_stage:
-                assert (
-                    callable(fetch) and last is not None and last.snapshot is not None
-                )
-                assert isinstance(stream_token, int)
-                attempt = BaselineRepairAttempt(
-                    event_generation=self._received_event_generation,
-                    stream_token=stream_token,
-                    baseline_observed_at=last.snapshot.config.observed_at,
-                )
-                self._baseline_repair_attempt = attempt
-                try:
-                    async with self._rest_sync_lock:
-                        cursor_reader = getattr(
-                            self._service, "user_data_journal_cursor", None
-                        )
-                        journal_sequence = (
-                            await cursor_reader() if callable(cursor_reader) else None
-                        )
-                        prepared = await fetch(
-                            observed_at=self._now(),
-                            publish_transient_states=False,
-                            include_fills=include_fills,
-                        )
-                        if (
-                            journal_sequence is not None
-                            and prepared.status is ExecutionAccountStatus.READY_READONLY
-                            and not prepared.fills_catching_up
-                            and prepared.snapshot is not None
-                        ):
-                            prepared = replace(
-                                prepared,
-                                baseline_checkpoint=AccountBaselineCheckpoint(
-                                    schema_version=1,
-                                    baseline_id=prepared.reconciliation_id,
-                                    journal_sequence=journal_sequence,
-                                    receiver_session_id=self._receiver_session_id,
-                                    stream_token=stream_token,
-                                    snapshot=prepared.snapshot,
-                                ),
-                            )
-                finally:
-                    self._baseline_repair_attempt = None
             return await self._reconcile_impl(
                 include_fills=include_fills,
                 wait_for_pipeline=wait_for_pipeline,
-                prepared_result=prepared,
-                prepared_attempt=attempt,
             )
         except Exception:
             if not self._pipeline_recovery_event.is_set():
@@ -1159,8 +1137,6 @@ class UserDataAccountSyncDaemon:
         *,
         include_fills: bool,
         wait_for_pipeline: bool = True,
-        prepared_result: ExecutionAccountSyncResult | None = None,
-        prepared_attempt: BaselineRepairAttempt | None = None,
     ) -> ExecutionAccountSyncResult:
         self._reconciliation_active = True
         if wait_for_pipeline and self._event_queue is not None:
@@ -1203,35 +1179,7 @@ class UserDataAccountSyncDaemon:
                 use_realtime_sync = (
                     self._state is not None and realtime_sync_callable is not None
                 )
-                discarded_result = None
-                if prepared_result is not None and (
-                    prepared_attempt is None
-                    or not prepared_attempt.can_commit(
-                        event_generation=self._received_event_generation,
-                        stream_token=getattr(self._stream, "continuity_token", None),
-                        recovery_required=self._pipeline_recovery_event.is_set(),
-                        candidate_observed_at=(
-                            prepared_result.snapshot.config.observed_at
-                            if prepared_result.snapshot is not None
-                            else None
-                        ),
-                        now=self._now(),
-                    )
-                ):
-                    discarded_result = prepared_result
-                    if _is_usable_result(discarded_result):
-                        retain_facts = getattr(
-                            self._service, "persist_reconciliation_facts", None
-                        )
-                        if not callable(retain_facts):
-                            raise RuntimeError(
-                                "staged reconciliation cannot retain immutable facts"
-                            )
-                        await retain_facts(discarded_result)
-                    prepared_result = None
-                if prepared_result is not None:
-                    result = prepared_result
-                elif realtime_sync_callable is not None and use_realtime_sync:
+                if realtime_sync_callable is not None and use_realtime_sync:
                     result = await realtime_sync_callable(
                         observed_at=self._now(),
                         publish_transient_states=False,
@@ -1242,19 +1190,6 @@ class UserDataAccountSyncDaemon:
                         observed_at=self._now(),
                         publish_transient_states=False,
                         include_fills=include_fills,
-                    )
-                if discarded_result is not None and _is_usable_result(result):
-                    # A staged scan updates the service's identity cache. Carry
-                    # its newly discovered fills into the accepted result so a
-                    # guarded re-fetch cannot silently erase their publication.
-                    new_fills = {
-                        (fill.symbol, fill.trade_id): fill
-                        for fill in (*discarded_result.new_fills, *result.new_fills)
-                    }
-                    result = replace(
-                        result,
-                        new_fills=tuple(new_fills.values()),
-                        new_fill_keys=frozenset(new_fills),
                     )
             if _is_usable_result(result) and result.snapshot is not None:
                 self._last_sync_result = result

@@ -706,3 +706,81 @@ def test_event_time_fallback_is_not_rest_coverage_evidence() -> None:
         )
     )
     assert update.snapshot.balances[0].wallet_balance == Decimal("90")
+
+
+@pytest.mark.parametrize(
+    "field,value,drift",
+    [
+        ("wallet_balance", Decimal("99"), True),
+        ("available_balance", Decimal("70"), False),
+        ("unrealized_pnl", Decimal("3"), False),
+    ],
+)
+def test_periodic_check_compares_wallet_not_rest_only_balance_fields(
+    field, value, drift
+):
+    from crypto_momentum_lab.execution_account.snapshot_changes import (
+        account_ws_state_matches,
+    )
+
+    live = _initial_snapshot()
+    rest = replace(live, balances=(replace(live.balances[0], **{field: value}),))
+    assert account_ws_state_matches(live, rest) == (not drift)
+
+
+@pytest.mark.parametrize(
+    "field,value,drift",
+    [
+        ("position_amt", Decimal("0.003"), True),
+        ("entry_price", Decimal("49000"), True),
+        ("margin_type", "isolated", True),
+        ("leverage", 10, True),
+        ("mark_price", Decimal("52000"), False),
+        ("unrealized_pnl", Decimal("4"), False),
+        ("notional", Decimal("104"), False),
+    ],
+)
+def test_periodic_check_ignores_market_valuation_changes(field, value, drift):
+    from crypto_momentum_lab.execution_account.snapshot_changes import (
+        account_ws_state_matches,
+    )
+
+    live = _initial_snapshot()
+    rest = replace(live, positions=(replace(live.positions[0], **{field: value}),))
+    assert account_ws_state_matches(live, rest) == (not drift)
+
+
+def test_periodic_check_normalizes_zero_rows_but_detects_orders_and_config():
+    from crypto_momentum_lab.execution_account.snapshot_changes import (
+        account_ws_state_matches,
+    )
+
+    live = _initial_snapshot()
+    rest = replace(
+        live,
+        balances=(
+            *live.balances,
+            replace(live.balances[0], asset="BNB", wallet_balance=Decimal("0")),
+        ),
+        positions=(
+            *live.positions,
+            replace(live.positions[0], symbol="ETHUSDT", position_amt=Decimal("0")),
+        ),
+    )
+    assert account_ws_state_matches(live, rest)
+    assert not account_ws_state_matches(live, replace(rest, open_orders=()))
+    assert not account_ws_state_matches(
+        live,
+        replace(
+            rest,
+            open_orders=(
+                replace(
+                    rest.open_orders[0],
+                    executed_quantity=Decimal("0.001"),
+                ),
+            ),
+        ),
+    )
+    assert not account_ws_state_matches(
+        live, replace(rest, config=replace(rest.config, hedge_mode=True))
+    )

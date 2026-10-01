@@ -666,6 +666,18 @@ async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.DEGRADED
 
 
+async def test_realtime_rest_failure_does_not_publish_degraded_state() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FailingClient(),
+        repository=repository,
+        config=_config(),
+    )
+    with pytest.raises(RuntimeError, match="temporary Binance failure"):
+        await service.sync_once_for_realtime()
+    assert repository.process_states == []
+
+
 def _config(
     expected_multi_assets_mode: bool = False,
     expected_hedge_mode: bool = False,

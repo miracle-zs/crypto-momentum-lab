@@ -561,14 +561,17 @@ class ExecutionAccountSyncService:
                 )
             return result
         except Exception as error:
-            try:
-                await self._save_state(
-                    ExecutionAccountStatus.DEGRADED,
-                    f"sync_failed:{type(error).__name__}",
-                    config=config,
-                )
-            except Exception:
-                pass
+            # Fetch-only audits do not own live readiness. The daemon requests
+            # repair for known gaps; a REST transport failure alone is not one.
+            if persist:
+                try:
+                    await self._save_state(
+                        ExecutionAccountStatus.DEGRADED,
+                        f"sync_failed:{type(error).__name__}",
+                        config=config,
+                    )
+                except Exception:
+                    pass
             raise
 
     async def persist_reconciliation_facts(
