@@ -82,6 +82,11 @@ class AccountSyncRepository(Protocol):
     ) -> int:
         pass
 
+    async def user_data_journal_cursor(
+        self, *, environment: str, account_label: str
+    ) -> int:
+        pass
+
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         pass
 

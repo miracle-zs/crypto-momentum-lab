@@ -22,6 +22,10 @@ from crypto_momentum_lab.domain.account.models import (
     ExecutionAccountProcessState,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+    decode_baseline_checkpoint,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
@@ -146,6 +150,37 @@ class PostgresAccountRepository:
                     raise RuntimeError("account event receipt was not persisted")
             return int(sequence)
 
+    async def user_data_journal_cursor(self, *, environment: str, account_label: str) -> int:
+        if not environment.strip() or not account_label.strip():
+            raise ValueError("journal account identity must not be empty")
+        async with self._session_factory() as session:
+            sequence = await session.scalar(select(func.max(AccountUserDataJournalRow.sequence)).where(
+                AccountUserDataJournalRow.environment == environment,
+                AccountUserDataJournalRow.account_label == account_label,
+            ))
+            return int(sequence or 0)
+
+    async def load_baseline_checkpoint(self, *, environment: str, account_label: str) -> AccountBaselineCheckpoint | None:
+        if not environment.strip() or not account_label.strip():
+            raise ValueError("checkpoint account identity must not be empty")
+        async with self._session_factory() as session:
+            row = await session.scalar(select(AccountReconciliationRunRow).where(
+                AccountReconciliationRunRow.environment == environment,
+                AccountReconciliationRunRow.account_label == account_label,
+                AccountReconciliationRunRow.status == "ready",
+                AccountReconciliationRunRow.details.has_key("baseline_checkpoint"),
+            ).order_by(AccountReconciliationRunRow.observed_at.desc(), AccountReconciliationRunRow.reconciliation_id.desc()).limit(1))
+            if row is None:
+                return None
+            checkpoint = decode_baseline_checkpoint(row.details["baseline_checkpoint"])
+            if (
+                (checkpoint.snapshot.config.environment, checkpoint.snapshot.config.account_label) != (environment, account_label)
+                or checkpoint.baseline_id != row.reconciliation_id
+                or checkpoint.snapshot.config.observed_at != row.observed_at
+            ):
+                raise ValueError("checkpoint does not match its persisted baseline")
+            return checkpoint
+
     async def load_user_data_events(
         self,
         *,
@@ -267,6 +302,24 @@ class PostgresAccountRepository:
                         )
                     },
                 )
+                checkpoint_payload = run.details.get("baseline_checkpoint")
+                if checkpoint_payload is not None:
+                    checkpoint = decode_baseline_checkpoint(checkpoint_payload)
+                    if (
+                        checkpoint.baseline_id != run.reconciliation_id
+                        or checkpoint.snapshot.config != config
+                        or (run.environment, run.account_label) != (config.environment, config.account_label)
+                        or checkpoint.snapshot.config.observed_at != run.observed_at
+                    ):
+                        raise ValueError("checkpoint does not match the snapshot transaction")
+                    if checkpoint.journal_sequence > 0:
+                        anchor = await session.scalar(select(AccountUserDataJournalRow.sequence).where(
+                            AccountUserDataJournalRow.environment == config.environment,
+                            AccountUserDataJournalRow.account_label == config.account_label,
+                            AccountUserDataJournalRow.sequence == checkpoint.journal_sequence,
+                        ))
+                        if anchor is None:
+                            raise ValueError("checkpoint journal cursor does not belong to this account")
                 await self._insert_in_session(
                     session,
                     AccountConfigSnapshotRow,

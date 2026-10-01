@@ -25,6 +25,9 @@ from crypto_momentum_lab.execution_account.balance_history import (
     balance_value,
     select_balance_history,
 )
+from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+    encode_baseline_checkpoint,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
     BinanceUserDataEvent,
 )
@@ -142,6 +145,12 @@ class ExecutionAccountSyncService:
             receiver_session_id=receiver_session_id,
             stream_token=stream_token,
             event=event,
+        )
+
+    async def user_data_journal_cursor(self) -> int:
+        return await self._repository.user_data_journal_cursor(
+            environment=self._config.environment,
+            account_label=self._config.account_label,
         )
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
@@ -634,6 +643,18 @@ class ExecutionAccountSyncService:
             details: dict[str, JsonValue] = {}
             if source is not None:
                 details["source"] = source
+            checkpoint = result.baseline_checkpoint
+            if checkpoint is not None:
+                if (
+                    result.status is not ExecutionAccountStatus.READY_READONLY
+                    or result.fills_catching_up
+                    or checkpoint.snapshot != snapshot
+                    or (snapshot.config.environment, snapshot.config.account_label)
+                    != (self._config.environment, self._config.account_label)
+                    or checkpoint.baseline_id != result.reconciliation_id
+                ):
+                    raise ValueError("checkpoint does not match a verified baseline")
+                details["baseline_checkpoint"] = encode_baseline_checkpoint(checkpoint)
             if result.fills_catching_up:
                 details["fills_catching_up"] = True
                 details["incomplete_symbols"] = [

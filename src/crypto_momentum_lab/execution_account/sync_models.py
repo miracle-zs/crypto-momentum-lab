@@ -11,6 +11,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillSourceAnchor,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+)
 from crypto_momentum_lab.execution_account.snapshot_models import (
     AccountSnapshot,
     AccountSnapshotDelta,
@@ -103,3 +106,4 @@ class ExecutionAccountSyncResult:
     fill_cursor_updates: tuple[AccountFillReconciliationCursor, ...] = ()
     fill_load_scans: tuple[AccountFillLoadScan, ...] = ()
     fills_catching_up: bool = False
+    baseline_checkpoint: AccountBaselineCheckpoint | None = None

@@ -1425,3 +1425,56 @@ async def test_raw_receipt_is_account_scoped_and_independent_of_projection_commi
     assert repository.snapshot_calls == 0
     assert repository.process_states == []
     assert service._latest_observation_at is None
+
+
+async def test_checkpoint_is_saved_with_baseline_and_rejected_if_it_does_not_match():
+    from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+        AccountBaselineCheckpoint,
+        decode_baseline_checkpoint,
+    )
+
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(), repository=repository, config=_config()
+    )
+    result = await service.sync_once_for_realtime()
+    checkpoint = AccountBaselineCheckpoint(
+        1, result.reconciliation_id, 17, "receiver-a", 1, result.snapshot
+    )
+    result = replace(result, baseline_checkpoint=checkpoint)
+    await service.persist_reconciliation_result(result)
+    assert (
+        decode_baseline_checkpoint(
+            repository.reconciliation_runs[-1].details["baseline_checkpoint"]
+        )
+        == checkpoint
+    )
+    calls = repository.snapshot_calls
+    with pytest.raises(ValueError, match="verified baseline"):
+        await service.persist_reconciliation_result(
+            replace(
+                result, baseline_checkpoint=replace(checkpoint, baseline_id="different")
+            )
+        )
+    with pytest.raises(ValueError, match="verified baseline"):
+        await service.persist_reconciliation_result(
+            replace(
+                result, status=ExecutionAccountStatus.SYNCING, fills_catching_up=True
+            )
+        )
+    foreign_snapshot = replace(
+        result.snapshot,
+        config=replace(result.snapshot.config, account_label="foreign"),
+        balances=tuple(
+            replace(row, account_label="foreign") for row in result.snapshot.balances
+        ),
+    )
+    with pytest.raises(ValueError, match="verified baseline"):
+        await service.persist_reconciliation_result(
+            replace(
+                result,
+                snapshot=foreign_snapshot,
+                baseline_checkpoint=replace(checkpoint, snapshot=foreign_snapshot),
+            )
+        )
+    assert repository.snapshot_calls == calls

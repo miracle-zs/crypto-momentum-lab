@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.baseline_checkpoint import (
+    AccountBaselineCheckpoint,
+)
 from crypto_momentum_lab.execution_account.baseline_repair import (
     BaselineRepairAttempt,
     baseline_is_fresh,
@@ -341,6 +344,7 @@ class UserDataAccountSyncDaemon:
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
         self._receiver_session_id = uuid4().hex
+        self._journal_receipts_in_flight = 0
         self._received_event_generation = 0
         self._baseline_repair_attempt: BaselineRepairAttempt | None = None
         self._persistence_queue: (
@@ -585,6 +589,7 @@ class UserDataAccountSyncDaemon:
         self._received_event_generation += 1
         record = getattr(self._service, "record_user_data_event", None)
         if callable(record):
+            self._journal_receipts_in_flight += 1
             try:
                 await record(
                     event=event,
@@ -598,6 +603,8 @@ class UserDataAccountSyncDaemon:
                     origin_event=event,
                 )
                 raise
+            finally:
+                self._journal_receipts_in_flight -= 1
         event_queue = self._event_queue
         if event_queue is None:
             await self._process_event(event)
@@ -1079,6 +1086,7 @@ class UserDataAccountSyncDaemon:
                 and self._state is not None
                 and self._accept_events
                 and not self._reconciliation_active
+                and self._journal_receipts_in_flight == 0
                 and not self._pipeline_recovery_event.is_set()
                 and last is not None
                 and last.status is ExecutionAccountStatus.READY_READONLY
@@ -1102,11 +1110,34 @@ class UserDataAccountSyncDaemon:
                 self._baseline_repair_attempt = attempt
                 try:
                     async with self._rest_sync_lock:
+                        cursor_reader = getattr(
+                            self._service, "user_data_journal_cursor", None
+                        )
+                        journal_sequence = (
+                            await cursor_reader() if callable(cursor_reader) else None
+                        )
                         prepared = await fetch(
                             observed_at=self._now(),
                             publish_transient_states=False,
                             include_fills=include_fills,
                         )
+                        if (
+                            journal_sequence is not None
+                            and prepared.status is ExecutionAccountStatus.READY_READONLY
+                            and not prepared.fills_catching_up
+                            and prepared.snapshot is not None
+                        ):
+                            prepared = replace(
+                                prepared,
+                                baseline_checkpoint=AccountBaselineCheckpoint(
+                                    schema_version=1,
+                                    baseline_id=prepared.reconciliation_id,
+                                    journal_sequence=journal_sequence,
+                                    receiver_session_id=self._receiver_session_id,
+                                    stream_token=stream_token,
+                                    snapshot=prepared.snapshot,
+                                ),
+                            )
                 finally:
                     self._baseline_repair_attempt = None
             return await self._reconcile_impl(

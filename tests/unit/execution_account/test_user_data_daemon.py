@@ -792,6 +792,9 @@ async def test_background_reconciliation_never_replaces_a_newer_live_state(
                 return replace(result, new_fills=(), new_fill_keys=frozenset())
             return result
 
+        async def user_data_journal_cursor(self):
+            return 17
+
         async def persist_reconciliation_facts(self, result):
             self.retained_facts.append(result)
 
@@ -857,6 +860,7 @@ async def test_background_reconciliation_never_replaces_a_newer_live_state(
         result = await asyncio.wait_for(task, timeout=1)
         assert len(published) == 1
         if event_during_fetch or expire_during_fetch or stream_change:
+            assert result.baseline_checkpoint is None
             assert service.realtime_calls == 3
             assert len(service.retained_facts) == 1
             expected_balance = (
@@ -872,6 +876,8 @@ async def test_background_reconciliation_never_replaces_a_newer_live_state(
             assert result.new_fills == (service.fill,)
             assert fills == [service.fill]
         else:
+            assert result.baseline_checkpoint.journal_sequence == 17
+            assert result.baseline_checkpoint.snapshot == result.snapshot
             assert service.realtime_calls == 2
             assert service.retained_facts == []
     finally:
@@ -959,3 +965,78 @@ async def test_journal_failure_requests_recovery_without_applying_unrecorded_eve
     assert daemon._pipeline_recovery_origin_event == event
     assert not daemon._accept_events
     assert applied == []
+
+
+async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
+    class PendingReceiptService(RealtimeFakeService):
+        def __init__(self):
+            super().__init__(_snapshot())
+            self.journal_started = asyncio.Event()
+            self.release_journal = asyncio.Event()
+            self.fetch_started = asyncio.Event()
+            self.release_fetch = asyncio.Event()
+            self.cursor_reads = 0
+
+        async def record_user_data_event(self, **receipt):
+            self.journal_started.set()
+            await self.release_journal.wait()
+            return 17
+
+        async def user_data_journal_cursor(self):
+            self.cursor_reads += 1
+            return 17
+
+        async def sync_once_for_realtime(self, **kwargs):
+            result = await super().sync_once_for_realtime(**kwargs)
+            self.fetch_started.set()
+            await self.release_fetch.wait()
+            return result
+
+        async def persist_reconciliation_facts(self, result):
+            pass
+
+    service = PendingReceiptService()
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, 2, tzinfo=UTC),
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    # Make the stream explicitly eligible so the in-flight receipt is the
+    # only reason this scan must use the protected repair path.
+    daemon._stream.continuity_token = 1
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    receipt = asyncio.create_task(daemon._on_event(event))
+    repair = None
+    try:
+        await asyncio.wait_for(service.journal_started.wait(), timeout=1)
+        repair = asyncio.create_task(daemon._reconcile(include_fills=True))
+        await asyncio.wait_for(service.fetch_started.wait(), timeout=1)
+        await daemon._publish_heartbeat()
+        assert service.heartbeat_states[-1] is ExecutionAccountStatus.SYNCING
+        assert service.cursor_reads == 0
+        service.release_journal.set()
+        await asyncio.wait_for(receipt, timeout=1)
+        assert daemon._journal_receipts_in_flight == 0
+        service.release_fetch.set()
+        result = await asyncio.wait_for(repair, timeout=1)
+        assert result.baseline_checkpoint is None
+        assert daemon._state.snapshot(event.received_at).balances[
+            0
+        ].wallet_balance == Decimal("101")
+    finally:
+        service.release_journal.set()
+        service.release_fetch.set()
+        await asyncio.gather(
+            receipt, *([repair] if repair is not None else []), return_exceptions=True
+        )
+        await daemon._stop_pipeline()
