@@ -206,3 +206,9 @@ b39e110f 发布脚本成功后继续观察，实际账户任务报 adopted suffi
 PositionLedger 仅在 checkpoint_usable 且当前覆盖 covers_range(parent.event_cut, suffix.end_at) 时认可已验证前缀，不再重复要求新后缀覆盖父切面以前。父 checkpoint 的身份、完整性、数量、冲突和覆盖校验继续执行；无可信父 checkpoint、父后缀之间有缺口或未确认覆盖仍按原流程拒绝。没有删除恢复保护或重写历史成交。
 
 将原跨 epoch 测试增加“开仓早于父切面 30 秒”的真实形态，旧代码复现同一错误，修复后成功创建和恢复子 checkpoint；另明确验证父与后缀间一秒缺口仍被拒绝。执行域 418 项测试通过，PositionLedger 类型检查通过。
+
+## 真实 WS 成交验收：订单类型的表示统一
+
+22fe47ec 完成发布后，真实退出订单的 ORDER_TRADE_UPDATE 被报为 order_identity_conflict。只读核对两笔生产订单发现持久化 plan.order_type 为 market，Binance WS 为 MARKET，其余身份字段一致。新增大小写参数覆盖 NEW、PARTIALLY_FILLED、FILLED、CANCELED、EXPIRED，旧实现五项复现相同 ValueError。
+
+仅在 WS 适配边界按大写比较订单类型；client ID、交易所 ID、数量、价格、方向、positionSide 和 reduceOnly 校验继续执行。未修改数据库订单或成交事实，未绕过恢复门槛。直接相关 84 项测试及解析模块类型检查通过。该次发布的业务验收未通过，必须发布此修复后再次持续观察。

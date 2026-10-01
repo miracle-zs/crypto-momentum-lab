@@ -218,6 +218,7 @@ def _ws_order_case():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("order_type", ["MARKET", "market"])
 @pytest.mark.parametrize(
     "status,quantity",
     [
@@ -229,9 +230,10 @@ def _ws_order_case():
     ],
 )
 async def test_complete_ws_order_uses_existing_state_machine_without_rest(
-    status, quantity
+    status, quantity, order_type
 ):
     order, event = _ws_order_case()
+    order = replace(order, plan=replace(order.plan, order_type=order_type))
     event.order_update.update(X=status, z=quantity)
     applied = []
 

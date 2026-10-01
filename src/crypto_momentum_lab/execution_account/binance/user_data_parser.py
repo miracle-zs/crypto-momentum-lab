@@ -220,7 +220,7 @@ def order_snapshot_from_update(
         str(order["c"]) != plan.client_order_id
         or str(order["s"]) != plan.symbol
         or str(order["S"]) != plan.side
-        or str(order["o"]) != plan.order_type
+        or str(order["o"]).upper() != plan.order_type.upper()
         or str(order["ps"]) != plan.position_side.value
         or order["R"] != plan.reduce_only
         or quantity != plan.quantity
