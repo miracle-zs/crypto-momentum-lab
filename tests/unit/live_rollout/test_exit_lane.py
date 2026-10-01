@@ -120,3 +120,10 @@ async def test_older_account_trigger_keeps_newer_price_and_state():
     await lane.stop()
     assert states == [newer_state]
     assert quotes == [(newer_quote, newer_state)]
+
+
+def test_real_fault_takes_priority_over_pending_evaluation_in_both_orders():
+    pending = ExitLaneOutcome(failure="pending_live_context:BTCUSDT")
+    fatal = ExitLaneOutcome(failure="exit_execution_failed:RuntimeError", fatal_failure=True)
+    assert pending.merge(fatal) == fatal
+    assert fatal.merge(pending) == fatal

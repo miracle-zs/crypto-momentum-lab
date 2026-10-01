@@ -30,6 +30,9 @@ import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -144,6 +147,9 @@ from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
 from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventRuntime
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
+)
+from crypto_momentum_lab.live_rollout.position_self_healing import (
+    LiveUnmanagedPositionRepair,
 )
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
@@ -271,6 +277,9 @@ from crypto_momentum_lab.persistence.postgres.order_submission_repository import
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
+)
+from crypto_momentum_lab.persistence.postgres.position_repair import (
+    PostgresPositionRepairUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
@@ -963,6 +972,8 @@ async def run_live_daemon(
             run_id=session_id,
         )
         async def recover_decision_exits() -> None:
+            if daemon is not None and await daemon.recover_requested_exits():
+                exit_channel_runtime.note_account_facts_changed()
             await fact_source.recover_pending_exits(limit=5)
 
         order_reconciliation = LiveOrderReconciliation(
@@ -1279,6 +1290,20 @@ async def run_live_daemon(
                 interval_seconds=interval_seconds,
             )
 
+        position_repair = LiveUnmanagedPositionRepair(
+            account_label=account_label,
+            run_id=session_id,
+            book=execution_book,
+            uow=PostgresPositionRepairUnitOfWork(
+                execution_factory, strategy_name=strategy_name
+            ),
+            context_is_current=(
+                lambda context: context_provider.is_current(context)
+            ),
+            invalidate_context=lambda: context_provider.invalidate(),
+            request_recovery=order_reconciliation.request_recovery,
+        )
+        order_reconciliation.repair_positions = position_repair.repair_pending
         context_provider = PostgresLiveContextProvider(
             execution_session_factory=execution_factory,
             market_session_factory=market_factory,
@@ -1290,10 +1315,21 @@ async def run_live_daemon(
             migration_revision=migration_revision,
             lease_owner=lease_owner,
             approval_id=approval.approval_id,
+            request_position_repair=position_repair.request,
         )
         context_provider.set_execution_book(execution_book)
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
+        def request_unknown_exit(order: PersistedExchangeOrder) -> bool:
+            if daemon is None:
+                return False
+            state = next(iter(latest_market_states.for_symbols((order.plan.symbol,))), None)
+            if state is None:
+                return False
+            daemon.request_unknown_exit_recovery(order, state)
+            return True
+
+        order_reconciliation.request_unknown_exit = request_unknown_exit
         entry_universe_context_provider = entry_runtime.entry_universe_context_provider
         entry_universe_snapshot_provider = (
             entry_runtime.entry_universe_snapshot_provider
@@ -1316,6 +1352,7 @@ async def run_live_daemon(
             return None
 
         daemon = LiveStrategyDaemon(
+            request_exit_recovery=order_reconciliation.request_recovery,
             cached_context_provider=lambda: context_provider.cached_context,
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1368,7 +1405,7 @@ async def run_live_daemon(
                     ),
                 ),
                 decision_fact_binder=fact_source.bind_context,
-                readiness_provider=lambda symbol=None: (
+                readiness_provider=lambda symbol: (
                     daemon.evaluate_readiness(symbol=symbol)
                     if daemon is not None
                     else ExecutionReadiness.INDEPENDENT_EXECUTABLE
@@ -1425,7 +1462,7 @@ async def run_live_daemon(
             return draining_now, bool(active_halts)
 
         def invalidate_live_contexts() -> None:
-            context_provider.invalidate_cache()
+            context_provider.invalidate()
 
         def refresh_entry_enabled() -> None:
             if (

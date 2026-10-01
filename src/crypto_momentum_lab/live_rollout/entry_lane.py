@@ -86,7 +86,7 @@ class EntryLaneConfig:
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     max_concurrency_per_symbol: int | None = None
-    readiness_provider: Callable[..., ExecutionReadiness] | None = None
+    readiness_provider: Callable[[str | None], ExecutionReadiness] | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -102,6 +102,10 @@ class EntryLaneConfig:
             and self.max_concurrency_per_symbol <= 0
         ):
             raise ValueError("max_concurrency_per_symbol must be positive")
+        if not isinstance(self.entry_policy_compare_only, bool):
+            raise TypeError("entry_policy_compare_only must be a bool")
+        if not isinstance(self.entry_policy_enforce, bool):
+            raise TypeError("entry_policy_enforce must be a bool")
         if self.entry_policy_compare_only and self.entry_policy_enforce:
             raise ValueError(
                 "entry_policy_compare_only and entry_policy_enforce "
@@ -181,13 +185,7 @@ class EntryExecutionLane:
 
     def _current_readiness(self, symbol: str | None = None) -> ExecutionReadiness:
         if self._config.readiness_provider is not None:
-            try:
-                return self._config.readiness_provider(symbol=symbol)
-            except TypeError:
-                try:
-                    return self._config.readiness_provider(symbol)
-                except TypeError:
-                    return self._config.readiness_provider()
+            return self._config.readiness_provider(symbol)
         return ExecutionReadiness.INDEPENDENT_EXECUTABLE
 
     def record_decision(

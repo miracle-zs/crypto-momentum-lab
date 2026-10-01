@@ -15,6 +15,9 @@ from dataclasses import dataclass
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s, RealtimeMarketQuote
+from crypto_momentum_lab.live_rollout.exit_failure_policy import (
+    is_pending_exit_evaluation,
+)
 
 log = structlog.get_logger()
 
@@ -36,7 +39,13 @@ class ExitLaneOutcome:
             submitted_order_count=(
                 self.submitted_order_count + other.submitted_order_count
             ),
-            failure=self.failure or other.failure,
+            failure=(
+                self.failure
+                if self.fatal_failure
+                else other.failure
+                if other.fatal_failure
+                else self.failure or other.failure
+            ),
             fatal_failure=self.fatal_failure or other.fatal_failure,
         )
 
@@ -84,9 +93,7 @@ class ExitExecutionLane:
         self._quote_queue: asyncio.Queue[str | None] | None = None
         self._market_state_lock: asyncio.Lock | None = None
         self._market_latest: dict[str, _ExitLaneWork] = {}
-        self._market_enqueued: set[str] = set()
         self._quote_latest: dict[str, _QuoteLaneWork] = {}
-        self._quote_enqueued: set[str] = set()
         self._market_workers: tuple[asyncio.Task[None], ...] = ()
         self._quote_workers: tuple[asyncio.Task[None], ...] = ()
         self._idle: asyncio.Event | None = None
@@ -110,9 +117,7 @@ class ExitExecutionLane:
         self._quote_queue = asyncio.Queue()
         self._market_state_lock = asyncio.Lock()
         self._market_latest = {}
-        self._market_enqueued = set()
         self._quote_latest = {}
-        self._quote_enqueued = set()
         self._outstanding_work = 0
         self._outcome = ExitLaneOutcome()
         self._idle = asyncio.Event()
@@ -145,15 +150,15 @@ class ExitExecutionLane:
         ):
             raise RuntimeError("exit lane is not started")
         async with self._market_state_lock:
-            if state.symbol not in self._market_latest:
+            new_work = state.symbol not in self._market_latest
+            if new_work:
                 self._outstanding_work += 1
             self._idle.clear()
             previous = self._market_latest.get(state.symbol)
             if previous is not None:
                 state = max((state, previous.state), key=lambda item: item.bucket_end)
             self._market_latest[state.symbol] = _ExitLaneWork(state)
-            if state.symbol not in self._market_enqueued:
-                self._market_enqueued.add(state.symbol)
+            if new_work:
                 self._market_queue.put_nowait(state.symbol)
 
     async def submit_quote(
@@ -169,7 +174,8 @@ class ExitExecutionLane:
         ):
             raise RuntimeError("exit lane is not started")
         async with self._market_state_lock:
-            if quote.symbol not in self._quote_latest:
+            new_work = quote.symbol not in self._quote_latest
+            if new_work:
                 self._outstanding_work += 1
             self._idle.clear()
             previous = self._quote_latest.get(quote.symbol)
@@ -179,8 +185,7 @@ class ExitExecutionLane:
                 quote = max((quote, previous.quote), key=lambda item: item.event_at)
                 state = max((state, previous.state), key=lambda item: item.bucket_end)
             self._quote_latest[quote.symbol] = _QuoteLaneWork(quote, state)
-            if quote.symbol not in self._quote_enqueued:
-                self._quote_enqueued.add(quote.symbol)
+            if new_work:
                 self._quote_queue.put_nowait(quote.symbol)
 
     async def stop(self) -> ExitLaneOutcome:
@@ -223,7 +228,6 @@ class ExitExecutionLane:
                 return
             async with self._market_state_lock:
                 work = self._market_latest.pop(symbol, None)
-                self._market_enqueued.discard(symbol)
             if work is None:
                 self._mark_idle_if_ready()
                 continue
@@ -241,7 +245,6 @@ class ExitExecutionLane:
                 return
             async with self._market_state_lock:
                 work = self._quote_latest.pop(symbol, None)
-                self._quote_enqueued.discard(symbol)
             if work is None:
                 self._mark_idle_if_ready()
                 continue
@@ -281,6 +284,10 @@ class ExitExecutionLane:
                 fatal_failure=True,
             )
 
+    def record_recovery_outcome(self, symbol: str, outcome: ExitLaneOutcome) -> None:
+        """Account for work completed by the existing repair worker."""
+        self._record_outcome(symbol, outcome)
+
     def _record_outcome(self, symbol: str, outcome: ExitLaneOutcome) -> None:
         self._outcome = self._outcome.merge(outcome)
         if self._on_outcome is not None:
@@ -294,7 +301,7 @@ class ExitExecutionLane:
                         fatal_failure=True,
                     )
                 )
-        if outcome.failure is not None:
+        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
             if outcome.fatal_failure:
                 log.error(
                     "live_exit_lane_failed_closed",
@@ -321,9 +328,7 @@ class ExitExecutionLane:
 
     def _cancel_pending_work(self) -> None:
         self._market_latest.clear()
-        self._market_enqueued.clear()
         self._quote_latest.clear()
-        self._quote_enqueued.clear()
         self._outstanding_work = 0
         if self._idle is not None:
             self._idle.set()

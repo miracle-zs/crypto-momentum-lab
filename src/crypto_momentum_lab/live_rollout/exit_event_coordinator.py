@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -12,6 +12,10 @@ import structlog
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
+)
+from crypto_momentum_lab.live_rollout.context import (
+    LiveContextChangedDuringLoad,
+    exit_position_block_reason,
 )
 
 if TYPE_CHECKING:
@@ -29,7 +33,7 @@ from crypto_momentum_lab.live_rollout.exit_event_ports import (
     ExitEventProcessor,
 )
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
-    is_pending_candle_evaluation,
+    is_pending_exit_evaluation,
 )
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 
@@ -46,9 +50,8 @@ class LiveExitEventCoordinator:
         exit_enabled: Callable[[], bool],
         run_active: Callable[[], bool],
         context_provider: LiveContextProvider,
-        sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
-        publish_managed_position_symbols: Callable[
-            [LiveDaemonRuntimeContext], Awaitable[None]
+        apply_context: Callable[
+            [LiveDaemonRuntimeContext], None
         ],
         invalidate_context_cache: Callable[[], None],
         exit_processor: ExitEventProcessor,
@@ -60,8 +63,7 @@ class LiveExitEventCoordinator:
         self._exit_enabled = exit_enabled
         self._run_active = run_active
         self._context_provider = context_provider
-        self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._publish_managed_position_symbols = publish_managed_position_symbols
+        self._apply_context = apply_context
         self._invalidate_context_cache = invalidate_context_cache
         self._exit_processor = exit_processor
         self._exit_lane = exit_lane
@@ -89,7 +91,7 @@ class LiveExitEventCoordinator:
             if quote is None
             else await self.process_quote_work(quote, state)
         )
-        if outcome.failure is not None:
+        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
             log.error(
                 "live_account_event_exit_failed",
                 run_id=self._run_id,
@@ -114,7 +116,7 @@ class LiveExitEventCoordinator:
             await self._exit_lane.submit_quote(quote, state)
             return None
         outcome = await self.process_quote_work(quote, state)
-        if outcome.failure is not None:
+        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
             log.error(
                 "live_quote_exit_failed",
                 run_id=self._run_id,
@@ -130,6 +132,7 @@ class LiveExitEventCoordinator:
         context, failure = await self._load_context(state)
         if failure is not None:
             return ExitLaneOutcome(failure=failure)
+        assert context is not None
         return await self._exit_processor.process_state(state, context)
 
     async def process_quote_work(
@@ -142,6 +145,7 @@ class LiveExitEventCoordinator:
         context, failure = await self._load_context(state)
         if failure is not None:
             return ExitLaneOutcome(failure=failure)
+        assert context is not None
         return await self._exit_processor.process_quote(quote, state, context)
 
     async def process_closed_candle(
@@ -162,13 +166,14 @@ class LiveExitEventCoordinator:
         context, failure = await self._load_context(state)
         if failure is not None:
             return failure
+        assert context is not None
         outcome = await self._exit_processor.process_closed_candle(
             event,
             state,
             context,
             latest_quote,
         )
-        if outcome.failure is not None and not is_pending_candle_evaluation(outcome.failure):
+        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
             log.error(
                 "live_closed_candle_exit_failed",
                 run_id=self._run_id,
@@ -191,13 +196,14 @@ class LiveExitEventCoordinator:
         context, failure = await self._load_context(state)
         if failure is not None:
             return failure
+        assert context is not None
         outcome = await self._exit_processor.process_grace_timeout(
             state,
             now,
             context,
             latest_quote,
         )
-        if outcome.failure is not None:
+        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
             log.error(
                 "live_grace_timeout_exit_failed",
                 run_id=self._run_id,
@@ -209,17 +215,13 @@ class LiveExitEventCoordinator:
     async def _load_context(
         self,
         state: MarketState15s,
-    ) -> tuple[LiveDaemonRuntimeContext, str | None]:
-        context = await self._context_provider(state)
-        self._sync_pending_entry_plans(context)
-        await self._publish_managed_position_symbols(context)
-        if state.symbol in context.pending_position_symbols:
-            symbols = ",".join(sorted(context.pending_position_symbols))
-            return context, f"pending_live_positions:{symbols}"
-        if state.symbol in context.unmanaged_position_symbols:
-            symbols = ",".join(sorted(context.unmanaged_position_symbols))
-            return context, f"unmanaged_live_positions:{symbols}"
-        return context, None
+    ) -> tuple[LiveDaemonRuntimeContext | None, str | None]:
+        try:
+            context = await self._context_provider(state)
+        except LiveContextChangedDuringLoad:
+            return None, f"pending_live_context:{state.symbol}"
+        self._apply_context(context)
+        return context, exit_position_block_reason(context, state.symbol)
 
 
 def _market_state_for_closed_candle(

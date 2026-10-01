@@ -26,10 +26,63 @@ from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitLaneOutcome,
 )
 from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
+from crypto_momentum_lab.live_rollout.postgres_runtime import (
+    PostgresLiveContextProvider,
+)
 from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
+from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 from tests.unit.shadow_operation.test_service import _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("trigger", ["market", "quote"])
+async def test_inflight_account_updates_defer_exit_without_poisoning_lane(trigger):
+    provider = PostgresLiveContextProvider(
+        session_factory=object(), account_label="primary", run_id="run",
+        strategy_name="strategy", strategy_config_hash="config",
+        git_commit_hash="commit", migration_revision="migration",
+        lease_owner="owner", approval_id="approval",
+    )
+    changing = True
+    reads = []
+
+    async def load_once(state):
+        context = replace(_runtime_context(), context_epoch=provider._cache_epoch)
+        reads.append(context)
+        if changing:
+            provider.invalidate_account_snapshot()
+        return context
+
+    provider._load_context_once = load_once
+    processor = _Processor()
+    coordinator, events = _coordinator(processor=processor, lane=_Lane())
+    coordinator._context_provider = provider._load_context
+    outcomes = []
+    lane = ExitExecutionLane(coordinator.process_market_work, coordinator.process_quote_work,
+                             on_outcome=lambda symbol, outcome: outcomes.append(outcome))
+    await lane.start()
+    try:
+        state = _state()
+        if trigger == "quote":
+            await lane.submit_quote(_quote(symbol=state.symbol), state)
+        else:
+            await lane.submit_market(state)
+        await asyncio.wait_for(lane._idle.wait(), 1)
+        assert len(reads) == 3
+        assert processor.calls == []
+        assert events["publish"] == []
+        assert lane.failure is None
+        assert not outcomes[-1].fatal_failure
+        assert outcomes[-1].failure == f"pending_live_context:{state.symbol}"
+        changing = False
+        await lane.submit_market(state)
+        await asyncio.wait_for(lane._idle.wait(), 1)
+        assert len(processor.calls) == 1
+        assert provider.is_current(processor.calls[0][-1])
+        assert outcomes[-1].failure is None
+    finally:
+        await lane.stop()
 
 
 class _Processor:
@@ -128,7 +181,8 @@ def _coordinator(
         events["provider"].append(state)
         return runtime_context
 
-    async def publish(context_value: LiveDaemonRuntimeContext) -> None:
+    def publish(context_value: LiveDaemonRuntimeContext) -> None:
+        events["sync"].append(context_value)
         events["publish"].append(context_value)
 
     coordinator = LiveExitEventCoordinator(
@@ -136,10 +190,7 @@ def _coordinator(
         exit_enabled=lambda: True,
         run_active=lambda: run_active,
         context_provider=cast(LiveContextProvider, provider),
-        sync_pending_entry_plans=lambda context_value: events["sync"].append(
-            context_value
-        ),
-        publish_managed_position_symbols=publish,
+        apply_context=publish,
         invalidate_context_cache=lambda: events["invalidate"].append(True),
         exit_processor=cast(LiveExitProcessor, processor),
         exit_lane=cast(ExitExecutionLane, lane),
@@ -266,8 +317,7 @@ async def test_disabled_exit_coordinator_skips_all_collaborators(trigger: str) -
         exit_enabled=lambda: False,
         run_active=lambda: pytest.fail("must not read run state"),
         context_provider=cast(LiveContextProvider, object()),
-        sync_pending_entry_plans=lambda context: pytest.fail("must not sync"),
-        publish_managed_position_symbols=object(),
+        apply_context=object(),
         invalidate_context_cache=lambda: pytest.fail("must not invalidate"),
         exit_processor=cast(LiveExitProcessor, object()),
         exit_lane=cast(ExitExecutionLane, object()),
@@ -383,9 +433,8 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_quote", [False, True])
-@pytest.mark.parametrize("blocked_stage", ["context", "subscriptions"])
 async def test_context_preparation_does_not_block_account_facts(
-    with_quote, blocked_stage
+    with_quote
 ):
     from crypto_momentum_lab.execution_account.hub import AccountEvent
     from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
@@ -403,15 +452,12 @@ async def test_context_preparation_does_not_block_account_facts(
     quote = _quote()
 
     async def provider(_state):
-        if blocked_stage == "context":
-            started.set()
-            await release.wait()
+        started.set()
+        await release.wait()
         return current
 
-    async def publish(_context):
-        if blocked_stage == "subscriptions":
-            started.set()
-            await release.wait()
+    def publish(_context):
+        pass
 
     lane = ExitExecutionLane(
         lambda state: coordinator.process_market_work(state),
@@ -422,8 +468,7 @@ async def test_context_preparation_does_not_block_account_facts(
         exit_enabled=lambda: True,
         run_active=lambda: True,
         context_provider=provider,
-        sync_pending_entry_plans=lambda _context: None,
-        publish_managed_position_symbols=publish,
+        apply_context=publish,
         invalidate_context_cache=lambda: None,
         exit_processor=processor,
         exit_lane=lane,
@@ -472,9 +517,8 @@ async def test_context_preparation_does_not_block_account_facts(
     finally:
         release.set()
         await asyncio.wait_for(lane.stop(), timeout=1)
-    if blocked_stage == "context":
-        # Resolve the context after the wait, rather than retaining the view at enqueue.
-        assert all(call[-1].version == 2 for call in processor.calls)
+    # Resolve the context after the wait, rather than retaining the view at enqueue.
+    assert all(call[-1].version == 2 for call in processor.calls)
 
 
 @pytest.mark.asyncio
@@ -497,3 +541,20 @@ async def test_pending_position_is_published_and_blocks_background_exit_decision
     assert result.failure == "pending_live_positions:BTCUSDT"
     assert events["publish"] == [pending]
     assert processor.calls == []
+
+
+async def test_unrelated_context_runtime_error_remains_fatal():
+    coordinator, events = _coordinator(processor=_Processor(), lane=_Lane())
+
+    async def load(state):
+        raise RuntimeError("database failure")
+
+    coordinator._context_provider = load
+    lane = ExitExecutionLane(coordinator.process_market_work, coordinator.process_quote_work)
+    await lane.start()
+    await lane.submit_market(_state())
+    outcome = await asyncio.wait_for(lane.stop(), 1)
+    assert outcome.fatal_failure
+    assert outcome.failure == "exit_execution_failed:RuntimeError"
+    assert lane.failure == outcome.failure
+    assert events["publish"] == []

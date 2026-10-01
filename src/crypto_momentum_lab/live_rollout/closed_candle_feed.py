@@ -188,7 +188,6 @@ class BinanceClosedCandle15mFeed:
         self._events: asyncio.Queue[ClosedCandle15mEvent] = asyncio.Queue(
             maxsize=config.final_event_queue_size
         )
-        self._symbol_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self._stopping = False
         self._seen_keys: set[tuple[str, datetime]] = set()
@@ -249,24 +248,22 @@ class BinanceClosedCandle15mFeed:
         self._recovery_tasks.clear()
         self._started = False
 
-    async def set_symbols(self, symbols: frozenset[str]) -> None:
+    def set_symbols(self, symbols: frozenset[str]) -> None:
+        """Update the local subscription target without waiting for control I/O."""
         normalized = frozenset(
             symbol.strip().upper() for symbol in symbols if symbol.strip()
         )
-        async with self._symbol_lock:
-            previous = self._symbols
-            if normalized == previous:
-                return
-            self._symbols = normalized
-            self._generation += 1
-            connection = self._connection
-            generation = max(1, self._generation)
+        previous = self._symbols
+        if normalized == previous:
+            return
+        self._symbols = normalized
+        self._generation += 1
+        connection = self._connection
         if connection is None:
             return
-        additions = self._stream_names(normalized - previous)
-        removals = self._stream_names(previous - normalized)
-        await connection.subscribe(additions, generation=generation)
-        await connection.unsubscribe(removals, generation=generation)
+        connection.set_desired_subscriptions(
+            self._stream_names(normalized), generation=max(1, self._generation)
+        )
         self._schedule_recovery(normalized - previous)
 
     def __aiter__(self) -> AsyncIterator[ClosedCandle15mEvent]:

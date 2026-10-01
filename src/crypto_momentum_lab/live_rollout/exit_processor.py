@@ -43,6 +43,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryClient,
+    ExitRecoveryObservation,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -51,8 +52,10 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
 from crypto_momentum_lab.live_rollout.context import (
+    LiveContextChangedDuringLoad,
     LiveContextProvider,
     LiveDaemonRuntimeContext,
+    exit_position_block_reason,
 )
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 from crypto_momentum_lab.live_rollout.exits import (
@@ -75,7 +78,7 @@ _EXIT_RECOVERY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 15.0)
 
 
 class ExitContextPublisher(Protocol):
-    async def __call__(self, context: LiveDaemonRuntimeContext) -> None: ...
+    def __call__(self, context: LiveDaemonRuntimeContext) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,17 @@ class ExitProcessorConfig:
     def __post_init__(self) -> None:
         if not self.run_id.strip():
             raise ValueError("run_id must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestedExitRecovery:
+    plan: OrderExecutionPlan
+    known_executed_quantity: Decimal
+    state: MarketState15s
+    source_candidate: OrderIntentCandidate | None = None
+    reference_price: Decimal | None = None
+    recovery_entry_type: EntryType | None = None
+    recovery_limit_price: Decimal | None = None
 
 
 class LiveExitProcessor:
@@ -102,10 +116,10 @@ class LiveExitProcessor:
         clock: Callable[[], datetime],
         is_exit_enabled: Callable[[], bool],
         context_provider: LiveContextProvider,
-        sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
-        publish_managed_position_symbols: ExitContextPublisher,
+        apply_context: ExitContextPublisher,
         invalidate_context_cache: Callable[[], None],
         context_is_current: Callable[[LiveDaemonRuntimeContext], bool],
+        request_recovery: Callable[[], None] = lambda: None,
     ) -> None:
         self._config = config
         self._exit_manager = exit_manager
@@ -116,10 +130,11 @@ class LiveExitProcessor:
         self._clock = clock
         self._is_exit_enabled = is_exit_enabled
         self._context_provider = context_provider
-        self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._publish_managed_position_symbols = publish_managed_position_symbols
+        self._apply_context = apply_context
         self._invalidate_context_cache = invalidate_context_cache
         self._context_is_current = context_is_current
+        self._request_recovery = request_recovery
+        self._requested_recoveries: dict[str, _RequestedExitRecovery] = {}
         self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
         self._exit_recovery_attempts: dict[str, int] = {}
         self._exit_recovery_next_attempt_at: dict[str, datetime] = {}
@@ -140,15 +155,15 @@ class LiveExitProcessor:
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
+            recovery_outcome = self._defer_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
             if not self._exit_manager.uses_market_state_exit:
                 return ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_state(
@@ -187,8 +202,8 @@ class LiveExitProcessor:
         )
         async with lock:
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
+            recovery_outcome = self._defer_pending_exit_orders(
                 state=state,
                 context=context,
             )
@@ -197,12 +212,11 @@ class LiveExitProcessor:
                 # Revisit it after committed order/account facts refresh context.
                 return replace(
                     recovery_outcome,
-                    failure=recovery_outcome.failure or (
-                        f"pending_exit_order_recovery:{event.candle.symbol}"
-                    ),
+                    failure=recovery_outcome.failure
+                    or (f"pending_exit_order_recovery:{event.candle.symbol}"),
                 )
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
             requests = await self._exit_manager.requests_for_closed_candle(
                 event.candle,
                 context.managed_positions,
@@ -233,15 +247,15 @@ class LiveExitProcessor:
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
+            recovery_outcome = self._defer_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
             requests = await self._exit_manager.requests_for_grace_timeout(
                 now=now,
                 state=state,
@@ -285,15 +299,15 @@ class LiveExitProcessor:
         )
         async with lock:
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
+            recovery_outcome = self._defer_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
             if not self._context_is_current(context):
-                return ExitLaneOutcome()
+                return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
             requests = await self._exit_manager.requests_for_quote(
                 quote,
                 context.managed_positions,
@@ -309,7 +323,7 @@ class LiveExitProcessor:
             failure=failure,
         )
 
-    async def _recover_pending_exit_orders(
+    def _defer_pending_exit_orders(
         self,
         *,
         state: MarketState15s,
@@ -330,26 +344,118 @@ class LiveExitProcessor:
             previous = pending_by_root.get(root)
             if previous is None or attempt > _exit_recovery_identity(previous.plan)[1]:
                 pending_by_root[root] = order
-        has_pending_exit = bool(pending_by_root)
-        for order in sorted(
-            pending_by_root.values(),
-            key=lambda item: (item.updated_at, item.plan.client_order_id),
-        ):
-            result = await self._recover_unknown_exit(
+        for order in pending_by_root.values():
+            self.request_exit_recovery(
                 plan=order.plan,
                 known_executed_quantity=order.executed_quantity,
                 state=state,
-                context=context,
             )
-            if result is not None:
-                return _exit_recovery_outcome(
-                    original_client_order_id=order.plan.client_order_id,
-                    result=result,
+        return (
+            ExitLaneOutcome(failure=f"pending_exit_order_recovery:{state.symbol}")
+            if pending_by_root
+            else None
+        )
+
+    def request_exit_recovery(
+        self,
+        *,
+        plan: OrderExecutionPlan,
+        known_executed_quantity: Decimal,
+        state: MarketState15s,
+        source_candidate: OrderIntentCandidate | None = None,
+        reference_price: Decimal | None = None,
+        recovery_entry_type: EntryType | None = None,
+        recovery_limit_price: Decimal | None = None,
+    ) -> None:
+        if self._exit_recovery_client is None:
+            return
+        root, attempt = _exit_recovery_identity(plan)
+        previous = self._requested_recoveries.get(root)
+        if previous is not None:
+            if _exit_recovery_identity(previous.plan)[1] > attempt:
+                return
+            if source_candidate is None and previous.plan == plan:
+                source_candidate = previous.source_candidate
+                recovery_entry_type = previous.recovery_entry_type
+                recovery_limit_price = previous.recovery_limit_price
+        if previous is None and len(self._requested_recoveries) >= 4096:
+            raise RuntimeError("exit recovery request capacity exhausted")
+        self._requested_recoveries[root] = _RequestedExitRecovery(
+            plan,
+            known_executed_quantity,
+            state,
+            source_candidate,
+            reference_price,
+            recovery_entry_type,
+            recovery_limit_price,
+        )
+        if previous is None or (
+            self._clock()
+            >= self._exit_recovery_next_attempt_at.get(root, self._clock())
+        ):
+            self._request_recovery()
+
+    async def recover_requested_exits(
+        self, *, limit: int = 5
+    ) -> tuple[tuple[str, ExitLaneOutcome], ...]:
+        """Run in the existing repair worker; remote inspection never owns a decision lock."""
+        outcomes = []
+        for root in tuple(self._requested_recoveries)[:limit]:
+            work = self._requested_recoveries[root]
+            try:
+                context = await self._context_provider(work.state)
+                result = await self._recover_unknown_exit(
+                    plan=work.plan,
+                    known_executed_quantity=work.known_executed_quantity,
+                    state=work.state,
+                    context=context,
+                    source_candidate=work.source_candidate,
+                    reference_price=work.reference_price,
+                    recovery_entry_type=work.recovery_entry_type,
+                    recovery_limit_price=work.recovery_limit_price,
                 )
-        # Even when the inspection is deferred, the original order is still
-        # unresolved. Do not let a normal exit evaluation create a second
-        # order while the recovery backoff is in effect.
-        return ExitLaneOutcome() if has_pending_exit else None
+            except LiveContextChangedDuringLoad:
+                continue
+            except Exception as error:
+                outcomes.append(
+                    (
+                        work.state.symbol,
+                        ExitLaneOutcome(
+                            failure=f"exit_recovery_execution_failed:{type(error).__name__}",
+                            fatal_failure=True,
+                        ),
+                    )
+                )
+                continue
+            finally:
+                # Rotate every inspected root, including failures and stale contexts.
+                latest = self._requested_recoveries.pop(root, None)
+                if latest is not None:
+                    self._requested_recoveries[root] = latest
+            if result is None:
+                continue
+            latest = self._requested_recoveries.get(root)
+            if latest is not None and latest.plan == work.plan:
+                self._requested_recoveries.pop(root)
+            outcomes.append(
+                (
+                    work.state.symbol,
+                    _exit_recovery_outcome(
+                        original_client_order_id=work.plan.client_order_id,
+                        result=result,
+                    ),
+                )
+            )
+            if (
+                result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                and result.plan is not None
+            ):
+                self.request_exit_recovery(
+                    plan=result.plan,
+                    known_executed_quantity=result.executed_quantity,
+                    state=work.state,
+                )
+        return tuple(outcomes)
 
     async def _recover_unknown_exit(
         self,
@@ -386,7 +492,12 @@ class LiveExitProcessor:
         next_attempt_at = self._exit_recovery_next_attempt_at.get(root)
         if next_attempt_at is not None and now < next_attempt_at:
             return None
-        # All production callers already own the shared symbol decision lock.
+        # Only the existing repair worker reaches remote inspection.
+        if not self._context_is_current(context):
+            return None
+        self._exit_recovery_next_attempt_at[root] = now + timedelta(
+            seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+        )
         try:
             observation = await recovery_client.inspect_exit_order(plan)
         except Exception as error:
@@ -405,6 +516,49 @@ class LiveExitProcessor:
             )
             return None
 
+        if not self._context_is_current(context):
+            return None
+        fresh_context = await self._context_provider(state)
+        if not self._context_is_current(context):
+            return None
+        lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
+        async with lock:
+            latest = self._requested_recoveries.get(root)
+            if latest is not None and latest.plan != plan:
+                return None
+            if not self._context_is_current(fresh_context):
+                return None
+            return await self._apply_exit_recovery_observation(
+                plan=plan,
+                known_executed_quantity=known_executed_quantity,
+                state=state,
+                context=fresh_context,
+                observation=observation,
+                source_candidate=source_candidate,
+                reference_price=reference_price,
+                recovery_entry_type=recovery_entry_type,
+                recovery_limit_price=recovery_limit_price,
+                root=root,
+                current_attempt=current_attempt,
+                now=now,
+            )
+
+    async def _apply_exit_recovery_observation(
+        self,
+        *,
+        plan: OrderExecutionPlan,
+        known_executed_quantity: Decimal,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+        observation: ExitRecoveryObservation,
+        source_candidate: OrderIntentCandidate | None,
+        reference_price: Decimal | None,
+        recovery_entry_type: EntryType | None,
+        recovery_limit_price: Decimal | None,
+        root: str,
+        current_attempt: int,
+        now: datetime,
+    ) -> OrderExecutionResult | None:
         observed_result: OrderExecutionResult | None = None
         if observation.order is not None:
             if not observation.order.state.terminal:
@@ -417,11 +571,17 @@ class LiveExitProcessor:
                         list(observation.active_exit_order_client_ids)
                     ),
                 )
-                return None
+                active_result = await self._state_machine.apply_observed_snapshot(
+                    plan,
+                    observation.order,
+                )
+                self._invalidate_context_cache()
+                return active_result
             observed_result = await self._state_machine.apply_observed_snapshot(
                 plan,
                 observation.order,
             )
+            self._invalidate_context_cache()
             if (
                 observation.order.state is ExchangeOrderState.FILLED
                 and observation.position_quantity <= 0
@@ -442,6 +602,7 @@ class LiveExitProcessor:
                     "observed_at": observation.observed_at.isoformat(),
                 },
             )
+            self._invalidate_context_cache()
         if observation.active_exit_order_client_ids:
             log.info(
                 "live_exit_recovery_other_exit_order_active",
@@ -471,6 +632,7 @@ class LiveExitProcessor:
                 plan,
                 details=details,
             )
+            self._invalidate_context_cache()
             self._exit_recovery_attempts.pop(root, None)
             self._exit_recovery_next_attempt_at.pop(root, None)
             return resolved
@@ -492,6 +654,11 @@ class LiveExitProcessor:
                 order_quantity=str(plan.quantity),
                 known_executed_quantity=str(known_executed_quantity),
             )
+            return observed_result
+        context, failure = await self._refresh_context_if_stale(
+            state=state, context=context
+        )
+        if failure is not None:
             return observed_result
         recovery_attempt = current_attempt + 1
         recovery_candidate = _build_exit_recovery_candidate(
@@ -527,8 +694,7 @@ class LiveExitProcessor:
             )
         except Exception as error:
             if not (
-                _is_position_readiness_guard(error)
-                or _is_missing_position_facts(error)
+                _is_position_readiness_guard(error) or _is_missing_position_facts(error)
             ):
                 raise
             # No POST passed the guard, so this did not consume a retry.
@@ -586,25 +752,29 @@ class LiveExitProcessor:
 
         if self._context_is_current(context):
             return context, None
+        return await self._load_fresh_exit_context(state=state, context=context)
+
+    async def _load_fresh_exit_context(
+        self,
+        *,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> tuple[LiveDaemonRuntimeContext, str | None]:
         self._invalidate_context_cache()
         try:
             refreshed = await self._context_provider(state)
-            self._sync_pending_entry_plans(refreshed)
-            await self._publish_managed_position_symbols(refreshed)
+            self._apply_context(refreshed)
         except asyncio.CancelledError:
             raise
+        except LiveContextChangedDuringLoad:
+            return context, f"pending_live_context:{state.symbol}"
         except Exception as error:
             return context, f"exit_context_refresh_failed:{type(error).__name__}"
-        pending_symbols = getattr(refreshed, "pending_position_symbols", ())
-        if state.symbol in pending_symbols:
-            symbols = ",".join(sorted(pending_symbols))
-            return refreshed, f"pending_live_positions:{symbols}"
-        unmanaged_symbols = getattr(refreshed, "unmanaged_position_symbols", ())
-        if state.symbol in unmanaged_symbols:
-            symbols = ",".join(sorted(unmanaged_symbols))
-            return refreshed, f"unmanaged_live_positions:{symbols}"
+        failure = exit_position_block_reason(refreshed, state.symbol)
+        if failure is not None:
+            return refreshed, failure
         if not self._context_is_current(refreshed):
-            return refreshed, "exit_context_stale"
+            return refreshed, f"pending_live_context:{state.symbol}"
         return refreshed, None
 
     async def _execute_exit_submission(
@@ -681,7 +851,7 @@ class LiveExitProcessor:
             )
             if failure is not None:
                 return None, context, failure
-        return None, context, "exit_context_stale"
+        return None, context, f"pending_live_context:{state.symbol}"
 
     async def process_requests(
         self,
@@ -729,30 +899,26 @@ class LiveExitProcessor:
                     is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                 ):
                     if cancel_result.plan is not None:
-                        recovery_result = await self._recover_unknown_exit(
+                        self.request_exit_recovery(
                             plan=cancel_result.plan,
                             known_executed_quantity=cancel_result.executed_quantity,
                             source_candidate=request.fallback_candidate,
                             state=state,
-                            context=context,
                             reference_price=reference_price,
                             recovery_entry_type=request.fallback_candidate.entry_type,
                             recovery_limit_price=request.fallback_candidate.limit_price,
                         )
-                        if (
-                            recovery_result is not None
-                            and recovery_result.client_order_id
-                            != cancel_result.client_order_id
-                        ):
-                            approved += 1
-                            submitted += int(not recovery_result.suppressed)
                     log.warning(
                         "live_cancel_outcome_pending_reconciliation",
                         run_id=self._config.run_id,
                         symbol=request.cancel_plan.symbol,
                         client_order_id=request.cancel_plan.client_order_id,
                     )
-                    return approved, submitted, None
+                    return (
+                        approved,
+                        submitted,
+                        f"pending_exit_order_recovery:{state.symbol}",
+                    )
                 if not cancel_result.state.terminal:
                     return approved, submitted, "cancel_not_confirmed"
                 if cancel_result.state is ExchangeOrderState.REJECTED:
@@ -762,24 +928,12 @@ class LiveExitProcessor:
                     # is gone.  Refresh the account view before submitting a
                     # market fallback so a late fill cannot make us reuse
                     # the stale planned quantity.
-                    self._invalidate_context_cache()
-                    context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
-                    if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(sorted(context.pending_position_symbols))
-                        return (
-                            approved,
-                            submitted,
-                            (f"pending_live_positions:{symbols}"),
-                        )
-                    if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(sorted(context.unmanaged_position_symbols))
-                        return (
-                            approved,
-                            submitted,
-                            (f"unmanaged_live_positions:{symbols}"),
-                        )
+                    context, failure = await self._load_fresh_exit_context(
+                        state=state,
+                        context=context,
+                    )
+                    if failure is not None:
+                        return approved, submitted, failure
                 remaining = max(
                     Decimal("0"),
                     request.cancel_plan.quantity - cancel_result.executed_quantity,
@@ -791,24 +945,12 @@ class LiveExitProcessor:
                     # freshly loaded position after canceling the recovery
                     # order.  The recovery order may have partially filled or
                     # been filled while the cancel request was in flight.
-                    self._invalidate_context_cache()
-                    context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
-                    if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(sorted(context.pending_position_symbols))
-                        return (
-                            approved,
-                            submitted,
-                            (f"pending_live_positions:{symbols}"),
-                        )
-                    if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(sorted(context.unmanaged_position_symbols))
-                        return (
-                            approved,
-                            submitted,
-                            (f"unmanaged_live_positions:{symbols}"),
-                        )
+                    context, failure = await self._load_fresh_exit_context(
+                        state=state,
+                        context=context,
+                    )
+                    if failure is not None:
+                        return approved, submitted, failure
                 current_position_quantity = next(
                     (
                         position.quantity
@@ -881,28 +1023,24 @@ class LiveExitProcessor:
                 submitted += int(not result.suppressed)
                 if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
                     if result.plan is not None:
-                        recovery_result = await self._recover_unknown_exit(
+                        self.request_exit_recovery(
                             plan=result.plan,
                             known_executed_quantity=result.executed_quantity,
                             source_candidate=fallback_candidate,
                             state=state,
-                            context=context,
                             reference_price=reference_price,
                         )
-                        if (
-                            recovery_result is not None
-                            and recovery_result.client_order_id
-                            != result.client_order_id
-                        ):
-                            approved += 1
-                            submitted += int(not recovery_result.suppressed)
                     log.warning(
                         "live_exit_outcome_pending_reconciliation",
                         run_id=self._config.run_id,
                         symbol=request.fallback_candidate.symbol,
                         client_order_id=result.client_order_id,
                     )
-                    return approved, submitted, None
+                    return (
+                        approved,
+                        submitted,
+                        f"pending_exit_order_recovery:{state.symbol}",
+                    )
                 if result.state is ExchangeOrderState.REJECTED:
                     return approved, submitted, "grace_timeout_market_close_rejected"
                 continue
@@ -922,27 +1060,24 @@ class LiveExitProcessor:
             submitted += int(not result.suppressed)
             if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
                 if result.plan is not None:
-                    recovery_result = await self._recover_unknown_exit(
+                    self.request_exit_recovery(
                         plan=result.plan,
                         known_executed_quantity=result.executed_quantity,
                         source_candidate=request.candidate,
                         state=state,
-                        context=context,
                         reference_price=reference_price,
                     )
-                    if (
-                        recovery_result is not None
-                        and recovery_result.client_order_id != result.client_order_id
-                    ):
-                        approved += 1
-                        submitted += int(not recovery_result.suppressed)
                 log.warning(
                     "live_exit_outcome_pending_reconciliation",
                     run_id=self._config.run_id,
                     symbol=request.candidate.symbol,
                     client_order_id=result.client_order_id,
                 )
-                return approved, submitted, None
+                return (
+                    approved,
+                    submitted,
+                    f"pending_exit_order_recovery:{state.symbol}",
+                )
         return approved, submitted, None
 
 

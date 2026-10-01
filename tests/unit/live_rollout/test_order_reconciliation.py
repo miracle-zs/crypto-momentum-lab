@@ -560,3 +560,54 @@ async def test_failed_exit_recovery_does_not_kill_existing_worker():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_position_repair_failure_does_not_skip_order_or_exit_recovery():
+    completed = asyncio.Event()
+    calls = []
+
+    async def positions():
+        calls.append("positions")
+        raise OSError("repair database failed")
+
+    async def orders(run):
+        calls.append("orders")
+        return ()
+
+    async def exits():
+        calls.append("exits")
+        completed.set()
+
+    worker = LiveOrderReconciliation(order_repository=SimpleNamespace(load_unresolved_orders=orders),
+        state_machine=object(), run_id="run-1", repair_positions=positions, recover_exits=exits)
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_periodically())
+    try:
+        await asyncio.wait_for(completed.wait(), 1)
+        assert calls == ["positions", "orders", "exits"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_unknown_exit_routes_once_without_duplicate_generic_query(accepted):
+    from unittest.mock import AsyncMock
+
+    unknown = SimpleNamespace(plan=SimpleNamespace(reduce_only=True, client_order_id="exit"),
+                              state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION)
+    entry = SimpleNamespace(plan=SimpleNamespace(reduce_only=False, client_order_id="entry"),
+                            state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION)
+    routed = []
+    async def orders(run):
+        return (unknown, entry)
+    def route(order):
+        routed.append(order)
+        return accepted
+    machine = SimpleNamespace(reconcile_order=AsyncMock())
+    worker = LiveOrderReconciliation(order_repository=SimpleNamespace(load_unresolved_orders=orders),
+        state_machine=machine, run_id="run-1", request_unknown_exit=route)
+    await worker.reconcile_all()
+    assert routed == [unknown]
+    assert machine.reconcile_order.await_count == (1 if accepted else 2)
+    assert machine.reconcile_order.await_args_list[-1].args == (entry.plan,)

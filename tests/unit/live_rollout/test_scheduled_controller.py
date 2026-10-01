@@ -70,7 +70,7 @@ async def test_scheduled_controller_reports_pending_during_startup_market_wait()
             ),
         )
 
-    async def dummy_publish(_context):
+    def dummy_publish(_context):
         pass
 
     class DummyExitManager:
@@ -85,8 +85,7 @@ async def test_scheduled_controller_reports_pending_during_startup_market_wait()
         exit_manager=cast(object, DummyExitManager()),
         state_machine=None,
         context_provider=dummy_context,
-        sync_pending_entry_plans=lambda _: None,
-        publish_managed_position_symbols=dummy_publish,
+        apply_context=dummy_publish,
         invalidate_context_cache=lambda: None,
         process_exit_requests=cast(object, None),
         set_entry_blocked=lambda _b, **_kw: None,
@@ -124,7 +123,7 @@ async def test_scheduled_controller_reports_error_when_market_wait_times_out() -
             ),
         )
 
-    async def dummy_publish(_context):
+    def dummy_publish(_context):
         pass
 
     class DummyExitManager:
@@ -139,8 +138,7 @@ async def test_scheduled_controller_reports_error_when_market_wait_times_out() -
         exit_manager=cast(object, DummyExitManager()),
         state_machine=None,
         context_provider=dummy_context,
-        sync_pending_entry_plans=lambda _: None,
-        publish_managed_position_symbols=dummy_publish,
+        apply_context=dummy_publish,
         invalidate_context_cache=lambda: None,
         process_exit_requests=cast(object, None),
         set_entry_blocked=lambda _b, **_kw: None,
@@ -176,7 +174,7 @@ async def test_scheduled_controller_completes_flatten_after_market_state_arrives
             ),
         )
 
-    async def dummy_publish(_context):
+    def dummy_publish(_context):
         pass
 
     class DummyExitManager:
@@ -191,8 +189,7 @@ async def test_scheduled_controller_completes_flatten_after_market_state_arrives
         exit_manager=cast(object, DummyExitManager()),
         state_machine=None,
         context_provider=dummy_context,
-        sync_pending_entry_plans=lambda _: None,
-        publish_managed_position_symbols=dummy_publish,
+        apply_context=dummy_publish,
         invalidate_context_cache=lambda: None,
         process_exit_requests=cast(object, None),
         set_entry_blocked=lambda _b, **_kw: None,
@@ -241,8 +238,7 @@ async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> 
         exit_manager=None,
         state_machine=Canceller(),
         context_provider=None,
-        sync_pending_entry_plans=lambda context: None,
-        publish_managed_position_symbols=None,
+        apply_context=None,
         invalidate_context_cache=lambda: None,
         process_exit_requests=None,
         set_entry_blocked=lambda blocked, **kwargs: None,

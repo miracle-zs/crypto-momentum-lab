@@ -40,7 +40,7 @@ def test_is_context_current_rejects_missing_realtime_snapshot_when_active() -> N
     # When realtime account sequence is > 0, missing snapshot MUST be
     # marked stale (False)
     assert (
-        provider.is_context_current(
+        provider.is_current(
             context_without_snapshot  # type: ignore[arg-type]
         )
         is False
@@ -58,7 +58,7 @@ def test_is_context_current_rejects_mismatched_cache_epoch() -> None:
     )
 
     assert (
-        provider.is_context_current(
+        provider.is_current(
             stale_context  # type: ignore[arg-type]
         )
         is False
@@ -78,7 +78,7 @@ def test_is_context_current_accepts_matching_realtime_snapshot() -> None:
     )
 
     assert (
-        provider.is_context_current(
+        provider.is_current(
             fresh_context  # type: ignore[arg-type]
         )
         is True

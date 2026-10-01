@@ -73,13 +73,10 @@ class LiveMarketLoop:
         context_prefetcher: LiveContextPrefetcher,
         runtime_cache: LiveRuntimeCacheMaintenance,
         scheduled_controller: ScheduledRiskWindowController,
-        scheduled_risk_window_enabled: bool,
         telemetry: LiveTelemetrySink | None,
         exit_lane: ExitExecutionLane,
         exit_manager: LiveExitManager | None,
         exit_enabled: Callable[[], bool],
-        reconcile_orders: Callable[[], Awaitable[None]] | None,
-        reconcile_once_per_bucket: bool,
         market_admission: LiveMarketStateAdmission,
         checkpoint_coordinator: LiveCheckpointCoordinator,
         entry_lane: EntryExecutionLane,
@@ -108,13 +105,10 @@ class LiveMarketLoop:
         self._context_prefetcher = context_prefetcher
         self._runtime_cache = runtime_cache
         self._scheduled_controller = scheduled_controller
-        self._scheduled_risk_window_enabled = scheduled_risk_window_enabled
         self._telemetry = telemetry
         self._exit_lane = exit_lane
         self._exit_manager = exit_manager
         self._exit_enabled = exit_enabled
-        self._reconcile_orders = reconcile_orders
-        self._reconcile_once_per_bucket = reconcile_once_per_bucket
         self._market_admission = market_admission
         self._checkpoint_coordinator = checkpoint_coordinator
         self._entry_lane = entry_lane
@@ -178,7 +172,6 @@ class LiveMarketLoop:
         self._entry_lane.reset()
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
-        last_reconciled_bucket: datetime | None = None
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
         state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
         async for prefetched in prefetched_states:
@@ -266,19 +259,6 @@ class LiveMarketLoop:
                 active_symbols=self._entry_lane.entry_symbols,
             )
             self._scheduled_controller.observe_state(state)
-            if self._scheduled_risk_window_enabled:
-                try:
-                    await self._scheduled_controller.process(now=self._clock())
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    # The independent wall-clock task retries this control
-                    # path; the schedule gate remains fail-closed meanwhile.
-                    log.exception(
-                        "live_inline_scheduled_risk_window_failed",
-                        run_id=self._run_id,
-                        error_type=type(error).__name__,
-                    )
             if self._telemetry is not None:
                 await self._telemetry.market_state_received(
                     state,
@@ -306,33 +286,6 @@ class LiveMarketLoop:
                     exit_lane_failure,
                     final_state_at,
                 )
-            if self._reconcile_orders is not None and (
-                not self._reconcile_once_per_bucket
-                or last_reconciled_bucket != state.bucket_start
-            ):
-                try:
-                    await self._reconcile_orders()
-                    last_reconciled_bucket = state.bucket_start
-                except Exception as error:
-                    if runtime_errors.is_transient_runtime_error(error):
-                        # Reconciliation is an eventual-consistency safety
-                        # net. A temporary database outage must not tear down
-                        # the live process; the next bucket retries it.
-                        last_reconciled_bucket = state.bucket_start
-                        log.warning(
-                            "live_order_reconciliation_degraded",
-                            run_id=self._run_id,
-                            error_type=type(error).__name__,
-                        )
-                        continue
-                    await self._checkpoint_coordinator.save_final()
-                    return market_runtime_contracts.LiveDaemonResult(
-                        processed,
-                        approved,
-                        submitted,
-                        f"order_reconciliation_failed:{type(error).__name__}",
-                        final_state_at,
-                    )
             gap_generation = self._market_gap_generation
             if gap_generation > self._strategy_gap_reset_generation_by_symbol.get(
                 state.symbol,

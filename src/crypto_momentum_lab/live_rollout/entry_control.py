@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
+from datetime import UTC, datetime
 
 import structlog
+
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 
 log = structlog.get_logger()
 
@@ -12,11 +17,20 @@ log = structlog.get_logger()
 class LiveEntryControlGate:
     """Own prerequisite, risk, schedule, and position-sync entry gates."""
 
-    def __init__(self, *, run_id: str, state_machine: object) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        state_machine: object,
+        scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
         self._run_id = run_id
         self._state_machine = state_machine
+        self._schedule = scheduled_risk_window
+        self._clock = clock
         self._entry_enabled = True
         self._entry_enabled_reason = "initializing"
         self._risk_control_entry_blocked = False
@@ -33,6 +47,7 @@ class LiveEntryControlGate:
             self._entry_enabled
             and not self._risk_control_entry_blocked
             and not self._scheduled_entry_blocked
+            and self._outside_scheduled_window()
             and not self._pending_position_symbols
             and not self._exit_failure_by_symbol
         )
@@ -43,6 +58,8 @@ class LiveEntryControlGate:
             return self._risk_control_entry_block_reason
         if self._scheduled_entry_blocked:
             return self._scheduled_entry_block_reason
+        if not self._outside_scheduled_window():
+            return "scheduled_risk_window"
         if self._pending_position_symbols:
             symbols = ",".join(sorted(self._pending_position_symbols))
             return f"account_position_sync_pending:{symbols}"
@@ -50,6 +67,10 @@ class LiveEntryControlGate:
             symbol, failure = next(iter(self._exit_failure_by_symbol.items()))
             return f"exit_failure:{symbol}:{failure}"
         return self._entry_enabled_reason
+
+    def _outside_scheduled_window(self) -> bool:
+        # This read is synchronous even when cancellation/verification awaits I/O.
+        return self._schedule is None or self._schedule.is_entry_allowed(self._clock())
 
     def set_pending_position_symbols(
         self,

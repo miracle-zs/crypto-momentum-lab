@@ -580,3 +580,33 @@ async def test_submission_entry_trade_command_carries_projection_version() -> No
     )
     assert command is not None
     assert command.expected_projection_version == "pv_entry_token_123"
+
+
+async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts():
+    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
+    from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+        ScheduledRiskWindowConfig,
+    )
+
+    current = [datetime(2026, 7, 3, 23, 44, 59, tzinfo=UTC)]
+    repository = RecordingPreparedRepository()
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=object(),
+        scheduled_risk_window=ScheduledRiskWindowConfig(), clock=lambda: current[0])
+
+    class BoundaryCoordinator:
+        async def prepare_and_execute(self, plan, *, prepare_submission):
+            assert gate.entry_enabled
+            current[0] += timedelta(seconds=1)  # The serialized submit wait crosses 07:45.
+            prepared = await prepare_submission()
+            assert prepared is None
+            return None
+
+    submission = _submission(repository=repository, state_machine=BoundaryCoordinator())
+    submission._entry_enabled = lambda: gate.entry_enabled
+    submission._entry_enabled_reason = lambda: gate.entry_enabled_reason
+    result = await submission.execute(
+        replace(_intent(), desired_notional=Decimal("20")), requested_quantity=None,
+        state=_state(), context=_runtime_context())
+    assert result is None
+    assert not repository.prepare_calls
+    assert repository.saved_intents == 0

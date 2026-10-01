@@ -17,6 +17,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
 from crypto_momentum_lab.live_rollout.context import (
+    LiveContextChangedDuringLoad,
     LiveContextProvider,
     LiveDaemonRuntimeContext,
 )
@@ -96,7 +97,13 @@ def _acknowledged_result(*, suppressed: bool = False) -> OrderExecutionResult:
 
 
 def _context() -> LiveDaemonRuntimeContext:
-    return cast(LiveDaemonRuntimeContext, SimpleNamespace())
+    return cast(
+        LiveDaemonRuntimeContext,
+        SimpleNamespace(
+            pending_position_symbols=frozenset(),
+            unmanaged_position_symbols=frozenset(),
+        ),
+    )
 
 
 def _processor(
@@ -107,7 +114,7 @@ def _processor(
     async def provide_context(_state: MarketState15s) -> LiveDaemonRuntimeContext:
         return _context()
 
-    async def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
+    def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
         return None
 
     return LiveExitProcessor(
@@ -120,8 +127,7 @@ def _processor(
         clock=lambda: NOW,
         is_exit_enabled=lambda: True,
         context_provider=cast(LiveContextProvider, provide_context),
-        sync_pending_entry_plans=lambda _context: None,
-        publish_managed_position_symbols=publish_positions,
+        apply_context=publish_positions,
         invalidate_context_cache=lambda: None,
         context_is_current=context_is_current,
     )
@@ -215,7 +221,7 @@ async def test_process_requests_retries_when_context_is_fenced_during_submission
         current[0] = True
         return _context()
 
-    async def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
+    def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
         return None
 
     processor = LiveExitProcessor(
@@ -228,8 +234,7 @@ async def test_process_requests_retries_when_context_is_fenced_during_submission
         clock=lambda: NOW,
         is_exit_enabled=lambda: True,
         context_provider=cast(LiveContextProvider, provide_context),
-        sync_pending_entry_plans=lambda _context: None,
-        publish_managed_position_symbols=publish_positions,
+        apply_context=publish_positions,
         invalidate_context_cache=lambda: None,
         context_is_current=lambda _context: current[0],
     )
@@ -506,7 +511,7 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
     backend.submit.assert_not_called()
 
 
-async def test_state_and_quote_recovery_share_one_decision_lock_and_budget():
+async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query():
     started = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -527,25 +532,30 @@ async def test_state_and_quote_recovery_share_one_decision_lock_and_budget():
         raise TimeoutError("unknown exchange receipt")
 
     processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
-    first = asyncio.create_task(processor.process_state(state, context))
-    second = None
+    processor._context_provider = lambda state: _provide(context)
+    first_outcome = await processor.process_state(state, context)
+    assert first_outcome.failure == f"pending_exit_order_recovery:{state.symbol}"
+    assert not calls
+    worker = asyncio.create_task(processor.recover_requested_exits())
     try:
         await asyncio.wait_for(started.wait(), 1)
-        second = asyncio.create_task(processor.process_quote(
-            SimpleNamespace(symbol=state.symbol), state, context))
-        await asyncio.sleep(0)
+        outcome = await asyncio.wait_for(processor.process_quote(
+            SimpleNamespace(symbol=state.symbol), state, context), 0.5)
+        assert outcome.failure == f"pending_exit_order_recovery:{state.symbol}"
+        assert not processor._exit_symbol_locks[state.symbol].locked()
         assert calls == ["unknown-exit"]
-        assert not second.done()
         release.set()
-        outcomes = await asyncio.wait_for(asyncio.gather(first, second), 1)
+        await asyncio.wait_for(worker, 1)
+        await processor.recover_requested_exits()
         assert calls == ["unknown-exit"]
-        assert all(o.submitted_order_count == 0 for o in outcomes)
     finally:
         release.set()
-        first.cancel()
-        if second is not None:
-            second.cancel()
-        await asyncio.gather(first, *([] if second is None else [second]), return_exceptions=True)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+async def _provide(context):
+    return context
 
 
 async def test_candle_recovery_does_not_confirm_unevaluated_closing_event():
@@ -567,3 +577,158 @@ async def test_candle_recovery_does_not_confirm_unevaluated_closing_event():
     outcome = await processor.process_closed_candle(event, state, context, None)
     assert outcome.failure == f"pending_exit_order_recovery:{event.candle.symbol}"
     processor._exit_manager.requests_for_closed_candle.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error,expected", [
+    (LiveContextChangedDuringLoad("facts advanced"), "pending_live_context:BTCUSDT"),
+    (RuntimeError("database failed"), "exit_context_refresh_failed:RuntimeError"),
+])
+async def test_context_refresh_distinguishes_fact_advance_from_failure(error, expected):
+    submission = RecordingSubmission(_acknowledged_result())
+    processor = _processor(submission, context_is_current=lambda _: False)
+
+    async def load(state):
+        raise error
+
+    processor._context_provider = load
+    candidate = replace(_intent(), reduce_only=True)
+    result = await processor.process_requests(
+        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
+        state=_state(), context=_context(),
+    )
+    assert result == (0, 0, expected)
+    assert submission.calls == []
+
+
+async def test_cancel_fallback_waits_for_fresh_context_without_submitting():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.live_rollout.exits import LiveExitCancellationRequest
+
+    submission = RecordingSubmission(_acknowledged_result())
+    processor = _processor(submission)
+    processor._state_machine = SimpleNamespace(cancel_order=AsyncMock(
+        return_value=OrderExecutionResult("original", ExchangeOrderState.CANCELED, None)))
+
+    async def load(state):
+        raise LiveContextChangedDuringLoad("facts advanced")
+
+    processor._context_provider = load
+    plan = OrderExecutionPlan("exit", "run-1", "original", "BTCUSDT", "SELL",
+        "LIMIT", Decimal("0.001"), Decimal("100"), True, NOW)
+    request = LiveExitCancellationRequest(
+        cancel_plan=plan, fallback_candidate=replace(_intent(), reduce_only=True),
+        fallback_quantity=Decimal("0.001"), fallback_to_current_position=True)
+    result = await processor.process_requests((request,), state=_state(), context=_context())
+    assert result == (0, 0, "pending_live_context:BTCUSDT")
+    processor._state_machine.cancel_order.assert_awaited_once()
+    assert submission.calls == []
+
+
+async def test_stale_candle_context_is_not_acknowledged_as_evaluated():
+    from unittest.mock import AsyncMock
+
+    processor = _processor(RecordingSubmission(None), context_is_current=lambda _: False)
+    processor._exit_manager = SimpleNamespace(requests_for_closed_candle=AsyncMock())
+    event = SimpleNamespace(candle=SimpleNamespace(symbol="BTCUSDT"), received_at=NOW)
+    outcome = await processor.process_closed_candle(event, _state(), _context(), None)
+    assert outcome.failure == "pending_live_context:BTCUSDT"
+    assert not outcome.fatal_failure
+    processor._exit_manager.requests_for_closed_candle.assert_not_awaited()
+
+
+async def test_receipt_read_invalidated_by_account_update_does_not_commit_or_submit():
+    from unittest.mock import AsyncMock
+
+    current = [True]
+    processor = _processor(RecordingSubmission(_acknowledged_result()),
+                           context_is_current=lambda context: current[0])
+    processor._state_machine = SimpleNamespace(mark_absent_reconciled=AsyncMock(),
+                                               apply_observed_snapshot=AsyncMock())
+    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True, client_order_id="exit",
+                           intent_id="exit", position_side=SimpleNamespace(value="LONG"))
+    async def inspect(plan):
+        current[0] = False
+        return SimpleNamespace(order=None, position_quantity=Decimal("1"),
+                               active_exit_order_client_ids=(), observed_at=NOW)
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
+    result = await processor._recover_unknown_exit(plan=plan,
+        known_executed_quantity=Decimal("0"), state=_state(), context=_context())
+    assert result is None
+    processor._state_machine.mark_absent_reconciled.assert_not_awaited()
+    processor._state_machine.apply_observed_snapshot.assert_not_awaited()
+    assert not processor._submission.calls
+
+
+async def test_recovery_batch_rotates_stale_reads_without_starving_later_orders():
+    processor = _processor(RecordingSubmission(None))
+    processor._exit_recovery_client = object()
+    reads = []
+    async def load(state):
+        reads.append(state.symbol)
+        raise LiveContextChangedDuringLoad("account advanced")
+    processor._context_provider = load
+    for i in range(6):
+        state = replace(_state(), symbol=f"SYMBOL{i}USDT")
+        processor.request_exit_recovery(plan=SimpleNamespace(symbol=state.symbol,
+            reduce_only=True, client_order_id=f"exit-{i}", intent_id=f"exit-{i}"),
+            known_executed_quantity=Decimal("0"), state=state)
+    await processor.recover_requested_exits()
+    await processor.recover_requested_exits()
+    assert reads[:5] == [f"SYMBOL{i}USDT" for i in range(5)]
+    assert reads[5] == "SYMBOL5USDT"
+
+
+async def test_latest_trigger_during_inspection_does_not_repeat_completed_recovery():
+    from unittest.mock import AsyncMock
+
+    processor = _processor(RecordingSubmission(None))
+    processor._exit_recovery_client = object()
+    state = _state()
+    plan = SimpleNamespace(symbol=state.symbol, client_order_id="exit", intent_id="exit")
+    processor.request_exit_recovery(plan=plan, known_executed_quantity=Decimal("0"), state=state)
+    async def recover(**kwargs):
+        processor.request_exit_recovery(plan=plan, known_executed_quantity=Decimal("0"), state=state)
+        return OrderExecutionResult("exit", ExchangeOrderState.ABSENT_RECONCILED, None)
+    processor._recover_unknown_exit = AsyncMock(side_effect=recover)
+    assert len(await processor.recover_requested_exits()) == 1
+    assert await processor.recover_requested_exits() == ()
+    processor._recover_unknown_exit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("attempt", [3, 4])
+async def test_durable_recovery_attempt_identity_preserves_budget_after_restart(attempt):
+    from unittest.mock import AsyncMock
+
+    processor = _processor(RecordingSubmission(None))  # No in-memory attempt history.
+    inspector = AsyncMock()
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspector)
+    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True,
+        client_order_id="persisted-recovery", intent_id=f"live-exit-recovery-original-{attempt}",
+        position_side=SimpleNamespace(value="LONG"))
+    result = await processor._recover_unknown_exit(plan=plan,
+        known_executed_quantity=Decimal("0.2"), state=_state(), context=_context())
+    assert result is None
+    inspector.assert_not_awaited()
+    assert not processor._submission.calls
+
+
+async def test_committed_flat_receipt_invalidates_context_without_replacement():
+    from unittest.mock import AsyncMock, Mock
+
+    processor = _processor(RecordingSubmission(None))
+    invalidate = Mock()
+    processor._invalidate_context_cache = invalidate
+    result = OrderExecutionResult("exit", ExchangeOrderState.ABSENT_RECONCILED, None)
+    processor._state_machine = SimpleNamespace(mark_absent_reconciled=AsyncMock(return_value=result))
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=AsyncMock(return_value=SimpleNamespace(
+        order=None, position_quantity=Decimal("0"), active_exit_order_client_ids=(), observed_at=NOW)))
+    processor._context_provider = lambda state: _provide(_context())
+    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True, client_order_id="exit",
+        intent_id="exit", position_side=SimpleNamespace(value="LONG"))
+    observed = await processor._recover_unknown_exit(plan=plan,
+        known_executed_quantity=Decimal("0"), state=_state(), context=_context())
+    assert observed == result
+    invalidate.assert_called_once()
+    assert not processor._submission.calls

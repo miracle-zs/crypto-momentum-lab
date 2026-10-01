@@ -70,7 +70,7 @@ class ScheduledEntryGate(Protocol):
 
 
 class ScheduledContextPublisher(Protocol):
-    async def __call__(self, context: LiveDaemonRuntimeContext) -> None: ...
+    def __call__(self, context: LiveDaemonRuntimeContext) -> None: ...
 
 
 class ScheduledExitRequestProcessor(Protocol):
@@ -105,8 +105,7 @@ class ScheduledRiskWindowController:
         exit_manager: ScheduledFlattenPlanner | None,
         state_machine: ScheduledOrderCanceller,
         context_provider: LiveContextProvider,
-        sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
-        publish_managed_position_symbols: ScheduledContextPublisher,
+        apply_context: ScheduledContextPublisher,
         invalidate_context_cache: Callable[[], None],
         process_exit_requests: ScheduledExitRequestProcessor,
         set_entry_blocked: ScheduledEntryGate,
@@ -128,8 +127,7 @@ class ScheduledRiskWindowController:
         self._state_machine = state_machine
         self._wait_for_entry_submissions_idle = wait_for_entry_submissions_idle
         self._context_provider = context_provider
-        self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._publish_managed_position_symbols = publish_managed_position_symbols
+        self._apply_context = apply_context
         self._invalidate_context_cache = invalidate_context_cache
         self._process_exit_requests = process_exit_requests
         self._set_entry_blocked = set_entry_blocked
@@ -390,8 +388,9 @@ class ScheduledRiskWindowController:
         if state is not None:
             try:
                 self._invalidate_context_cache()
+                # Cancellation collects durable orders plus local reservations;
+                # it does not need to publish the decision view or await subscriptions.
                 context = await self._context_provider(state)
-                self._sync_pending_entry_plans(context)
             except Exception as error:
                 if self._cancel_unfilled_entry_orders is None:
                     return (
@@ -508,8 +507,7 @@ class ScheduledRiskWindowController:
         for state in states:
             try:
                 context = await self._context_provider(state)
-                self._sync_pending_entry_plans(context)
-                await self._publish_managed_position_symbols(context)
+                self._apply_context(context)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -591,8 +589,7 @@ class ScheduledRiskWindowController:
                 self._invalidate_context_cache()
                 try:
                     context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
+                    self._apply_context(context)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:

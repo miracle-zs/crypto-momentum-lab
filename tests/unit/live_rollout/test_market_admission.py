@@ -15,11 +15,10 @@ def test_invalidation_uses_only_explicit_callback(enabled: bool) -> None:
 
     admission = LiveMarketStateAdmission(
         context_provider=SimpleNamespace(
-            invalidate_cache=unexpected, invalidate=unexpected
+            invalidate=unexpected
         ),
         context_generation=lambda: 0,
-        sync_pending_entry_plans=lambda context: None,
-        publish_managed_position_symbols=SimpleNamespace(),
+        apply_context=SimpleNamespace(),
         telemetry=None,
         clock=lambda: datetime.now(tz=UTC),
         invalidate_context=(lambda: calls.append("invalidate")) if enabled else None,

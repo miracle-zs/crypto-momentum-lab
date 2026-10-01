@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -36,9 +36,8 @@ class LiveMarketStateAdmission:
         *,
         context_provider: LiveContextProvider,
         context_generation: Callable[[], int],
-        sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
-        publish_managed_position_symbols: Callable[
-            [LiveDaemonRuntimeContext], Awaitable[None]
+        apply_context: Callable[
+            [LiveDaemonRuntimeContext], None
         ],
         telemetry: MarketAdmissionSink | None,
         clock: Callable[[], datetime],
@@ -46,8 +45,7 @@ class LiveMarketStateAdmission:
     ) -> None:
         self._context_provider = context_provider
         self._context_generation = context_generation
-        self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._publish_managed_position_symbols = publish_managed_position_symbols
+        self._apply_context = apply_context
         self._telemetry = telemetry
         self._clock = clock
         self._invalidate_context = invalidate_context
@@ -82,7 +80,7 @@ class LiveMarketStateAdmission:
                 error=error,
             )
 
-        self._sync_pending_entry_plans(context)
+        self._apply_context(context)
         if self._telemetry is not None:
             await self._telemetry.context_ready(
                 prefetched.state,
@@ -90,7 +88,6 @@ class LiveMarketStateAdmission:
                 prefetched=not context_reloaded,
                 reloaded=context_reloaded,
             )
-        await self._publish_managed_position_symbols(context)
         gate = evaluate_live_gate(
             replace(
                 context.gate_context,

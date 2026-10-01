@@ -1249,7 +1249,7 @@ def test_context_invalidation_preserves_symbol_rules() -> None:
     provider._cached_rules = {"BTCUSDT": expected}
     provider._cached_rules_at = {"BTCUSDT": NOW}
 
-    provider.invalidate_cache()
+    provider.invalidate()
 
     assert provider._cache_epoch == 4
     assert provider._cached_context is None
@@ -1520,7 +1520,7 @@ async def test_context_reload_survives_cache_invalidation_during_rule_load(
         nonlocal rule_loads
         rule_loads += 1
         if rule_loads == 1:
-            provider.invalidate_cache()
+            provider.invalidate()
         return cached.trading_rules["BTCUSDT"]
 
     async def load_positions():
@@ -2047,7 +2047,6 @@ async def testload_order_identity_metadata_dual_track_query() -> None:
 async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
     monkeypatch,
 ) -> None:
-    from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
@@ -2089,11 +2088,7 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
         )
     )
     book = ExecutionBook(books_by_key={key.canonical_id: PositionBook(journal)})
-    repair = AsyncMock(return_value=False)
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.postgres_runtime.auto_heal_unmanaged_position",
-        repair,
-    )
+    repair_requests = []
 
     class Sessions:
         async def __aenter__(self):
@@ -2109,6 +2104,7 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
     provider._account_label = "primary"
     provider._execution_book = book
     provider._sessions = Sessions()
+    provider._request_position_repair = repair_requests.append
     context = replace(
         _runtime_context(),
         now=fill_at,
@@ -2123,7 +2119,7 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
         assert len(result.managed_positions) == 1
         assert result.managed_positions[0].quantity == Decimal("0.5")
         assert result.unmanaged_position_symbols == frozenset()
-    repair.assert_not_awaited()
+    assert all(not request.unmanaged_position_symbols for request in repair_requests)
     # Current operational classification must not change historical decision
     # reads or let a future fill leak into an earlier frozen decision.
     historical = await book.list_position_views(
@@ -2172,3 +2168,31 @@ async def test_unknown_account_exposure_does_not_authorize_book_actions(operatio
         await provider._observe_book_drift(book=provider._execution_book, context=context)
     assert not hasattr(provider, "_last_book_drift_scan_at")
     assert not hasattr(provider, "_reported_stale_book_symbols")
+
+
+async def test_context_read_only_requests_repair_without_entering_transaction():
+    from unittest.mock import AsyncMock
+
+    requests = []
+    writes = []
+
+    class Uow:
+        def transaction(self, key):
+            writes.append(key)
+            raise AssertionError("context reads must not open repair transactions")
+
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._run_id = "run-1"
+    provider._position_repair_uow = Uow()
+    provider._execution_book = SimpleNamespace(
+        list_position_views=AsyncMock(return_value=()),
+        get_active_stream=lambda environment, account: ("account_event_hub", "epoch"))
+    provider._request_position_repair = requests.append
+    provider._observe_book_drift = AsyncMock()
+    context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(_position(),)))
+    result = await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
+    assert not writes
+    assert result.unmanaged_position_symbols == frozenset({"BTCUSDT"})
+    assert requests == [result]

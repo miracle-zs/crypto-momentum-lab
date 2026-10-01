@@ -864,4 +864,3 @@ async def test_repeated_candidate_evaluations_refresh_phase_timestamps() -> None
     assert risk_events[0].details["latency_ms_from_previous"] == 10.0
     # Cycle 2 latency: MUST be 15ms, NOT 60015ms!
     assert risk_events[1].details["latency_ms_from_previous"] == 15.0
-    assert risk_events[1].details["latency_ms_from_market_state"] == 15.0

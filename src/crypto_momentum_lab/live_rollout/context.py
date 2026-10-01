@@ -42,6 +42,10 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 
 
+class LiveContextChangedDuringLoad(RuntimeError):
+    """Facts advanced during reading; no stable decision context was produced."""
+
+
 @dataclass(frozen=True, slots=True)
 class LiveEntryFilterContext:
     """Entry-side market context used by the live EMA filters."""
@@ -95,6 +99,19 @@ class LiveDaemonRuntimeContext:
     coverage_by_symbol: Mapping[str, CoverageEvidence] = field(default_factory=dict)
 
 
+def exit_position_block_reason(
+    context: LiveDaemonRuntimeContext, symbol: str
+) -> str | None:
+    """Report position facts that block exit evaluation for this symbol."""
+    if symbol in context.pending_position_symbols:
+        symbols = ",".join(sorted(context.pending_position_symbols))
+        return f"pending_live_positions:{symbols}"
+    if symbol in context.unmanaged_position_symbols:
+        symbols = ",".join(sorted(context.unmanaged_position_symbols))
+        return f"unmanaged_live_positions:{symbols}"
+    return None
+
+
 class ContextInvalidationReason(StrEnum):
     ACCOUNT_UPDATE = "account_update"
     LEASE_CHANGE = "lease_change"
@@ -133,13 +150,8 @@ class LiveContextProvider(Protocol):
 
 
 @runtime_checkable
-class LiveContextReader(Protocol):
+class LiveContextReader(LiveContextProvider, Protocol):
     """Explicit interface for reading live runtime context."""
-
-    def for_state(
-        self,
-        state: MarketState15s,
-    ) -> Awaitable[LiveDaemonRuntimeContext]: ...
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool: ...
 
@@ -150,43 +162,27 @@ class LiveContextReader(Protocol):
 
 
 class LiveContextRuntime:
-    """Own context freshness fencing and managed-symbol publication."""
+    """Fence context freshness and apply the related in-memory decision views."""
 
     def __init__(
         self,
         *,
         run_id: str,
-        context_reader: LiveContextReader | None = None,
-        context_provider: LiveContextReader | LiveContextProvider | None = None,
+        context_provider: LiveContextProvider,
+        sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
         set_pending_position_symbols: Callable[[Collection[str]], None],
         update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
         on_managed_position_symbols: (
-            Callable[[frozenset[str]], Awaitable[None]] | None
+            Callable[[frozenset[str]], None] | None
         ) = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
-        resolved = context_reader if context_reader is not None else context_provider
-        if resolved is None:
-            raise ValueError("context_reader or context_provider must be provided")
+        resolved = context_provider
         self._run_id = run_id
-        self._has_currentness_check = False
-        if hasattr(resolved, "is_current"):
-            self._currentness_check = resolved.is_current
-            self._has_currentness_check = True
-        elif hasattr(resolved, "is_context_current"):
-            self._currentness_check = resolved.is_context_current
-            self._has_currentness_check = True
-        else:
-            self._currentness_check = None
-        self._uses_legacy_cache_invalidator = False
-        if hasattr(resolved, "invalidate"):
-            self._context_invalidator = resolved.invalidate
-        elif hasattr(resolved, "invalidate_cache"):
-            self._context_invalidator = resolved.invalidate_cache
-            self._uses_legacy_cache_invalidator = True
-        else:
-            self._context_invalidator = None
+        self._currentness_check = getattr(resolved, "is_current", None)
+        self._context_invalidator = getattr(resolved, "invalidate", None)
+        self._sync_pending_entry_plans = sync_pending_entry_plans
         self._set_pending_position_symbols = set_pending_position_symbols
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
@@ -203,7 +199,7 @@ class LiveContextRuntime:
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
         try:
-            if self._has_currentness_check:
+            if self._currentness_check is not None:
                 return bool(self._currentness_check(context))
             if context.account_observed_at is None:
                 return False
@@ -223,13 +219,7 @@ class LiveContextRuntime:
         invalidator = self._context_invalidator
         try:
             if invalidator is not None:
-                if self._uses_legacy_cache_invalidator:
-                    try:
-                        invalidator(event)
-                    except TypeError:
-                        invalidator()
-                else:
-                    invalidator(event)
+                invalidator(event)
         except Exception as error:
             _log.warning(
                 "live_context_invalidation_failed",
@@ -237,10 +227,11 @@ class LiveContextRuntime:
                 error_type=type(error).__name__,
             )
 
-    async def publish_managed_position_symbols(
+    def apply_context(
         self,
         context: LiveDaemonRuntimeContext,
     ) -> None:
+        """Apply current facts and the local subscription target without yielding."""
         if not self.is_current(context):
             _log.info(
                 "live_managed_position_symbols_stale_context_ignored",
@@ -252,6 +243,7 @@ class LiveContextRuntime:
             | context.unmanaged_position_symbols
             | context.pending_position_symbols
         )
+        self._sync_pending_entry_plans(context)
         self._managed_position_symbols = symbols
         self._set_pending_position_symbols(context.pending_position_symbols)
         managed_order_symbols = frozenset(
@@ -261,7 +253,7 @@ class LiveContextRuntime:
         )
         self._update_managed_symbols(symbols, managed_order_symbols)
         if self._on_managed_position_symbols is not None:
-            await self._on_managed_position_symbols(symbols)
+            self._on_managed_position_symbols(symbols)
 
 
 _log = structlog.get_logger()

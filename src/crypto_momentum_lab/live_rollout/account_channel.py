@@ -14,7 +14,7 @@ from crypto_momentum_lab.live_rollout.account_event_ports import (
 )
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     ORDER_IDENTITY_CONFLICT_REASON,
-    is_pending_position_sync_failure,
+    is_pending_exit_evaluation,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
@@ -119,7 +119,7 @@ class LiveAccountEventRuntime:
                     state,
                     quote=quote,
                 )
-                if is_pending_position_sync_failure(failure):
+                if is_pending_exit_evaluation(failure):
                     # Context publication already sets the pending-position
                     # entry gate. Later account/market events refresh that view;
                     # waiting here would prevent newer account facts arriving.

@@ -88,11 +88,6 @@ def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
     }
 
 
-def _order_state_is_uncertain(state: ExchangeOrderState) -> bool:
-    """Backward-compatible private alias for the shared uncertainty rule."""
-    return order_state_is_uncertain(state)
-
-
 def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:
     lease = context.active_lease
     if lease is None:

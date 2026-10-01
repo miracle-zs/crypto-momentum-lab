@@ -121,7 +121,6 @@ _PERSIST_BATCH_ATTEMPTS = 3
 _PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 _MAX_PENDING_EXCHANGE_REQUESTS = 32
 _MAX_STRATEGY_OUTPUT_SAMPLES = 8192
-_MAX_TRACES = 2048
 
 _DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
 _DECISION_SLO_TRANSITIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -495,10 +494,7 @@ class LiveRuntimeTelemetry:
         self._writer_task: asyncio.Task[None] | None = None
         self._traces: dict[str, _Trace] = {}
         self._source_ingress_by_trace: dict[str, SourceIngress] = {}
-        self._source_trace_order: deque[str] = deque()
-        self._order_trace_by_client: dict[str, str] = {}
-        self._order_lane_by_client: dict[str, str] = {}
-        self._order_clients: deque[str] = deque()
+        self._order_trace_by_client: dict[str, tuple[str, str]] = {}
         self._recent_events: deque[LiveRuntimeEvent] = deque(maxlen=queue_size)
         # Keep the production-facing aggregate intentionally low-cardinality:
         # lane, trigger source and terminal reason only.  Source ids and
@@ -1027,14 +1023,9 @@ class LiveRuntimeTelemetry:
         event: ExchangeOrderEvent,
     ) -> None:
         lane = LIVE_LANE_EXIT if plan.reduce_only else LIVE_LANE_ENTRY
-        if plan.client_order_id not in self._order_trace_by_client:
-            self._order_clients.append(plan.client_order_id)
-        self._order_trace_by_client[plan.client_order_id] = plan.intent_id
-        self._order_lane_by_client[plan.client_order_id] = lane
+        self._order_trace_by_client[plan.client_order_id] = (plan.intent_id, lane)
         while len(self._order_trace_by_client) > self._max_trace_count:
-            oldest_client_order_id = self._order_clients.popleft()
-            self._order_trace_by_client.pop(oldest_client_order_id, None)
-            self._order_lane_by_client.pop(oldest_client_order_id, None)
+            del self._order_trace_by_client[next(iter(self._order_trace_by_client))]
         if event.state is ExchangeOrderState.SUBMITTING:
             phase = SUBMITTING
         elif event.state is ExchangeOrderState.FILLED:
@@ -1156,15 +1147,15 @@ class LiveRuntimeTelemetry:
         if not event.has_fill:
             return
         client_order_id = event.client_order_id
+        order_trace = self._order_trace_by_client.get(client_order_id or "")
         trace_id = (
-            self._order_trace_by_client.get(client_order_id or "")
-            or client_order_id
-            or event.event_id
+            order_trace[0] if order_trace is not None else client_order_id or event.event_id
         )
         trace = self._traces.get(trace_id)
-        lane = self._order_lane_by_client.get(
-            client_order_id or "",
-            trace.lane if trace is not None else LIVE_LANE_UNKNOWN,
+        lane = (
+            order_trace[1]
+            if order_trace is not None
+            else trace.lane if trace is not None else LIVE_LANE_UNKNOWN
         )
         symbol = event.symbol or (trace.symbol if trace is not None else None)
         bucket_start = trace.bucket_start if trace is not None else None
@@ -1284,14 +1275,6 @@ class LiveRuntimeTelemetry:
                 delta_ms = (occurred_at - previous_at).total_seconds() * 1000
                 event_details["previous_phase"] = previous_phase
                 event_details["latency_ms_from_previous"] = delta_ms
-            if (
-                MARKET_STATE_RECEIVED in trace.phase_at
-                and phase != MARKET_STATE_RECEIVED
-            ):
-                origin_delta_ms = (
-                    occurred_at - trace.phase_at[MARKET_STATE_RECEIVED]
-                ).total_seconds() * 1000
-                event_details["latency_ms_from_market_state"] = origin_delta_ms
         if update_phase and (
             phase not in trace.phase_at or phase in _REPEATABLE_PHASES
         ):
@@ -1354,12 +1337,9 @@ class LiveRuntimeTelemetry:
     ) -> None:
         if ingress is None:
             return
-        if trace_id not in self._source_ingress_by_trace:
-            self._source_trace_order.append(trace_id)
         self._source_ingress_by_trace[trace_id] = ingress
         while len(self._source_ingress_by_trace) > self._max_trace_count:
-            oldest_trace_id = self._source_trace_order.popleft()
-            self._source_ingress_by_trace.pop(oldest_trace_id, None)
+            del self._source_ingress_by_trace[next(iter(self._source_ingress_by_trace))]
 
     def _trace_bucket_start(self, trace_id: str) -> datetime | None:
         trace = self._traces.get(trace_id)

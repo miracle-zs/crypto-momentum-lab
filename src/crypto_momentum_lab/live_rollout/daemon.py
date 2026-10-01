@@ -15,6 +15,9 @@ import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runti
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
@@ -28,10 +31,8 @@ from crypto_momentum_lab.domain.market.models import (
     RealtimeMarketQuote,
 )
 from crypto_momentum_lab.domain.strategy import (
-    EntryType,
     OrderIntentCandidate,
     StrategyDecision,
-    UniverseRankingSnapshot,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -53,7 +54,6 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
-    LiveEntryFilterContext,
 )
 from crypto_momentum_lab.live_rollout.context_prefetch import (
     LiveContextPrefetcher,
@@ -69,12 +69,11 @@ from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryLaneConfig,
     _live_signal_account_context,
 )
-from crypto_momentum_lab.live_rollout.exit_control import LiveExitControlGate
 from crypto_momentum_lab.live_rollout.exit_event_coordinator import (
     LiveExitEventCoordinator,
 )
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
-    is_pending_position_sync_failure,
+    is_pending_exit_evaluation,
 )
 from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitExecutionLane,
@@ -119,38 +118,16 @@ from crypto_momentum_lab.risk.gateway import RiskGateway
 log = structlog.get_logger()
 
 
-@dataclass(frozen=True, slots=True)
-class LiveDaemonConfig:
-    run_id: str
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LiveDaemonConfig(EntryLaneConfig):
     account_label: str
     resize_tolerance: Decimal
     checkpoint_every_states: int
     checkpoint_every_seconds: float = 60.0
     checkpoint_phase_seconds: float = 0.0
     max_dirty_age_seconds: float = 90.0
-    reconcile_once_per_bucket: bool = True
     hedge_mode: bool = True
-    entry_long_only: bool = False
-    entry_symbol_refresh_seconds: float = 15.0
-    entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = None
-    require_price_above_ema5: bool = False
-    require_price_above_ema10: bool = False
-    entry_filter_context_loader: (
-        Callable[[MarketState15s], Awaitable["LiveEntryFilterContext | None"]] | None
-    ) = None
-    entry_universe_context_provider: (
-        Callable[[str, datetime], Mapping[str, object] | None] | None
-    ) = None
-    entry_universe_snapshot_provider: (
-        Callable[[datetime], UniverseRankingSnapshot | None] | None
-    ) = None
-    entry_policy_compare_only: bool = False
-    entry_policy_enforce: bool = False
-    entry_order_type: EntryType = EntryType.LIMIT
-    entry_limit_ttl_seconds: int = 900
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
-    max_concurrency_per_symbol: int | None = None
-    readiness_provider: Callable[..., ExecutionReadiness] | None = None
     unmanaged_halt_debounce_seconds: float = 15.0
     decision_filter: (
         Callable[
@@ -162,8 +139,7 @@ class LiveDaemonConfig:
     decision_fact_binder: Callable[[Any], None] | None = None
 
     def __post_init__(self) -> None:
-        if not self.run_id.strip():
-            raise ValueError("run_id must not be empty")
+        EntryLaneConfig.__post_init__(self)
         if not self.account_label.strip():
             raise ValueError("account_label must not be empty")
         if self.resize_tolerance < 0 or self.resize_tolerance >= 1:
@@ -178,28 +154,6 @@ class LiveDaemonConfig:
             )
         if self.max_dirty_age_seconds <= 0:
             raise ValueError("max_dirty_age_seconds must be positive")
-        if not isinstance(self.reconcile_once_per_bucket, bool):
-            raise TypeError("reconcile_once_per_bucket must be a bool")
-        if not isinstance(self.entry_policy_compare_only, bool):
-            raise TypeError("entry_policy_compare_only must be a bool")
-        if not isinstance(self.entry_policy_enforce, bool):
-            raise TypeError("entry_policy_enforce must be a bool")
-        if self.entry_policy_compare_only and self.entry_policy_enforce:
-            raise ValueError(
-                "entry_policy_compare_only and "
-                "entry_policy_enforce are mutually exclusive"
-            )
-        if self.entry_symbol_refresh_seconds <= 0:
-            raise ValueError("entry_symbol_refresh_seconds must be positive")
-        if not isinstance(self.entry_order_type, EntryType):
-            raise TypeError("entry_order_type must be an EntryType")
-        if self.entry_limit_ttl_seconds < 601:
-            raise ValueError("entry_limit_ttl_seconds must be at least 601")
-        if (
-            self.max_concurrency_per_symbol is not None
-            and self.max_concurrency_per_symbol <= 0
-        ):
-            raise ValueError("max_concurrency_per_symbol must be positive")
 
 
 class LiveStrategyDaemon:
@@ -216,13 +170,12 @@ class LiveStrategyDaemon:
         config: LiveDaemonConfig,
         exit_manager: LiveExitManager | None = None,
         exit_recovery_client: ExitRecoveryClient | None = None,
-        reconcile_orders: Callable[[], Awaitable[None]] | None = None,
         telemetry: LiveTelemetrySink | None = None,
         signal_recorder: LiveSignalRecorderPort | None = None,
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
         clock: Callable[[], datetime] | None = None,
         on_managed_position_symbols: (
-            Callable[[frozenset[str]], Awaitable[None]] | None
+            Callable[[frozenset[str]], None] | None
         ) = None,
         cancel_unfilled_entry_orders: (
             Callable[[tuple[OrderExecutionPlan, ...]], Awaitable[int]] | None
@@ -237,14 +190,18 @@ class LiveStrategyDaemon:
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         on_checkpoint_saved: Callable[[], None] | None = None,
         cached_context_provider: Callable[[], LiveDaemonRuntimeContext | None] | None = None,
+        request_exit_recovery: Callable[[], None] = lambda: None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
         self._limits = limits
         self._state_machine = state_machine
+        self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._entry_control = LiveEntryControlGate(
             run_id=config.run_id,
             state_machine=self._state_machine,
+            scheduled_risk_window=config.scheduled_risk_window,
+            clock=self._clock,
         )
         self._context_provider = context_provider
         self._cached_context_provider = cached_context_provider or (
@@ -263,7 +220,6 @@ class LiveStrategyDaemon:
                 )
         self._exit_manager = exit_manager
         self._exit_recovery_client = exit_recovery_client
-        self._reconcile_orders = reconcile_orders
         self._checkpoint_coordinator = LiveCheckpointCoordinator(
             writer=CheckpointWriter(
                 run_id=config.run_id,
@@ -280,11 +236,10 @@ class LiveStrategyDaemon:
         self._telemetry = telemetry
         self._signal_recorder = signal_recorder
         self._entry_order_lifecycle = entry_order_lifecycle
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
         self._run_active = False
-        self._exit_control = LiveExitControlGate(run_id=config.run_id)
+        self._exit_enabled = True
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
         strategy_protected_symbols = getattr(strategy, "cache_protected_symbols", None)
         strategy_pruner = getattr(strategy, "prune_inactive_symbols", None)
@@ -310,6 +265,7 @@ class LiveStrategyDaemon:
         self._context_runtime = LiveContextRuntime(
             run_id=config.run_id,
             context_provider=self._context_provider,
+            sync_pending_entry_plans=self._pending_entries.sync,
             set_pending_position_symbols=(
                 self._entry_control.set_pending_position_symbols
             ),
@@ -328,21 +284,15 @@ class LiveStrategyDaemon:
             context_generation=lambda: self._context_runtime.generation,
             clock=self._clock,
         )
-        context_invalidator = getattr(self._context_provider, "invalidate_cache", None)
-        if not callable(context_invalidator):
-            context_invalidator = getattr(self._context_provider, "invalidate", None)
-        if not callable(context_invalidator):
-            context_invalidator = None
         self._market_admission = LiveMarketStateAdmission(
             context_provider=self._context_provider,
             context_generation=lambda: self._context_runtime.generation,
-            sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=(
-                self._context_runtime.publish_managed_position_symbols
+            apply_context=(
+                self._context_runtime.apply_context
             ),
             telemetry=self._telemetry,
             clock=self._clock,
-            invalidate_context=context_invalidator,
+            invalidate_context=self._context_runtime.invalidate,
         )
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,
@@ -375,14 +325,14 @@ class LiveStrategyDaemon:
             submission=self._submission,
             telemetry=self._telemetry,
             clock=self._clock,
-            is_exit_enabled=lambda: self._exit_control.enabled,
+            is_exit_enabled=lambda: self._exit_enabled,
             context_provider=self._context_provider,
-            sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=(
-                self._context_runtime.publish_managed_position_symbols
+            apply_context=(
+                self._context_runtime.apply_context
             ),
             invalidate_context_cache=self._context_runtime.invalidate,
             context_is_current=self._context_runtime.is_current,
+            request_recovery=request_exit_recovery,
         )
         self._exit_lane = ExitExecutionLane(
             lambda state: self._exit_events.process_market_work(state),
@@ -392,13 +342,12 @@ class LiveStrategyDaemon:
         self._exit_events = LiveExitEventCoordinator(
             run_id=config.run_id,
             exit_enabled=lambda: (
-                self._exit_manager is not None and self._exit_control.enabled
+                self._exit_manager is not None and self._exit_enabled
             ),
             run_active=lambda: self._run_active,
             context_provider=self._context_provider,
-            sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=(
-                self._context_runtime.publish_managed_position_symbols
+            apply_context=(
+                self._context_runtime.apply_context
             ),
             invalidate_context_cache=self._context_runtime.invalidate,
             exit_processor=self._exit_processor,
@@ -417,9 +366,8 @@ class LiveStrategyDaemon:
             exit_manager=self._exit_manager,
             state_machine=self._state_machine,
             context_provider=self._context_provider,
-            sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=(
-                self._context_runtime.publish_managed_position_symbols
+            apply_context=(
+                self._context_runtime.apply_context
             ),
             invalidate_context_cache=self._context_runtime.invalidate,
             process_exit_requests=self._exit_processor.process_requests,
@@ -431,27 +379,7 @@ class LiveStrategyDaemon:
             wait_for_entry_submissions_idle=entry_submission_waiter,
         )
         self._entry_lane = EntryExecutionLane(
-            config=EntryLaneConfig(
-                run_id=config.run_id,
-                entry_symbol_loader=config.entry_symbol_loader,
-                entry_symbol_refresh_seconds=(config.entry_symbol_refresh_seconds),
-                entry_filter_context_loader=config.entry_filter_context_loader,
-                entry_universe_context_provider=(
-                    config.entry_universe_context_provider
-                ),
-                entry_universe_snapshot_provider=(
-                    config.entry_universe_snapshot_provider
-                ),
-                entry_long_only=config.entry_long_only,
-                require_price_above_ema5=config.require_price_above_ema5,
-                require_price_above_ema10=config.require_price_above_ema10,
-                entry_policy_compare_only=config.entry_policy_compare_only,
-                entry_policy_enforce=config.entry_policy_enforce,
-                entry_order_type=config.entry_order_type,
-                entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
-                max_concurrency_per_symbol=config.max_concurrency_per_symbol,
-                readiness_provider=config.readiness_provider,
-            ),
+            config=config,
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
@@ -466,13 +394,10 @@ class LiveStrategyDaemon:
             context_prefetcher=self._context_prefetcher,
             runtime_cache=self._runtime_cache,
             scheduled_controller=self._scheduled_controller,
-            scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
             telemetry=self._telemetry,
             exit_lane=self._exit_lane,
             exit_manager=self._exit_manager,
-            exit_enabled=lambda: self._exit_control.enabled,
-            reconcile_orders=self._reconcile_orders,
-            reconcile_once_per_bucket=config.reconcile_once_per_bucket,
+            exit_enabled=lambda: self._exit_enabled,
             market_admission=self._market_admission,
             checkpoint_coordinator=self._checkpoint_coordinator,
             entry_lane=self._entry_lane,
@@ -507,7 +432,7 @@ class LiveStrategyDaemon:
 
     @property
     def exit_enabled(self) -> bool:
-        return self._exit_control.enabled
+        return self._exit_enabled
 
     @property
     def managed_position_symbols(self) -> frozenset[str]:
@@ -526,7 +451,7 @@ class LiveStrategyDaemon:
 
     def _on_exit_lane_outcome(self, symbol: str, outcome: ExitLaneOutcome) -> None:
         failure = self._exit_lane.failure or outcome.failure
-        if not is_pending_position_sync_failure(failure):
+        if not is_pending_exit_evaluation(failure):
             self._entry_control.set_exit_failure(symbol, failure)
 
     def set_exit_failure(
@@ -583,7 +508,12 @@ class LiveStrategyDaemon:
         )
 
     def set_exit_enabled(self, enabled: bool, *, reason: str) -> None:
-        self._exit_control.set_enabled(enabled, reason=reason)
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if self._exit_enabled != enabled:
+            self._exit_enabled = enabled
+            log.warning("live_exit_lane_state_changed", enabled=enabled,
+                        reason=reason, run_id=self._config.run_id)
 
     def observe_entry_order_event(
         self,
@@ -687,6 +617,16 @@ class LiveStrategyDaemon:
             reconciliation_gap=reconciliation_gap,
         )
         return assessment.readiness
+
+    def request_unknown_exit_recovery(self, order: PersistedExchangeOrder, state: MarketState15s) -> None:
+        self._exit_processor.request_exit_recovery(
+            plan=order.plan, known_executed_quantity=order.executed_quantity, state=state)
+
+    async def recover_requested_exits(self) -> bool:
+        outcomes = await self._exit_processor.recover_requested_exits()
+        for symbol, outcome in outcomes:
+            self._exit_lane.record_recovery_outcome(symbol, outcome)
+        return any(not outcome.fatal_failure for _, outcome in outcomes)
 
     async def process_scheduled_risk_window(
         self,

@@ -194,3 +194,48 @@ async def test_feed_overflow_does_not_ack_a_dropped_candle() -> None:
 
     await feed._events.get()
     assert await feed._publish(second) is True
+
+
+@pytest.mark.asyncio
+async def test_symbol_targets_replace_synchronously_while_control_ack_is_pending():
+    from unittest.mock import Mock
+
+    from crypto_momentum_lab.market_data.binance.websocket import (
+        BinanceWebSocketConnection,
+    )
+
+    feed = BinanceClosedCandle15mFeed(config=ClosedCandle15mFeedConfig(
+        websocket_url="wss://example.test/market/ws"))
+    connection = BinanceWebSocketConnection(base_url="wss://example.test/market/ws",
+        route=CaptureRoute.MARKET, environment="live", desired_names=(),
+        stream=CaptureStream.KLINE_15M, generation=1,
+        on_envelope=feed._discard_envelope, on_lifecycle=feed._observe_lifecycle,
+        reconnect_delays=(0,), connection_lifetime_seconds=60,
+        open_timeout_seconds=1, ping_interval_seconds=1, ping_timeout_seconds=1,
+        silence_timeout_seconds=60)
+    pending_ack = object()
+    connection._pending_control = pending_ack
+    feed._connection = connection
+    recover = Mock()
+    feed._schedule_recovery = recover
+
+    assert feed.set_symbols(frozenset({" btcusdt ", "ETHUSDT"})) is None
+    assert feed.set_symbols(frozenset({"SOLUSDT"})) is None
+    assert feed.symbols == frozenset({"SOLUSDT"})
+    assert await connection._desired_snapshot() == (("solusdt@kline_15m",), 2)
+    assert connection._desired_event.is_set()
+    assert connection._pending_control is pending_ack
+    assert connection._control_commands_sent == 0
+    assert recover.call_count == 2
+    feed.set_symbols(frozenset({" solusdt "}))
+    assert recover.call_count == 2
+    feed.set_symbols(frozenset())
+    assert await connection._desired_snapshot() == ((), 3)
+
+
+def test_symbol_target_can_be_set_before_connection_start():
+    feed = BinanceClosedCandle15mFeed(config=ClosedCandle15mFeedConfig(
+        websocket_url="wss://example.test/market/ws"))
+    assert feed.set_symbols(frozenset({" btcusdt ", ""})) is None
+    assert feed.symbols == frozenset({"BTCUSDT"})
+    assert feed._generation == 1

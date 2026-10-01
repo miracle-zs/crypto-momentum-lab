@@ -110,7 +110,7 @@ async def test_pending_candles_wait_for_facts_without_blocking_other_symbols(mon
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize("pending_reason", ["pending_live_positions:BTCUSDT", "pending_exit_order_recovery:BTCUSDT"])
+@pytest.mark.parametrize("pending_reason", ["pending_live_positions:BTCUSDT", "pending_exit_order_recovery:BTCUSDT", "pending_live_context:BTCUSDT"])
 async def test_candle_notification_during_evaluation_is_retained(pending_reason):
     started = asyncio.Event()
     release = asyncio.Event()
@@ -277,3 +277,82 @@ async def test_candle_conflict_stays_pending_until_success():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("channel", ["quote", "grace"])
+async def test_context_refresh_wait_does_not_fault_or_back_off(channel):
+    state = SimpleNamespace(symbol="BTCUSDT")
+    quote = SimpleNamespace(symbol="BTCUSDT")
+    calls = []
+    outcomes = []
+    finished = asyncio.Event()
+
+    class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
+        async def process_market_quote(self, quote, state):
+            return await self.evaluate()
+
+        async def process_grace_timeout(self, state, **kwargs):
+            return await self.evaluate()
+
+        async def evaluate(self):
+            calls.append(1)
+            return "pending_live_context:BTCUSDT" if len(calls) == 1 else None
+
+    def publish(symbol, failure):
+        outcomes.append((symbol, failure))
+        finished.set()
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),
+        latest_market_quotes=SimpleNamespace(observe=lambda quote: None,
+                                            for_symbols=lambda symbols: (quote,)),
+        latest_market_states=SimpleNamespace(for_symbols=lambda symbols: (state,)),
+        is_transient_error=lambda error: False, on_exit_failure=publish,
+    )
+
+    async def source():
+        yield quote
+        assert outcomes == []  # A pending read neither sets nor clears a real fault.
+        yield quote
+
+    if channel == "quote":
+        await runtime.run_quote_channel(source=source())
+    else:
+        task = asyncio.create_task(runtime.run_grace_timeout_channel(interval_seconds=0.001))
+        try:
+            await asyncio.wait_for(finished.wait(), 0.5)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) == 2
+    assert outcomes == [("BTCUSDT", None)]
+
+
+async def test_quotes_keep_cache_current_during_exit_backoff():
+    quotes = [SimpleNamespace(symbol="BTCUSDT", price=price) for price in (100, 101, 102)]
+    observed = []
+    evaluated = []
+    failures = []
+
+    class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
+        async def process_market_quote(self, quote, state):
+            evaluated.append(quote)
+            return "exit_submission_failed"
+
+    async def source():
+        for quote in quotes:
+            yield quote
+
+    runtime = LiveExitChannelRuntime(daemon=Daemon(),
+        latest_market_quotes=SimpleNamespace(observe=observed.append),
+        latest_market_states=SimpleNamespace(for_symbols=lambda symbols: (SimpleNamespace(symbol="BTCUSDT"),)),
+        is_transient_error=lambda error: False,
+        on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)))
+    await runtime.run_quote_channel(source=source())
+    assert observed == quotes
+    assert evaluated == quotes[:1]
+    assert failures == [("BTCUSDT", "exit_submission_failed")]

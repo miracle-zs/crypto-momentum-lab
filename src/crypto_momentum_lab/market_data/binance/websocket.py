@@ -142,7 +142,6 @@ class BinanceWebSocketConnection:
         self._symbol_filter = symbol_filter
         self._on_realtime_envelope = on_realtime_envelope
         self._connection_lock = asyncio.Lock()
-        self._desired_lock = asyncio.Lock()
         self._desired_event = asyncio.Event()
         self._stopping = False
         self._connection: ClientConnection | None = None
@@ -324,32 +323,22 @@ class BinanceWebSocketConnection:
         if self._task is not None:
             await self._task
 
-    async def subscribe(
-        self,
-        names: tuple[str, ...],
-        *,
-        generation: int,
-    ) -> None:
-        if not names:
-            return
-        async with self._desired_lock:
-            self._desired_names = tuple(sorted(set((*self._desired_names, *names))))
-            self._generation = generation
+    def set_desired_subscriptions(self, names: tuple[str, ...], *, generation: int) -> None:
+        """Replace the local target on the owning event loop; control I/O stays in run()."""
+        self._desired_names = tuple(sorted(set(names)))
+        self._generation = generation
         self._desired_event.set()
 
-    async def unsubscribe(
-        self,
-        names: tuple[str, ...],
-        *,
-        generation: int,
-    ) -> None:
+    async def subscribe(self, names: tuple[str, ...], *, generation: int) -> None:
+        if names:
+            self.set_desired_subscriptions((*self._desired_names, *names), generation=generation)
+
+    async def unsubscribe(self, names: tuple[str, ...], *, generation: int) -> None:
         remove = set(names)
-        async with self._desired_lock:
-            self._desired_names = tuple(
-                name for name in self._desired_names if name not in remove
-            )
-            self._generation = generation
-        self._desired_event.set()
+        self.set_desired_subscriptions(
+            tuple(name for name in self._desired_names if name not in remove),
+            generation=generation,
+        )
 
     async def _run_once(self, session_id: UUID) -> str:
         uri = self._base_url.rstrip("/")
@@ -755,8 +744,7 @@ class BinanceWebSocketConnection:
         self._active_generation = generation
 
     async def _desired_snapshot(self) -> tuple[tuple[str, ...], int]:
-        async with self._desired_lock:
-            return self._desired_names, self._generation
+        return self._desired_names, self._generation
 
     def _resolve_control_ack(self, decoded: object) -> bool:
         if not isinstance(decoded, dict) or "id" not in decoded:

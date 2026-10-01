@@ -177,7 +177,7 @@ async def test_entry_lane_rejects_when_progress_lagging() -> None:
     lane = EntryExecutionLane(
         config=EntryLaneConfig(
             run_id="run-1",
-            readiness_provider=lambda: ExecutionReadiness.PROGRESS_LAGGING,
+            readiness_provider=lambda symbol: ExecutionReadiness.PROGRESS_LAGGING,
         ),
         clock=lambda: NOW,
         entry_enabled=lambda: True,
@@ -259,3 +259,24 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
     assert executed == []
     assert outcome.approved_intent_count == 0
     assert outcome.submitted_order_count == 0
+
+
+async def test_readiness_provider_error_is_propagated_without_another_call():
+    import pytest
+
+    calls = []
+
+    def readiness(symbol):
+        calls.append(symbol)
+        raise TypeError("bad readiness fact")
+
+    async def execute(*args, **kwargs):
+        pytest.fail("must not submit without readiness")
+
+    lane = EntryExecutionLane(config=EntryLaneConfig(run_id="run-1", readiness_provider=readiness),
+        clock=lambda: NOW, entry_enabled=lambda: True, entry_enabled_reason=lambda: "ready",
+        execute_candidate=execute, invalidate_context=lambda: None)
+    with pytest.raises(TypeError, match="bad readiness fact"):
+        await lane.process(decision=_decision(_intent()), state=_state(),
+            context=cast(LiveDaemonRuntimeContext, object()), gate_reasons=(), recorded_at=NOW)
+    assert calls == [_intent().symbol]

@@ -35,7 +35,7 @@ class FakeContextProvider:
     def update_lease(self, lease: TradingLease) -> None:
         self.lease_updates.append(lease)
 
-    def invalidate_cache(self) -> None:
+    def invalidate(self) -> None:
         self.cache_invalidations += 1
 
     async def __call__(self, state: object) -> object:

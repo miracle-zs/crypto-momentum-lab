@@ -835,7 +835,9 @@ async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() 
 
     failure = await daemon.process_account_event(_state())
 
-    assert failure is None
+    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert not recovery.plans
+    await daemon.recover_requested_exits()
     assert len(exchange.plans) == 2
     assert exchange.plans[0].reduce_only is True
     assert exchange.plans[1].reduce_only is True
@@ -905,7 +907,9 @@ async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
 
     failure = await daemon.process_account_event(_state())
 
-    assert failure is None
+    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert not recovery.plans
+    await daemon.recover_requested_exits()
     assert len(exchange.plans) == 1
     assert exchange.plans[0].reduce_only is True
     assert exchange.plans[0].quantity == Decimal("0.0007")
@@ -942,9 +946,11 @@ async def test_unknown_reduce_only_limit_exit_reuses_limit_recovery_type() -> No
         context=context,
     )
 
-    assert failure is None
-    assert approved == 2
-    assert submitted == 2
+    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert not recovery.plans
+    await daemon.recover_requested_exits()
+    assert approved == 1
+    assert submitted == 1
     assert exchange.plans[0].order_type == "LIMIT"
     assert exchange.plans[1].order_type == "LIMIT"
     assert exchange.plans[1].price == Decimal("30000")
@@ -977,7 +983,9 @@ async def test_unknown_reduce_only_exit_does_not_duplicate_active_exit() -> None
         context=_runtime_context(),
     )
 
-    assert failure is None
+    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert not recovery.plans
+    await daemon.recover_requested_exits()
     assert approved == 1
     assert submitted == 1
     assert len(exchange.plans) == 1
@@ -1027,9 +1035,11 @@ async def test_unknown_grace_limit_cancel_falls_back_to_market() -> None:
         context=_runtime_context(),
     )
 
-    assert failure is None
-    assert approved == 1
-    assert submitted == 1
+    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert not recovery.plans
+    await daemon.recover_requested_exits()
+    assert approved == 0
+    assert submitted == 0
     assert len(exchange.plans) == 1
     assert exchange.plans[0].order_type == "MARKET"
 
@@ -1345,30 +1355,6 @@ async def test_live_daemon_resets_only_symbol_when_states_skip_buckets() -> None
 
     assert result.halt_reason is None
     assert exchange.calls == ["submit", "submit"]
-
-
-async def test_live_daemon_reconciles_once_per_market_bucket() -> None:
-    exchange = PlanAwareExchange()
-    reconcile_calls = 0
-
-    async def reconcile() -> None:
-        nonlocal reconcile_calls
-        reconcile_calls += 1
-
-    async def states() -> AsyncIterator:
-        first = _state()
-        yield first
-        yield replace(
-            first,
-            bucket_end=first.bucket_end,
-        )
-
-    daemon = _daemon(exchange=exchange, reconcile_orders=reconcile)
-
-    result = await daemon.run(states())
-
-    assert result.halt_reason is None
-    assert reconcile_calls == 1
 
 
 async def test_live_daemon_resets_strategy_after_market_state_gap() -> None:
@@ -2135,7 +2121,6 @@ def _daemon(
     require_price_above_ema10: bool = False,
     entry_order_type: EntryType = EntryType.LIMIT,
     max_gross_exposure: Decimal = Decimal("25"),
-    reconcile_orders=None,
     exit_recovery_client=None,
     clock=None,
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
@@ -2198,7 +2183,6 @@ def _daemon(
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,
-        reconcile_orders=reconcile_orders,
         clock=clock or (lambda: NOW),
         cancel_unfilled_entry_orders=cancel_unfilled_entry_orders,
         fetch_exchange_positions=fetch_exchange_positions,
@@ -2433,7 +2417,7 @@ async def test_live_daemon_readiness_provider_blocks_entries_when_lagging() -> N
     exchange = PlanAwareExchange()
     daemon = _daemon(
         exchange=exchange,
-        readiness_provider=lambda: ExecutionReadiness.PROGRESS_LAGGING,
+        readiness_provider=lambda symbol: ExecutionReadiness.PROGRESS_LAGGING,
     )
     result = await daemon.run(_states())
     assert result.approved_intent_count == 0
@@ -2553,3 +2537,99 @@ def test_readiness_reads_latest_explicit_context_without_provider_cache() -> Non
     snapshot = replace(snapshot, account_observed_at=now)
     assert daemon.latest_watermark == now
     assert daemon.evaluate_readiness() != ExecutionReadiness.PROGRESS_LAGGING
+
+
+@pytest.mark.parametrize("waiting_on", ["cancellation", "verification"])
+async def test_market_loop_keeps_processing_while_scheduled_io_waits(waiting_on):
+    minute = 45 if waiting_on == "cancellation" else 58
+    now = datetime(2026, 7, 3, 23, minute, tzinfo=UTC)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancel(plans):
+        if waiting_on == "cancellation":
+            started.set()
+            await release.wait()
+        return 0
+
+    async def verify():
+        started.set()
+        await release.wait()
+        return ()
+
+    daemon = _daemon(exchange=PlanAwareExchange(), clock=lambda: now,
+                     scheduled_risk_window=ScheduledRiskWindowConfig(),
+                     cancel_unfilled_entry_orders=cancel,
+                     fetch_exchange_positions=verify)
+
+    async def states():
+        await started.wait()
+        yield _state()
+        state = _state()
+        yield replace(state, bucket_start=state.bucket_start + timedelta(seconds=15),
+                      bucket_end=state.bucket_end + timedelta(seconds=15))
+
+    task = asyncio.create_task(daemon.run(states()))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), 0.5)
+        assert result.processed_state_count == 2
+        assert result.submitted_order_count == 0
+        assert result.halt_reason is None
+        assert not daemon.entry_enabled
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_schedule_gate_closes_at_boundary_without_waiting_for_timer():
+    current = [datetime(2026, 7, 3, 23, 44, 59, tzinfo=UTC)]
+    daemon = _daemon(exchange=PlanAwareExchange(), clock=lambda: current[0],
+                     scheduled_risk_window=ScheduledRiskWindowConfig())
+    assert daemon.entry_enabled
+    current[0] += timedelta(seconds=1)
+    assert not daemon.entry_enabled
+    assert daemon.entry_enabled_reason == "scheduled_risk_window"
+    # A controller awaiting evidence must remain closed after the wall-clock window.
+    daemon.set_scheduled_entry_blocked(True, reason="scheduled_positions_unverified")
+    current[0] = datetime(2026, 7, 4, 1, 0, tzinfo=UTC)
+    assert not daemon.entry_enabled
+    assert daemon.entry_enabled_reason == "scheduled_positions_unverified"
+
+
+async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capability():
+    from crypto_momentum_lab.live_rollout.context_prefetch import PrefetchedContext
+
+    calls = []
+    fresh = _runtime_context()
+
+    class Provider:
+        async def __call__(self, state):
+            calls.append("load")
+            return fresh
+
+        def invalidate(self, event=None):
+            calls.append("invalidate")
+
+    daemon = _daemon(exchange=PlanAwareExchange(), context_provider=Provider())
+    generation = daemon._context_runtime.generation
+    state = await anext(_states())
+    prefetched = PrefetchedContext(state=state, generation=generation,
+        received_at=fresh.now, context=_runtime_context(), error=None)
+    daemon._market_admission.invalidate_context_cache()
+    assert daemon._context_runtime.generation == generation + 1
+    admitted = await daemon._market_admission.prepare(prefetched)
+    assert admitted.error is None
+    assert admitted.context is fresh
+    assert calls == ["invalidate", "load"]
+
+
+def test_operator_can_pause_and_resume_exits():
+    daemon = _daemon(exchange=PlanAwareExchange())
+    assert daemon.exit_enabled
+    daemon.set_exit_enabled(False, reason="operator_pause")
+    assert not daemon.exit_enabled
+    daemon.set_exit_enabled(True, reason="operator_resume")
+    assert daemon.exit_enabled
+    with pytest.raises(TypeError, match="enabled must be a bool"):
+        daemon.set_exit_enabled("yes", reason="invalid")

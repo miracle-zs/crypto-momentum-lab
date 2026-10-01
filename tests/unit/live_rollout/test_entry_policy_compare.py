@@ -9,7 +9,7 @@ from crypto_momentum_lab.domain.strategy import (
     compare_entry_policy_request,
     summarize_entry_policy_comparisons,
 )
-from crypto_momentum_lab.live_rollout.entry_policy_compare import (
+from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
     compare_entry_candidate,
     universe_snapshot_for_symbols,
 )

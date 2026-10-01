@@ -1,10 +1,18 @@
 """Unmanaged-position repair use case; transactions and ORM live in adapters."""
 
+from collections.abc import Callable
+
 import structlog
 
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import DecisionCommitConflict
 from crypto_momentum_lab.domain.execution.position_context_ports import (
+    PositionContextBook,
     PositionRepairBook,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
+    PositionKey,
 )
 from crypto_momentum_lab.domain.execution.position_repair import (
     build_position_repair,
@@ -14,6 +22,7 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairRequest,
     PositionRepairUnitOfWork,
 )
+from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 
 log = structlog.get_logger(__name__)
 
@@ -23,11 +32,16 @@ async def auto_heal_unmanaged_position(
     request: PositionRepairRequest,
     uow: PositionRepairUnitOfWork,
     book: PositionRepairBook,
+    is_current: Callable[[], bool] | None = None,
 ) -> bool:
     for attempt in range(3):
         try:
             async with uow.transaction(request.key) as tx:
                 loaded = await tx.load_repair_facts(request)
+                if is_current is not None and not is_current():
+                    raise PositionRepairBlocked(
+                        "repair context advanced during fact load"
+                    )
                 repair = build_position_repair(request, loaded)
                 receipt = await tx.persist_repair(repair)
             break
@@ -70,3 +84,92 @@ async def auto_heal_unmanaged_position(
         projection_version=reloaded.projection_version,
     )
     return True
+
+
+class LiveUnmanagedPositionRepair:
+    """Coalesce current exposure for the existing account repair worker."""
+
+    def __init__(
+        self,
+        *,
+        account_label: str,
+        run_id: str,
+        book: PositionContextBook,
+        uow: PositionRepairUnitOfWork,
+        context_is_current: Callable[[LiveDaemonRuntimeContext], bool],
+        invalidate_context: Callable[[], None],
+        request_recovery: Callable[[], None],
+    ) -> None:
+        self._account = account_label
+        self._run_id = run_id
+        self._book = book
+        self._uow = uow
+        self._is_current = context_is_current
+        self._invalidate = invalidate_context
+        self._request_recovery = request_recovery
+        self._pending: LiveDaemonRuntimeContext | None = None
+
+    def request(self, context: LiveDaemonRuntimeContext) -> None:
+        if not self._is_current(context):
+            return
+        self._pending = context if context.unmanaged_position_symbols else None
+        if self._pending is not None:
+            self._request_recovery()
+
+    async def repair_pending(self) -> None:
+        context = self._pending
+        self._pending = None
+        if context is None or context.account_snapshot is None:
+            return
+        if not self._is_current(context):
+            return
+        stream = self._book.get_active_stream("live", self._account)
+        if stream is None:
+            self._pending = context
+            return
+        repaired = False
+        for position in context.account_snapshot.positions:
+            if not self._is_current(context):
+                break
+            if (
+                position.symbol not in context.unmanaged_position_symbols
+                or position.position_amt == 0
+            ):
+                continue
+            try:
+                key = PositionKey(
+                    "live",
+                    self._account,
+                    position.symbol,
+                    FuturesPositionSide(position.position_side.upper()),
+                )
+                request = PositionRepairRequest(
+                    key=key,
+                    run_id=self._run_id,
+                    scope=AccountFactStreamScope.for_position_key(
+                        key, stream_id=stream[0], stream_epoch=stream[1]
+                    ),
+                    expected_quantity=abs(position.position_amt),
+                    observed_at=position.observed_at,
+                )
+                repaired = (
+                    await auto_heal_unmanaged_position(
+                        request=request,
+                        uow=self._uow,
+                        book=self._book,
+                        is_current=lambda: self._is_current(context),
+                    )
+                    or repaired
+                )
+            except Exception as error:
+                log.exception(
+                    "auto_heal_unmanaged_position_failed",
+                    account_label=self._account,
+                    symbol=position.symbol,
+                    error_type=type(error).__name__,
+                )
+        if repaired:
+            self._invalidate()
+        elif self._pending is None and self._is_current(context):
+            # Retry on the existing worker's next periodic pass, without a spin loop.
+            self._pending = context

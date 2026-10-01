@@ -13,11 +13,6 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 
 
-class ExitFailureResult(Protocol):
-    @property
-    def failure(self) -> str | None: ...
-
-
 class ExitEventProcessor(Protocol):
     async def process_state(
         self, state: MarketState15s, context: LiveDaemonRuntimeContext
@@ -36,7 +31,7 @@ class ExitEventProcessor(Protocol):
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
         latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitFailureResult: ...
+    ) -> ExitLaneOutcome: ...
 
     async def process_grace_timeout(
         self,
@@ -44,7 +39,7 @@ class ExitEventProcessor(Protocol):
         now: datetime,
         context: LiveDaemonRuntimeContext,
         latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitFailureResult: ...
+    ) -> ExitLaneOutcome: ...
 
 
 class ExitEventLane(Protocol):

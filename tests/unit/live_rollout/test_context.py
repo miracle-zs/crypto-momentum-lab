@@ -19,7 +19,7 @@ class _Provider:
         self.current = True
         self.invalidations = 0
 
-    async def for_state(self, _state: object) -> LiveDaemonRuntimeContext:
+    async def __call__(self, _state: object) -> LiveDaemonRuntimeContext:
         raise AssertionError("context loading is outside this unit")
 
     def is_current(self, _context: object) -> bool:
@@ -38,12 +38,13 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     published: list[frozenset[str]] = []
 
-    async def on_published(symbols: frozenset[str]) -> None:
+    def on_published(symbols: frozenset[str]) -> None:
         published.append(symbols)
 
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_reader=cast(LiveContextReader, provider),
+        context_provider=cast(LiveContextReader, provider),
+        sync_pending_entry_plans=lambda context: None,
         set_pending_position_symbols=lambda symbols: pending_updates.append(
             frozenset(symbols)
         ),
@@ -66,7 +67,7 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
         ),
     )
 
-    await runtime.publish_managed_position_symbols(context)
+    runtime.apply_context(context)
 
     expected_symbols = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
     assert runtime.managed_position_symbols == expected_symbols
@@ -80,10 +81,12 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
     None
 ):
     provider = _Provider()
+    synced = []
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_reader=cast(LiveContextReader, provider),
+        context_provider=cast(LiveContextReader, provider),
+        sync_pending_entry_plans=synced.append,
         set_pending_position_symbols=lambda _symbols: None,
         update_managed_symbols=lambda positions, orders: cache_updates.append(
             (frozenset(positions), frozenset(orders))
@@ -100,11 +103,12 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
         ),
     )
 
-    await runtime.publish_managed_position_symbols(context)
+    runtime.apply_context(context)
     runtime.invalidate()
 
     assert runtime.managed_position_symbols == frozenset()
     assert cache_updates == []
+    assert synced == []
     assert runtime.generation == 1
     assert provider.invalidations == 1
 
@@ -145,7 +149,7 @@ class _MockReader:
         self.last_event: ContextInvalidation | None = None
         self.invalidation_count = 0
 
-    async def for_state(self, _state: object) -> LiveDaemonRuntimeContext:
+    async def __call__(self, _state: object) -> LiveDaemonRuntimeContext:
         raise AssertionError("outside this unit")
 
     def is_current(self, _context: LiveDaemonRuntimeContext) -> bool:
@@ -161,7 +165,7 @@ def test_live_context_reader_protocol_conformance() -> None:
     assert isinstance(reader, LiveContextReader)
 
     class _IncompleteReader:
-        def for_state(self, _state: object):
+        def __call__(self, _state: object):
             pass
 
     assert not isinstance(_IncompleteReader(), LiveContextReader)
@@ -172,6 +176,7 @@ def test_context_runtime_with_live_context_reader() -> None:
     runtime = LiveContextRuntime(
         run_id="run-reader",
         context_provider=reader,
+        sync_pending_entry_plans=lambda context: None,
         set_pending_position_symbols=lambda _s: None,
         update_managed_symbols=lambda _p, _o: None,
     )
@@ -200,56 +205,42 @@ def test_context_runtime_with_live_context_reader() -> None:
     assert reader.last_event == event
 
 
-@pytest.mark.parametrize("mode", ["primary", "legacy_event", "legacy_noarg"])
-def test_invalidator_binding_preserves_priority_and_legacy_arguments(mode: str) -> None:
+def test_invalidator_internal_type_error_is_not_called_again():
     calls = []
 
-    def primary(event):
-        calls.append(("primary", event))
+    def invalidate(event):
+        calls.append(event)
+        raise TypeError("invalid fact")
 
-    def legacy_event(event):
-        calls.append(("legacy_event", event))
-
-    def legacy_noarg():
-        calls.append(("legacy_noarg", None))
-
-    provider = SimpleNamespace(
-        invalidate_cache=legacy_noarg if mode == "legacy_noarg" else legacy_event
-    )
-    if mode == "primary":
-        provider.invalidate = primary
-    runtime = LiveContextRuntime(
-        run_id="run-1",
-        context_provider=provider,
+    runtime = LiveContextRuntime(run_id="run-1",
+        context_provider=SimpleNamespace(invalidate=invalidate),
+        sync_pending_entry_plans=lambda context: None,
         set_pending_position_symbols=lambda symbols: None,
-        update_managed_symbols=lambda positions, orders: None,
-    )
-    provider.invalidate = lambda event: pytest.fail("must use bound original method")
-    provider.invalidate_cache = lambda *args: pytest.fail("must use bound cache method")
-    event = object()
-    runtime.invalidate(event)
+        update_managed_symbols=lambda positions, orders: None)
+    runtime.invalidate()
+    assert calls == [None]
     assert runtime.generation == 1
-    assert calls == [(mode, None if mode == "legacy_noarg" else event)]
 
 
-@pytest.mark.parametrize("method", ["is_current", "is_context_current"])
-def test_currentness_uses_original_bound_method(method: str) -> None:
-    calls = []
+@pytest.mark.asyncio
+async def test_context_applies_all_memory_views_before_subscription_target_update():
+    provider = _Provider()
+    order = []
+    context = cast(LiveDaemonRuntimeContext, SimpleNamespace(
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        unmanaged_position_symbols=frozenset(),
+        pending_position_symbols=frozenset({"ETHUSDT"}), unresolved_orders=()))
 
-    def check(context):
-        calls.append(context)
-        return True
+    def notify(symbols):
+        assert order == ["entries", "pending", "cache"]
+        assert runtime.managed_position_symbols == symbols
+        provider.current = False
+        runtime.apply_context(context)
+        assert order == ["entries", "pending", "cache"]
 
-    provider = SimpleNamespace(**{method: check})
-    if method == "is_current":
-        provider.is_context_current = lambda context: pytest.fail("wrong priority")
-    runtime = LiveContextRuntime(
-        run_id="run-1",
-        context_provider=provider,
-        set_pending_position_symbols=lambda symbols: None,
-        update_managed_symbols=lambda positions, orders: None,
-    )
-    setattr(provider, method, lambda context: pytest.fail("must use bound method"))
-    context = object()
-    assert runtime.is_current(context)
-    assert calls == [context]
+    runtime = LiveContextRuntime(run_id="run-1", context_provider=provider,
+        sync_pending_entry_plans=lambda context: order.append("entries"),
+        set_pending_position_symbols=lambda symbols: order.append("pending"),
+        update_managed_symbols=lambda positions, orders: order.append("cache"),
+        on_managed_position_symbols=notify)
+    runtime.apply_context(context)

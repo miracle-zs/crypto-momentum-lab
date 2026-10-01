@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -24,19 +24,13 @@ from crypto_momentum_lab.domain.execution.order_rules import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
-    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 from crypto_momentum_lab.domain.execution.position_context_ports import (
     PositionContextBook,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
     CoverageEvidence,
-    PositionKey,
-)
-from crypto_momentum_lab.domain.execution.position_repair_models import (
-    PositionRepairRequest,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -53,6 +47,7 @@ from crypto_momentum_lab.execution_account.snapshot_models import (
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
+    LiveContextChangedDuringLoad,
     LiveContextReader,
     LiveDaemonRuntimeContext,
 )
@@ -75,9 +70,6 @@ from crypto_momentum_lab.live_rollout.position_batches import (
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
     _classify_live_positions_detailed,
-)
-from crypto_momentum_lab.live_rollout.position_self_healing import (
-    auto_heal_unmanaged_position,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -103,9 +95,6 @@ from crypto_momentum_lab.persistence.postgres.order_read_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
     load_position_orders_bounded,
-)
-from crypto_momentum_lab.persistence.postgres.position_repair import (
-    PostgresPositionRepairUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
@@ -179,6 +168,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         migration_revision: str,
         lease_owner: str,
         approval_id: str,
+        request_position_repair: Callable[[LiveDaemonRuntimeContext], None] | None = None,
     ) -> None:
         execution_sessions = execution_session_factory or session_factory
         if execution_sessions is None:
@@ -196,9 +186,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._risk_repository = PostgresRiskRepository(execution_sessions)
         self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
         self._order_repository = PostgresOrderReadRepository(execution_sessions)
-        self._position_repair_uow = PostgresPositionRepairUnitOfWork(
-            execution_sessions, strategy_name=strategy_name
-        )
+        self._request_position_repair = request_position_repair
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_loaded_at: datetime | None = None
@@ -317,7 +305,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         if execution_book is None:
             raise ValueError("execution_book is required")
         self._execution_book = execution_book
-        self.invalidate_cache()
+        self.invalidate()
 
     async def _with_execution_book(
         self,
@@ -404,86 +392,20 @@ class PostgresLiveContextProvider(LiveContextReader):
             frozenset(context.unmanaged_position_symbols)
             | context.open_position_symbols
         ) - active_symbols
-        if unmanaged and context.account_snapshot is not None:
-            healed_any = False
-            active_stream = book.get_active_stream("live", self._account_label)
-            positions_to_repair = tuple(
-                position
-                for position in context.account_snapshot.positions
-                if position.symbol in unmanaged and position.position_amt != 0
-            )
-            for position in positions_to_repair:
-                if active_stream is None:
-                    continue
-                try:
-                    pos_side = FuturesPositionSide(position.position_side.upper())
-                    key = PositionKey(
-                        "live", self._account_label, position.symbol, pos_side
-                    )
-                    request = PositionRepairRequest(
-                        key=key,
-                        run_id=self._run_id,
-                        scope=AccountFactStreamScope.for_position_key(
-                            key,
-                            stream_id=active_stream[0],
-                            stream_epoch=active_stream[1],
-                        ),
-                        expected_quantity=abs(position.position_amt),
-                        observed_at=position.observed_at,
-                    )
-                    healed = await auto_heal_unmanaged_position(
-                        request=request,
-                        uow=self._position_repair_uow,
-                        book=book,
-                    )
-                    healed_any = healed_any or healed
-                except Exception as heal_err:
-                    structlog.get_logger(__name__).error(
-                        "auto_heal_unmanaged_position_failed",
-                        symbol=position.symbol,
-                        account_label=self._account_label,
-                        error=str(heal_err),
-                    )
-
-            if healed_any:
-                views = await book.list_position_views(
-                    environment="live",
-                    account_label=self._account_label,
-                    symbols=(
-                        context.open_position_symbols
-                        if context.account_snapshot is not None
-                        else None
-                    ),
-                )
-                managed = managed_live_positions_from_views(
-                    views,
-                    unresolved_orders=context.unresolved_orders,
-                )
-                managed = tuple(
-                    position
-                    for position in managed
-                    if position.symbol in context.open_position_symbols
-                    and (
-                        account_position_keys is None
-                        or (position.symbol, position.position_side.value)
-                        in account_position_keys
-                    )
-                )
-                active_symbols = frozenset(position.symbol for position in managed)
-                unmanaged = (
-                    frozenset(context.unmanaged_position_symbols)
-                    | context.open_position_symbols
-                ) - active_symbols
         self._cached_book_bucket_end = state.bucket_end
         self._cached_book_unresolved = context.unresolved_orders
         visible_position_symbols = context.open_position_symbols
         self._cached_book_result = (visible_position_symbols, managed, unmanaged)
-        return replace(
+        result = replace(
             context,
             open_position_symbols=visible_position_symbols,
             managed_positions=managed,
             unmanaged_position_symbols=unmanaged,
         )
+        request_repair = getattr(self, "_request_position_repair", None)
+        if request_repair is not None:
+            request_repair(result)
+        return result
 
     async def _observe_book_drift(
         self,
@@ -549,9 +471,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         """
         for _attempt in range(3):
             context = await self._load_context_once(state)
-            if self.is_context_current(context):
+            if self.is_current(context):
                 return context
-        raise RuntimeError("live context changed during load")
+        raise LiveContextChangedDuringLoad("live context changed during load")
 
     async def load_lease_gate(
         self, sessions: async_sessionmaker[AsyncSession]
@@ -785,22 +707,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             self._cached_loaded_at = now
         return context
 
-    async def for_state(
-        self,
-        state: MarketState15s,
-    ) -> LiveDaemonRuntimeContext:
-        """Alias for __call__ satisfying the LiveContextReader interface."""
-        return await self(state)
-
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
-        """Alias for is_context_current satisfying the LiveContextReader interface."""
-        return self.is_context_current(context)
-
-    def invalidate(self, event: ContextInvalidation | None = None) -> None:
-        """Alias for invalidate_cache satisfying the LiveContextReader interface."""
-        self.invalidate_cache(event)
-
-    def is_context_current(self, context: LiveDaemonRuntimeContext) -> bool:
         """Return whether a context still matches the live provider inputs."""
         context_epoch = getattr(context, "context_epoch", None)
         current_epoch = getattr(self, "_cache_epoch", 0)
@@ -842,7 +749,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_snapshot = snapshot
         self._realtime_account_state = account_state
         self._realtime_account_sequence = sequence
-        self.invalidate_cache(
+        self.invalidate(
             ContextInvalidation(
                 reason=ContextInvalidationReason.ACCOUNT_UPDATE,
                 occurred_at=datetime.now(tz=UTC),
@@ -855,7 +762,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._realtime_account_snapshot = None
         self._realtime_account_state = None
         self._realtime_account_sequence = 0
-        self.invalidate_cache(
+        self.invalidate(
             ContextInvalidation(
                 reason=ContextInvalidationReason.RECOVERY,
                 occurred_at=datetime.now(tz=UTC),
@@ -875,7 +782,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         # Invalidate in-flight loads as well as the cached object.  Updating
         # only ``_cached_context`` allows a load that captured an older lease
         # to repopulate the cache after this callback returns.
-        self.invalidate_cache(
+        self.invalidate(
             ContextInvalidation(
                 reason=ContextInvalidationReason.LEASE_CHANGE,
                 occurred_at=datetime.now(tz=UTC),
@@ -883,7 +790,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             )
         )
 
-    def invalidate_cache(self, event: ContextInvalidation | None = None) -> None:
+    def invalidate(self, event: ContextInvalidation | None = None) -> None:
         """Force the next state to reload account and risk state.
 
         Trading rules are market metadata, not account/risk state.  Keeping

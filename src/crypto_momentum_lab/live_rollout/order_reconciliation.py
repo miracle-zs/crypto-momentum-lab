@@ -10,9 +10,13 @@ from dataclasses import dataclass, field
 
 import structlog
 
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_read_repository import (
     OrderReadRepository,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     order_snapshot_from_update,
 )
@@ -43,6 +47,8 @@ class LiveOrderReconciliation:
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     on_unknown_order: Callable[[str], None] | None = None
     recover_exits: Callable[[], Awaitable[None]] | None = None
+    repair_positions: Callable[[], Awaitable[None]] | None = None
+    request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
     _requested: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
     )
@@ -122,6 +128,13 @@ class LiveOrderReconciliation:
         try:
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
+                    if (
+                        self.request_unknown_exit is not None
+                        and order.plan.reduce_only
+                        and order.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                        and self.request_unknown_exit(order)
+                    ):
+                        continue
                     await self.state_machine.reconcile_order(order.plan)
         except BaseException:
             self._requested_runs.update(runs)
@@ -141,6 +154,15 @@ class LiveOrderReconciliation:
             # Clear before the scan so a request arriving during REST work
             # remains set and triggers another scan after this one finishes.
             self._requested.clear()
+            if self.repair_positions is not None:
+                try:
+                    await self.repair_positions()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception(
+                        "live_periodic_position_repair_failed", run_id=self.run_id
+                    )
             try:
                 await self.reconcile_all()
                 if self.recover_exits is not None:

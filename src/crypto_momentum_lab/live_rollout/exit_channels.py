@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from collections.abc import AsyncIterable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -13,8 +12,8 @@ import structlog
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     ORDER_IDENTITY_CONFLICT_REASON,
-    is_pending_candle_evaluation,
-    is_pending_position_sync_failure,
+    is_pending_context_refresh,
+    is_pending_exit_evaluation,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
@@ -61,8 +60,7 @@ class LiveExitChannelRuntime:
         self._on_order_identity_conflict = on_order_identity_conflict
         self._candle_facts_changed = asyncio.Event()
         self._pending_candles: dict[tuple[str, datetime], ClosedCandle15mEvent] = {}
-        self._evaluated_candles: set[tuple[str, datetime]] = set()
-        self._evaluated_order: deque[tuple[str, datetime]] = deque()
+        self._evaluated_candles: dict[tuple[str, datetime], None] = {}
 
 
     async def run_quote_channel(
@@ -70,23 +68,15 @@ class LiveExitChannelRuntime:
         *,
         source: AsyncIterable[RealtimeMarketQuote],
     ) -> None:
-        retry_at_by_symbol: dict[str, float] = {}
-        retry_delay_by_symbol: dict[str, float] = {}
+        retries: dict[str, tuple[float, float]] = {}
         async for quote in source:
             loop_time = asyncio.get_running_loop().time()
             managed_symbols = self._daemon.managed_position_symbols
-            if quote.symbol not in managed_symbols:
-                if (
-                    quote.symbol in retry_at_by_symbol
-                    or quote.symbol in retry_delay_by_symbol
-                ):
-                    retry_at_by_symbol.pop(quote.symbol, None)
-                    retry_delay_by_symbol.pop(quote.symbol, None)
-                    if self._on_exit_failure is not None:
-                        self._on_exit_failure(quote.symbol, None)
-            if loop_time < retry_at_by_symbol.get(quote.symbol, 0.0):
-                continue
             self._latest_market_quotes.observe(quote)
+            if quote.symbol not in managed_symbols:
+                self._clear_retry(quote.symbol, retries)
+            if loop_time < retries.get(quote.symbol, (0.0, 1.0))[0]:
+                continue
             for state in self._latest_market_states.for_symbols((quote.symbol,)):
                 try:
                     failure = await self._daemon.process_market_quote(quote, state)
@@ -111,35 +101,30 @@ class LiveExitChannelRuntime:
                         reason=failure,
                     )
                     continue
-                if failure is not None:
-                    pending_position_sync = is_pending_position_sync_failure(failure)
-                    if not pending_position_sync and self._on_exit_failure is not None:
-                        self._on_exit_failure(quote.symbol, failure)
-                    if pending_position_sync:
-                        log.warning(
-                            "live_market_quote_position_sync_pending",
-                            symbol=quote.symbol,
-                            reason=failure,
-                        )
-                    delay = min(
-                        retry_delay_by_symbol.get(quote.symbol, 1.0),
-                        60.0,
-                    )
-                    retry_delay_by_symbol[quote.symbol] = min(delay * 2, 60.0)
-                    retry_at_by_symbol[quote.symbol] = (
-                        asyncio.get_running_loop().time() + delay
-                    )
-                    log.error(
-                        "live_market_quote_exit_retry_scheduled",
-                        symbol=quote.symbol,
-                        reason=failure,
-                        retry_delay_seconds=delay,
-                    )
-                    continue
-                retry_at_by_symbol.pop(quote.symbol, None)
-                retry_delay_by_symbol.pop(quote.symbol, None)
-                if self._on_exit_failure is not None:
-                    self._on_exit_failure(quote.symbol, None)
+                self._record_result(quote.symbol, failure, retries, channel="quote")
+
+    def _clear_retry(self, symbol: str, retries: dict[str, tuple[float, float]]) -> None:
+        if retries.pop(symbol, None) is not None and self._on_exit_failure is not None:
+            self._on_exit_failure(symbol, None)
+
+    def _record_result(
+        self, symbol: str, failure: str | None,
+        retries: dict[str, tuple[float, float]], *, channel: str,
+    ) -> None:
+        if is_pending_context_refresh(failure):
+            return
+        if failure is None:
+            retries.pop(symbol, None)
+            if self._on_exit_failure is not None:
+                self._on_exit_failure(symbol, None)
+            return
+        pending = is_pending_exit_evaluation(failure)
+        if not pending and self._on_exit_failure is not None:
+            self._on_exit_failure(symbol, failure)
+        delay = retries.get(symbol, (0.0, 1.0))[1]
+        retries[symbol] = (asyncio.get_running_loop().time() + delay, min(delay * 2, 60.0))
+        log.warning("live_exit_evaluation_deferred" if pending else "live_exit_retry_scheduled",
+                    symbol=symbol, channel=channel, reason=failure, retry_delay_seconds=delay)
 
     def note_account_facts_changed(self) -> None:
         """Wake candle evaluation only after committed account facts are published."""
@@ -211,15 +196,14 @@ class LiveExitChannelRuntime:
                 await asyncio.sleep(float(2**attempt))
         if failure is None:
             del self._pending_candles[key]
-            self._evaluated_candles.add(key)
-            self._evaluated_order.append(key)
-            if len(self._evaluated_order) > _MAX_RETAINED_CANDLES:
-                self._evaluated_candles.discard(self._evaluated_order.popleft())
+            self._evaluated_candles[key] = None
+            if len(self._evaluated_candles) > _MAX_RETAINED_CANDLES:
+                del self._evaluated_candles[next(iter(self._evaluated_candles))]
             if self._on_exit_failure is not None and not any(
                 pending[0] == event.candle.symbol for pending in self._pending_candles
             ):
                 self._on_exit_failure(event.candle.symbol, None)
-        elif is_pending_candle_evaluation(failure):
+        elif is_pending_exit_evaluation(failure):
             log.warning("live_closed_candle_position_sync_pending",
                         symbol=event.candle.symbol, reason=failure)
         else:
@@ -231,22 +215,18 @@ class LiveExitChannelRuntime:
     async def run_grace_timeout_channel(self, *, interval_seconds: float = 1.0) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
-        retry_at_by_symbol: dict[str, float] = {}
-        retry_delay_by_symbol: dict[str, float] = {}
+        retries: dict[str, tuple[float, float]] = {}
         while True:
             now = datetime.now(tz=UTC)
             loop_time = asyncio.get_running_loop().time()
             managed_symbols = self._daemon.managed_position_symbols
-            for symbol in list(retry_at_by_symbol.keys()):
+            for symbol in tuple(retries):
                 if symbol not in managed_symbols:
-                    retry_at_by_symbol.pop(symbol, None)
-                    retry_delay_by_symbol.pop(symbol, None)
-                    if self._on_exit_failure is not None:
-                        self._on_exit_failure(symbol, None)
+                    self._clear_retry(symbol, retries)
             for state in self._latest_market_states.for_symbols(
                 tuple(sorted(managed_symbols))
             ):
-                if loop_time < retry_at_by_symbol.get(state.symbol, 0.0):
+                if loop_time < retries.get(state.symbol, (0.0, 1.0))[0]:
                     continue
                 quote = next(
                     iter(self._latest_market_quotes.for_symbols((state.symbol,))),
@@ -265,26 +245,7 @@ class LiveExitChannelRuntime:
                         failure = ORDER_IDENTITY_CONFLICT_REASON
                         if self._on_order_identity_conflict is not None:
                             self._on_order_identity_conflict(state.symbol)
-                        if self._on_exit_failure is not None:
-                            self._on_exit_failure(state.symbol, failure)
-                        retry_delay = min(
-                            retry_delay_by_symbol.get(state.symbol, 1.0),
-                            60.0,
-                        )
-                        retry_delay_by_symbol[state.symbol] = min(
-                            retry_delay * 2,
-                            60.0,
-                        )
-                        retry_at_by_symbol[state.symbol] = (
-                            asyncio.get_running_loop().time() + retry_delay
-                        )
-                        log.warning(
-                            "live_grace_timeout_processing_degraded",
-                            symbol=state.symbol,
-                            error_type=type(error).__name__,
-                            reason=failure,
-                            retry_delay_seconds=retry_delay,
-                        )
+                        self._record_result(state.symbol, failure, retries, channel="grace")
                         continue
                     if not self._is_transient_error(error):
                         raise
@@ -294,35 +255,7 @@ class LiveExitChannelRuntime:
                         error_type=type(error).__name__,
                     )
                     continue
-                if failure is not None:
-                    pending_position_sync = is_pending_position_sync_failure(failure)
-                    if not pending_position_sync and self._on_exit_failure is not None:
-                        self._on_exit_failure(state.symbol, failure)
-                    if pending_position_sync:
-                        log.warning(
-                            "live_grace_timeout_position_sync_pending",
-                            symbol=state.symbol,
-                            reason=failure,
-                        )
-                    delay = min(
-                        retry_delay_by_symbol.get(state.symbol, 1.0),
-                        60.0,
-                    )
-                    retry_delay_by_symbol[state.symbol] = min(delay * 2, 60.0)
-                    retry_at_by_symbol[state.symbol] = (
-                        asyncio.get_running_loop().time() + delay
-                    )
-                    log.error(
-                        "live_grace_timeout_exit_retry_scheduled",
-                        symbol=state.symbol,
-                        reason=failure,
-                        retry_delay_seconds=delay,
-                    )
-                    continue
-                retry_at_by_symbol.pop(state.symbol, None)
-                retry_delay_by_symbol.pop(state.symbol, None)
-                if self._on_exit_failure is not None:
-                    self._on_exit_failure(state.symbol, None)
+                self._record_result(state.symbol, failure, retries, channel="grace")
             await asyncio.sleep(interval_seconds)
 
 
