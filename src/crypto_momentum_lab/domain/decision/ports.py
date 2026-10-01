@@ -8,7 +8,8 @@ caller-verified exchange absence and proof that the exit is obsolete.
 """
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 from crypto_momentum_lab.domain.decision.commit_models import (
     DecisionCommit,
@@ -52,3 +53,21 @@ class ExitDispatchReceipt(Protocol):
 
 
 ExitDispatchHandler = Callable[[TradeCommand], Awaitable[ExitDispatchReceipt]]
+
+
+@dataclass(frozen=True, slots=True)
+class ExitRecoveryDisposition:
+    status: Literal["PENDING", "DISPATCHED", "SUPERSEDED"]
+    reason: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.status not in {"PENDING", "DISPATCHED", "SUPERSEDED"}
+            or not self.reason.strip()
+        ):
+            raise ValueError(
+                "exit recovery needs a known disposition and evidence reason"
+            )
+
+
+ExitRecoveryHandler = Callable[[TradeCommand], Awaitable[ExitRecoveryDisposition]]

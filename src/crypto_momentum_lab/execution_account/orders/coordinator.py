@@ -24,6 +24,7 @@ import structlog
 from crypto_momentum_lab.domain.account.models import (
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillLoadScan,
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.command_models import (
@@ -60,13 +61,22 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     PreparedOrderSubmission,
 )
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
+    PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    StreamCheckpointAdoption,
+)
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     PositionReservation,
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
+    coverage_from_scan,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     LiveSubmissionDisabledError,
@@ -448,6 +458,7 @@ class OrderExecutionCoordinator:
         symbols: tuple[str, ...] | frozenset[str] = (),
         *,
         fills: tuple[AccountFillEvent, ...] = (),
+        fill_load_scans: tuple[AccountFillLoadScan, ...] = (),
         stream_id: str | None = None,
         stream_epoch: str | None = None,
         sequence: int | None = None,
@@ -561,6 +572,23 @@ class OrderExecutionCoordinator:
             )
             fills_by_key.setdefault(key, []).append(fill)
 
+        scans_by_key: dict[PositionKey, AccountFillLoadScan] = {}
+        for source_scan in fill_load_scans:
+            key = PositionKey(
+                source_scan.environment,
+                source_scan.account_label,
+                source_scan.symbol,
+                FuturesPositionSide(source_scan.position_side),
+            )
+            if key not in positions_by_key:
+                raise ValueError(
+                    "fill scan requires a matching explicit account snapshot"
+                )
+            if key in scans_by_key:
+                raise ValueError("account event contains duplicate position scans")
+            if not stream_id or not stream_epoch:
+                raise ValueError("fill scan requires a source stream")
+            scans_by_key[key] = source_scan
         conflict_reasons: Counter[str] = Counter()
         for key in sorted(
             positions_by_key.keys() | fills_by_key.keys(),
@@ -572,6 +600,7 @@ class OrderExecutionCoordinator:
                 pos is not None
                 and pos.position_amt == 0
                 and not scoped_fills
+                and key not in scans_by_key
                 and stream_id is not None
                 and stream_epoch is not None
                 and self._confirmed_flat_streams.get(key) == (stream_id, stream_epoch)
@@ -604,6 +633,51 @@ class OrderExecutionCoordinator:
                 symbol=key.symbol,
                 position_side=key.position_side,
             )
+            proof = None
+            adoption = None
+            scan = scans_by_key.get(key)
+            if scan is not None:
+                assert (
+                    pos is not None
+                    and stream_id is not None
+                    and stream_epoch is not None
+                )
+                target_scope = AccountFactStreamScope.for_position_key(
+                    key, stream_id=stream_id, stream_epoch=stream_epoch
+                )
+                proof = coverage_from_scan(scan, snapshot=pos, scope=target_scope)
+                assert proof.load_provenance is not None
+                if (
+                    scan.source_anchor_kind == "recovery_checkpoint"
+                    and proof.load_provenance.is_complete
+                ):
+                    assert (
+                        scan.source_stream_id is not None
+                        and scan.source_stream_epoch is not None
+                    )
+                    parent_scope = AccountFactStreamScope.for_position_key(
+                        key,
+                        stream_id=scan.source_stream_id,
+                        stream_epoch=scan.source_stream_epoch,
+                    )
+                    if parent_scope != target_scope:
+                        parent = await self._execution_book.load_recovery_checkpoint(
+                            parent_scope
+                        )
+                        if (
+                            parent is None
+                            or parent.checkpoint_id != scan.source_anchor_id
+                        ):
+                            conflict_reasons[
+                                "fill scan parent checkpoint unavailable"
+                            ] += 1
+                            continue
+                        adoption = StreamCheckpointAdoption(
+                            parent_checkpoint=parent,
+                            target_scope=target_scope,
+                            fill_load_provenance=proof.load_provenance,
+                            target_event_cut=scan.observed_at,
+                        )
             result = await self._execution_book.observe(
                 ExecutionEvidence(
                     evidence_id=scoped_evidence_id,
@@ -611,6 +685,14 @@ class OrderExecutionCoordinator:
                     observed_at=observed_at,
                     fills=scoped_fills,
                     snapshot=pos,
+                    coverage_evidence=proof,
+                    fill_load_provenance=None
+                    if proof is None
+                    else proof.load_provenance,
+                    stream_checkpoint_adoption=adoption,
+                    source_anchor_snapshot=None
+                    if scan is None
+                    else scan.source_anchor_snapshot,
                     stream_id=stream_id,
                     stream_epoch=stream_epoch,
                     sequence=sequence,
@@ -975,7 +1057,7 @@ class OrderExecutionCoordinator:
         if getattr(result, "recovery_required", False):
             raise RuntimeError(
                 "ExecutionBook applied order facts but reservation settlement "
-                f"requires recovery: {result.diagnostics}"
+                f"requires recovery: {getattr(result, 'diagnostics', ())}"
             )
 
     async def _record_submission_failure(

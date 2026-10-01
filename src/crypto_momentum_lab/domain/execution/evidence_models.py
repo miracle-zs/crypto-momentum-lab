@@ -42,8 +42,39 @@ class ExecutionEvidence:
     stream_epoch: str | None = None
     sequence: int | None = None
     cumulative_order: ExecutionCumulativeOrderReport | None = None
+    source_anchor_snapshot: AccountPositionSnapshot | None = None
 
     def __post_init__(self) -> None:
+        if self.source_anchor_snapshot is not None:
+            from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+                stable_snapshot_anchor_id,
+            )
+
+            anchor = self.source_anchor_snapshot
+            provenance = self.fill_load_provenance
+            key = self.scope.to_position_key()
+            if (
+                provenance is None
+                or provenance.source_anchor_kind != "zero_snapshot"
+                or anchor.position_amt != 0
+                or anchor.observed_at != provenance.source_anchor_event_cut
+                or stable_snapshot_anchor_id(anchor) != provenance.source_anchor_id
+            ):
+                raise ValueError(
+                    "execution zero anchor must match typed source provenance"
+                )
+            if (
+                anchor.environment,
+                anchor.account_label,
+                anchor.symbol,
+                anchor.position_side,
+            ) != (
+                key.environment,
+                key.account_label,
+                key.symbol,
+                key.position_side.value,
+            ):
+                raise ValueError("execution zero anchor position scope mismatch")
         if self.sequence is not None and self.sequence < 0:
             raise ValueError("execution evidence sequence must be non-negative")
         if (self.stream_id is None) != (self.stream_epoch is None):

@@ -641,3 +641,12 @@ async def test_fact_source_commit_decision_heals_skipped_revision() -> None:
     assert receipt.decision_id == "dec_skip"
     assert src.policy_revision == 5
     assert src.current_policy_state.policy_version == 3
+
+
+async def test_flat_book_does_not_prove_pending_exit_was_never_submitted():
+    source, uow, book, view, handler, command = _pending_exit_case()
+    view.total_quantity = Decimal("0")
+    await source.recover_pending_exits()
+    uow.mark_exit_superseded.assert_not_awaited()
+    uow.mark_exit_dispatched.assert_not_awaited()
+    handler.assert_not_awaited()

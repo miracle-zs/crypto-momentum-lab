@@ -70,6 +70,9 @@ from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
+from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+    load_fill_recovery_sources,
+)
 from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
@@ -511,6 +514,9 @@ async def sync_once(
             service = ExecutionAccountSyncService(
                 client=sync_client,
                 repository=sync_repository,
+                fill_source_anchor_loader=lambda: load_fill_recovery_sources(
+                    factory, environment=environment, account_label=account_label
+                ),
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
                     account_label=account_label,
@@ -521,6 +527,9 @@ async def sync_once(
                         sorted(set(fill_symbols) | historical_fill_symbols)
                     ),
                     recent_fill_cursors=historical_fill_cursors,
+                    fill_source_anchors=await load_fill_recovery_sources(
+                        factory, environment=environment, account_label=account_label
+                    ),
                 ),
             )
             return await service.sync_once()
@@ -624,6 +633,9 @@ async def sync_continuously(
             service = ExecutionAccountSyncService(
                 client=sync_client,
                 repository=sync_repository,
+                fill_source_anchor_loader=lambda: load_fill_recovery_sources(
+                    factory, environment=environment, account_label=account_label
+                ),
                 config=ExecutionAccountSyncConfig(
                     environment=environment,
                     account_label=account_label,
@@ -634,6 +646,9 @@ async def sync_continuously(
                         sorted(set(fill_symbols) | historical_fill_symbols)
                     ),
                     recent_fill_cursors=historical_fill_cursors,
+                    fill_source_anchors=await load_fill_recovery_sources(
+                        factory, environment=environment, account_label=account_label
+                    ),
                     historical_fill_reconciliation_interval_seconds=(
                         historical_fill_reconciliation_interval_seconds
                     ),
@@ -875,7 +890,8 @@ def _account_event_from_user_data(
         reason=result.status.value,
         has_fill=has_fill,
         trade_id=trade_id,
-        fills=result.new_fills,
+        fills=result.fills if result.fill_load_scans else result.new_fills,
+        fill_load_scans=result.fill_load_scans,
         exchange_event_at=event.exchange_event_at,
         exchange_update_id=event.exchange_update_id,
         exchange_previous_update_id=event.exchange_previous_update_id,
@@ -915,7 +931,8 @@ def _account_event_from_snapshot(
         account_state=result.status,
         snapshot_kind="full",
         account_snapshot=snapshot,
-        fills=result.new_fills,
+        fills=result.fills if result.fill_load_scans else result.new_fills,
+        fill_load_scans=result.fill_load_scans,
     )
 
 

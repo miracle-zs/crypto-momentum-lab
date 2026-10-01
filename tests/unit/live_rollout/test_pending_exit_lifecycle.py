@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
-from crypto_momentum_lab.domain.decision.ports import DecisionUnitOfWorkPort
+from crypto_momentum_lab.domain.decision.ports import (
+    DecisionUnitOfWorkPort,
+    ExitRecoveryDisposition,
+)
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
@@ -103,16 +106,20 @@ async def test_pending_exit_dispatches_when_book_matches_active_epoch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pending_exit_superseded_when_position_confirmed_flat_on_exchange() -> None:
-    """If exchange reconciliation proves the physical position has already been closed
-
-    (total_quantity == 0), the pending exit in outbox must be safely marked SUPERSEDED
-    instead of staying permanently PENDING and logging deferred warnings forever.
-    """
+async def test_pending_exit_superseded_when_position_confirmed_flat_on_exchange() -> (
+    None
+):
+    """An explicit exchange-absence verdict closes an obsolete exit."""
     source, uow, book, view, handler, command = _setup_pending_exit_test()
 
-    # Position is flat in the current book
     view.total_quantity = Decimal("0")
+    source.set_exit_recovery_handler(
+        AsyncMock(
+            return_value=ExitRecoveryDisposition(
+                "SUPERSEDED", "exchange_absence_verified_explicit_position_flat"
+            )
+        )
+    )
 
     await source.recover_pending_exits()
 
@@ -122,7 +129,9 @@ async def test_pending_exit_superseded_when_position_confirmed_flat_on_exchange(
 
     # Invariant: Must transition to SUPERSEDED to close the finite state machine loop
     uow.mark_exit_superseded.assert_awaited_once_with(
-        "dec_test_123", command.command_id, "position_already_flat"
+        "dec_test_123",
+        command.command_id,
+        "exchange_absence_verified_explicit_position_flat",
     )
 
 
@@ -145,3 +154,18 @@ def test_exit_command_client_order_id_bounded() -> None:
     )
     assert len(exit_client_order_id) <= 36
     assert exit_client_order_id.startswith("cml_")
+
+
+@pytest.mark.parametrize("status", ["PENDING", "DISPATCHED", "SUPERSEDED"])
+async def test_flat_book_uses_receipt_disposition_without_fabricating_status(status):
+    source, uow, _, view, handler, command = _setup_pending_exit_test()
+    view.total_quantity = Decimal("0")
+    recovery = AsyncMock(
+        return_value=ExitRecoveryDisposition(status, "verified-test-evidence")
+    )
+    source.set_exit_recovery_handler(recovery)
+    await source.recover_pending_exits()
+    recovery.assert_awaited_once_with(command)
+    handler.assert_not_awaited()
+    assert uow.mark_exit_dispatched.await_count == (status == "DISPATCHED")
+    assert uow.mark_exit_superseded.await_count == (status == "SUPERSEDED")

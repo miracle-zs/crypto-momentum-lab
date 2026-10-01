@@ -17,6 +17,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveOperatorApprovalRow,
     LiveRollbackCommandRow,
     LiveSessionTransitionRow,
+    StrategyLiveStateRow,
 )
 
 _LIVE_SESSION_REASON_MAX_LENGTH = 128
@@ -26,8 +27,17 @@ class PostgresLiveRolloutRepository:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        strategy_scope: tuple[str, str, str] | None = None,
     ) -> None:
+        if strategy_scope is not None and (
+            len(strategy_scope) != 3 or any(not part.strip() for part in strategy_scope)
+        ):
+            raise ValueError(
+                "strategy scope must have environment, account and strategy"
+            )
         self._session_factory = session_factory
+        self._strategy_scope = strategy_scope
 
     async def save_approval(self, approval: LiveOperatorApproval) -> None:
         await self._insert(LiveOperatorApprovalRow, asdict(approval))
@@ -97,7 +107,47 @@ class PostgresLiveRolloutRepository:
 
     async def save_transition(self, transition: LiveSessionTransition) -> None:
         values = _prepare_transition_values(transition)
-        await self._insert(LiveSessionTransitionRow, values)
+        operating_state = {
+            LiveSessionState.LIVE_ENABLED: "active",
+            LiveSessionState.DRAINING: "draining",
+            LiveSessionState.HALTED: "halted",
+            LiveSessionState.COMPLETED: "halted",
+        }.get(transition.state)
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(LiveSessionTransitionRow)
+                    .values(values)
+                    .on_conflict_do_nothing()
+                )
+                # The lifecycle event and its dashboard projection commit together.
+                # Temporary preflight probes must not overwrite operating state.
+                if self._strategy_scope is not None and operating_state is not None:
+                    environment, account_label, strategy_name = self._strategy_scope
+                    statement = insert(StrategyLiveStateRow).values(
+                        environment=environment,
+                        account_label=account_label,
+                        strategy_name=strategy_name,
+                        state=operating_state,
+                        changed_at=transition.occurred_at,
+                        reason=values["reason"],
+                    )
+                    await session.execute(
+                        statement.on_conflict_do_update(
+                            index_elements=[
+                                StrategyLiveStateRow.environment,
+                                StrategyLiveStateRow.account_label,
+                                StrategyLiveStateRow.strategy_name,
+                            ],
+                            set_={
+                                "state": statement.excluded.state,
+                                "changed_at": statement.excluded.changed_at,
+                                "reason": statement.excluded.reason,
+                            },
+                            where=StrategyLiveStateRow.changed_at
+                            <= statement.excluded.changed_at,
+                        )
+                    )
 
     async def load_latest_transition(
         self,

@@ -24,6 +24,7 @@ class FillScanPlan:
     source_anchor_kind: str
     source_stream_id: str | None
     source_stream_epoch: str | None
+    source_anchor_snapshot: AccountPositionSnapshot | None = None
 
 
 def plan_fill_scan(
@@ -34,7 +35,11 @@ def plan_fill_scan(
     if source_anchor is not None:
         source_anchor_id = source_anchor.checkpoint_id
         source_anchor_cut = source_anchor.event_cut
-        source_anchor_kind = "recovery_checkpoint"
+        source_anchor_kind = (
+            "zero_snapshot"
+            if source_anchor.zero_snapshot is not None
+            else "recovery_checkpoint"
+        )
         source_stream_id = source_anchor.stream_id
         source_stream_epoch = source_anchor.stream_epoch
     elif position.position_amt == Decimal("0"):
@@ -60,4 +65,7 @@ def plan_fill_scan(
         source_anchor_kind=source_anchor_kind,
         source_stream_id=source_stream_id,
         source_stream_epoch=source_stream_epoch,
+        source_anchor_snapshot=(
+            source_anchor.zero_snapshot if source_anchor is not None else position
+        ),
     )

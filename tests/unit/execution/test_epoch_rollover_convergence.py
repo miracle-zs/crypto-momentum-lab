@@ -23,11 +23,11 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
 
 @pytest.mark.asyncio
-async def test_non_flat_position_controlled_epoch_adoption_when_quantity_matches() -> None:
-    """When an active stream epoch changes, a non-flat position whose physical snapshot
+async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
+    """Close and reopen can leave the same quantity with a different batch.
 
-    matches the ledger total quantity and has no in-flight orders should safely
-    adopt the new stream epoch without deadlock or losing position facts.
+    A snapshot alone cannot establish whether that happened during downtime.
+    Only source-backed history may adopt an occupied position into a new epoch.
     """
     book = ExecutionBook()
     scope = ExecutionScope(
@@ -110,20 +110,19 @@ async def test_non_flat_position_controlled_epoch_adoption_when_quantity_matches
 
     obs_2 = await book.observe(evidence_new_epoch)
 
-    # Invariant: Must NOT be rejected as a conflict
-    assert not isinstance(obs_2, EvidenceConflict), f"Observation failed: {obs_2}"
-
-    # Invariant: Reading under the new epoch MUST succeed and return ready
-    view_epoch_2 = await book.read(
-        scope, stream_id="account_event_hub", stream_epoch="epoch-2"
+    assert isinstance(obs_2, EvidenceConflict)
+    assert "validated recovery checkpoint" in obs_2.reason
+    preserved = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
     )
-    assert view_epoch_2.total_quantity == Decimal("137.6")
-    assert view_epoch_2.is_ready_for_trade
-    assert view_epoch_2.stream_scope.stream_epoch == "epoch-2"
+    assert preserved.projection_version == view_epoch_1.projection_version
+    assert preserved.total_quantity == view_epoch_1.total_quantity
 
 
 @pytest.mark.asyncio
-async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges() -> None:
+async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges() -> (
+    None
+):
     """If the new stream's snapshot quantity disagrees with the ledger (actual desync),
 
     epoch rollover must be rejected with an EvidenceConflict to protect data integrity.
@@ -178,7 +177,7 @@ async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges(
         symbol="GRASSUSDT",
         position_side="LONG",
         position_amt=Decimal("100.0"),
-        entry_price=Decimal("0.72483"),
+        entry_price=Decimal("0"),
         mark_price=Decimal("0.72483"),
         unrealized_pnl=Decimal("0"),
         notional=Decimal("72.483"),
@@ -204,7 +203,7 @@ async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges(
 
 
 @pytest.mark.asyncio
-async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
+async def test_durable_empty_flat_rollover_resets_sequence_monotonicity() -> None:
     """When a new stream epoch is adopted under durable UoW, sequence monotonicity
 
     must NOT compare the new stream's sequence (e.g. 11) against the old stream's
@@ -274,28 +273,12 @@ async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
     )
     start = datetime(2026, 9, 29, 6, 7, tzinfo=UTC)
 
-    # 1. Establish position under epoch-1 with sequence 463
-    fill = AccountFillEvent(
-        environment=scope.environment,
-        account_label=scope.account_label,
-        symbol=scope.symbol,
-        trade_id="trade-1",
-        order_id="order-1",
-        side="BUY",
-        price=Decimal("0.72483"),
-        quantity=Decimal("137.6"),
-        realized_pnl=Decimal("0"),
-        fee=Decimal("0.05"),
-        fee_asset="USDT",
-        trade_at=start,
-        raw_payload={"positionSide": "LONG"},
-    )
+    # Establish an empty position under the old stream with sequence 463.
     obs_1 = await book.observe(
         ExecutionEvidence(
             evidence_id="evidence-initial-fill-463",
             scope=scope,
             observed_at=start,
-            fills=(fill,),
             stream_id="account_event_hub",
             stream_epoch="epoch-1",
             sequence=463,
@@ -317,8 +300,8 @@ async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
         account_label="primary",
         symbol="GRASSUSDT",
         position_side="LONG",
-        position_amt=Decimal("137.6"),
-        entry_price=Decimal("0.72483"),
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
         mark_price=Decimal("0.72483"),
         unrealized_pnl=Decimal("0"),
         notional=Decimal("99.7366"),
@@ -340,10 +323,9 @@ async def test_durable_epoch_rollover_resets_sequence_monotonicity() -> None:
         )
     )
 
-    # Invariant: Must NOT be rejected as "sequence 11 does not advance prior sequence 463"
+    # The new epoch must not compare sequence 11 against the old sequence 463.
     assert not isinstance(obs_2, EvidenceConflict), f"Observation failed: {obs_2}"
 
     view = await book.read(scope, stream_id="account_event_hub", stream_epoch="epoch-2")
-    assert view.total_quantity == Decimal("137.6")
+    assert view.total_quantity == Decimal("0")
     assert view.stream_scope.stream_epoch == "epoch-2"
-

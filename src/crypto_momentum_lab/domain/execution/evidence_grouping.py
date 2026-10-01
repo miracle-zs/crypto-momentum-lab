@@ -47,6 +47,7 @@ async def observe_evidence_group(
             fill_load_provenance=None,
             stream_checkpoint_adoption=None,
             cumulative_order=None,
+            source_anchor_snapshot=None,
         )
         fill_result = await observe_one(one_fill)
         forget_identity(_evidence_identity(one_fill))

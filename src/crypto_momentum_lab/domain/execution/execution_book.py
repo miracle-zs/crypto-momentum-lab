@@ -1908,9 +1908,15 @@ class ExecutionBook:
             current_scope = self._stream_scopes.get(canon)
             current_book = self._books.get(canon)
             can_rollover = (
-                current_book is not None
+                evidence.coverage_evidence is None
+                and evidence.stream_checkpoint_adoption is None
+                and evidence.source_anchor_snapshot is None
+                and current_book is not None
                 and evidence.snapshot is not None
-                and evidence.snapshot.position_amt == current_book.get_view().total_quantity
+                and evidence.snapshot.position_amt == Decimal("0")
+                and current_book.get_view().total_quantity == Decimal("0")
+                and not current_book.get_view().batches
+                and not current_book.get_view().unallocated_quantity
                 and not bool(self.get_active_reservations(key))
             )
             if (
@@ -2133,6 +2139,11 @@ class ExecutionBook:
                             )
                         )
 
+                    if evidence.source_anchor_snapshot is not None:
+                        # Only an explicit flat source row may seed a new baseline.
+                        candidate._ensure_journal(key).record_snapshot(
+                            evidence.source_anchor_snapshot
+                        )
                     facts_before = candidate._ensure_journal(key).read_cut()
                     fills_to_record = evidence.fills or (
                         (evidence.fill,) if evidence.fill is not None else ()
@@ -2338,10 +2349,13 @@ class ExecutionBook:
             if current_scope is not None and current_scope != scope:
                 current_book = self._books.get(key.canonical_id)
                 can_rollover = (
-                    current_book is not None
+                    evidence.coverage_evidence is None
+                    and current_book is not None
                     and evidence.snapshot is not None
-                    and evidence.snapshot.position_amt
-                    == current_book.get_view().total_quantity
+                    and evidence.snapshot.position_amt == Decimal("0")
+                    and current_book.get_view().total_quantity == Decimal("0")
+                    and not current_book.get_view().batches
+                    and not current_book.get_view().unallocated_quantity
                     and not bool(self.get_active_reservations(key))
                 )
                 if can_rollover:

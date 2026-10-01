@@ -180,8 +180,18 @@ class AccountFillSourceAnchor:
     event_cut: datetime
     stream_id: str
     stream_epoch: str
+    zero_snapshot: AccountPositionSnapshot | None = None
 
     def __post_init__(self) -> None:
+        if self.zero_snapshot is not None:
+            snapshot = self.zero_snapshot
+            if snapshot.position_amt != 0 or snapshot.observed_at != self.event_cut:
+                raise ValueError("zero source anchor requires an explicit flat cut")
+            if (
+                snapshot.symbol.strip().upper(),
+                snapshot.position_side.strip().upper(),
+            ) != (self.symbol.strip().upper(), self.position_side.strip().upper()):
+                raise ValueError("zero source anchor position identity mismatch")
         _require_non_empty(self.symbol, "symbol")
         _require_non_empty(self.position_side, "position_side")
         _require_non_empty(self.checkpoint_id, "checkpoint_id")
@@ -242,9 +252,32 @@ class AccountFillLoadScan:
     source_anchor_kind: str
     source_stream_id: str | None = None
     source_stream_epoch: str | None = None
+    source_anchor_snapshot: AccountPositionSnapshot | None = None
 
     def __post_init__(self) -> None:
         _require_common(self.environment, self.account_label)
+        if self.source_anchor_snapshot is not None:
+            anchor = self.source_anchor_snapshot
+            if (
+                self.source_anchor_kind != "zero_snapshot"
+                or anchor.position_amt != 0
+                or anchor.observed_at != self.source_anchor_event_cut
+            ):
+                raise ValueError(
+                    "fill scan zero anchor must be an explicit flat source cut"
+                )
+            if (
+                anchor.environment,
+                anchor.account_label,
+                anchor.symbol.strip().upper(),
+                anchor.position_side.strip().upper(),
+            ) != (
+                self.environment,
+                self.account_label,
+                self.symbol.strip().upper(),
+                self.position_side.strip().upper(),
+            ):
+                raise ValueError("fill scan zero anchor scope mismatch")
         _require_non_empty(self.symbol, "symbol")
         _require_non_empty(self.position_side, "position_side")
         _require_non_empty(self.source_anchor_id, "source_anchor_id")
@@ -257,8 +290,7 @@ class AccountFillLoadScan:
         if (self.source_stream_id is None) != (self.source_stream_epoch is None):
             raise ValueError("source stream id and epoch must be supplied together")
         if self.source_anchor_kind == "recovery_checkpoint" and (
-            self.source_stream_id is None
-            or self.source_stream_epoch is None
+            self.source_stream_id is None or self.source_stream_epoch is None
         ):
             raise ValueError("recovery checkpoint anchor requires its source stream")
         if self.source_anchor_kind == "zero_snapshot" and (

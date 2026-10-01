@@ -30,6 +30,7 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
 from crypto_momentum_lab.domain.decision.ports import (
     DecisionUnitOfWorkPort,
     ExitDispatchHandler,
+    ExitRecoveryHandler,
 )
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -182,6 +183,8 @@ class LiveDecisionFactSource:
         self._stream_sequence: int | None = None
         self._reported_stream_mismatches: set[tuple[str, str, str]] = set()
         self._exit_handler: ExitDispatchHandler | None = None
+        self._exit_recovery_handler: ExitRecoveryHandler | None = None
+        self._pending_exit_recovery_cursor = 0
         self._commit_lock = asyncio.Lock()
 
     @property
@@ -213,6 +216,9 @@ class LiveDecisionFactSource:
 
     def set_exit_handler(self, handler: ExitDispatchHandler) -> None:
         self._exit_handler = handler
+
+    def set_exit_recovery_handler(self, handler: ExitRecoveryHandler) -> None:
+        self._exit_recovery_handler = handler
 
     def bind_context(self, context: LiveDaemonRuntimeContext | None) -> None:
         self._context = context
@@ -457,30 +463,54 @@ class LiveDecisionFactSource:
             del decision_input
             return receipt
 
-    async def recover_pending_exits(self) -> None:
+    async def recover_pending_exits(self, *, limit: int | None = None) -> None:
         if self._decision_uow is None:
             raise RuntimeError("live decision persistence UoW is required")
         if self._exit_handler is None:
             raise RuntimeError("live decision exit handler is not configured")
-        for decision_id, command in await self._decision_uow.load_pending_exits(
-            self._policy_key
-        ):
+        pending = await self._decision_uow.load_pending_exits(self._policy_key)
+        if limit is not None and pending:
+            if limit <= 0:
+                raise ValueError("exit recovery limit must be positive")
+            offset = self._pending_exit_recovery_cursor % len(pending)
+            pending = (pending[offset:] + pending[:offset])[:limit]
+            self._pending_exit_recovery_cursor = offset + len(pending)
+        for decision_id, command in pending:
             view = await self._read_book_view(command)
             total_qty = (
                 getattr(view, "total_quantity", None) if view is not None else None
             )
             if total_qty is not None and total_qty <= Decimal("0"):
-                log.info(
-                    "durable_decision_exit_superseded_position_flat",
-                    decision_id=decision_id,
-                    command_id=command.command_id,
-                    symbol=command.position_key.symbol,
-                )
-                await self._decision_uow.mark_exit_superseded(
-                    decision_id,
-                    command.command_id,
-                    "position_already_flat",
-                )
+                recovery = self._exit_recovery_handler
+                if recovery is None:
+                    continue
+                try:
+                    disposition = await recovery(command)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception(
+                        "durable_exit_receipt_recovery_deferred",
+                        decision_id=decision_id,
+                        command_id=command.command_id,
+                    )
+                    continue
+                if disposition.status == "DISPATCHED":
+                    await self._decision_uow.mark_exit_dispatched(
+                        decision_id, command.command_id
+                    )
+                elif disposition.status == "SUPERSEDED":
+                    await self._decision_uow.mark_exit_superseded(
+                        decision_id, command.command_id, disposition.reason
+                    )
+                if disposition.status != "PENDING":
+                    log.info(
+                        "durable_exit_receipt_recovered",
+                        decision_id=decision_id,
+                        command_id=command.command_id,
+                        disposition=disposition.status,
+                        reason=disposition.reason,
+                    )
                 continue
 
             if not await self._exit_matches_current_book(command, view=view):
@@ -510,11 +540,7 @@ class LiveDecisionFactSource:
 
     async def _read_book_view(self, command: TradeCommand) -> PositionView | None:
         book = self._execution_book
-        if (
-            book is None
-            or self._stream_id is None
-            or self._stream_epoch is None
-        ):
+        if book is None or self._stream_id is None or self._stream_epoch is None:
             return None
         key = command.position_key
         if key.environment != "live" or key.account_label != self._account_label:

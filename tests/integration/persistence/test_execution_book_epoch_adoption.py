@@ -1,7 +1,3 @@
-from crypto_momentum_lab.domain.execution.snapshot_encoding import (
-    stable_snapshot_anchor_id,
-)
-
 """Real PostgreSQL recovery across execution stream epochs."""
 
 from datetime import UTC, datetime, timedelta
@@ -31,6 +27,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
+)
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
@@ -388,14 +387,183 @@ async def test_new_epoch_without_checkpoint_adoption_fails_closed(
                 scope=new_scope,
                 at=anchor_at + timedelta(minutes=1),
                 sequence=1,
-                snapshot=_snapshot(
-                    key, anchor_at + timedelta(minutes=1), "0", "0"
-                ),
+                snapshot=_snapshot(key, anchor_at + timedelta(minutes=1), "0", "0"),
                 proof=rejected_proof,
             )
         )
         assert not isinstance(result, Applied)
         current_view = await book.read(ExecutionScope("live", account, "BTCUSDT"))
         assert current_view.projection_version == old_view.projection_version
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete", [True, False])
+async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically(
+    async_database_url,
+    complete,
+):
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillLoadScan,
+        AccountFillPageScan,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"business-{uuid4().hex[:12]}"
+    key = PositionKey("live", account, "BTCUSDT", "LONG")
+    scope = ExecutionScope("live", account, "BTCUSDT", key.position_side)
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    entry = _fill(key, "entry", "BUY", "2", start + timedelta(minutes=1))
+    exit_fill = _fill(key, "exit", "SELL", "2", start + timedelta(minutes=2))
+    old_snapshot = _snapshot(key, start + timedelta(minutes=1), "2", "100")
+    baseline = _snapshot(key, start, "0", "0")
+    target = _snapshot(key, start + timedelta(minutes=3), "0", "0")
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        result = await book.observe(
+            ExecutionEvidence(
+                "old-open",
+                scope,
+                old_snapshot.observed_at,
+                fill=entry,
+                snapshot=old_snapshot,
+                stream_id="hub",
+                stream_epoch="old",
+                sequence=1,
+            )
+        )
+        assert isinstance(result, Applied)
+        assert (await book.read(scope)).total_quantity == 2
+        scan = AccountFillLoadScan(
+            "live",
+            account,
+            "BTCUSDT",
+            "LONG",
+            AccountFillPageScan(
+                "BTCUSDT",
+                "repair-scan",
+                int(start.timestamp() * 1000),
+                None,
+                1,
+                complete,
+                not complete,
+                target.observed_at,
+            ),
+            target.observed_at,
+            stable_snapshot_anchor_id(baseline),
+            start,
+            "zero_snapshot",
+            source_anchor_snapshot=baseline,
+        )
+        coordinator = OrderExecutionCoordinator(
+            backend=object(),
+            environment="live",
+            account_label=account,
+            execution_book=book,
+        )
+        await coordinator.observe_account_snapshot(
+            target,
+            fills=(entry, exit_fill),
+            fill_load_scans=(scan,),
+            stream_id="hub",
+            stream_epoch="new",
+            sequence=1,
+        )
+        if not complete:
+            preserved = await book.read(scope, stream_id="hub", stream_epoch="old")
+            assert preserved.total_quantity == 2
+            assert (
+                await book.load_recovery_checkpoint(
+                    AccountFactStreamScope.for_position_key(
+                        key, stream_id="hub", stream_epoch="new"
+                    )
+                )
+                is None
+            )
+            return
+        view = await book.read(scope, stream_id="hub", stream_epoch="new")
+        assert view.total_quantity == 0
+        checkpoint = await book.load_recovery_checkpoint(
+            AccountFactStreamScope.for_position_key(
+                key, stream_id="hub", stream_epoch="new"
+            )
+        )
+        assert checkpoint is not None and checkpoint.coverage.is_authoritative
+        from types import SimpleNamespace
+
+        from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
+            load_fact_integrity,
+        )
+        from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+            load_fill_recovery_sources,
+        )
+
+        sources = await load_fill_recovery_sources(
+            factory, environment="live", account_label=account
+        )
+        assert sources[("BTCUSDT", "LONG")].checkpoint_id == checkpoint.checkpoint_id
+        assert sources[("BTCUSDT", "LONG")].stream_epoch == "new"
+        integrity = await load_fact_integrity(
+            factory,
+            accounts={account: SimpleNamespace(position_count=0)},
+            now=target.observed_at,
+        )
+        assert integrity[account].gaps == 0
+        assert integrity[account].observed_at == target.observed_at
+        stale = await load_fact_integrity(
+            factory,
+            accounts={account: SimpleNamespace(position_count=0)},
+            now=target.observed_at + timedelta(minutes=4),
+        )
+        assert stale[account].gaps is None
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        recovered = await restarted.read(scope, stream_id="hub", stream_epoch="new")
+        assert recovered.total_quantity == 0
+        assert recovered.projection_version == view.projection_version
+        # The next poll must load the newly adopted checkpoint and extend it,
+        # rather than attempting the original zero anchor again.
+        later = _snapshot(key, target.observed_at + timedelta(seconds=30), "0", "0")
+        continuation = AccountFillLoadScan(
+            "live",
+            account,
+            "BTCUSDT",
+            "LONG",
+            AccountFillPageScan(
+                "BTCUSDT",
+                "continuation",
+                int(checkpoint.event_cut.timestamp() * 1000),
+                None,
+                1,
+                True,
+                False,
+                later.observed_at,
+            ),
+            later.observed_at,
+            checkpoint.checkpoint_id,
+            checkpoint.event_cut,
+            "recovery_checkpoint",
+            "hub",
+            "new",
+        )
+        await coordinator.observe_account_snapshot(
+            later,
+            fill_load_scans=(continuation,),
+            stream_id="hub",
+            stream_epoch="new",
+            sequence=2,
+        )
+        extended = await book.load_recovery_checkpoint(
+            AccountFactStreamScope.for_position_key(
+                key, stream_id="hub", stream_epoch="new"
+            )
+        )
+        assert extended.event_cut == later.observed_at
     finally:
         await engine.dispose()

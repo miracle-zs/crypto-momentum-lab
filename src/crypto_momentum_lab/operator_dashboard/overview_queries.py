@@ -8,6 +8,7 @@ but do not need to know how the append-only process and lease rows are joined.
 
 import asyncio
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,12 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.operational import (
+    HealthDimensionName,
     OperationalView,
     aggregate_operational_views,
     evaluate_standard_health,
+    read_health,
 )
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     read_research_collector_status,
+)
+from crypto_momentum_lab.operator_dashboard.fact_integrity_queries import (
+    load_fact_integrity,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountsResponse,
@@ -267,6 +273,14 @@ class OverviewQueries:
         except Exception:
             pass
 
+        fact_integrity = {}
+        try:
+            fact_integrity = await load_fact_integrity(
+                self._session_factory, accounts=heads_by_account, now=now
+            )
+        except Exception:
+            # An unavailable or malformed proof cannot be reported as complete.
+            pass
         account_views: list[OperationalView] = []
         for acc in accounts_resp.accounts:
             observed = acc.observed_at or now
@@ -312,15 +326,30 @@ class OverviewQueries:
                 liveness_details=f"account_status_{acc.status.value}",
                 lag_seconds=lag,
                 max_lag_seconds=90.0,
-                # Reconciliation and process state do not establish ledger
-                # fact coverage. Keep this unknown until evidence is queried.
-                fact_gaps_count=None,
+                # Only a verified current ledger checkpoint establishes coverage.
+                fact_gaps_count=(
+                    fact_integrity[acc.account_label].gaps
+                    if acc.account_label in fact_integrity
+                    else None
+                ),
                 capability_permitted=cap_ok,
                 capability_reason=capability_reason,
                 reconciliation_matched=recon_matched,
                 reconciliation_details=recon_details,
                 observed_at=observed,
             )
+            summary = fact_integrity.get(acc.account_label)
+            if summary is not None and summary.observed_at is not None:
+                acc_view = read_health(
+                    acc_view.scope,
+                    tuple(
+                        replace(dimension, observed_at=summary.observed_at)
+                        if dimension.name == HealthDimensionName.FACT_INTEGRITY
+                        else dimension
+                        for dimension in acc_view.dimensions
+                    ),
+                    evidence_cut=now,
+                )
             account_views.append(acc_view)
 
         if account_views:

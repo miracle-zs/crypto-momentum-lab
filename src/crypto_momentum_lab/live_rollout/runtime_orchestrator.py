@@ -37,7 +37,6 @@ from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
-    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
@@ -113,6 +112,10 @@ from crypto_momentum_lab.live_rollout.execution_runtime import (
 )
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
+from crypto_momentum_lab.live_rollout.exit_receipt_recovery import (
+    LiveExitReceiptRecovery,
+    exit_command_client_id,
+)
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
@@ -527,7 +530,10 @@ async def run_live_daemon(
             expire_on_commit=False,
         )
         shadow_repository = PostgresShadowRepository(execution_factory)
-        live_repository = PostgresLiveRolloutRepository(execution_factory)
+        live_repository = PostgresLiveRolloutRepository(
+            execution_factory,
+            strategy_scope=("live", account_label, strategy_name),
+        )
         risk_repository = PostgresRiskRepository(execution_factory)
         # Lease liveness is a control-plane concern.  Give it one isolated
         # connection with a short driver timeout so a slow market/reconcile
@@ -842,11 +848,7 @@ async def run_live_daemon(
             allocs = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
-            exit_client_order_id = cmd.idempotency_key or (
-                cmd.command_id
-                if len(cmd.command_id) <= 36
-                else deterministic_client_order_id(session_id, cmd.command_id)
-            )
+            exit_client_order_id = exit_command_client_id(session_id, cmd)
             candidate_id = f"intent_exit_{cmd.command_id}"
             signal_id = f"sig_exit_{cmd.command_id}"
 
@@ -950,6 +952,14 @@ async def run_live_daemon(
             return res
 
         fact_source.set_exit_handler(_handle_decision_exit)
+        fact_source.set_exit_recovery_handler(
+            LiveExitReceiptRecovery(
+                execution_factory,
+                exchange=client,
+                account_label=account_label,
+                run_id=session_id,
+            )
+        )
         await fact_source.restore()
 
         entry_order_canceller = LiveEntryOrderCanceller(
@@ -1547,8 +1557,10 @@ async def run_live_daemon(
         )
         entry_runtime.set_ready_callback(on_entry_filter_cache_ready)
         refresh_entry_enabled()
-        if not draining and session_lifecycle is not None:
-            await session_lifecycle.transition(LiveSessionState.LIVE_ENABLED)
+        if session_lifecycle is not None:
+            await session_lifecycle.transition(
+                LiveSessionState.DRAINING if draining else LiveSessionState.LIVE_ENABLED
+            )
         mark_live_ready()
         log_startup_phase("live_readiness_published")
         startup_phase = False
@@ -1594,6 +1606,7 @@ async def run_live_daemon(
                     event.account_snapshot,
                     symbols=event.symbols,
                     fills=event.fills,
+                    fill_load_scans=event.fill_load_scans,
                     stream_id="account_event_hub",
                     stream_epoch=event.stream_epoch,
                     sequence=event.sequence,
@@ -1612,7 +1625,7 @@ async def run_live_daemon(
                 # A durable accepted exit is dispatchable only after the
                 # account facts for the current Hub epoch have reached the
                 # restored Book and its original projection token still wins.
-                await fact_source.recover_pending_exits()
+                await fact_source.recover_pending_exits(limit=5)
             control_plane_runtime.on_account_snapshot(event)
 
         account_event_runtime = LiveAccountEventRuntime(

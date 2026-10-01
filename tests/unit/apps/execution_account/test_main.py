@@ -16,7 +16,9 @@ def test_account_label_prefers_explicit_option(monkeypatch) -> None:
     assert main._resolve_account_label(" explicit ") == "explicit"
 
 
-def test_account_label_falls_back_to_environment_and_requires_value(monkeypatch) -> None:
+def test_account_label_falls_back_to_environment_and_requires_value(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("CML_ACCOUNT_LABEL", " account-2 ")
     assert main._resolve_account_label(None) == "account-2"
 
@@ -228,3 +230,69 @@ def test_publish_reconciled_fill_ignores_when_snapshot_is_none() -> None:
     # Should not raise ValueError and should not publish anything
     publish_reconciled_fill(fill, result_no_snap)
     assert len(published) == 0
+
+
+async def test_snapshot_event_keeps_scan_proof_and_full_replay_fills():
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.account.models import (
+        AccountConfigSnapshot,
+        AccountFillEvent,
+        AccountFillLoadScan,
+        AccountFillPageScan,
+        ExecutionAccountStatus,
+    )
+    from crypto_momentum_lab.execution_account.snapshot_models import AccountSnapshot
+    from crypto_momentum_lab.execution_account.sync_models import (
+        ExecutionAccountSyncResult,
+    )
+
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    scan = AccountFillLoadScan(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "LONG",
+        AccountFillPageScan(
+            "BTCUSDT", "scan", int(now.timestamp() * 1000), None, 1, True, False, now
+        ),
+        now,
+        "zero",
+        now,
+        "zero_snapshot",
+    )
+    fill = AccountFillEvent(
+        "live",
+        "primary",
+        "BTCUSDT",
+        "trade-1",
+        "order-1",
+        "BUY",
+        Decimal("10"),
+        Decimal("1"),
+        Decimal("0"),
+        Decimal("0"),
+        "USDT",
+        now,
+        {"positionSide": "LONG"},
+    )
+    result = ExecutionAccountSyncResult(
+        ExecutionAccountStatus.READY_READONLY,
+        "r",
+        0,
+        snapshot=AccountSnapshot(
+            AccountConfigSnapshot("live", "primary", False, True, 0, now, {}),
+            (),
+            (),
+            (),
+        ),
+        fills=(fill,),
+        new_fills=(),
+        fill_load_scans=(scan,),
+    )
+    event = main._account_event_from_snapshot(
+        result, environment="live", account_label="primary"
+    )
+    assert event.fill_load_scans == (scan,)
+    assert event.fills == (fill,)

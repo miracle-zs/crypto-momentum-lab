@@ -1538,6 +1538,7 @@ def disable_new_entries_command(
             risk_config_hash,
             LiveSessionState.DRAINING,
             "operator_disabled_new_entries",
+            strategy_scope=("live", account_label, strategy),
         )
     )
     push_error: Exception | None = None
@@ -2259,6 +2260,8 @@ async def _save_transition(
     risk_config_hash: str,
     state: LiveSessionState,
     reason: str,
+    *,
+    strategy_scope: tuple[str, str, str] | None = None,
 ) -> LiveSessionTransition:
     now = datetime.now(tz=UTC)
     transition = LiveSessionTransition(
@@ -2275,7 +2278,8 @@ async def _save_transition(
     engine = create_execution_database_engine(database_url)
     try:
         await PostgresLiveRolloutRepository(
-            async_sessionmaker(engine, expire_on_commit=False)
+            async_sessionmaker(engine, expire_on_commit=False),
+            strategy_scope=strategy_scope,
         ).save_transition(transition)
     finally:
         await engine.dispose()

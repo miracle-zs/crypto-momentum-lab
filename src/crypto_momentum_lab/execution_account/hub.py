@@ -1269,8 +1269,7 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "trade_id": event.trade_id,
             "fills": [_encode_account_fill(fill) for fill in event.fills],
             "fill_load_scans": [
-                _encode_account_fill_load_scan(scan)
-                for scan in event.fill_load_scans
+                _encode_account_fill_load_scan(scan) for scan in event.fill_load_scans
             ],
             "exchange_event_at": (
                 None
@@ -1598,7 +1597,9 @@ def _encode_account_fill_load_scan(
             "page_exhausted": page.page_exhausted,
             "truncated": page.truncated,
             "checked_through": (
-                None if page.checked_through is None else page.checked_through.isoformat()
+                None
+                if page.checked_through is None
+                else page.checked_through.isoformat()
             ),
         },
         "observed_at": scan.observed_at.isoformat(),
@@ -1607,6 +1608,9 @@ def _encode_account_fill_load_scan(
         "source_anchor_kind": scan.source_anchor_kind,
         "source_stream_id": scan.source_stream_id,
         "source_stream_epoch": scan.source_stream_epoch,
+        "source_anchor_snapshot": None
+        if scan.source_anchor_snapshot is None
+        else _encode_position_snapshot(scan.source_anchor_snapshot),
     }
 
 
@@ -1627,7 +1631,9 @@ def _decode_account_fill_load_scan(
     page = AccountFillPageScan(
         symbol=_require_string(page_payload, "symbol"),
         load_id=_require_string(page_payload, "load_id"),
-        scan_origin_start_time_ms=_required_int(page_payload, "scan_origin_start_time_ms"),
+        scan_origin_start_time_ms=_required_int(
+            page_payload, "scan_origin_start_time_ms"
+        ),
         next_from_id=_optional_int_value(page_payload, "next_from_id"),
         page_count=_required_int(page_payload, "page_count"),
         page_exhausted=_required_bool(page_payload, "page_exhausted"),
@@ -1652,6 +1658,15 @@ def _decode_account_fill_load_scan(
         source_anchor_kind=_require_string(payload, "source_anchor_kind"),
         source_stream_id=_optional_string(payload, "source_stream_id"),
         source_stream_epoch=_optional_string(payload, "source_stream_epoch"),
+        source_anchor_snapshot=(
+            None
+            if payload.get("source_anchor_snapshot") is None
+            else _decode_position_snapshot(
+                payload["source_anchor_snapshot"],
+                expected_environment=expected_environment,
+                expected_account_label=expected_account_label,
+            )
+        ),
     )
 
 

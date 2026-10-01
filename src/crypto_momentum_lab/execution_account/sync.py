@@ -1,5 +1,5 @@
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -10,9 +10,13 @@ from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountFillLoadScan,
     AccountFillReconciliationCursor,
+    AccountFillSourceAnchor,
     AccountPositionSnapshot,
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
+)
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.balance_history import (
@@ -78,10 +82,19 @@ class ExecutionAccountSyncService:
         client: ReadOnlyAccountClient,
         repository: AccountSyncRepository,
         config: ExecutionAccountSyncConfig,
+        fill_source_anchor_loader: Callable[
+            [], Awaitable[Mapping[tuple[str, str], AccountFillSourceAnchor]]
+        ]
+        | None = None,
     ) -> None:
         self._client = client
         self._repository = repository
         self._config = config
+        self._fill_source_anchor_loader = fill_source_anchor_loader
+        self._fill_source_anchors = dict(config.fill_source_anchors)
+        self._zero_position_snapshots: dict[
+            tuple[str, str], AccountPositionSnapshot
+        ] = {}
         self._tracked_fill_symbols = {
             symbol.strip().upper() for symbol in config.recent_fill_symbols
         }
@@ -102,9 +115,7 @@ class ExecutionAccountSyncService:
             seconds=config.historical_fill_reconciliation_interval_seconds
         )
         self._last_balance_values: dict[str, BalanceValue] = {}
-        self._last_position_signatures: dict[
-            tuple[str, str], PositionSignature
-        ] = {}
+        self._last_position_signatures: dict[tuple[str, str], PositionSignature] = {}
         self._known_fill_keys: set[FillKey] = set()
         self._known_fill_key_order: deque[FillKey] = deque(maxlen=_FILL_KEY_CACHE_SIZE)
         self._has_completed_sync = False
@@ -147,7 +158,9 @@ class ExecutionAccountSyncService:
         normalized_balances = tuple(
             replace(balance, observed_at=resolved_observed_at) for balance in balances
         )
-        persisted_balances = select_balance_history(normalized_balances, self._last_balance_values)
+        persisted_balances = select_balance_history(
+            normalized_balances, self._last_balance_values
+        )
         normalized_positions = tuple(
             replace(position, observed_at=resolved_observed_at)
             for position in positions_to_save
@@ -267,6 +280,10 @@ class ExecutionAccountSyncService:
                     mismatch_count=len(mismatches),
                 )
 
+            if include_fills and self._fill_source_anchor_loader is not None:
+                self._fill_source_anchors.update(
+                    await self._fill_source_anchor_loader()
+                )
             balances = await self._client.fetch_balances()
             previous_active_position_keys = set(self._active_position_keys)
             positions = tuple(
@@ -276,6 +293,22 @@ class ExecutionAccountSyncService:
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
+            for position in active_positions:
+                identity = (
+                    position.symbol.strip().upper(),
+                    position.position_side.strip().upper(),
+                )
+                baseline = self._zero_position_snapshots.get(identity)
+                if identity not in self._fill_source_anchors and baseline is not None:
+                    self._fill_source_anchors[identity] = AccountFillSourceAnchor(
+                        identity[0],
+                        identity[1],
+                        stable_snapshot_anchor_id(baseline),
+                        baseline.observed_at,
+                        "exchange_snapshot",
+                        stable_snapshot_anchor_id(baseline),
+                        zero_snapshot=baseline,
+                    )
             active_position_keys = _position_keys(active_positions)
             self._active_position_keys = active_position_keys
             open_orders = await self._client.fetch_open_orders()
@@ -286,7 +319,7 @@ class ExecutionAccountSyncService:
                 order.symbol.strip().upper() for order in open_orders
             )
             active_fill_symbols.update(
-                symbol for symbol, _side in self._config.fill_source_anchors
+                symbol for symbol, _side in self._fill_source_anchors
             )
             self._tracked_fill_symbols.update(active_fill_symbols)
             tracked_fill_symbols = select_fill_reconciliation_symbols(
@@ -321,7 +354,7 @@ class ExecutionAccountSyncService:
                 for position in positions:
                     symbol = position.symbol.strip().upper()
                     side = position.position_side.strip().upper()
-                    source_anchor = self._config.fill_source_anchors.get((symbol, side))
+                    source_anchor = self._fill_source_anchors.get((symbol, side))
                     plan = plan_fill_scan(position, source_anchor)
                     if plan is None:
                         continue
@@ -346,6 +379,7 @@ class ExecutionAccountSyncService:
                             source_anchor_kind=plan.source_anchor_kind,
                             source_stream_id=plan.source_stream_id,
                             source_stream_epoch=plan.source_stream_epoch,
+                            source_anchor_snapshot=plan.source_anchor_snapshot,
                         )
                     )
 
@@ -386,9 +420,7 @@ class ExecutionAccountSyncService:
                     key=lambda item: (item.trade_at, item.symbol, item.trade_id),
                 )
             )
-            incomplete_symbols: set[str] = set(
-                incomplete_fill_symbols(self._client)
-            )
+            incomplete_symbols: set[str] = set(incomplete_fill_symbols(self._client))
             fills_catching_up = bool(incomplete_symbols) or any(
                 not scan.page_scan.page_exhausted or scan.page_scan.truncated
                 for scan in fill_load_scans
@@ -466,6 +498,14 @@ class ExecutionAccountSyncService:
             )
             if result.snapshot is not None:
                 self._remember_observation(result.snapshot.config.observed_at)
+                for position in result.snapshot.positions:
+                    if position.position_amt == 0:
+                        self._zero_position_snapshots[
+                            (
+                                position.symbol.strip().upper(),
+                                position.position_side.strip().upper(),
+                            )
+                        ] = position
             if persist:
                 await self.persist_reconciliation_result(
                     result,
@@ -538,7 +578,9 @@ class ExecutionAccountSyncService:
         # balances and the zero that closes a previously non-zero asset.
         # persist_reconciliation_result is the daemon's main write path and had
         # been inserting the full multi-asset zero set every cycle.
-        persisted_balances = select_balance_history(snapshot.balances, self._last_balance_values)
+        persisted_balances = select_balance_history(
+            snapshot.balances, self._last_balance_values
+        )
         persisted_positions = self._positions_to_persist(
             snapshot.positions,
             observed_at=snapshot.config.observed_at,
@@ -627,7 +669,9 @@ class ExecutionAccountSyncService:
             config,
             event.event_id,
         )
-        persisted_balances = select_balance_history(snapshot.balances, self._last_balance_values)
+        persisted_balances = select_balance_history(
+            snapshot.balances, self._last_balance_values
+        )
         persisted_positions = self._positions_to_persist(
             snapshot.positions,
             observed_at=event.received_at,
@@ -636,8 +680,7 @@ class ExecutionAccountSyncService:
             ExecutionAccountStatus.SYNCING
             if (
                 not self._has_completed_sync
-                or self._last_persisted_process_state
-                is ExecutionAccountStatus.SYNCING
+                or self._last_persisted_process_state is ExecutionAccountStatus.SYNCING
             )
             else ExecutionAccountStatus.READY_READONLY
         )

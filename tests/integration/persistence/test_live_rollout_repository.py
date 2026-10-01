@@ -154,9 +154,7 @@ async def test_live_risk_control_command_claim_is_atomic_and_idempotent(
         )
         is True
     )
-    loaded = await live_repository.load_command_by_idempotency(
-        command.idempotency_key
-    )
+    loaded = await live_repository.load_command_by_idempotency(command.idempotency_key)
     assert loaded is not None
     assert loaded.status == "completed"
     assert loaded.completed_at == completed_at
@@ -169,3 +167,51 @@ async def test_live_risk_control_command_claim_is_atomic_and_idempotent(
         )
         is False
     )
+
+
+async def test_operating_state_projection_is_scoped_monotonic_and_ignores_preflight(
+    async_database_url,
+):
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from crypto_momentum_lab.domain.live_rollout import (
+        LiveSessionState,
+        LiveSessionTransition,
+    )
+    from crypto_momentum_lab.persistence.postgres.models import StrategyLiveStateRow
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = "projection-" + uuid4().hex[:12]
+    repository = PostgresLiveRolloutRepository(
+        factory, strategy_scope=("live", account, "test-strategy")
+    )
+
+    def transition(state, at):
+        return LiveSessionTransition(
+            uuid4().hex, account, state, at, "test", "a" * 64, "b" * 64, state.value, {}
+        )
+
+    try:
+        await repository.save_transition(transition(LiveSessionState.LIVE_ENABLED, NOW))
+        await repository.save_transition(
+            transition(LiveSessionState.DRAINING, NOW + timedelta(seconds=1))
+        )
+        await repository.save_transition(
+            transition(LiveSessionState.LIVE_ENABLED, NOW - timedelta(seconds=1))
+        )
+        await repository.save_transition(
+            transition(LiveSessionState.PREFLIGHT, NOW + timedelta(seconds=2))
+        )
+        async with factory() as session:
+            row = await session.scalar(
+                select(StrategyLiveStateRow).where(
+                    StrategyLiveStateRow.account_label == account
+                )
+            )
+            assert row.state == "draining"
+            assert row.changed_at == NOW + timedelta(seconds=1)
+    finally:
+        await engine.dispose()
