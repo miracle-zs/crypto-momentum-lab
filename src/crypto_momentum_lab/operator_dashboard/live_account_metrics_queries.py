@@ -17,6 +17,7 @@ from sqlalchemy import (
     Numeric,
     Select,
     and_,
+    case,
     func,
     or_,
     select,
@@ -42,8 +43,10 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
+    AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
     CashFlowCorrectionRow,
+    RuntimeMarketState15sRow,
     StrategyLiveStateRow,
     TradingLeaseRow,
 )
@@ -136,32 +139,175 @@ def account_equity_statement(
     )
     snapshot = aliased(AccountBalanceSnapshotRow)
     bucket_start_at = bucket_series.c.bucket
+    sample_at = func.least(bucket_start_at + bucket_interval, window_end)
     latest_equity = (
         select(
             snapshot.observed_at.label("observed_at"),
             snapshot.wallet_balance.label("wallet_balance"),
             snapshot.unrealized_pnl.label("unrealized_pnl"),
+            snapshot.raw_payload.has_key("crossUnPnl").label("rest_valuation"),
         )
         .where(
             snapshot.environment == environment,
             snapshot.account_label == account_label,
             snapshot.asset == asset,
-            snapshot.observed_at >= window_start,
-            snapshot.observed_at <= window_end,
-            snapshot.observed_at >= bucket_start_at,
-            snapshot.observed_at < bucket_start_at + bucket_interval,
+            snapshot.observed_at <= sample_at,
         )
         .order_by(snapshot.observed_at.desc())
         .limit(1)
         .lateral("latest_equity")
     )
+    head = aliased(AccountReconciliationRunRow)
+    account_head = (
+        select(head.position_count, head.details)
+        .where(
+            head.environment == environment,
+            head.account_label == account_label,
+            head.status == "ready",
+            head.observed_at <= sample_at,
+        )
+        .order_by(head.observed_at.desc(), head.reconciliation_id.desc())
+        .limit(1)
+        .correlate(bucket_series)
+        .lateral("equity_head")
+    )
+    position = aliased(AccountPositionSnapshotRow)
+    columns = (
+        position.symbol,
+        position.position_side,
+        position.position_amt,
+        position.entry_price,
+        position.observed_at,
+    )
+    scope = (
+        position.environment == environment,
+        position.account_label == account_label,
+    )
+    baseline = (
+        select(*columns)
+        .distinct(position.symbol, position.position_side)
+        .where(*scope, position.observed_at < window_start)
+        .order_by(position.symbol, position.position_side, position.observed_at.desc())
+        .subquery("position_baseline")
+    )
+    history = (
+        select(*baseline.c)
+        .union_all(
+            select(*columns).where(
+                *scope,
+                position.observed_at >= window_start,
+                position.observed_at <= window_end,
+            )
+        )
+        .cte("position_history")
+    )
+    intervals = (
+        select(
+            *history.c,
+            func.lead(history.c.observed_at)
+            .over(
+                partition_by=(history.c.symbol, history.c.position_side),
+                order_by=history.c.observed_at,
+            )
+            .label("valid_until"),
+        )
+        .cte("position_intervals")
+        .prefix_with("MATERIALIZED", dialect="postgresql")
+    )
+    latest_positions = (
+        select(
+            intervals.c.symbol,
+            intervals.c.position_side,
+            intervals.c.position_amt,
+            intervals.c.entry_price,
+        )
+        .where(
+            intervals.c.observed_at <= sample_at,
+            or_(intervals.c.valid_until.is_(None), intervals.c.valid_until > sample_at),
+        )
+        .correlate(bucket_series)
+        .lateral("equity_positions")
+    )
+    market = aliased(RuntimeMarketState15sRow)
+    latest_mark = (
+        select(market.mark_price)
+        .where(
+            market.environment == "research",
+            market.symbol == latest_positions.c.symbol,
+            market.bucket_start <= sample_at,
+            market.bucket_start >= sample_at - text("interval '75 seconds'"),
+            market.bucket_end <= sample_at,
+            market.bucket_end >= sample_at - text("interval '60 seconds'"),
+            market.mark_price.is_not(None),
+        )
+        .order_by(market.bucket_start.desc())
+        .limit(1)
+        .correlate(latest_positions, bucket_series)
+        .lateral("equity_mark")
+    )
+    valuation = (
+        select(
+            func.coalesce(
+                func.sum(
+                    latest_positions.c.position_amt
+                    * (latest_mark.c.mark_price - latest_positions.c.entry_price)
+                ),
+                0,
+            ).label("unrealized_pnl"),
+            (
+                func.count(latest_positions.c.symbol)
+                == func.count(latest_mark.c.mark_price)
+            ).label("complete"),
+            func.count(latest_positions.c.symbol).label("position_count"),
+        )
+        .select_from(latest_positions.outerjoin(latest_mark, true()))
+        .where(
+            latest_positions.c.position_amt != 0,
+            account_head.c.position_count > 0,
+            or_(
+                account_head.c.details["position_keys"].is_(None),
+                account_head.c.details["position_keys"].op("@>")(
+                    func.jsonb_build_array(
+                        func.jsonb_build_object(
+                            "symbol",
+                            latest_positions.c.symbol,
+                            "position_side",
+                            latest_positions.c.position_side,
+                        )
+                    )
+                ),
+            ),
+        )
+        .correlate(bucket_series, account_head)
+        .lateral("equity_valuation")
+    )
+    complete = and_(
+        valuation.c.complete,
+        valuation.c.position_count == account_head.c.position_count,
+    )
+    historical_rest_point = and_(
+        latest_equity.c.rest_valuation, latest_equity.c.observed_at >= bucket_start_at
+    )
     return (
         select(
-            latest_equity.c.observed_at,
+            case((complete, sample_at), else_=latest_equity.c.observed_at).label(
+                "observed_at"
+            ),
             latest_equity.c.wallet_balance,
-            latest_equity.c.unrealized_pnl,
+            case(
+                (complete, valuation.c.unrealized_pnl),
+                else_=latest_equity.c.unrealized_pnl,
+            ).label("unrealized_pnl"),
         )
-        .select_from(bucket_series.join(latest_equity, true()))
+        .select_from(
+            bucket_series.join(latest_equity, true())
+            .join(account_head, true())
+            .join(valuation, true())
+        )
+        .where(
+            or_(complete, historical_rest_point),
+            bucket_start_at < window_end,
+        )
         .order_by(bucket_start_at)
     )
 
@@ -327,6 +473,7 @@ class LiveAccountMetricsQueries:
             equity_window,
         )
         async with self._session_factory() as session:
+            await session.execute(text("SET LOCAL jit = off"))
             processes = (
                 await session.scalars(latest_live_account_process_statement())
             ).all()

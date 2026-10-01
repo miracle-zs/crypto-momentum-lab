@@ -4,6 +4,7 @@ enabled_streams:
   - aggTrade
   - bookTicker
   - forceOrder
+  - markPrice@1s
 max_subscriptions_per_connection: 100
 ingress_queue_max_events: 4096
 book_ticker_max_subscriptions_per_connection: 25

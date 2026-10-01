@@ -8,11 +8,11 @@ metrics time-series domain remains in ``live_account_metrics_queries``.
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
@@ -42,6 +42,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
     LiveStrategySignalRow,
     OrderIntentExecutionRow,
+    RuntimeMarketState15sRow,
     StrategyLiveStateRow,
     TradingLeaseRow,
 )
@@ -173,7 +174,9 @@ class LiveAccountQueries:
         execution_orders: Sequence[ExchangeOrderRow] = ()
         intent_rows: Sequence[OrderIntentExecutionRow] = ()
         available_accounts: list[LiveAccountSummaryResponse] = []
+        marks: dict[str, RuntimeMarketState15sRow] = {}
         async with self._session_factory() as session:
+            await session.execute(text("SET LOCAL jit = off"))
             live_processes = (
                 await session.scalars(latest_live_account_process_statement())
             ).all()
@@ -277,35 +280,80 @@ class LiveAccountQueries:
                 if balance_at is not None:
                     balances = (
                         await session.scalars(
-                            select(AccountBalanceSnapshotRow).where(
+                            select(AccountBalanceSnapshotRow)
+                            .distinct(AccountBalanceSnapshotRow.asset)
+                            .where(
                                 AccountBalanceSnapshotRow.environment == environment,
                                 AccountBalanceSnapshotRow.account_label
                                 == account_label,
-                                AccountBalanceSnapshotRow.observed_at == balance_at,
+                            )
+                            .order_by(
+                                AccountBalanceSnapshotRow.asset,
+                                AccountBalanceSnapshotRow.observed_at.desc(),
                             )
                         )
                     ).all()
                 if reconciliation is not None and reconciliation.position_count > 0:
-                    position_at = await session.scalar(
-                        select(func.max(AccountPositionSnapshotRow.observed_at)).where(
+                    raw_keys = reconciliation.details.get("position_keys")
+                    active_keys = (
+                        {
+                            (str(key.get("symbol")), str(key.get("position_side")))
+                            for key in raw_keys
+                            if isinstance(key, dict)
+                        }
+                        if isinstance(raw_keys, list)
+                        else None
+                    )
+                    latest_positions = (
+                        select(AccountPositionSnapshotRow)
+                        .distinct(
+                            AccountPositionSnapshotRow.symbol,
+                            AccountPositionSnapshotRow.position_side,
+                        )
+                        .where(
                             AccountPositionSnapshotRow.environment == environment,
                             AccountPositionSnapshotRow.account_label == account_label,
                         )
+                        .order_by(
+                            AccountPositionSnapshotRow.symbol,
+                            AccountPositionSnapshotRow.position_side,
+                            AccountPositionSnapshotRow.observed_at.desc(),
+                        )
                     )
-                    if position_at is not None:
-                        positions = (
+                    positions = tuple(
+                        row
+                        for row in (await session.scalars(latest_positions)).all()
+                        if row.position_amt != 0
+                        and (
+                            active_keys is None
+                            or (row.symbol, row.position_side) in active_keys
+                        )
+                    )
+                    if positions:
+                        market_rows = (
                             await session.scalars(
-                                select(AccountPositionSnapshotRow).where(
-                                    AccountPositionSnapshotRow.environment
-                                    == environment,
-                                    AccountPositionSnapshotRow.account_label
-                                    == account_label,
-                                    AccountPositionSnapshotRow.observed_at
-                                    == position_at,
-                                    AccountPositionSnapshotRow.position_amt != 0,
+                                select(RuntimeMarketState15sRow)
+                                .distinct(RuntimeMarketState15sRow.symbol)
+                                .where(
+                                    RuntimeMarketState15sRow.environment == "research",
+                                    RuntimeMarketState15sRow.symbol.in_(
+                                        {p.symbol for p in positions}
+                                    ),
+                                    RuntimeMarketState15sRow.mark_price.is_not(None),
+                                    RuntimeMarketState15sRow.bucket_start
+                                    >= equity_window_end - timedelta(seconds=75),
+                                    RuntimeMarketState15sRow.bucket_end
+                                    <= equity_window_end,
+                                    RuntimeMarketState15sRow.bucket_end
+                                    >= equity_window_end - timedelta(seconds=60),
+                                )
+                                .order_by(
+                                    RuntimeMarketState15sRow.symbol,
+                                    RuntimeMarketState15sRow.bucket_start.desc(),
                                 )
                             )
                         ).all()
+                        marks = {row.symbol: row for row in market_rows}
                 orders = (
                     await session.scalars(
                         select(AccountOpenOrderRow)
@@ -404,13 +452,39 @@ class LiveAccountQueries:
             }
         )
         usdt = next((row for row in balances if row.asset == "USDT"), None)
-        total_unrealized = sum(
-            (row.unrealized_pnl for row in balances),
-            start=Decimal("0"),
+        valued_positions = []
+        valuation_complete = (
+            reconciliation is not None
+            and len(positions) == reconciliation.position_count
         )
-        total_notional = sum(
-            (abs(row.notional) for row in positions),
-            start=Decimal("0"),
+        for row in positions:
+            market = marks.get(row.symbol)
+            fresh = (
+                market is not None
+                and 0 <= (equity_window_end - market.bucket_end).total_seconds() <= 60
+            )
+            valuation_complete = valuation_complete and fresh
+            mark = market.mark_price if fresh and market is not None else None
+            pnl = None if mark is None else row.position_amt * (mark - row.entry_price)
+            valued_positions.append((row, mark, pnl))
+        total_unrealized = (
+            sum(
+                (pnl for _, _, pnl in valued_positions if pnl is not None), Decimal("0")
+            )
+            if valuation_complete
+            else None
+        )
+        total_notional = (
+            sum(
+                (
+                    abs(row.position_amt * mark)
+                    for row, mark, _ in valued_positions
+                    if mark is not None
+                ),
+                Decimal("0"),
+            )
+            if valuation_complete
+            else None
         )
         observed_at = None if process is None else process.occurred_at
         return AccountOverviewResponse(
@@ -452,8 +526,16 @@ class LiveAccountQueries:
                 "usdt_available_balance": (
                     None if usdt is None else str(usdt.available_balance)
                 ),
-                "total_unrealized_pnl": str(total_unrealized),
-                "gross_position_notional": str(total_notional),
+                "total_unrealized_pnl": None
+                if total_unrealized is None
+                else str(total_unrealized),
+                "valuation_complete": valuation_complete,
+                "available_balance_observed_at": None
+                if account_config is None
+                else account_config.observed_at.isoformat(),
+                "gross_position_notional": None
+                if total_notional is None
+                else str(total_notional),
                 "position_count": len(positions),
                 "open_order_count": len(orders),
                 "recent_trade_count": len(recent_trades),
@@ -464,7 +546,14 @@ class LiveAccountQueries:
                     "asset": row.asset,
                     "wallet_balance": str(row.wallet_balance),
                     "available_balance": str(row.available_balance),
-                    "unrealized_pnl": str(row.unrealized_pnl),
+                    "unrealized_pnl": (
+                        None if total_unrealized is None else str(total_unrealized)
+                    )
+                    if row.asset == "USDT"
+                    else str(row.unrealized_pnl),
+                    "available_balance_observed_at": None
+                    if account_config is None
+                    else account_config.observed_at.isoformat(),
                 }
                 for row in balances
             ],
@@ -474,15 +563,18 @@ class LiveAccountQueries:
                     "position_side": row.position_side,
                     "position_amt": str(row.position_amt),
                     "entry_price": str(row.entry_price),
-                    "notional": str(row.notional),
-                    "unrealized_pnl": str(row.unrealized_pnl),
+                    "notional": None if mark is None else str(row.position_amt * mark),
+                    "unrealized_pnl": None if pnl is None else str(pnl),
                     "leverage": row.leverage,
-                    "mark_price": str(row.mark_price),
+                    "mark_price": None if mark is None else str(mark),
+                    "valuation_observed_at": None
+                    if mark is None
+                    else marks[row.symbol].bucket_end.isoformat(),
                     "margin_type": row.margin_type,
                     "strategy_name": strategy_by_symbol.get(row.symbol),
                     "entry_notional": str(abs(row.position_amt * row.entry_price)),
                 }
-                for row in positions
+                for row, mark, pnl in valued_positions
             ],
             open_orders=[
                 {

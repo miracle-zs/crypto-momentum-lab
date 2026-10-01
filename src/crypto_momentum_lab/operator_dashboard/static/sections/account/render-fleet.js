@@ -76,7 +76,7 @@ export function liveAccountCard(account, index, selectedLabel) {
   const secondary = financialSnapshot
     ? `<span class="live-account-card-kpis">
       <span><small>USDT 钱包</small><b class="num">${esc(money(summary.usdt_wallet_balance))}</b></span>
-      <span><small>可用余额</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>
+      <span><small>可用余额（快照）</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>
       <span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>
       <span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>
     </span>`

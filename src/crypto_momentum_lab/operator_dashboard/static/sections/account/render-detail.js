@@ -75,7 +75,7 @@ function renderAccountStateGrid(syncState, configState, executionState, reconcil
 function renderAccountKpiGrid(summary) {
   return `<div class="tile-grid account-kpi-grid">
     ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
-    ${tile("USDT 可用余额", money(summary.usdt_available_balance), "可用于开仓/保证金")}
+    ${tile("USDT 可用余额", money(summary.usdt_available_balance), `交易所快照 · ${summary.available_balance_observed_at ? esc(fullDateTime(summary.available_balance_observed_at)) : "时间未知"}`)}
     ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
     ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
     ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
@@ -122,7 +122,7 @@ function renderBalancesTable(usdtBalances) {
   return dataTable([
     { label: "资产", key: "asset", cls: "sym" },
     { label: "钱包余额", value: (row) => num(row.wallet_balance, 4), align: "right" },
-    { label: "可用余额", value: (row) => num(row.available_balance, 4), align: "right" },
+    { label: "可用余额（快照）", value: (row) => num(row.available_balance, 4), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
   ], usdtBalances, { emptyText: "尚无 USDT 余额快照", tall: true, rowKey: (row) => row.asset });
 }

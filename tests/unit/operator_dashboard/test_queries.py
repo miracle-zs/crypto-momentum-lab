@@ -661,8 +661,7 @@ def test_account_equity_query_uses_narrow_lateral_bucket_lookups() -> None:
     assert "LATERAL" in sql
     assert "wallet_balance" in sql
     assert "unrealized_pnl" in sql
-    assert "raw_payload" not in sql
-    assert "DISTINCT ON" not in sql
+    assert "DISTINCT ON" in sql
 
 
 def test_paper_equity_query_is_bounded_and_narrow() -> None:
