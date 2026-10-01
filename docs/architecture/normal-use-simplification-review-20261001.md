@@ -165,3 +165,11 @@ exit_control.py 主要封装一个 enabled 布尔值和日志；entry_policy 的
 共享账户仓库实际被行情与研究采集调用，Compose 与配置仍可能改变共享运行条件，本轮保留这些路径的保守分类；不能将它们全部强行归为 live-only。审批刷新、租约、优雅停止、readiness、失败恢复和部署锁均保留。
 
 新增 Bash 行为回归验证旧镜像健康服务保留、受影响旧镜像拒绝、不健康服务恢复、实盘路径分类及看板旧版本保留。部署脚本/清单 53 项测试通过（包含本地和远端脚本 shell 语法检查），Ruff F/I 与 diff 检查通过。尚未提交、推送或部署；真实耗时收益需下次部署计时，不能据本地测试承诺五分钟完成。全仓源文件或 Compose 改动仍可能需要完整发布。
+
+### 账户 4 历史退出 HTTP 400 根因
+
+只读复现查询 `龙虾USDT / cmd_exit_dec_龙虾USDT_70b9111923319e92`，币安返回 HTTP 400、code=-4015、msg=Client order id length should be less than 36 chars。数据库对应 exchange_orders 记录 state=rejected、exchange_order_id=NULL、run_id=live-account-4-v1；旧内部命令名被保存为客户订单身份。恢复为避免查询错误身份而保留历史 row.client_order_id，导致每次重试使用交易所拒绝的非法 ID。新命令无显式覆盖时已有确定性的 ASCII 短 ID，不能把历史记录重算成新 ID 并视查询不到为原订单不存在。
+
+本地修复仅在恢复边界识别非法历史 ID：完成原有新鲜显式零持仓、无挂单、无活跃预留及身份检查后，若历史订单明确 rejected 且无 exchange_order_id，返回 SUPERSEDED/rejected_invalid_identity_explicit_position_flat；其余非法身份保留 PENDING，均不发送注定失败的查询。不将任意 HTTP 400 当作订单不存在，不手工删除业务记录。
+
+新增三种拒绝/未知/已有交易所 ID 行为回归先复现 3 项失败，修复后退出回执与事实源 52 项测试通过，修复模块 mypy、Ruff F/I、diff 检查通过。未提交或部署，线上尚未解除该历史记录；未验证全部历史记录均符合过时条件。

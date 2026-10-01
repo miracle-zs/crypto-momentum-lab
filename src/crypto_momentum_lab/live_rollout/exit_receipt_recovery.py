@@ -4,6 +4,7 @@ No submit/cancel methods are exposed here. Unknown exchange outcomes and
 unsettled reservations retain PENDING; a flat Book alone proves no receipt.
 """
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -144,6 +145,19 @@ class LiveExitReceiptRecovery:
             return pending("explicit_fresh_exchange_flat_cut_required")
         if any(order.symbol == key.symbol for order in self._open_orders):
             return pending("exchange_open_order_requires_recovery")
+        # Legacy internal command names were persisted as exchange identities.
+        # An invalid ID cannot produce an exchange receipt. A recorded rejection
+        # with no exchange ID, plus the fresh flat/no-order cut above, is terminal.
+        if re.fullmatch(r"[.A-Z:/a-z0-9_-]{1,36}", expected_id) is None:
+            if (
+                row is not None
+                and row.state == ExchangeOrderState.REJECTED.value
+                and row.exchange_order_id is None
+            ):
+                return ExitRecoveryDisposition(
+                    "SUPERSEDED", "rejected_invalid_identity_explicit_position_flat"
+                )
+            return pending("invalid_legacy_order_identity_requires_recovery")
         try:
             order = await self._exchange.query_order_by_client_id(
                 key.symbol, expected_id

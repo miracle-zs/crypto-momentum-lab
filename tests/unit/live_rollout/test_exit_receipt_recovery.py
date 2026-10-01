@@ -222,3 +222,19 @@ async def test_explicit_identity_conflict_does_not_query_or_supersede():
     ), 0]
     assert (await recovery(command)).reason == "durable_order_identity_mismatch"
     exchange.query_order_by_client_id.assert_not_awaited()
+
+
+@pytest.mark.parametrize("state,exchange_id,expected", [
+    ("rejected", None, "SUPERSEDED"),
+    ("unknown_pending", None, "PENDING"),
+    ("rejected", "123", "PENDING"),
+])
+async def test_invalid_legacy_receipt_requires_proven_rejection(state, exchange_id, expected):
+    command, exchange, session, recovery = case()
+    session.scalar.side_effect = [SimpleNamespace(
+        run_id="run", symbol="BTCUSDT", reduce_only=True,
+        client_order_id="cmd_exit_dec_龙虾USDT_70b9111923319e92",
+        state=state, exchange_order_id=exchange_id,
+    ), 0]
+    assert (await recovery(command)).status == expected
+    exchange.query_order_by_client_id.assert_not_awaited()
