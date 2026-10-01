@@ -1,5 +1,6 @@
 import {
   asNumber,
+  computeRoi,
   dayTime,
   esc,
   fullDateTime,
@@ -130,7 +131,7 @@ function renderBalancesTable(usdtBalances) {
 function renderPositionsTable(positions, strategy) {
   const positionRows = (positions || []).map((row) => ({
     ...row,
-    roi: asNumber(row.entry_notional) ? asNumber(row.unrealized_pnl) / asNumber(row.entry_notional) : null,
+    roi: computeRoi(row.unrealized_pnl, row.entry_notional),
   }));
   return dataTable([
     { label: "币种", key: "symbol", cls: "sym" },

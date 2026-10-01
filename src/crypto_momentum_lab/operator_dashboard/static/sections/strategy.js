@@ -6,7 +6,10 @@ import {
   STRATEGY_ORDER,
 } from "../dashboard-config.js";
 import {
+  PAPER_DEFAULT_INITIAL_CAPITAL,
   asNumber,
+  computeReturnRate,
+  computeRoi,
   dayTime,
   elapsedTime,
   esc,
@@ -56,18 +59,9 @@ async function defaultRequestJson(url) {
 }
 
 // Standard initial capital for paper accounts ($1,000 baseline)
-const DEFAULT_INITIAL_CAPITAL = 1000;
-
-function computePaperAccountReturn(equity, initialCapital = DEFAULT_INITIAL_CAPITAL) {
-  const eq = asNumber(equity);
-  return eq == null || initialCapital <= 0 ? null : (eq - initialCapital) / initialCapital;
-}
-
-function computeUnrealizedPnlRatio(unrealizedPnl, entryNotional) {
-  const upnl = asNumber(unrealizedPnl);
-  const notional = asNumber(entryNotional);
-  return upnl != null && notional && Number.isFinite(notional) ? upnl / notional : null;
-}
+const DEFAULT_INITIAL_CAPITAL = PAPER_DEFAULT_INITIAL_CAPITAL;
+const computePaperAccountReturn = computeReturnRate;
+const computeUnrealizedPnlRatio = computeRoi;
 
 export function createStrategySection({ requestJson = defaultRequestJson } = {}) {
   let selectedPaperAccount = 0;

@@ -14,13 +14,21 @@ import {
   rememberAccountDetailRange,
 } from "./state.js";
 
-export async function defaultAccountRequestJson(url) {
+export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {}) {
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined;
   const response = await fetch(url, {
     headers: { "Accept": "application/json" },
+    signal,
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+const liveAccountDetailInFlight = new Map();
+const liveAccountMetricsInFlight = new Map();
+
 
 export function markRefreshStale(root, message) {
   const state = root.querySelector(sel.refreshState());
@@ -178,11 +186,20 @@ export async function loadLiveAccountDetail(
   }
   slot.setAttribute("aria-busy", "true");
   try {
-    const query = new URLSearchParams({
-      account_label: accountLabel,
-      equity_range: equityRange,
-    });
-    const detail = await requestJson(`api/account?${query.toString()}`);
+    const fetchKey = `${accountLabel}:${equityRange}`;
+    let detailPromise = liveAccountDetailInFlight.get(fetchKey);
+    if (!detailPromise) {
+      const query = new URLSearchParams({
+        account_label: accountLabel,
+        equity_range: equityRange,
+      });
+      detailPromise = Promise.resolve(requestJson(`api/account?${query.toString()}`))
+        .finally(() => {
+          liveAccountDetailInFlight.delete(fetchKey);
+        });
+      liveAccountDetailInFlight.set(fetchKey, detailPromise);
+    }
+    const detail = await detailPromise;
     if (requestId !== state.liveAccountDetailRequest || !slot.isConnected) return;
     const [status, html] = renderAccount(detail);
     if (slot.dataset.renderedAccount === accountLabel) patchChildrenFromHtml(contentSlot, html);
@@ -229,8 +246,17 @@ export async function loadLiveAccountMetrics(state, root, requestJson, equityRan
   }
   slot.setAttribute("aria-busy", "true");
   try {
-    const query = new URLSearchParams({ equity_range: equityRange });
-    const data = await requestJson(`api/live-account-metrics?${query.toString()}`);
+    const fetchKey = String(equityRange);
+    let metricsPromise = liveAccountMetricsInFlight.get(fetchKey);
+    if (!metricsPromise) {
+      const query = new URLSearchParams({ equity_range: equityRange });
+      metricsPromise = Promise.resolve(requestJson(`api/live-account-metrics?${query.toString()}`))
+        .finally(() => {
+          liveAccountMetricsInFlight.delete(fetchKey);
+        });
+      liveAccountMetricsInFlight.set(fetchKey, metricsPromise);
+    }
+    const data = await metricsPromise;
     if (requestId !== state.liveAccountMetricsRequest || !slot.isConnected) return;
     const html = renderLiveAccountMetrics(data);
     if (hasLastGood) patchChildrenFromHtml(slot, html);

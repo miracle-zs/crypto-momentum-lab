@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   asNumber,
+  computeReturnRate,
+  computeRoi,
   esc,
   money,
   statusClass,
@@ -193,6 +195,20 @@ test("operator formatters keep status and money output stable", () => {
   assert.equal(asNumber(-Infinity), null);
   assert.equal(asNumber(NaN), null);
   assert.equal(asNumber("invalid"), null);
+
+  assert.equal(computeReturnRate(1100, 1000), 0.1);
+  assert.equal(computeReturnRate(900, 1000), -0.1);
+  assert.equal(computeReturnRate(null, 1000), null);
+  assert.equal(computeReturnRate(1000, 0), null);
+  assert.equal(computeReturnRate(1000, -100), null);
+  assert.equal(computeReturnRate(1000, null), null);
+
+  assert.equal(computeRoi(50, 500), 0.1);
+  assert.equal(computeRoi(-50, 500), -0.1);
+  assert.equal(computeRoi(null, 500), null);
+  assert.equal(computeRoi(50, 0), null);
+  assert.equal(computeRoi(50, null), null);
+  assert.equal(computeRoi(50, "0"), null);
 });
 
 test("global readiness uses database status for the overview section", () => {
