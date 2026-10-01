@@ -412,3 +412,59 @@ def test_ping_timeout_policy(
     )
 
     assert _ping_timeout_for_stream(stream, configured_timeout=10.0) == expected_timeout
+
+
+@pytest.mark.asyncio
+async def test_active_mark_stream_survives_original_silence_deadline(
+    monkeypatch,
+) -> None:
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    import crypto_momentum_lab.market_data.binance.websocket as websocket_module
+
+    received = 0
+
+    class Socket:
+        def __init__(self):
+            self.ack = None
+
+        async def send(self, message):
+            self.ack = {"result": None, "id": json.loads(message)["id"]}
+
+        async def recv(self):
+            if self.ack is not None:
+                ack, self.ack = self.ack, None
+                return json.dumps(ack)
+            await asyncio.sleep(0.005)
+            return json.dumps(
+                {"e": "markPriceUpdate", "E": 1781488800000, "s": "BTCUSDT", "p": "100"}
+            )
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield Socket()
+
+    async def observe(envelope):
+        nonlocal received
+        received += 1
+
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.MARK_PRICE),
+        environment="test",
+        desired_names=("btcusdt@markPrice@1s",),
+        generation=1,
+        on_envelope=observe,
+        on_lifecycle=lambda event: asyncio.sleep(0),
+        reconnect_delays=(0,),
+        connection_lifetime_seconds=0.12,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=0.025,
+        control_messages_per_second=1000,
+    )
+    monkeypatch.setattr(websocket_module, "connect", connect)
+    assert await connection._run_once(uuid4()) == "lifetime_expired"
+    assert received >= 10
