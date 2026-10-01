@@ -16,7 +16,7 @@ P1/P2/P3 表示本报告的重构优先级，不代表已经确认对应级别�
 
 ### 1. P1：账户事实消费先等待 REST 与业务重试
 
-证据：live_rollout/account_channel.py:104 在 ORDER_TRADE_UPDATE 上先 await reconcile_account_event，:117 才调用账户快照/事实应用；order_reconciliation.py:50 查找订单后调用 reconcile_order；orders/state_machine.py:360、:568 最终执行交易所订单查询及重试。account_channel.py:133 的持仓同步失败在同一消费者内逐次 sleep，runtime_config.py:46 附近配置 0.25、0.5、1、2、4、8、16、32 秒，合计 63.75 秒，不含数据库和网络耗时。
+证据：live_rollout/account_channel.py:104 在 ORDER_TRADE_UPDATE 上先 await reconcile_account_event，:117 才调用账户快照/事实应用；order_reconciliation.py:50 查找订单后调用 reconcile_order；orders/state_machine.py:360、:568 最终执行交易所订单查询及重试。account_channel.py:133 的持仓同步失败在同一消费者内逐次 sleep，runtime_config.py:28配置 0.25、0.5、1、2、4、8、16、32 秒，合计 63.75 秒，不含数据库和网络耗时。
 
 这是可确认的串行依赖。慢查询、未决订单或同步等待会拖慢后续账户事件消费；底层 reader 与缓冲队列仍可继续接收，不能据此声称服务器已经停收或丢失消息。独立行情/退出通道也不能等同于全部暂停。
 
@@ -56,7 +56,7 @@ P1/P2/P3 表示本报告的重构优先级，不代表已经确认对应级别�
 
 ### 5. P2：生产契约仍保留运行时兼容探测
 
-证据：ReadOnlyAccountClient 在 sync_ports.py 明确声明 include_flat 和成交 provenance，但 client_compat.py:14 用 inspect.signature 判断 include_flat，:28 又把 provenance 当可选能力；daemon.py:48 检查心跳参数形状，周期检查也为缺少能力的旧适配器走另一条修复路径。生产 apps/execution_account/main.py 装配的是 BinanceUsdMPrivateReadClient；测试中的旧 fake 不应永久决定生产流程。
+证据：ReadOnlyAccountClient 在 sync_ports.py 明确声明 include_flat 和成交 provenance，但 client_compat.py:14 用 inspect.signature 判断 include_flat，:28 又把 provenance 当可选能力；daemon.py:50 检查心跳参数形状，周期检查也为缺少能力的旧适配器走另一条修复路径。生产 apps/execution_account/main.py 装配的是 BinanceUsdMPrivateReadClient；测试中的旧 fake 不应永久决定生产流程。
 
 AST 扫描 live_rollout 有 170 个 getattr、7 个 hasattr，execution_account 有 46 个 getattr、4 个 hasattr。其中包括正常的载荷/ORM/可选值处理，不应整体删除，也不把数量等同于兼容分支数量。
 
