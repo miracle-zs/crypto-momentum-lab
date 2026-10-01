@@ -212,3 +212,5 @@ PositionLedger 仅在 checkpoint_usable 且当前覆盖 covers_range(parent.even
 22fe47ec 完成发布后，真实退出订单的 ORDER_TRADE_UPDATE 被报为 order_identity_conflict。只读核对两笔生产订单发现持久化 plan.order_type 为 market，Binance WS 为 MARKET，其余身份字段一致。新增大小写参数覆盖 NEW、PARTIALLY_FILLED、FILLED、CANCELED、EXPIRED，旧实现五项复现相同 ValueError。
 
 仅在 WS 适配边界按大写比较订单类型；client ID、交易所 ID、数量、价格、方向、positionSide 和 reduceOnly 校验继续执行。未修改数据库订单或成交事实，未绕过恢复门槛。直接相关 84 项测试及解析模块类型检查通过。该次发布的业务验收未通过，必须发布此修复后再次持续观察。
+
+最后一次实盘运行版本为 aa5ab9d4。启用本机 Hub 网络测试后的相关回归 1902 项全部通过；持续部署验收见 [实盘验收记录](live-deployment-verification-20261001.md)。运行及检查点恢复，但退出预留结算仍有遗留，不应据 READY/healthy 宣称所有业务异常消失。
