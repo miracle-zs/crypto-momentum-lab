@@ -1,7 +1,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import structlog
@@ -21,6 +21,11 @@ from crypto_momentum_lab.domain.account.models import (
     AccountReconciliationRun,
     ExecutionAccountProcessState,
 )
+from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
+    BinanceUserDataEvent,
+)
+from crypto_momentum_lab.execution_account.event_journal import AccountEventJournalEntry
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
@@ -30,6 +35,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
     AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
+    AccountUserDataJournalRow,
     ExecutionAccountProcessStateRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
@@ -81,6 +87,110 @@ class PostgresAccountRepository:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+
+    async def append_user_data_event(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        receiver_session_id: str,
+        stream_token: int | None,
+        event: BinanceUserDataEvent,
+    ) -> int:
+        if (
+            not environment.strip()
+            or not account_label.strip()
+            or not receiver_session_id.strip()
+        ):
+            raise ValueError("journal account and receiver identity must not be empty")
+        async with self._session_factory() as session:
+            async with session.begin():
+                # Allocate order only after previous same-account receipt commits.
+                # A sequence is scoped by account and can contain gaps/duplicates.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {
+                        "lock_key": f"account-user-data-journal:{environment}:{account_label}"
+                    },
+                )
+                sequence = await session.scalar(
+                    insert(AccountUserDataJournalRow)
+                    .values(
+                        environment=environment,
+                        account_label=account_label,
+                        receiver_session_id=receiver_session_id,
+                        stream_token=stream_token,
+                        event_id=event.event_id,
+                        event_type=event.event_type,
+                        event_at=event.event_at,
+                        received_at=event.received_at,
+                        exchange_event_at=event.exchange_event_at,
+                        exchange_update_id=event.exchange_update_id,
+                        exchange_previous_update_id=event.exchange_previous_update_id,
+                        payload=jsonable(event.payload),
+                    )
+                    .on_conflict_do_nothing(
+                        constraint="uq_account_user_data_journal_event"
+                    )
+                    .returning(AccountUserDataJournalRow.sequence)
+                )
+                if sequence is None:
+                    sequence = await session.scalar(
+                        select(AccountUserDataJournalRow.sequence).where(
+                            AccountUserDataJournalRow.environment == environment,
+                            AccountUserDataJournalRow.account_label == account_label,
+                            AccountUserDataJournalRow.event_id == event.event_id,
+                        )
+                    )
+                if sequence is None:
+                    raise RuntimeError("account event receipt was not persisted")
+            return int(sequence)
+
+    async def load_user_data_events(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        after_sequence: int = 0,
+        limit: int = 256,
+    ) -> tuple[AccountEventJournalEntry, ...]:
+        if not environment.strip() or not account_label.strip():
+            raise ValueError("journal account identity must not be empty")
+        if after_sequence < 0 or not 1 <= limit <= 4096:
+            raise ValueError("invalid journal cursor or page size")
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(AccountUserDataJournalRow)
+                    .where(
+                        AccountUserDataJournalRow.environment == environment,
+                        AccountUserDataJournalRow.account_label == account_label,
+                        AccountUserDataJournalRow.sequence > after_sequence,
+                    )
+                    .order_by(AccountUserDataJournalRow.sequence)
+                    .limit(limit)
+                )
+            ).all()
+            return tuple(
+                AccountEventJournalEntry(
+                    sequence=row.sequence,
+                    environment=row.environment,
+                    account_label=row.account_label,
+                    receiver_session_id=row.receiver_session_id,
+                    stream_token=row.stream_token,
+                    event=BinanceUserDataEvent(
+                        event_type=row.event_type,
+                        event_at=row.event_at,
+                        received_at=row.received_at,
+                        payload=cast(dict[str, JsonValue], row.payload),
+                        event_id=row.event_id,
+                        exchange_event_at=row.exchange_event_at,
+                        exchange_update_id=row.exchange_update_id,
+                        exchange_previous_update_id=row.exchange_previous_update_id,
+                    ),
+                )
+                for row in rows
+            )
 
     async def save_balance_snapshot(self, snapshot: AccountBalanceSnapshot) -> None:
         await self._insert(AccountBalanceSnapshotRow, balance_snapshot_row(snapshot))
@@ -480,7 +590,7 @@ class PostgresAccountRepository:
                     open_order_count=row.open_order_count,
                     fill_count=row.fill_count,
                     mismatch_count=row.mismatch_count,
-                    details=dict(row.details or {}),
+                    details=cast(dict[str, JsonValue], dict(row.details or {})),
                     projection_schema_version=row.projection_schema_version,
                     projected_at=row.projected_at,
                 )

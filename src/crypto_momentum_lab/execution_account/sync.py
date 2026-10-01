@@ -128,6 +128,22 @@ class ExecutionAccountSyncService:
         self._last_persisted_process_state_reason: str | None = None
         self._last_persisted_process_state_at: datetime | None = None
 
+    async def record_user_data_event(
+        self,
+        *,
+        event: BinanceUserDataEvent,
+        receiver_session_id: str,
+        stream_token: int | None,
+    ) -> int:
+        """Commit an unmerged WS receipt without REST or projection locks."""
+        return await self._repository.append_user_data_event(
+            environment=self._config.environment,
+            account_label=self._config.account_label,
+            receiver_session_id=receiver_session_id,
+            stream_token=stream_token,
+            event=event,
+        )
+
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
         """Persist a lightweight balance/position observation.
 

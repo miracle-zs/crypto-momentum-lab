@@ -1385,3 +1385,43 @@ async def test_materialized_rest_commit_finishes_before_newer_ws_commit():
             *([ws_task] if ws_task is not None else []),
             return_exceptions=True,
         )
+
+
+async def test_raw_receipt_is_account_scoped_and_independent_of_projection_commit():
+    class JournalRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.receipts = []
+
+        async def append_user_data_event(self, **receipt):
+            self.receipts.append(receipt)
+            return 17
+
+    repository = JournalRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(), repository=repository, config=_config()
+    )
+    event = parse_user_data_event(
+        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
+        received_at=_config().observed_at,
+    )
+    async with service._observation_write_lock:
+        sequence = await asyncio.wait_for(
+            service.record_user_data_event(
+                event=event, receiver_session_id="receiver-a", stream_token=2
+            ),
+            timeout=1,
+        )
+    assert sequence == 17
+    assert repository.receipts == [
+        {
+            "environment": "live",
+            "account_label": "primary",
+            "event": event,
+            "receiver_session_id": "receiver-a",
+            "stream_token": 2,
+        }
+    ]
+    assert repository.snapshot_calls == 0
+    assert repository.process_states == []
+    assert service._latest_observation_at is None

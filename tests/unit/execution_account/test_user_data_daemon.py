@@ -878,3 +878,84 @@ async def test_background_reconciliation_never_replaces_a_newer_live_state(
         service.release_fetch.set()
         await asyncio.gather(task, return_exceptions=True)
         await daemon._stop_pipeline()
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_raw_event_is_durable_before_application_even_during_repair(frozen):
+    class JournalService(FakeService):
+        def __init__(self):
+            super().__init__(_snapshot())
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.receipts = []
+
+        async def record_user_data_event(self, **receipt):
+            self.started.set()
+            await self.release.wait()
+            self.receipts.append(receipt)
+            return 1
+
+    service = JournalService()
+    applied = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda *args: applied.append(args),
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    daemon._reconciliation_active = frozen
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    task = asyncio.create_task(daemon._on_event(event))
+    try:
+        await asyncio.wait_for(service.started.wait(), timeout=1)
+        assert applied == []
+        assert not daemon._deferred_events
+        service.release.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert service.receipts[0]["event"] == event
+        assert len(service.receipts[0]["receiver_session_id"]) == 32
+        if frozen:
+            assert list(daemon._deferred_events) == [event]
+            assert applied == []
+        else:
+            await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
+            assert len(applied) == 1
+    finally:
+        service.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await daemon._stop_pipeline()
+
+
+async def test_journal_failure_requests_recovery_without_applying_unrecorded_event():
+    class FailingJournalService(FakeService):
+        async def record_user_data_event(self, **receipt):
+            raise RuntimeError("journal unavailable")
+
+    service = FailingJournalService(_snapshot())
+    applied = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda *args: applied.append(args),
+    )
+    await daemon._reconcile(include_fills=True)
+    event = parse_user_data_event(
+        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
+        received_at=datetime(2026, 7, 4, tzinfo=UTC),
+    )
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        await daemon._on_event(event)
+    assert daemon._pipeline_recovery_event.is_set()
+    assert daemon._pipeline_recovery_origin_event == event
+    assert not daemon._accept_events
+    assert applied == []

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Protocol, TypeVar, cast
+from uuid import uuid4
 
 import structlog
 
@@ -339,6 +340,7 @@ class UserDataAccountSyncDaemon:
         self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
+        self._receiver_session_id = uuid4().hex
         self._received_event_generation = 0
         self._baseline_repair_attempt: BaselineRepairAttempt | None = None
         self._persistence_queue: (
@@ -581,6 +583,21 @@ class UserDataAccountSyncDaemon:
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
         self._received_event_generation += 1
+        record = getattr(self._service, "record_user_data_event", None)
+        if callable(record):
+            try:
+                await record(
+                    event=event,
+                    receiver_session_id=self._receiver_session_id,
+                    stream_token=getattr(self._stream, "continuity_token", None),
+                )
+            except Exception as error:
+                self._report_error(error)
+                self._request_pipeline_recovery(
+                    "user_data_journal_failed",
+                    origin_event=event,
+                )
+                raise
         event_queue = self._event_queue
         if event_queue is None:
             await self._process_event(event)

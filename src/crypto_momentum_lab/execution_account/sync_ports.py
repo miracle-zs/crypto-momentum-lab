@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountReconciliationRun,
     ExecutionAccountProcessState,
 )
+from crypto_momentum_lab.execution_account.binance.user_data_models import (
+    BinanceUserDataEvent,
+)
 
 
 class AccountFillProvenanceFetcher(Protocol):
@@ -68,6 +71,17 @@ class ReadOnlyAccountClient(Protocol):
 
 
 class AccountSyncRepository(Protocol):
+    async def append_user_data_event(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        receiver_session_id: str,
+        stream_token: int | None,
+        event: BinanceUserDataEvent,
+    ) -> int:
+        pass
+
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         pass
 
