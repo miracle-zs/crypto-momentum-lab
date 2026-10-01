@@ -35,8 +35,9 @@
 .monitor-note {
   margin: 0 0 12px;
   padding: 9px 11px;
-  border-left: 2px solid var(--info);
-  background: rgba(138, 180, 255, .06);
+  border: 1px solid color-mix(in srgb, var(--info) 22%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--info) 6%, var(--surface-2));
   color: var(--muted);
   font-size: 10.5px;
   line-height: 1.5;

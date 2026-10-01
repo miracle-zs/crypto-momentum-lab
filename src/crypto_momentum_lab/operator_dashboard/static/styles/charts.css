@@ -105,7 +105,8 @@
 .common-equity-note {
   margin: 10px 0 2px;
   padding: 8px 10px;
-  border-left: 2px solid var(--brand);
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--line));
+  border-radius: 8px;
   background: color-mix(in srgb, var(--brand) 7%, transparent);
   color: var(--muted);
   font-size: 10px;

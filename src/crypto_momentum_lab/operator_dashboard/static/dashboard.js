@@ -17,7 +17,14 @@ import { latestSectionData } from "./app/section-state.js";
 import { renderLiveRuntime } from "./app/runtime-badge.js";
 import { createPoller } from "./app/poller.js";
 import { createShell } from "./app/shell.js";
-import { wireMarketViews, wireTableFilters } from "./app/wire-widgets.js";
+import {
+  wireClickToCopy,
+  wireGlobalShortcuts,
+  wireMarketViews,
+  wireTableFilters,
+  wireTableSorting,
+} from "./app/wire-widgets.js";
+import { wireActionRunbook } from "./sections/actions.js";
 import { installJumpProbe } from "./app/jump-probe.js";
 
 const strategySection = createStrategySection();
@@ -53,6 +60,8 @@ const poller = createPoller({
   onAfterRender: {
     wireMarketViews,
     wireTableFilters,
+    wireClickToCopy,
+    wireTableSorting,
     account: {
       wire: wireLiveAccounts,
       updateDynamic: updateLiveAccountsDynamic,
@@ -65,9 +74,18 @@ const shell = createShell({
   onNavigate: (id) => poller.maybeRefresh(id),
 });
 
+const refreshBtn = document.getElementById("manual-refresh-btn");
+if (refreshBtn) {
+  refreshBtn.addEventListener("click", () => {
+    poller.poll(true);
+  });
+}
+
 shell.selectView(shell.initialView(), { updateHistory: false });
 installJumpProbe();
 wireEcharts(document);
+wireActionRunbook(document);
+wireGlobalShortcuts(shell, poller);
 tick();
 poller.poll();
 setInterval(tick, 1000);

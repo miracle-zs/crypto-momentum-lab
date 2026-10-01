@@ -32,18 +32,18 @@
       <nav class="nav" aria-label="控制台分区">
         <div class="nav-workspace" data-workspace-nav="ops">
           <span class="nav-group-label">RUN CONTROL</span>
-          <a href="#overview" data-nav="overview" data-label="总览"><i>01</i><span>总览</span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
-          <a href="#risk" data-nav="risk" data-label="执行"><i>02</i><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
-          <a href="#account" data-nav="account" data-label="账户"><i>03</i><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-          <a href="#reports" data-nav="reports" data-label="台账"><i>04</i><span>运行台账</span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
-          <a href="#performance" data-nav="performance" data-label="性能"><i>05</i><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
-          <a href="#actions" data-nav="actions" data-label="操作"><i>06</i><span>受控操作</span><em class="nav-dot is-locked"></em></a>
+          <a href="#overview" data-nav="overview" data-label="总览"><kbd class="nav-key">1</kbd><span>总览</span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
+          <a href="#risk" data-nav="risk" data-label="执行"><kbd class="nav-key">2</kbd><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
+          <a href="#account" data-nav="account" data-label="账户"><kbd class="nav-key">3</kbd><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
+          <a href="#reports" data-nav="reports" data-label="台账"><kbd class="nav-key">4</kbd><span>运行台账</span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+          <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">5</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
+          <a href="#actions" data-nav="actions" data-label="操作"><kbd class="nav-key">6</kbd><span>受控操作</span><em class="nav-dot is-locked"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
           <span class="nav-group-label">STRATEGY &amp; DATA</span>
-          <a href="#strategy" data-nav="strategy" data-label="策略"><i>01</i><span>模拟策略</span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
-          <a href="#universe" data-nav="universe" data-label="市场"><i>02</i><span>市场行情</span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-          <a href="#collector" data-nav="collector" data-label="数据采集"><i>03</i><span>数据采集</span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
+          <a href="#strategy" data-nav="strategy" data-label="策略"><span>模拟策略</span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+          <a href="#universe" data-nav="universe" data-label="市场"><span>市场行情</span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
+          <a href="#collector" data-nav="collector" data-label="数据采集"><span>数据采集</span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
         </div>
       </nav>
 
@@ -73,12 +73,15 @@
           <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-label="执行模式">
             <small>MODE</small><strong data-mode-value>UNKNOWN</strong><span data-mode-detail>等待数据</span>
           </div>
-          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span class="poll-kicker">HEARTBEAT</span><strong id="last-cycle">UNKNOWN</strong></div>
+          <button type="button" id="manual-refresh-btn" class="poll-state poll-refresh-btn" title="点击立即强制刷新 (当前 15s 自动轮询)" aria-label="立即强制刷新">
+            <span class="pulse" aria-hidden="true"></span>
+            <strong id="last-cycle">UNKNOWN</strong>
+            <svg class="refresh-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          </button>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
         <div id="readiness-strip" class="readiness-strip status-UNKNOWN">
           <div class="readiness-lead">
-            <span class="readiness-kicker">SAFETY POSTURE</span>
             <strong id="global-readiness">UNKNOWN</strong>
             <span id="global-readiness-detail">检测中</span>
           </div>
@@ -89,6 +92,7 @@
             <span class="readiness-metric"><b id="global-reconciliation">—</b><small>账户对账</small></span>
           </div>
         </div>
+        <div id="emergency-triage-hud" class="emergency-triage-hud" hidden></div>
         <div id="runtime-announcer" class="sr-only runtime-announcer" aria-live="polite" aria-atomic="true"></div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
       </header>
@@ -96,7 +100,7 @@
       <main class="content" id="main-content" tabindex="-1">
         <section id="overview" class="card is-active-view" data-workspace="ops" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
           <header class="card-head">
-            <div class="card-title"><i>01</i><div><h2 id="overview-title">系统总览</h2><small>15S 轮询刷新</small></div></div>
+            <div class="card-title"><div><h2 id="overview-title">系统总览</h2><small>15S 轮询刷新</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -106,7 +110,7 @@
 
         <section id="risk" class="card card-risk" data-workspace="ops" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>02</i><div><h2 id="risk-title">执行风控</h2><small>风控闸门与订单流水</small></div></div>
+            <div class="card-title"><div><h2 id="risk-title">执行风控</h2><small>风控闸门与订单流水</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -116,7 +120,7 @@
 
         <section id="account" class="card" data-workspace="ops" data-view-title="账户" data-endpoint="api/live-accounts" aria-labelledby="account-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>03</i><div><h2 id="account-title">实盘账户</h2><small>资金持仓与对账同步</small></div></div>
+            <div class="card-title"><div><h2 id="account-title">实盘账户</h2><small>资金持仓与对账同步</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -126,7 +130,7 @@
 
         <section id="strategy" class="card" data-workspace="data" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>01</i><div><h2 id="strategy-title">模拟策略</h2><small>PAPER / LIVE COHORT · ON-DEMAND DETAIL</small></div></div>
+            <div class="card-title"><div><h2 id="strategy-title">模拟策略</h2><small>PAPER / LIVE COHORT · ON-DEMAND DETAIL</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -136,7 +140,7 @@
 
         <section id="universe" class="card" data-workspace="data" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>02</i><div><h2 id="universe-title">市场行情</h2><small>UTC 动量排名与监控池</small></div></div>
+            <div class="card-title"><div><h2 id="universe-title">市场行情</h2><small>UTC 动量排名与监控池</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -146,7 +150,7 @@
 
         <section id="collector" class="card card-collector" data-workspace="data" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>03</i><div><h2 id="collector-title">数据采集</h2><small>15S 状态归档监控</small></div></div>
+            <div class="card-title"><div><h2 id="collector-title">数据采集</h2><small>15S 状态归档监控</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -156,7 +160,7 @@
 
         <section id="reports" class="card" data-workspace="ops" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>04</i><div><h2 id="reports-title">运行台账</h2><small>会话与实盘状态迁移</small></div></div>
+            <div class="card-title"><div><h2 id="reports-title">运行台账</h2><small>会话与实盘状态迁移</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -166,7 +170,7 @@
 
         <section id="performance" class="card card-performance" data-workspace="ops" data-view-title="性能" data-endpoint="api/performance" aria-labelledby="performance-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>05</i><div><h2 id="performance-title">系统性能</h2><small>DECISION SLO · CHECKPOINT CADENCE · HOST STEADY-STATE</small></div></div>
+            <div class="card-title"><div><h2 id="performance-title">系统性能</h2><small>DECISION SLO · CHECKPOINT CADENCE · HOST STEADY-STATE</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -176,17 +180,18 @@
 
         <section id="actions" class="card card-actions" data-workspace="ops" data-view-title="操作" aria-labelledby="actions-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>06</i><div><h2 id="actions-title">受控操作</h2><small>需签名审计通道就绪</small></div></div>
-            <span class="lock-badge">READ ONLY</span>
+            <div class="card-title"><div><h2 id="actions-title">受控操作</h2><small>双重审计通道 · CLI 应急命令生成器</small></div></div>
+            <span class="lock-badge">AUDITED OPS</span>
           </header>
-          <div class="action-grid">
-            <button disabled><b>全局停机</b><span>Global Halt</span><small>需后端审计指令</small></button>
-            <button disabled><b>策略退场</b><span>Drain Strategy</span><small>需状态迁移记录</small></button>
-            <button disabled><b>撤销挂单</b><span>Cancel Orders</span><small>需撤单确认记录</small></button>
-            <button disabled><b>紧急平仓</b><span>Emergency Flatten</span><small>需显式平仓确认</small></button>
-            <button disabled><b>释放租约</b><span>Release Lease</span><small>需零持仓对账</small></button>
+          <div class="action-grid" id="action-cards-grid">
+            <button type="button" class="action-card is-active" data-action="halt"><b>全局停机</b><span>Global Halt</span><small>阻断新入场信号</small></button>
+            <button type="button" class="action-card" data-action="drain"><b>策略退场</b><span>Drain Strategy</span><small>停开新仓，自然退场</small></button>
+            <button type="button" class="action-card" data-action="cancel"><b>撤销挂单</b><span>Cancel Orders</span><small>撤销全部在途限价单</small></button>
+            <button type="button" class="action-card danger" data-action="flatten"><b>紧急平仓</b><span>Emergency Flatten</span><small>实盘头寸市价全平</small></button>
+            <button type="button" class="action-card" data-action="lease"><b>释放租约</b><span>Release Lease</span><small>零持仓释放执行权</small></button>
           </div>
-          <p class="action-note">只读保护：所有操作均由独立受控后端执行并留存审计日志。</p>
+          <div id="action-runbook-panel" class="action-runbook-panel"></div>
+          <p class="action-note">只读保护：本机控制台采用受控审计架构。可在上方一键复制精确终端运维命令，或通过受控后端执行并留存审计日志。</p>
         </section>
       </main>
 

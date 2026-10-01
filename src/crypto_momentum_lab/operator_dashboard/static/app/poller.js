@@ -173,8 +173,8 @@ export function createPoller({ renderers, onAfterRender }) {
     }
   }
 
-  async function poll() {
-    if (document.hidden) return;
+  async function poll(force = false) {
+    if (document.hidden && !force) return;
     const now = Date.now();
     const activeView = document.body.dataset.activeView || "overview";
     const visibleSections = new Set(["overview", activeView]);
@@ -189,6 +189,7 @@ export function createPoller({ renderers, onAfterRender }) {
     const dueSections = allSectionIds.filter((id) => {
       if (!visibleSections.has(id)) return false;
       if (sectionInFlight.has(id)) return false;
+      if (force) return true;
       const lastPolledAt = lastSectionPollAt.get(id);
       const interval = SECTION_POLL_MS[id] || POLL_MS;
       return lastPolledAt == null || now - lastPolledAt >= interval;
@@ -202,8 +203,11 @@ export function createPoller({ renderers, onAfterRender }) {
         pollbar.classList.add("run");
       });
     }
+    const refreshBtn = document.getElementById("manual-refresh-btn");
+    if (refreshBtn) refreshBtn.classList.add("is-refreshing");
     const scrollGuard = typeof window !== "undefined" ? createScrollGuard() : null;
     await Promise.allSettled(dueSections.map(refreshSection));
+    if (refreshBtn) refreshBtn.classList.remove("is-refreshing");
     onAfterRender?.pollState?.();
     if (scrollGuard) {
       scrollGuard.restore();

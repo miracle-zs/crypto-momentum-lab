@@ -1,44 +1,42 @@
 /* ============ design tokens ============ */
 
 :root {
-  --bg: #0b0e14;
-  --bg-raise: #10141c;
-  --surface: #12161f;
-  --surface-2: #171c27;
-  --surface-3: #1d2431;
-  --line: #273043;
-  --line-strong: #3a4960;
-  --text: #e9edf4;
-  --muted: #a5b0c3;
-  --faint: #738099;
+  --bg: #070b10;
+  --bg-raise: #0b1219;
+  --surface: #101922;
+  --surface-2: #15212c;
+  --surface-3: #1b2a37;
+  --line: #293b4b;
+  --line-strong: #466075;
+  --text: #edf3f6;
+  --muted: #aebbc5;
+  --faint: #8293a2;
+  --brand: #71d6d0;
   --accent: var(--brand);
-  --brand: #7aa2f7;
-  --up: #34d399;
-  --down: #fb7185;
-  --warn: #f5b755;
-  --info: #8ab4ff;
+  --up: #65d39a;
+  --down: #f4777f;
+  --warn: #e9b45b;
+  --info: #86aef5;
   --live: #34d399;
-  --series-fixed: #7aa2f7;
-  --series-candle: #34d399;
+  --series-fixed: #86aef5;
+  --series-candle: #65d39a;
   --series-live: #67e8f9;
-  --series-amber: #f5b755;
+  --series-amber: #e9b45b;
   --series-violet: #c084fc;
   --series-cyan: #22d3ee;
-  --series-coral: #fb7185;
+  --series-coral: #f4777f;
   --series-lime: #a3e635;
   --series-sky: #38bdf8;
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo,
-    Consolas, monospace;
+  --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
 }
 
 /* status → accent color (--s) */
 .status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--up); }
 .status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
 .status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
-.status-DEGRADED, .status-ATTENTION { --s: var(--warn); }
-.status-HALTED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--down); }
+.status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
+.status-HALTED, .status-BLOCKED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--down); }
 .status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
 .status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }
 
@@ -56,14 +54,14 @@ body {
   overflow-anchor: auto;
   color: var(--text);
   background:
-    radial-gradient(1000px 480px at 18% -8%, rgba(122, 162, 247, .07), transparent 62%),
-    radial-gradient(820px 420px at 96% 4%, rgba(52, 211, 153, .045), transparent 58%),
+    radial-gradient(1000px 480px at 18% -8%, rgba(113, 214, 208, .07), transparent 62%),
+    radial-gradient(820px 420px at 96% 4%, rgba(101, 211, 154, .045), transparent 58%),
     var(--bg);
   font: 13px/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: rgba(122, 162, 247, .32); }
+::selection { background: color-mix(in srgb, var(--brand) 32%, transparent); }
 
 :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
@@ -74,34 +72,5 @@ body {
 .warn { color: var(--warn); }
 .hero { color: var(--brand); }
 
-:root {
-  --bg: #070b10;
-  --bg-raise: #0b1219;
-  --surface: #101922;
-  --surface-2: #15212c;
-  --surface-3: #1b2a37;
-  --line: #293b4b;
-  --line-strong: #466075;
-  --text: #edf3f6;
-  --muted: #aebbc5;
-  --faint: #8293a2;
-  --brand: #71d6d0;
-  --accent: var(--brand);
-  --up: #65d39a;
-  --down: #f4777f;
-  --warn: #e9b45b;
-  --info: #86aef5;
-  --live: #65d39a;
-  --series-fixed: #86aef5;
-  --series-candle: #65d39a;
-  --series-live: #71d6d0;
-  --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-}
-
-.status-REVIEW { --s: var(--warn); }
-
-.status-BLOCKED { --s: var(--down); }
-
 .poll-state.status-STALE strong { color: var(--down); }
-
 .poll-state.status-UNKNOWN strong { color: var(--faint); }

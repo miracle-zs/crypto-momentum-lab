@@ -97,6 +97,29 @@
 
 .nav i { color: var(--faint); font: 10px var(--mono); font-style: normal; }
 
+.nav-key {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--faint);
+  font: 700 9.5px var(--mono);
+  box-shadow: 0 1px 0 var(--line-strong);
+}
+
+.nav a:hover .nav-key {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.nav a.active .nav-key {
+  color: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 35%, var(--line));
+}
+
 .nav a > span { display: block; font-size: 12.5px; font-weight: 600; line-height: 1.2; }
 
 .nav a > span small {
@@ -200,6 +223,45 @@
   color: var(--muted);
   font: 10.5px var(--mono);
   min-width: 0;
+}
+
+.poll-refresh-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.poll-refresh-btn:hover {
+  border-color: var(--brand);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.poll-refresh-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.poll-refresh-btn .refresh-icon {
+  margin-left: 2px;
+  color: var(--faint);
+  transition: transform .25s ease, color .15s ease;
+}
+
+.poll-refresh-btn:hover .refresh-icon {
+  color: var(--brand);
+}
+
+.poll-refresh-btn.is-refreshing .refresh-icon {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .poll-state.status-STALE { color: var(--down); }
@@ -344,6 +406,90 @@
 }
 
 @keyframes pollrun { from { width: 0; } to { width: 100%; } }
+
+/* ============ emergency triage hud ============ */
+
+.emergency-triage-hud {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  margin-top: 6px;
+  border: 1px solid color-mix(in srgb, var(--down) 40%, var(--line));
+  border-radius: 9px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--down) 12%, var(--surface-2)), var(--surface-2));
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.emergency-triage-hud[hidden] {
+  display: none !important;
+}
+
+.emergency-triage-hud.is-review {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 10%, var(--surface-2)), var(--surface-2));
+}
+
+.emergency-triage-lead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.emergency-triage-lead strong {
+  color: var(--down);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+
+.emergency-triage-hud.is-review .emergency-triage-lead strong {
+  color: var(--warn);
+}
+
+.emergency-triage-lead span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.emergency-triage-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.emergency-triage-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--text);
+  font: 600 10.5px var(--sans);
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.emergency-triage-btn:hover {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 15%, var(--surface-3));
+}
+
+.emergency-triage-btn.danger {
+  border-color: color-mix(in srgb, var(--down) 50%, var(--line));
+  color: var(--down);
+}
+
+.emergency-triage-btn.danger:hover {
+  border-color: var(--down);
+  background: color-mix(in srgb, var(--down) 15%, var(--surface-3));
+}
 
 /* ============ footer ============ */
 

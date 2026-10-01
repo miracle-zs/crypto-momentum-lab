@@ -160,6 +160,31 @@ export function renderGlobalReadiness() {
     const element = document.getElementById(id);
     if (element) element.textContent = value;
   });
+
+  const hud = document.getElementById("emergency-triage-hud");
+  if (hud) {
+    const isCrisis = model.status === "BLOCKED" || model.status === "REVIEW";
+    if (isCrisis) {
+      hud.hidden = false;
+      hud.className = `emergency-triage-hud ${model.status === "REVIEW" ? "is-review" : ""}`;
+      const isHalt = Number(model.halts) > 0;
+      const isAmbiguous = Number(model.ambiguous) > 0;
+      const label = isHalt ? "活跃停机警报" : isAmbiguous ? "未决订单待核" : "风控态势注意";
+      hud.innerHTML = `
+        <div class="emergency-triage-lead">
+          <strong>${label}</strong>
+          <span>${model.detail}</span>
+        </div>
+        <div class="emergency-triage-actions">
+          <a href="#risk" class="emergency-triage-btn">查看风控详情</a>
+          <a href="#actions" class="emergency-triage-btn ${isHalt ? "danger" : ""}">打开应急操作</a>
+        </div>
+      `;
+    } else {
+      hud.hidden = true;
+      hud.innerHTML = "";
+    }
+  }
 }
 
 export function updateGlobalState(id, data) {

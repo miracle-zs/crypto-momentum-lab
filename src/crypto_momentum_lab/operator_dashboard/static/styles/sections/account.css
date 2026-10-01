@@ -151,7 +151,6 @@
   min-height: 82px;
   padding: 10px 11px;
   border: 1px solid var(--line);
-  border-left: 2px solid var(--s, var(--line-strong));
   border-radius: 10px;
   background: var(--surface-2);
 }
@@ -249,7 +248,8 @@
 .equity-coverage-note {
   margin: -2px 0 9px;
   padding: 7px 9px;
-  border-left: 2px solid var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 25%, var(--line));
+  border-radius: 8px;
   background: color-mix(in srgb, var(--warn) 7%, transparent);
   color: var(--faint);
   font-size: 9.5px;
@@ -286,7 +286,8 @@
 .account-facts-note {
   margin: 9px 2px 0;
   padding: 9px 11px;
-  border-left: 2px solid var(--brand);
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--line));
+  border-radius: 8px;
   background: color-mix(in srgb, var(--brand) 7%, transparent);
   color: var(--muted);
   font-size: 10.5px;
