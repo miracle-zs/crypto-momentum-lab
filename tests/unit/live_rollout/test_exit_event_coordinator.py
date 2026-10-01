@@ -92,17 +92,15 @@ class _Lane:
     async def submit_market(
         self,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
     ) -> None:
-        self.market_calls.append((state, context))
+        self.market_calls.append(state)
 
     async def submit_quote(
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
     ) -> None:
-        self.quote_calls.append((quote, state, context))
+        self.quote_calls.append((quote, state))
 
 
 def _coordinator(
@@ -162,7 +160,7 @@ def _quote(*, symbol: str = "BTCUSDT") -> RealtimeMarketQuote:
 
 
 @pytest.mark.asyncio
-async def test_account_event_refreshes_context_and_uses_existing_market_lane() -> None:
+async def test_account_event_defers_context_to_existing_market_lane() -> None:
     processor = _Processor()
     lane = _Lane()
     coordinator, events = _coordinator(
@@ -175,9 +173,9 @@ async def test_account_event_refreshes_context_and_uses_existing_market_lane() -
     result = await coordinator.process_account_event(state)
 
     assert result is None
-    assert len(events["provider"]) == 1
-    assert len(events["sync"]) == 1
-    assert len(events["publish"]) == 1
+    assert events["provider"] == []
+    assert events["sync"] == []
+    assert events["publish"] == []
     assert len(events["invalidate"]) == 1
     assert lane.start_calls == 1
     assert len(lane.market_calls) == 1
@@ -333,8 +331,8 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
 
     processor = Processor()
     lane = ExitExecutionLane(
-        processor.process_state,
-        processor.process_quote,
+        lambda state: coordinator.process_market_work(state),
+        lambda quote, state: coordinator.process_quote_work(quote, state),
         on_outcome=lambda symbol, outcome: outcomes.append((symbol, outcome.failure)),
     )
     coordinator, _events = _coordinator(
@@ -381,3 +379,121 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
         await lane.stop()
     assert outcomes
     assert all(failure == "exit_recovery_failed" for _symbol, failure in outcomes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_quote", [False, True])
+@pytest.mark.parametrize("blocked_stage", ["context", "subscriptions"])
+async def test_context_preparation_does_not_block_account_facts(
+    with_quote, blocked_stage
+):
+    from crypto_momentum_lab.execution_account.hub import AccountEvent
+    from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    snapshots = []
+    current = SimpleNamespace(
+        pending_position_symbols=frozenset(),
+        unmanaged_position_symbols=frozenset(),
+        version=0,
+    )
+    processor = _Processor()
+    state = cast(MarketState15s, _state())
+    quote = _quote()
+
+    async def provider(_state):
+        if blocked_stage == "context":
+            started.set()
+            await release.wait()
+        return current
+
+    async def publish(_context):
+        if blocked_stage == "subscriptions":
+            started.set()
+            await release.wait()
+
+    lane = ExitExecutionLane(
+        lambda state: coordinator.process_market_work(state),
+        lambda quote, state: coordinator.process_quote_work(quote, state),
+    )
+    coordinator = LiveExitEventCoordinator(
+        run_id="run-1",
+        exit_enabled=lambda: True,
+        run_active=lambda: True,
+        context_provider=provider,
+        sync_pending_entry_plans=lambda _context: None,
+        publish_managed_position_symbols=publish,
+        invalidate_context_cache=lambda: None,
+        exit_processor=processor,
+        exit_lane=lane,
+    )
+    first = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ACCOUNT_UPDATE",
+        event_id="first",
+        event_at=NOW,
+        received_at=NOW,
+        symbols=(state.symbol,),
+    )
+
+    class Source:
+        def __aiter__(self):
+            async def events():
+                yield first
+                await asyncio.wait_for(started.wait(), timeout=1)
+                yield replace(first, event_id="second")
+
+            return events()
+
+    def snapshot(event):
+        nonlocal current
+        snapshots.append(event.event_id)
+        current = SimpleNamespace(
+            pending_position_symbols=frozenset(),
+            unmanaged_position_symbols=frozenset(),
+            version=len(snapshots),
+        )
+
+    runtime = LiveAccountEventRuntime(
+        daemon=coordinator,
+        latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
+        latest_market_quotes=SimpleNamespace(
+            for_symbols=lambda _symbols: (quote,) if with_quote else ()
+        ),
+        is_transient_error=lambda _error: False,
+        on_account_snapshot=snapshot,
+    )
+    try:
+        await asyncio.wait_for(runtime.run(Source()), timeout=1)
+        assert snapshots == ["first", "second"]
+        assert processor.calls == []
+    finally:
+        release.set()
+        await asyncio.wait_for(lane.stop(), timeout=1)
+    if blocked_stage == "context":
+        # Resolve the context after the wait, rather than retaining the view at enqueue.
+        assert all(call[-1].version == 2 for call in processor.calls)
+
+
+@pytest.mark.asyncio
+async def test_pending_position_is_published_and_blocks_background_exit_decision():
+    processor = _Processor()
+    pending = cast(
+        LiveDaemonRuntimeContext,
+        SimpleNamespace(
+            pending_position_symbols=frozenset({"BTCUSDT"}),
+            unmanaged_position_symbols=frozenset(),
+        ),
+    )
+    coordinator, events = _coordinator(
+        processor=processor, lane=_Lane(), run_active=True, context=pending
+    )
+    state = cast(MarketState15s, _state())
+    assert await coordinator.process_account_event(state) is None
+    assert events["provider"] == []
+    result = await coordinator.process_market_work(state)
+    assert result.failure == "pending_live_positions:BTCUSDT"
+    assert events["publish"] == [pending]
+    assert processor.calls == []

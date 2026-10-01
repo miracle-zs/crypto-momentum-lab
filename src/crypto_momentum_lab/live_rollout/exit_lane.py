@@ -11,14 +11,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s, RealtimeMarketQuote
-
-if TYPE_CHECKING:
-    from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 
 log = structlog.get_logger()
 
@@ -48,15 +44,12 @@ class ExitLaneOutcome:
 @dataclass(frozen=True, slots=True)
 class _ExitLaneWork:
     state: MarketState15s
-    context: LiveDaemonRuntimeContext
 
 
 @dataclass(frozen=True, slots=True)
 class _QuoteLaneWork:
     quote: RealtimeMarketQuote
     state: MarketState15s
-    context: LiveDaemonRuntimeContext
-    completion: asyncio.Future[ExitLaneOutcome] | None = None
 
 
 class ExitExecutionLane:
@@ -73,11 +66,11 @@ class ExitExecutionLane:
     def __init__(
         self,
         processor: Callable[
-            [MarketState15s, LiveDaemonRuntimeContext],
+            [MarketState15s],
             Awaitable[ExitLaneOutcome],
         ],
         quote_processor: Callable[
-            [RealtimeMarketQuote, MarketState15s, LiveDaemonRuntimeContext],
+            [RealtimeMarketQuote, MarketState15s],
             Awaitable[ExitLaneOutcome],
         ],
         *,
@@ -97,7 +90,6 @@ class ExitExecutionLane:
         self._market_workers: tuple[asyncio.Task[None], ...] = ()
         self._quote_workers: tuple[asyncio.Task[None], ...] = ()
         self._idle: asyncio.Event | None = None
-        self._pending_completions: set[asyncio.Future[ExitLaneOutcome]] = set()
         self._outstanding_work = 0
         self._outcome = ExitLaneOutcome()
 
@@ -121,7 +113,6 @@ class ExitExecutionLane:
         self._market_enqueued = set()
         self._quote_latest = {}
         self._quote_enqueued = set()
-        self._pending_completions = set()
         self._outstanding_work = 0
         self._outcome = ExitLaneOutcome()
         self._idle = asyncio.Event()
@@ -145,7 +136,6 @@ class ExitExecutionLane:
     async def submit_market(
         self,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
     ) -> None:
         if (
             not self._started
@@ -161,7 +151,7 @@ class ExitExecutionLane:
             previous = self._market_latest.get(state.symbol)
             if previous is not None:
                 state = max((state, previous.state), key=lambda item: item.bucket_end)
-            self._market_latest[state.symbol] = _ExitLaneWork(state, context)
+            self._market_latest[state.symbol] = _ExitLaneWork(state)
             if state.symbol not in self._market_enqueued:
                 self._market_enqueued.add(state.symbol)
                 self._market_queue.put_nowait(state.symbol)
@@ -170,10 +160,7 @@ class ExitExecutionLane:
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        *,
-        wait: bool = False,
-    ) -> ExitLaneOutcome | None:
+    ) -> None:
         if (
             not self._started
             or self._quote_queue is None
@@ -181,33 +168,20 @@ class ExitExecutionLane:
             or self._idle is None
         ):
             raise RuntimeError("exit lane is not started")
-        completion: asyncio.Future[ExitLaneOutcome] | None = None
-        if wait:
-            completion = asyncio.get_running_loop().create_future()
-            self._pending_completions.add(completion)
-            completion.add_done_callback(self._pending_completions.discard)
         async with self._market_state_lock:
             if quote.symbol not in self._quote_latest:
                 self._outstanding_work += 1
             self._idle.clear()
             previous = self._quote_latest.get(quote.symbol)
             if previous is not None:
-                # Account context can finish loading after a newer ticker.
-                # Keep its fresh context without rolling the price backward.
+                # An account trigger can carry an older cached ticker.
+                # Keep the newer price; the worker loads current context.
                 quote = max((quote, previous.quote), key=lambda item: item.event_at)
                 state = max((state, previous.state), key=lambda item: item.bucket_end)
-            self._quote_latest[quote.symbol] = _QuoteLaneWork(
-                quote,
-                state,
-                context,
-                completion,
-            )
+            self._quote_latest[quote.symbol] = _QuoteLaneWork(quote, state)
             if quote.symbol not in self._quote_enqueued:
                 self._quote_enqueued.add(quote.symbol)
                 self._quote_queue.put_nowait(quote.symbol)
-        if completion is None:
-            return None
-        return await completion
 
     async def stop(self) -> ExitLaneOutcome:
         if not self._started:
@@ -273,14 +247,12 @@ class ExitExecutionLane:
                 continue
             outcome = await self._run_quote_work(work)
             self._record_outcome(symbol, outcome)
-            if work.completion is not None and not work.completion.done():
-                work.completion.set_result(outcome)
             self._outstanding_work -= 1
             self._mark_idle_if_ready()
 
     async def _run_work(self, work: _ExitLaneWork) -> ExitLaneOutcome:
         try:
-            return await self._processor(work.state, work.context)
+            return await self._processor(work.state)
         except Exception as error:
             log.exception(
                 "live_exit_lane_work_failed",
@@ -297,7 +269,6 @@ class ExitExecutionLane:
             return await self._quote_processor(
                 work.quote,
                 work.state,
-                work.context,
             )
         except Exception as error:
             log.exception(
@@ -349,13 +320,6 @@ class ExitExecutionLane:
             await asyncio.gather(*workers, return_exceptions=True)
 
     def _cancel_pending_work(self) -> None:
-        for quote_work in self._quote_latest.values():
-            if quote_work.completion is not None:
-                quote_work.completion.cancel()
-        for completion in tuple(self._pending_completions):
-            if not completion.done():
-                completion.cancel()
-        self._pending_completions.clear()
         self._market_latest.clear()
         self._market_enqueued.clear()
         self._quote_latest.clear()

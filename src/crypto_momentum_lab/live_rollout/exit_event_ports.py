@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s, RealtimeMarketQuote
+from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 
 if TYPE_CHECKING:
     from crypto_momentum_lab.live_rollout.closed_candle_feed import ClosedCandle15mEvent
@@ -20,14 +21,14 @@ class ExitFailureResult(Protocol):
 class ExitEventProcessor(Protocol):
     async def process_state(
         self, state: MarketState15s, context: LiveDaemonRuntimeContext
-    ) -> ExitFailureResult: ...
+    ) -> ExitLaneOutcome: ...
 
     async def process_quote(
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
-    ) -> ExitFailureResult: ...
+    ) -> ExitLaneOutcome: ...
 
     async def process_closed_candle(
         self,
@@ -49,15 +50,10 @@ class ExitEventProcessor(Protocol):
 class ExitEventLane(Protocol):
     async def start(self) -> None: ...
 
-    async def submit_market(
-        self, state: MarketState15s, context: LiveDaemonRuntimeContext
-    ) -> None: ...
+    async def submit_market(self, state: MarketState15s) -> None: ...
 
     async def submit_quote(
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        *,
-        wait: bool = False,
-    ) -> ExitFailureResult | None: ...
+    ) -> None: ...

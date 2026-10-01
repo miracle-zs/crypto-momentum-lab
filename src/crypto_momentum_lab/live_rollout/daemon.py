@@ -385,8 +385,8 @@ class LiveStrategyDaemon:
             context_is_current=self._context_runtime.is_current,
         )
         self._exit_lane = ExitExecutionLane(
-            self._exit_processor.process_state,
-            self._exit_processor.process_quote,
+            lambda state: self._exit_events.process_market_work(state),
+            lambda quote, state: self._exit_events.process_quote_work(quote, state),
             on_outcome=self._on_exit_lane_outcome,
         )
         self._exit_events = LiveExitEventCoordinator(

@@ -530,7 +530,7 @@ class LiveMarketLoop:
                 and self._exit_enabled()
                 and self._exit_manager.uses_market_state_exit
             ):
-                await self._exit_lane.submit_market(state, context)
+                await self._exit_lane.submit_market(state)
                 await asyncio.sleep(0)
                 exit_lane_failure = self._exit_lane.failure
                 if exit_lane_failure is not None:
