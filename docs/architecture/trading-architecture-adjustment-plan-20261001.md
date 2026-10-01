@@ -1,6 +1,6 @@
 # 交易系统架构调整计划
 
-日期：2026-10-01。状态：六批结构调整、累计单元/smoke 回归与架构图更新已在本地完成；准备回调及有实际用途的共享设施引用保留，真实数据库与生产验收尚未完成。
+日期：2026-10-01。状态：执行单向化和共享设施迁移已本地完成；真实数据库与生产验收尚未完成。
 
 源码基线：`242fabec23c47a1dcd9481fef8e4199ddf70f01f`，编写前工作树干净。本文是当前 checkout 的结构调整提案，不代表生产状态或已完成验收。
 
@@ -171,3 +171,19 @@ AST 扫描未发现顶层包导入循环；persistence 的项目内跨顶层依�
 [调整后的架构快照](trading-architecture-after-adjustment-20261001.md)包含模块依赖图、核心下单时序、明确的调用统计口径和剩余边界。正常提交主通道仍为七个类；删减的是兼容入口、两条回退、跨层类型引用和调度状态副本，不把文件移动报告为调用层数下降。
 
 本轮已确认的结构删减完成，后续优先做真实数据库及正常交易闭环验收。已知账户 overflow 故障注入失败和账户渠道资源清理警告仍未修复；不宣称所有 E2E 或全项目检查无问题。全部改动仍在本地工作树，未提交、推送或部署。
+
+
+## 第八批：执行单向化与共享设施迁移（2026-10-01）
+
+基线为已推送的 85005a9e。本批按用户进一步明确的职责归属方案实施，替代此前保留准备回调与共享设施位置的决定。
+
+- domain/execution/order_submission 定义纯数据 OrderSubmissionPreparation、提交仓储及最终准入协议。Coordinator 在装配阶段持有仓储、准入规则和时钟；请求不包含准备函数或绑定 Submission 的方法。
+- 队列出队后，Coordinator 直接读取 LiveSubmissionAdmission 的最新开仓许可和上下文有效性，再调用仓储完成原子准备，然后调用状态机 submit。prepare_for_execution 和回调式 prepare_submission 参数全部删除，包括决策退出路径。
+- Submission 不再持有仓储，保留候选风险评估、计划生成、遥测和提交后记账。返回结果携带仓储真实准备时间，遥测不再靠回调修改上游局部变量。EntryExecutionLane 独立保留。
+- 策略工厂迁入 strategies/registry.py；收盘行情/EMA 设施迁入 market_data/candle_source.py；所有代码、测试与脚本导入同步迁移，不留旧位置兼容别名。live_rollout 无 strategy_runner 引用。
+
+事务语义未改变：耐久准备由 Postgres 仓储在既有事务内完成；返回时事务已提交。发单在数据库事务外，但与准备处于同一 key 的调度任务。账本预留仍沿用自己的事务，不宣称整个链路是单一数据库事务。
+
+验证：完整单元与 smoke **3128 passed、5 skipped、2 warnings**；最后新增的五项独立导入防护 **5 passed**（禁用 strategy_runner 时加载策略工厂、行情设施和实盘装配）。真实队列定向 **57 passed**，包含出队许可变化、上下文拒绝、准备失败不发单、准备与对账串行及准备时间回传。相关实盘/决策退出/故障注入定向 **127 passed、1 deselected**；排除仍为已知账户 overflow 失败。七个修改核心模块 mypy 通过。迁移的 registry 有一条既有 tuple(object) 类型诊断，文件内容与 HEAD 旧位置完全一致；不宣称全部类型检查通过。修改文件 Ruff F/I、git diff --check 通过；AST 顶层依赖无循环，execution_account 不导入 live_rollout，live_rollout 不依赖 strategy_runner。
+
+数据库 golden path 三项收集成功但未执行；四项默认关闭的 Hub 测试和数据库 live smoke 跳过，既有客户端弃用与账户渠道 aclose 警告保留。架构快照已更新。本批未提交、推送或部署。

@@ -57,7 +57,31 @@ from crypto_momentum_lab.domain.strategy import (
     deterministic_config_hash,
 )
 from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitConfig as _PaperExitConfig,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperExitMode as _PaperExitMode,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperPosition as _PaperPosition,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperPositionStatus as _PaperPositionStatus,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperTradingRunReport as _PaperTradingRunReport,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    ReplayExecutionConfig as _ReplayExecutionConfig,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    SimulatedFill as _SimulatedFill,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    SimulatedFillStatus as _SimulatedFillStatus,
+)
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    position_from_entry_fill as _position_from_entry_fill,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
@@ -74,10 +98,10 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
     LiquidationCascadeConfig,
 )
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
-from crypto_momentum_lab.domain.strategy.paper_models import (
-    ReplayExecutionConfig as _ReplayExecutionConfig,
-    SimulatedFill as _SimulatedFill,
-    SimulatedFillStatus as _SimulatedFillStatus,
+from crypto_momentum_lab.strategies.registry import (
+    StrategyRegistryError,
+    build_runtime_config,
+    build_runtime_strategy,
 )
 from crypto_momentum_lab.strategy_runner.fills import (
     fill_summary,
@@ -85,22 +109,10 @@ from crypto_momentum_lab.strategy_runner.fills import (
     resolve_candidate_fill_at_state,
     simulate_candidate_fill,
 )
-from crypto_momentum_lab.domain.strategy.paper_models import (
-    PaperExitConfig as _PaperExitConfig,
-    PaperExitMode as _PaperExitMode,
-    PaperPosition as _PaperPosition,
-    PaperPositionStatus as _PaperPositionStatus,
-    position_from_entry_fill as _position_from_entry_fill,
-)
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
     ClosedCandle15m,
     mark_positions,
-)
-from crypto_momentum_lab.strategy_runner.registry import (
-    StrategyRegistryError,
-    build_runtime_config,
-    build_runtime_strategy,
 )
 from crypto_momentum_lab.strategy_runner.serialization import jsonable
 

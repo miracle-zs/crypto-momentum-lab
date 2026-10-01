@@ -19,7 +19,7 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
-from crypto_momentum_lab.strategy_runner.candle_source import (
+from crypto_momentum_lab.market_data.candle_source import (
     ClosedCandleEmaSnapshot,
 )
 

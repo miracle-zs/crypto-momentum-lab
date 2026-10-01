@@ -69,7 +69,7 @@ from crypto_momentum_lab.shadow_operation.service import (
     ShadowOperationResult,
     ShadowOperationService,
 )
-from crypto_momentum_lab.strategy_runner.registry import (
+from crypto_momentum_lab.strategies.registry import (
     build_runtime_config,
     build_runtime_strategy,
 )

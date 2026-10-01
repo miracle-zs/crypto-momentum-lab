@@ -39,7 +39,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
-    PreparedOrderSubmission,
+    OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
@@ -247,6 +247,10 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 )
 from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
+from crypto_momentum_lab.market_data.candle_source import (
+    BinanceRestClosedCandle15mSource,
+    ClosedCandleEmaProvider,
+)
 from crypto_momentum_lab.market_data.hub import (
     WebSocketMarketStateSource,
 )
@@ -315,11 +319,7 @@ from crypto_momentum_lab.persistence.postgres.shadow_repository import (
     PostgresShadowRepository,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.strategy_runner.candle_source import (
-    BinanceRestClosedCandle15mSource,
-    ClosedCandleEmaProvider,
-)
-from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
+from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 
 log = structlog.get_logger()
 
@@ -850,6 +850,7 @@ async def run_live_daemon(
         )
         execution_book = execution_runtime.book
         execution_coordinator = execution_runtime.coordinator
+        execution_coordinator.configure_submission(submission_repository)
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose
         )
@@ -932,29 +933,18 @@ async def run_live_daemon(
                 strategy_version="v0",
             )
 
-            async def _prepare_for_execution() -> PreparedOrderSubmission | None:
-                fencing_kwargs: dict[str, Any] = {}
-                if active_lease is not None:
-                    fencing_kwargs = {
-                        "environment": "live",
-                        "account_label": account_label,
-                        "strategy_name": strategy_name,
-                        "required_lease_owner": lease_owner,
-                        "required_lease_id": active_lease.lease_id,
-                        "required_code_generation": git_commit_hash,
-                    }
-                return await submission_repository.prepare_submission(
-                    intent=intent,
-                    evaluation=evaluation,
-                    plan=plan,
-                    prepared_at=datetime.now(tz=UTC),
-                    required_session_id=session_id,
-                    **fencing_kwargs,
-                )
-
             res = await execution_coordinator.prepare_and_execute(
                 plan,
-                prepare_submission=_prepare_for_execution,
+                preparation=OrderSubmissionPreparation(
+                    intent=intent, evaluation=evaluation,
+                    environment="live" if active_lease is not None else None,
+                    account_label=account_label,
+                    strategy_name=strategy_name,
+                    required_lease_owner=lease_owner if active_lease is not None else None,
+                    required_lease_id=active_lease.lease_id if active_lease is not None else None,
+                    required_code_generation=git_commit_hash if active_lease is not None else None,
+                    required_session_id=session_id,
+                ),
             )
             if res is None:
                 return OrderExecutionResult(

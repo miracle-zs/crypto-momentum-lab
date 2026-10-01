@@ -22,6 +22,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderSubmissionRepository,
+)
 from crypto_momentum_lab.domain.execution.progress_contract import (
     ExecutionReadiness,
     ReadinessEvaluator,
@@ -110,7 +113,9 @@ from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
     LiveEntryOrderLifecycle,
     LiveSubmissionConfig,
-    LiveSubmissionRepository,
+)
+from crypto_momentum_lab.live_rollout.submission_admission import (
+    LiveSubmissionAdmission,
 )
 from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 from crypto_momentum_lab.risk.gateway import RiskGateway
@@ -163,7 +168,7 @@ class LiveStrategyDaemon:
         strategy: market_runtime_contracts.LiveRuntimeStrategy,
         risk_gateway: RiskGateway,
         limits: FixedLiveLimits,
-        submission_repository: LiveSubmissionRepository,
+        submission_repository: OrderSubmissionRepository,
         persist_checkpoint: PersistCheckpoint,
         state_machine: CoordinatedOrderExecutionPort,
         context_provider: LiveContextProvider,
@@ -294,10 +299,16 @@ class LiveStrategyDaemon:
             clock=self._clock,
             invalidate_context=self._context_runtime.invalidate,
         )
+        self._state_machine.configure_submission(
+            submission_repository,
+            admission=LiveSubmissionAdmission(
+                self._entry_control, self._context_runtime.is_current,
+            ),
+            clock=self._clock,
+        )
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,
             limits=self._limits,
-            repository=submission_repository,
             state_machine=self._state_machine,
             config=LiveSubmissionConfig(
                 run_id=config.run_id,

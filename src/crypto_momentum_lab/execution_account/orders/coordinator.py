@@ -14,7 +14,7 @@ import inspect
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -60,7 +60,10 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
+    FinalSubmissionAdmission,
     OrderPreSubmissionError,
+    OrderSubmissionPreparation,
+    OrderSubmissionRepository,
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -137,11 +140,19 @@ class OrderExecutionPort(Protocol):
 
 
 class CoordinatedOrderExecutionPort(OrderExecutionPort, Protocol):
+    def configure_submission(
+        self,
+        repository: OrderSubmissionRepository,
+        *,
+        admission: FinalSubmissionAdmission | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None: ...
+
     async def prepare_and_execute(
         self,
         plan: OrderExecutionPlan,
         *,
-        prepare_submission: Callable[[], Awaitable[PreparedOrderSubmission | None]],
+        preparation: OrderSubmissionPreparation,
     ) -> OrderExecutionResult | None: ...
 
 
@@ -399,6 +410,9 @@ class OrderExecutionCoordinator:
             raise ValueError(
                 "exit_headroom must be non-negative and less than max_queue_depth"
             )
+        self._submission_repository: OrderSubmissionRepository | None = None
+        self._submission_admission: FinalSubmissionAdmission | None = None
+        self._submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC)
         self._backend = backend
         self._environment = environment.strip()
         self._account_label = account_label.strip()
@@ -1189,18 +1203,31 @@ class OrderExecutionCoordinator:
             await self._schedule(plan, priority=priority, operation=operation),
         )
 
+    def configure_submission(
+        self,
+        repository: OrderSubmissionRepository,
+        *,
+        admission: FinalSubmissionAdmission | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        if self._schedulers:
+            raise RuntimeError("cannot configure submission after execution starts")
+        self._submission_repository = repository
+        self._submission_admission = admission
+        self._submission_clock = clock
+
     async def prepare_and_execute(
         self,
         plan: OrderExecutionPlan,
         *,
-        prepare_submission: Callable[[], Awaitable[PreparedOrderSubmission | None]],
+        preparation: OrderSubmissionPreparation,
     ) -> OrderExecutionResult | None:
         """Prepare and submit one plan inside the same per-key scheduler.
 
+        Final admission and repository preparation run after dequeue.
         A durable ``SUBMITTING`` row must not become visible to reconciliation
         while the corresponding exchange POST is still waiting to enter the
-        coordinator.  The callback is deliberately executed by the scheduler
-        worker, immediately followed by the backend submit, so reconcile and
+        coordinator. Preparation is immediately followed by backend submit, so reconcile and
         cancel operations for this key cannot interleave the two steps.
         """
 
@@ -1211,7 +1238,50 @@ class OrderExecutionCoordinator:
                 try:
                     await self._ensure_reservation(plan)
                     await self._mark_dispatching_if_accepted(plan)
-                    prepared = await prepare_submission()
+                    if self._submission_repository is None:
+                        raise OrderPreSubmissionError(
+                            "submission repository is not configured"
+                        )
+                    if (
+                        preparation.context_token is not None
+                        and self._submission_admission is None
+                    ):
+                        raise OrderPreSubmissionError(
+                            "submission admission is not configured"
+                        )
+                    rejection = (
+                        self._submission_admission.rejection_reason(plan, preparation)
+                        if self._submission_admission is not None
+                        else None
+                    )
+                    prepared = None
+                    if rejection is not None:
+                        log.info(
+                            "order_submission_admission_rejected",
+                            client_order_id=plan.client_order_id,
+                            reason=rejection,
+                        )
+                    if rejection is None:
+                        prepared = await self._submission_repository.prepare_submission(
+                            plan=plan,
+                            prepared_at=self._submission_clock(),
+                            intent=preparation.intent,
+                            evaluation=preparation.evaluation,
+                            environment=preparation.environment,
+                            account_label=preparation.account_label,
+                            strategy_name=preparation.strategy_name,
+                            required_lease_owner=preparation.required_lease_owner,
+                            required_lease_id=preparation.required_lease_id,
+                            required_code_generation=preparation.required_code_generation,
+                            required_session_id=preparation.required_session_id,
+                            max_open_positions=preparation.max_open_positions,
+                            max_daily_loss=preparation.max_daily_loss,
+                            max_gross_exposure=preparation.max_gross_exposure,
+                            current_daily_pnl=preparation.current_daily_pnl,
+                            current_gross_exposure=preparation.current_gross_exposure,
+                            open_position_symbols=preparation.open_position_symbols,
+                            exposure_notional=preparation.exposure_notional,
+                        )
                 except Exception as prepare_err:
                     await self._record_submission_failure(
                         plan,
@@ -1220,10 +1290,13 @@ class OrderExecutionCoordinator:
                     )
                     raise
                 if prepared is None:
-                    if self._execution_book.get_outbox(plan.client_order_id) is not None:
+                    if (
+                        self._execution_book.get_outbox(plan.client_order_id)
+                        is not None
+                    ):
                         await self._execution_book.mark_rejected(
                             plan.client_order_id,
-                            reason="prepare_submission_returned_none",
+                            reason=rejection or "prepare_submission_returned_none",
                         )
                     return None
                 try:
@@ -1247,7 +1320,7 @@ class OrderExecutionCoordinator:
                     )
                     raise
                 await self._observe_returned_order_result(plan, res)
-                return res
+                return replace(res, prepared_at=prepared.submitting_event.occurred_at)
 
             return cast(
                 OrderExecutionResult | None,

@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
+    OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
@@ -314,15 +315,17 @@ async def test_prepare_and_execute_serializes_reconcile_after_prepare() -> None:
     prepare_started = asyncio.Event()
     release_prepare = asyncio.Event()
 
-    async def prepare_submission():
-        prepare_started.set()
-        await release_prepare.wait()
-        return _prepared(plan)
+    class Repository:
+        async def prepare_submission(self, **kwargs):
+            prepare_started.set()
+            await release_prepare.wait()
+            return _prepared(kwargs["plan"])
 
+    coordinator.configure_submission(Repository())
     submit_task = asyncio.create_task(
         coordinator.prepare_and_execute(
             plan,
-            prepare_submission=prepare_submission,
+            preparation=_submission_preparation(plan),
         )
     )
     await prepare_started.wait()
@@ -467,7 +470,8 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     await block_task
 
     with pytest.raises(
-        OrderPreSubmissionError, match="waited .* in queue exceeding limit"
+        OrderPreSubmissionError,
+ match="waited .* in queue exceeding limit"
     ):
         await entry_task
 
@@ -521,7 +525,8 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
     # Entry command submitted while worker is hung.
     # The caller must time out within max_queue_wait_seconds
     with pytest.raises(
-        OrderPreSubmissionError, match="waited .* in queue exceeding limit"
+        OrderPreSubmissionError,
+ match="waited .* in queue exceeding limit"
     ):
         await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
@@ -730,16 +735,18 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     )
 
     with pytest.raises(
-        OrderPreSubmissionError, match="Failed to create position reservation"
+        OrderPreSubmissionError,
+ match="Failed to create position reservation"
     ):
         await coordinator.submit(plan)
 
     with pytest.raises(
-        OrderPreSubmissionError, match="Failed to create position reservation"
+        OrderPreSubmissionError,
+ match="Failed to create position reservation"
     ):
         await coordinator.prepare_and_execute(
             plan,
-            prepare_submission=lambda: asyncio.sleep(0, result=None),
+            preparation=_submission_preparation(plan),
         )
 
     await coordinator.aclose()
@@ -1124,7 +1131,8 @@ async def test_unallocated_exit_order_fails_closed_without_inventing_batch() -> 
         quantized=True,
     )
     with pytest.raises(
-        OrderPreSubmissionError, match="has no allocated batches or batch_id"
+        OrderPreSubmissionError,
+ match="has no allocated batches or batch_id"
     ):
         await coordinator.submit(plan)
     await coordinator.aclose()
@@ -2699,5 +2707,85 @@ async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_witho
         assert events[0].occurred_at == NOW
         assert order_state_is_uncertain(events[0].state)
         assert events[0].details["reason"] == "incomplete_ws_order_update"
+    finally:
+        await coordinator.aclose()
+
+
+def _submission_preparation(plan):
+    from dataclasses import replace
+
+    from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
+    from tests.unit.shadow_operation.test_service import _intent
+
+    intent = replace(_intent(), candidate_id=plan.intent_id, run_id=plan.run_id)
+    return OrderSubmissionPreparation(
+        intent=intent,
+        evaluation=RiskEvaluation(
+            evaluation_id="evaluation", candidate_id=plan.intent_id,
+            decision=RiskDecision.APPROVED, reason="test", evaluated_at=NOW,
+            details={},
+        ),
+    )
+
+
+@pytest.mark.parametrize("reason", ["entry_paused", "context_invalidated"])
+async def test_final_admission_reads_current_state_after_dequeue(reason):
+    backend = BlockingSubmitBackend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    admitted = [True]
+    prepared_ids = []
+    first = _plan("BTCUSDT", reduce_only=False)
+    from dataclasses import replace
+    queued = replace(first, intent_id="queued-intent", client_order_id="queued-order")
+
+    class Admission:
+        def rejection_reason(self, plan, preparation):
+            return None if admitted[0] else reason
+
+    class Repository:
+        async def prepare_submission(self, **kwargs):
+            plan = kwargs["plan"]
+            prepared_ids.append(plan.client_order_id)
+            return _prepared(plan)
+
+    coordinator.configure_submission(Repository(), admission=Admission())
+    first_task = asyncio.create_task(coordinator.prepare_and_execute(
+        first, preparation=_submission_preparation(first),
+    ))
+    queued_task = None
+    try:
+        await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
+        queued_task = asyncio.create_task(coordinator.prepare_and_execute(
+            queued, preparation=_submission_preparation(queued),
+        ))
+        await asyncio.sleep(0)
+        admitted[0] = False
+        backend.release_submit.set()
+        first_result = await asyncio.wait_for(first_task, timeout=1)
+        assert first_result.prepared_at == _prepared(first).submitting_event.occurred_at
+        assert await asyncio.wait_for(queued_task, timeout=1) is None
+        assert prepared_ids == [first.client_order_id]
+        assert backend.calls == ["submit:BTCUSDT:entry"]
+    finally:
+        backend.release_submit.set()
+        await asyncio.gather(first_task, *([queued_task] if queued_task else []),
+                             return_exceptions=True)
+        await coordinator.aclose()
+
+
+async def test_preparation_failure_never_calls_exchange():
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+
+    class Repository:
+        async def prepare_submission(self, **kwargs):
+            raise OSError("prepare transaction failed")
+
+    coordinator.configure_submission(Repository())
+    plan = _plan("BTCUSDT", reduce_only=False)
+    try:
+        with pytest.raises(OSError, match="prepare transaction failed"):
+            await coordinator.prepare_and_execute(plan, preparation=_submission_preparation(plan))
+        assert backend.calls == []
     finally:
         await coordinator.aclose()

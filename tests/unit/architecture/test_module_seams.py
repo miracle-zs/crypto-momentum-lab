@@ -611,3 +611,27 @@ importlib.import_module(sys.argv[1])
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("module", [
+    "crypto_momentum_lab.strategies.registry",
+    "crypto_momentum_lab.market_data.candle_source",
+    "crypto_momentum_lab.live_rollout.runtime_config",
+    "crypto_momentum_lab.live_rollout.entry_cache",
+    "crypto_momentum_lab.live_rollout.runtime_orchestrator",
+])
+def test_live_shared_facilities_do_not_import_strategy_runner(module):
+    script = """
+import importlib
+import sys
+from importlib.abc import MetaPathFinder
+class RunnerGuard(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith('crypto_momentum_lab.strategy_runner'):
+            raise RuntimeError('live dependency on simulation runner: ' + fullname)
+sys.meta_path.insert(0, RunnerGuard())
+importlib.import_module(sys.argv[1])
+"""
+    result = subprocess.run([sys.executable, "-c", script, module],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr

@@ -6,8 +6,7 @@ accepted a candidate:
 * re-check entry state and candidate freshness;
 * apply fixed live limits and the risk gateway;
 * quantize the intent into an exchange plan;
-* durably prepare the order before the exchange request;
-* let the execution coordinator serialize preparation and submission; and
+* pass a data-only preparation request to the execution coordinator; and
 * update the daemon's pending-entry and limit-order bookkeeping.
 
 The surrounding daemon supplies context and bookkeeping callbacks.  This
@@ -34,7 +33,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
-    PreparedOrderSubmission,
+    OrderSubmissionPreparation,
 )
 from crypto_momentum_lab.domain.execution.position_batches import (
     count_active_symbol_batch_concurrency,
@@ -48,7 +47,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
+from crypto_momentum_lab.domain.risk import RiskDecision
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -81,31 +80,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 
 log = structlog.get_logger()
-
-
-class LiveSubmissionRepository(Protocol):
-    async def prepare_submission(
-        self,
-        *,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-        plan: OrderExecutionPlan,
-        prepared_at: datetime,
-        environment: str | None = None,
-        account_label: str | None = None,
-        strategy_name: str | None = None,
-        required_lease_owner: str | None = None,
-        required_lease_id: str | None = None,
-        required_code_generation: str | None = None,
-        required_session_id: str | None = None,
-        max_open_positions: int | None = None,
-        max_daily_loss: Decimal | None = None,
-        max_gross_exposure: Decimal | None = None,
-        current_daily_pnl: Decimal | None = None,
-        current_gross_exposure: Decimal | None = None,
-        open_position_symbols: frozenset[str] | None = None,
-        exposure_notional: Decimal | None = None,
-    ) -> PreparedOrderSubmission | None: ...
 
 
 class LiveEntryOrderLifecycle(Protocol):
@@ -164,7 +138,6 @@ class LiveCandidateSubmission:
         *,
         risk_gateway: RiskGateway,
         limits: FixedLiveLimits,
-        repository: LiveSubmissionRepository,
         state_machine: CoordinatedOrderExecutionPort,
         config: LiveSubmissionConfig,
         clock: Callable[[], datetime],
@@ -181,7 +154,6 @@ class LiveCandidateSubmission:
     ) -> None:
         self._risk_gateway = risk_gateway
         self._limits = limits
-        self._repository = repository
         self._state_machine = state_machine
         self._config = config
         self._clock = clock
@@ -429,32 +401,11 @@ class LiveCandidateSubmission:
                 symbol=executable_candidate.symbol,
             )
             return None
-        intent_saved_at = self._clock()
-
-        async def prepare_for_execution() -> PreparedOrderSubmission | None:
-            nonlocal intent_saved_at
-            if not executable_candidate.reduce_only and not self._entry_enabled():
-                log.info(
-                    "live_entry_blocked_inside_submission_scheduler",
-                    run_id=self._config.run_id,
-                    candidate_id=executable_candidate.candidate_id,
-                    symbol=executable_candidate.symbol,
-                    reason=self._entry_enabled_reason(),
-                )
-                return None
-            if not self._context_is_current(context):
-                log.info(
-                    "live_candidate_context_invalidated_inside_submission_scheduler",
-                    run_id=self._config.run_id,
-                    candidate_id=executable_candidate.candidate_id,
-                    symbol=executable_candidate.symbol,
-                )
-                return None
-            prepared_submission = await self._repository.prepare_submission(
+        result = await self._state_machine.prepare_and_execute(
+            plan,
+            preparation=OrderSubmissionPreparation(
                 intent=executable_candidate,
                 evaluation=evaluation,
-                plan=plan,
-                prepared_at=self._clock(),
                 environment=(
                     None
                     if context.active_lease is None
@@ -499,9 +450,7 @@ class LiveCandidateSubmission:
                     else context.realized_pnl + context.unrealized_pnl
                 ),
                 current_gross_exposure=(
-                    None
-                    if executable_candidate.reduce_only
-                    else context.gross_exposure
+                    None if executable_candidate.reduce_only else context.gross_exposure
                 ),
                 open_position_symbols=(
                     None
@@ -509,22 +458,14 @@ class LiveCandidateSubmission:
                     else risk_open_position_symbols
                 ),
                 exposure_notional=(
-                    None
-                    if limit_decision is None
-                    else limit_decision.capped_notional
+                    None if limit_decision is None else limit_decision.capped_notional
                 ),
-            )
-            if prepared_submission is not None:
-                intent_saved_at = prepared_submission.submitting_event.occurred_at
-            return prepared_submission
-
-        result = await self._state_machine.prepare_and_execute(
-            plan,
-            prepare_submission=prepare_for_execution,
+                context_token=context,
+            ),
         )
         if result is None:
             log.info(
-                "live_duplicate_submission_suppressed",
+                "live_submission_suppressed",
                 run_id=self._config.run_id,
                 symbol=plan.symbol,
                 client_order_id=plan.client_order_id,
@@ -534,7 +475,7 @@ class LiveCandidateSubmission:
             await self._telemetry.intent_saved(
                 executable_candidate,
                 state=state,
-                occurred_at=intent_saved_at,
+                occurred_at=result.prepared_at or self._clock(),
                 lane=lane,
             )
         if not plan.reduce_only:

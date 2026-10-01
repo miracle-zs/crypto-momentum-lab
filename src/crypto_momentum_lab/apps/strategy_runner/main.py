@@ -28,6 +28,10 @@ from crypto_momentum_lab.domain.strategy.paper_models import (
     SimulatedFillStatus,
 )
 from crypto_momentum_lab.health import LocalHealthWriter, StartupPhaseTimer
+from crypto_momentum_lab.market_data.candle_source import (
+    BinanceRestClosedCandle15mSource,
+    ClosedCandleEmaProvider,
+)
 from crypto_momentum_lab.persistence.parquet import read_market_states_15s_dataset
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
@@ -53,9 +57,10 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowImpulseConfig,
 )
-from crypto_momentum_lab.strategy_runner.candle_source import (
-    BinanceRestClosedCandle15mSource,
-    ClosedCandleEmaProvider,
+from crypto_momentum_lab.strategies.registry import (
+    RuntimeStrategyProtocol,
+    build_runtime_config,
+    build_runtime_strategy,
 )
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
@@ -81,11 +86,6 @@ from crypto_momentum_lab.strategy_runner.paper import (
     PaperRunnerConfig,
     run_paper_trading,
     write_paper_trading_report,
-)
-from crypto_momentum_lab.strategy_runner.registry import (
-    RuntimeStrategyProtocol,
-    build_runtime_config,
-    build_runtime_strategy,
 )
 from crypto_momentum_lab.strategy_runner.replay import (
     EntryPolicyReplayError,

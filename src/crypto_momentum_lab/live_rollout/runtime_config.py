@@ -9,7 +9,7 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
-from crypto_momentum_lab.strategy_runner.registry import build_runtime_config
+from crypto_momentum_lab.strategies.registry import build_runtime_config
 
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 30
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False

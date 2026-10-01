@@ -242,6 +242,17 @@ def _build_submission_service(
         backend=machine, account_label="primary", environment="live",
     )
     _created_coordinators.append(coordinator)
+    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
+    from crypto_momentum_lab.live_rollout.submission_admission import (
+        LiveSubmissionAdmission,
+    )
+    coordinator.configure_submission(
+        PostgresOrderSubmissionRepository(sessions),
+        admission=LiveSubmissionAdmission(
+            LiveEntryControlGate(run_id="golden-run-1", state_machine=coordinator),
+            lambda context: True,
+        ), clock=lambda: NOW,
+    )
     return LiveCandidateSubmission(
         risk_gateway=RiskGateway(),
         limits=limits
@@ -251,7 +262,6 @@ def _build_submission_service(
             max_daily_loss=Decimal("10"),
             max_gross_exposure=Decimal("25"),
         ),
-        repository=PostgresOrderSubmissionRepository(sessions),
         state_machine=coordinator,
         config=LiveSubmissionConfig(
             run_id="golden-run-1",

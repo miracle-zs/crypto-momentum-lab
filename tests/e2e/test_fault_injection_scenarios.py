@@ -22,9 +22,6 @@ from crypto_momentum_lab.execution_account.daemon import (
 from crypto_momentum_lab.execution_account.hub import (
     WebSocketAccountEventSource,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
 )
@@ -54,6 +51,7 @@ from tests.unit.execution_account.test_user_data_daemon import (
 )
 from tests.unit.live_rollout.test_daemon import _runtime_context
 from tests.unit.live_rollout.test_submission import (
+    RecordingCoordinator,
     RecordingPreparedRepository,
     _submission,
 )
@@ -283,32 +281,22 @@ async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() 
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
-class _HaltAwareCoordinator:
+class _HaltAwareCoordinator(RecordingCoordinator):
     def __init__(self) -> None:
+        super().__init__()
         self.prepare_calls = 0
         self.exchange_calls = 0
 
-    async def prepare_and_execute(self, plan, *, prepare_submission):
+    async def prepare_and_execute(self, plan, *, preparation):
         self.prepare_calls += 1
-        prepared = await prepare_submission()
-        if prepared is None:
-            return None
-        self.exchange_calls += 1
-        return OrderExecutionResult(
-            client_order_id=plan.client_order_id,
-            state=ExchangeOrderState.ACKNOWLEDGED,
-            exchange_order_id="exchange-1",
-            plan=plan,
-        )
+        result = await super().prepare_and_execute(plan, preparation=preparation)
+        self.exchange_calls += int(result is not None)
+        return result
 
 
 async def test_fault_injection_operator_halt_wins_entry_post_race() -> None:
     repository = RecordingPreparedRepository()
     coordinator = _HaltAwareCoordinator()
-    submission = _submission(
-        repository=repository,
-        state_machine=coordinator,
-    )
     entry_checks = 0
 
     def entry_enabled() -> bool:
@@ -316,8 +304,9 @@ async def test_fault_injection_operator_halt_wins_entry_post_race() -> None:
         entry_checks += 1
         return entry_checks < 3
 
-    submission._entry_enabled = entry_enabled
-    submission._entry_enabled_reason = lambda: "operator_halt"
+    submission = _submission(
+        repository=repository, state_machine=coordinator, entry_enabled=entry_enabled,
+    )
 
     result = await submission.execute(
         replace(_intent(), desired_notional=Decimal("20")),

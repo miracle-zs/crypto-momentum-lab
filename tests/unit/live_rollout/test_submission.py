@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -67,16 +67,28 @@ class RecordingCoordinator:
     def __init__(self) -> None:
         self.events: list[str] = []
 
-    async def prepare_and_execute(self, plan, *, prepare_submission):
+    def configure_submission(self, repository, *, admission=None, clock=lambda: NOW):
+        self.repository = repository
+        self.admission = admission
+        self.clock = clock
+
+    async def prepare_and_execute(self, plan, *, preparation):
         self.events.append("prepare")
-        prepared = await prepare_submission()
-        assert prepared is not None
+        if self.admission is not None and self.admission.rejection_reason(plan, preparation):
+            return None
+        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
+                  if f.name != "context_token"}
+        prepared = await self.repository.prepare_submission(
+            plan=plan, prepared_at=self.clock(), **values,
+        )
+        if prepared is None:
+            return None
         self.events.append("exchange")
         return OrderExecutionResult(
             client_order_id=plan.client_order_id,
             state=ExchangeOrderState.ACKNOWLEDGED,
-            exchange_order_id="exchange-1",
-            plan=plan,
+            exchange_order_id="exchange-1", plan=plan,
+            prepared_at=prepared.submitting_event.occurred_at,
         )
 
 
@@ -85,7 +97,24 @@ def _submission(
     repository,
     state_machine,
     limits: FixedLiveLimits | None = None,
+    entry_enabled=lambda: True,
+    context_is_current=lambda context: True,
 ) -> LiveCandidateSubmission:
+    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
+    from crypto_momentum_lab.live_rollout.submission_admission import (
+        LiveSubmissionAdmission,
+    )
+
+    class TestGate(LiveEntryControlGate):
+        @property
+        def entry_enabled(self):
+            return entry_enabled()
+
+    gate = TestGate(run_id="run-1", state_machine=state_machine)
+    state_machine.configure_submission(
+        repository, admission=LiveSubmissionAdmission(gate, context_is_current),
+        clock=lambda: NOW,
+    )
     return LiveCandidateSubmission(
         risk_gateway=RiskGateway(),
         limits=limits
@@ -95,7 +124,6 @@ def _submission(
             max_daily_loss=Decimal("10"),
             max_gross_exposure=Decimal("25"),
         ),
-        repository=repository,
         state_machine=cast(CoordinatedOrderExecutionPort, state_machine),
         config=LiveSubmissionConfig(
             run_id="run-1",
@@ -106,9 +134,9 @@ def _submission(
             entry_limit_ttl_seconds=900,
         ),
         clock=lambda: NOW,
-        entry_enabled=lambda: True,
+        entry_enabled=entry_enabled,
         entry_enabled_reason=lambda: "ready",
-        context_is_current=lambda context: True,
+        context_is_current=context_is_current,
         pending_entry_reservation=lambda orders: (
             Decimal("0"),
             frozenset(),
@@ -550,17 +578,16 @@ async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts()
     gate = LiveEntryControlGate(run_id="run-1", state_machine=object(),
         scheduled_risk_window=ScheduledRiskWindowConfig(), clock=lambda: current[0])
 
-    class BoundaryCoordinator:
-        async def prepare_and_execute(self, plan, *, prepare_submission):
+    class BoundaryCoordinator(RecordingCoordinator):
+        async def prepare_and_execute(self, plan, *, preparation):
             assert gate.entry_enabled
-            current[0] += timedelta(seconds=1)  # The serialized submit wait crosses 07:45.
-            prepared = await prepare_submission()
-            assert prepared is None
-            return None
+            current[0] += timedelta(seconds=1)
+            return await super().prepare_and_execute(plan, preparation=preparation)
 
-    submission = _submission(repository=repository, state_machine=BoundaryCoordinator())
-    submission._entry_enabled = lambda: gate.entry_enabled
-    submission._entry_enabled_reason = lambda: gate.entry_enabled_reason
+    submission = _submission(
+        repository=repository, state_machine=BoundaryCoordinator(),
+        entry_enabled=lambda: gate.entry_enabled,
+    )
     result = await submission.execute(
         replace(_intent(), desired_notional=Decimal("20")), requested_quantity=None,
         state=_state(), context=_runtime_context())
@@ -574,18 +601,18 @@ async def test_queued_entry_with_invalidated_context_never_prepares_or_posts():
     current = [True]
     posts = []
 
-    class DelayedCoordinator:
-        async def prepare_and_execute(self, plan, *, prepare_submission):
+    class DelayedCoordinator(RecordingCoordinator):
+        async def prepare_and_execute(self, plan, *, preparation):
             current[0] = False
-            prepared = await prepare_submission()
-            if prepared is not None:
+            result = await super().prepare_and_execute(plan, preparation=preparation)
+            if result is not None:
                 posts.append(plan)
-            return None
+            return result
 
     submission = _submission(
         repository=repository, state_machine=DelayedCoordinator(),
+        context_is_current=lambda context: current[0],
     )
-    submission._context_is_current = lambda context: current[0]
     result = await submission.execute(
         replace(_intent(), desired_notional=Decimal("20")),
         requested_quantity=None,

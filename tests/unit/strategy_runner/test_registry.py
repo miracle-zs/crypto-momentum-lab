@@ -6,7 +6,7 @@ import pytest
 from crypto_momentum_lab.domain.strategy import RunMode, StrategyRunIdentity
 from crypto_momentum_lab.strategies.liquidation_cascade import LiquidationCascadeConfig
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
-from crypto_momentum_lab.strategy_runner.registry import (
+from crypto_momentum_lab.strategies.registry import (
     StrategyRegistryError,
     build_runtime_config,
     build_runtime_strategy,

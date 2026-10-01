@@ -18,7 +18,7 @@ from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _live_strategy_config_hash,
 )
-from crypto_momentum_lab.strategy_runner.registry import StrategyRegistryError
+from crypto_momentum_lab.strategies.registry import StrategyRegistryError
 
 
 class RuntimeManifestError(ValueError):

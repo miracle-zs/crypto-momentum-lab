@@ -19,7 +19,7 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
     LiveEntryUniverseData,
     universe_context_for,
 )
-from crypto_momentum_lab.strategy_runner.candle_source import (
+from crypto_momentum_lab.market_data.candle_source import (
     ClosedCandleEmaSnapshot,
 )
 

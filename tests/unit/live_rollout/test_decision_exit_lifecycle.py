@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
+    OrderSubmissionPreparation,
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
@@ -62,8 +63,11 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
 
     mock_coordinator = MagicMock()
 
-    async def fake_prepare_and_execute(plan, *, prepare_submission):
-        prepared = await prepare_submission()
+    async def fake_prepare_and_execute(plan, *, preparation):
+        from dataclasses import fields
+        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
+                  if f.name != "context_token"}
+        prepared = await repository.prepare_submission(plan=plan, prepared_at=NOW, **values)
         assert prepared is not None
         prepared_submissions.append(prepared)
         return OrderExecutionResult(
@@ -160,29 +164,17 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
             strategy_version="v0",
         )
 
-        async def _prepare_for_execution() -> PreparedOrderSubmission | None:
-            fencing_kwargs: dict[str, Any] = {}
-            if active_lease is not None:
-                fencing_kwargs = {
-                    "environment": "live",
-                    "account_label": account_label,
-                    "strategy_name": strategy_name,
-                    "required_lease_owner": lease_owner,
-                    "required_lease_id": active_lease.lease_id,
-                    "required_code_generation": git_commit_hash,
-                }
-            return await repository.prepare_submission(
-                intent=intent,
-                evaluation=evaluation,
-                plan=plan,
-                prepared_at=NOW,
-                required_session_id=session_id,
-                **fencing_kwargs,
-            )
-
         res = await mock_coordinator.prepare_and_execute(
             plan,
-            prepare_submission=_prepare_for_execution,
+            preparation=OrderSubmissionPreparation(
+                intent=intent, evaluation=evaluation,
+                environment="live" if active_lease is not None else None,
+                account_label=account_label, strategy_name=strategy_name,
+                required_lease_owner=lease_owner if active_lease is not None else None,
+                required_lease_id=active_lease.lease_id if active_lease is not None else None,
+                required_code_generation=git_commit_hash if active_lease is not None else None,
+                required_session_id=session_id,
+            ),
         )
         if res is None:
             return OrderExecutionResult(

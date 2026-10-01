@@ -1,4 +1,6 @@
 import asyncio
+import os
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -899,3 +901,86 @@ def _plan() -> OrderExecutionPlan:
         created_at=NOW,
         quantized=True,
     )
+
+
+async def test_committed_preparation_survives_process_exit_before_dispatch(
+    order_repository,
+    async_database_url: str,
+) -> None:
+    # The fixture initializes/clears only the guarded local test database.
+    _, _, _, _, submissions, factory = order_repository
+    child_code = """
+import asyncio
+import os
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from crypto_momentum_lab.persistence.postgres.session import (
+    create_async_database_engine,
+)
+from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+    PostgresOrderSubmissionRepository,
+)
+from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
+from tests.integration.persistence.test_order_repository import _intent, _plan, NOW
+
+async def main():
+    engine = create_async_database_engine(os.environ["CML_CRASH_TEST_DATABASE_URL"])
+    repository = PostgresOrderSubmissionRepository(
+        async_sessionmaker(engine, expire_on_commit=False)
+    )
+    prepared = await repository.prepare_submission(
+        intent=_intent(), plan=_plan(), prepared_at=NOW,
+        evaluation=RiskEvaluation(
+            evaluation_id="evaluation-crash", candidate_id="candidate-1",
+            decision=RiskDecision.APPROVED, reason="approved",
+            evaluated_at=NOW, details={},
+        ),
+    )
+    assert prepared is not None
+    os._exit(73)
+
+asyncio.run(main())
+"""
+    environment = dict(os.environ)
+    environment["CML_CRASH_TEST_DATABASE_URL"] = async_database_url
+    environment["PYTHONPATH"] = os.pathsep.join(sys.path)
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        child_code,
+        env=environment,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(child.communicate(), timeout=20)
+    except TimeoutError:
+        child.kill()
+        await child.wait()
+        raise
+    assert child.returncode == 73, stderr.decode()
+
+    async with factory() as session:
+        state = await session.scalar(
+            select(ExchangeOrderRow.state).where(
+                ExchangeOrderRow.client_order_id == _plan().client_order_id,
+            )
+        )
+        event_count = await session.scalar(
+            select(func.count()).select_from(ExchangeOrderEventRow)
+        )
+    assert state == ExchangeOrderState.SUBMITTING.value
+    assert event_count == 1
+    duplicate = await submissions.prepare_submission(
+        intent=_intent(),
+        plan=_plan(),
+        prepared_at=NOW,
+        evaluation=RiskEvaluation(
+            evaluation_id="evaluation-restart",
+            candidate_id="candidate-1",
+            decision=RiskDecision.APPROVED,
+            reason="approved",
+            evaluated_at=NOW,
+            details={},
+        ),
+    )
+    assert duplicate is None

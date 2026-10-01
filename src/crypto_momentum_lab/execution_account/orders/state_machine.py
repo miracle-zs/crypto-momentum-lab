@@ -154,6 +154,7 @@ class OrderExecutionResult:
     executed_quantity: Decimal = Decimal("0")
     average_price: Decimal = Decimal("0")
     plan: OrderExecutionPlan | None = None
+    prepared_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

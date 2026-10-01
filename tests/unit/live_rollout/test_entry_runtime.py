@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
-from crypto_momentum_lab.strategy_runner.candle_source import ClosedCandleEmaSnapshot
+from crypto_momentum_lab.market_data.candle_source import ClosedCandleEmaSnapshot
 
 
 class FakeClient:

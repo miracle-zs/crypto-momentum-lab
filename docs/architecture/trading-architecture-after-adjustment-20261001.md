@@ -1,10 +1,10 @@
 # 交易系统调整后的架构快照
 
-日期：2026-10-01。范围：基于 `242fabec23c47a1dcd9481fef8e4199ddf70f01f` 加本轮未提交工作树；不代表生产部署。实施记录见[调整计划](trading-architecture-adjustment-plan-20261001.md)。
+日期：2026-10-01。范围：本轮执行链路重构后的提交内容；不代表生产部署。实施记录见[调整计划](trading-architecture-adjustment-plan-20261001.md)。
 
 ## 模块依赖
 
-箭头表示引用或注入依赖。为便于阅读省略辅助包和各业务包对 domain 的重复引用；虚线为仍需评估的归属问题，不表示已证实循环。
+箭头表示引用或注入依赖。为便于阅读省略辅助包和各业务包对 domain 的重复引用；实线表示引用/持有，虚线表示实现领域契约；不表示循环依赖。
 
 ```mermaid
 graph TD
@@ -12,14 +12,17 @@ graph TD
     Apps --> Market[market_data 行情]
     Apps --> Account[execution_account 账户与交易所接入]
     Apps --> Store[persistence]
-    Apps --> Runner[strategy_runner 模拟与共享设施]
+    Apps --> Runner[strategy_runner 模拟运行]
     Apps --> UI[operator_dashboard]
     Live --> Market
     Live --> Strategies[strategies 策略]
     Live --> Account
     Live --> Risk[risk / RiskGateway]
     Live --> Store
-    Live -. 共享策略工厂与收盘行情设施归属待评估 .-> Runner
+    Live --> Factory[strategies.registry 策略工厂]
+    Live --> Candles[market_data.candle_source 行情与 EMA]
+    Runner --> Factory
+    Runner --> Candles
     Runner --> Strategies
     Runner --> Store
     UI --> Store
@@ -40,7 +43,11 @@ graph TD
     Live --> Daemon
     Submission --> Risk
     Submission --> Planner[TradeCommandExecutor]
-    Submission --> Store
+    Coordinator --> RepoPort[domain / OrderSubmissionRepository]
+    Store -.实现.-> RepoPort
+    Coordinator --> FinalPort[domain / FinalSubmissionAdmission]
+    Final[LiveSubmissionAdmission 最终准入规则] -.实现.-> FinalPort
+    Live --> Final
     Coordinator --> Book[ExecutionBook]
     Account --> Receipt[AccountEventReceipt 接入边界转换]
     Receipt --> Domain
@@ -66,6 +73,7 @@ sequenceDiagram
     participant Planner as TradeCommandExecutor
     participant Coordinator as OrderExecutionCoordinator
     participant Scheduler as _KeyCommandScheduler
+    participant Final as LiveSubmissionAdmission
     participant Store as 提交仓储
     participant Machine as OrderExecutionStateMachine
     participant Client as BinanceUsdMTradeClient
@@ -91,11 +99,10 @@ sequenceDiagram
     Scheduler->>Coordinator: operation()
     Coordinator->>Coordinator: _run_entry_submission()
     Coordinator->>Coordinator: prepare_and_submit()
-    Coordinator->>Submission: prepare_for_execution()
-    Note over Coordinator,Submission: 保留排队后的许可及上下文复查
-    Submission->>Store: prepare_submission()
-    Store-->>Submission: 准备结果
-    Submission-->>Coordinator: 准备结果
+    Coordinator->>Final: rejection_reason()
+    Final-->>Coordinator: 最终准入通过
+    Coordinator->>Store: prepare_submission()
+    Store-->>Coordinator: 已提交事务的准备结果
     Coordinator->>Machine: submit()
     Machine->>Machine: _execute_approved_intent()
     Machine->>Machine: _exchange_call()
@@ -114,14 +121,18 @@ sequenceDiagram
     Lane-->>Loop: 下单结果
 ```
 
-主提交通道仍穿透 7 个类：Loop、Lane、Submission、Coordinator、Scheduler、StateMachine、Client。加准入、策略、风控、计划生成和仓储，共 12 个项目内参与角色。图中从 run 到 HTTP post 显示 23 次方法进入；这是简化图口径，不是全部函数调用数或调用栈深度。
+主提交通道仍穿透 7 个类：Loop、Lane、Submission、Coordinator、Scheduler、StateMachine、Client。加运行准入、最终提交准入、策略、风控、计划生成和仓储，共 13 个项目内参与角色（不计图中未展开的执行账本）。图中从 run 到 HTTP post 显示 23 次方法进入；这是简化图口径，不是全部函数调用数或调用栈深度。
 
 正常的 prepare_and_execute 路径原本不经过已删除的协调器兼容别名，因此没有宣称正常提交减少一层。改进主要是删去两条提交回退、兼容入口、跨层导入以及调度门禁重复状态；保留并发、订单状态与交易所协议边界。
 
 ## 剩余边界与停止条件
 
-live_rollout 对 strategy_runner 剩余引用集中在 registry 和 candle_source：前者实际创建共享策略配置与运行时，后者提供收盘行情和 EMA 设施。它们有实际职责，不是空心透传，也不进入逐订单提交主通道。位置归属可以后续调整，但仅移动文件不会减少运行复杂度，本轮先保留。
+共享策略工厂已迁至 strategies.registry，收盘行情和 EMA 设施迁至 market_data.candle_source，全部调用方直接引用新位置；live_rollout 对 strategy_runner 的直接与已验证的运行导入依赖已切断。
 
-准备回调保留队列执行时的最终检查；不为消除往返箭头引入新框架。调度门禁以 LiveEntryControlGate 为实际许可来源，协调器保留提交保护。当前达到已确认的结构删减范围，应先完成累计验证，再依据实际业务问题决定后续调整。
+Coordinator 不再接收提交准备函数，改为接收纯数据 OrderSubmissionPreparation；最终准入规则与仓储由执行侧持有并在出队后直接调用。Submission 保留风险评估、执行计划生成和提交后业务记账；EntryExecutionLane 保留池过滤、开仓政策与不确定结果熔断。未合并为大类。
+
+事务边界：仓储在既有数据库事务中做 lease/session/risk fencing、幂等仲裁和耐久准备，事务提交后才返回 PreparedOrderSubmission；交易所 HTTP 请求在事务外执行。同一个 key 的准备与提交仍为一个调度任务，对账/撤单不能插入两者之间。执行账本预留使用其既有事务边界，不把独立事务或 HTTP 宣称为同一数据库原子事务。
 
 真实 Postgres 事务、进程恢复及生产正常交易闭环仍需单独验收；本轮本地检查不替代这些证据。
+
+异常恢复验证见[下单恢复验收](order-recovery-acceptance-20261001.md)：HTTP 接单后响应超时及重建执行器对账测试通过；真实数据库强制退出测试已编写、未执行。查询不到订单时保留未知状态是当前行为，不代表已观察到交易所订单长期不可查。
