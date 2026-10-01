@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · 运行控制 · 总览 · Flight Deck</title>
-  <link rel="stylesheet" href="static/dashboard.css?v=20260930-zerojump-v4">
+  <link rel="stylesheet" href="static/dashboard.css?v=20261002-v2">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -37,7 +37,6 @@
           <a href="#account" data-nav="account" data-label="账户"><kbd class="nav-key">3</kbd><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
           <a href="#reports" data-nav="reports" data-label="台账"><kbd class="nav-key">4</kbd><span>运行台账</span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
           <a href="#performance" data-nav="performance" data-label="性能"><kbd class="nav-key">5</kbd><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
-          <a href="#actions" data-nav="actions" data-label="操作"><kbd class="nav-key">6</kbd><span>受控操作</span><em class="nav-dot is-locked"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
           <span class="nav-group-label">STRATEGY &amp; DATA</span>
@@ -177,22 +176,6 @@
             <div class="skeleton"><s style="width:36%"></s><s style="width:85%"></s><s style="width:72%"></s><s style="width:90%"></s></div>
           </div>
         </section>
-
-        <section id="actions" class="card card-actions" data-workspace="ops" data-view-title="操作" aria-labelledby="actions-title" hidden>
-          <header class="card-head">
-            <div class="card-title"><div><h2 id="actions-title">受控操作</h2><small>双重审计通道 · CLI 应急命令生成器</small></div></div>
-            <span class="lock-badge">AUDITED OPS</span>
-          </header>
-          <div class="action-grid" id="action-cards-grid">
-            <button type="button" class="action-card is-active" data-action="halt"><b>全局停机</b><span>Global Halt</span><small>阻断新入场信号</small></button>
-            <button type="button" class="action-card" data-action="drain"><b>策略退场</b><span>Drain Strategy</span><small>停开新仓，自然退场</small></button>
-            <button type="button" class="action-card" data-action="cancel"><b>撤销挂单</b><span>Cancel Orders</span><small>撤销全部在途限价单</small></button>
-            <button type="button" class="action-card danger" data-action="flatten"><b>紧急平仓</b><span>Emergency Flatten</span><small>实盘头寸市价全平</small></button>
-            <button type="button" class="action-card" data-action="lease"><b>释放租约</b><span>Release Lease</span><small>零持仓释放执行权</small></button>
-          </div>
-          <div id="action-runbook-panel" class="action-runbook-panel"></div>
-          <p class="action-note">只读保护：本机控制台采用受控审计架构。可在上方一键复制精确终端运维命令，或通过受控后端执行并留存审计日志。</p>
-        </section>
       </main>
 
       <footer class="page-foot">
@@ -202,6 +185,6 @@
     </div>
   </div>
   <script src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"></script>
-  <script type="module" src="static/dashboard.js?v=20260930-zerojump-v5" defer></script>
+  <script type="module" src="static/dashboard.js?v=20261002-v2" defer></script>
 </body>
 </html>

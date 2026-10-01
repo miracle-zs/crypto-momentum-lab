@@ -21,7 +21,6 @@ const VIEW_PURPOSES = Object.freeze({
   account: "资金权益与持仓对账",
   reports: "运行会话与状态迁移",
   performance: "链路时延与系统性能监控",
-  actions: "受控命令操作",
   strategy: "策略对比与收益走势",
   universe: "UTC 动量排名与监控池",
   collector: "数据采集与窗口归档",

@@ -24,7 +24,6 @@ import {
   wireTableFilters,
   wireTableSorting,
 } from "./app/wire-widgets.js";
-import { wireActionRunbook } from "./sections/actions.js";
 import { installJumpProbe } from "./app/jump-probe.js";
 
 const strategySection = createStrategySection();
@@ -84,7 +83,6 @@ if (refreshBtn) {
 shell.selectView(shell.initialView(), { updateHistory: false });
 installJumpProbe();
 wireEcharts(document);
-wireActionRunbook(document);
 wireGlobalShortcuts(shell, poller);
 tick();
 poller.poll();

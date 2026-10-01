@@ -176,8 +176,7 @@ export function renderGlobalReadiness() {
           <span>${model.detail}</span>
         </div>
         <div class="emergency-triage-actions">
-          <a href="#risk" class="emergency-triage-btn">查看风控详情</a>
-          <a href="#actions" class="emergency-triage-btn ${isHalt ? "danger" : ""}">打开应急操作</a>
+          <a href="#risk" class="emergency-triage-btn ${isHalt ? "danger" : ""}">查看风控详情</a>
         </div>
       `;
     } else {

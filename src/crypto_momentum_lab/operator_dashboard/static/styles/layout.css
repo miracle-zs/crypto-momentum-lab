@@ -226,18 +226,25 @@
 }
 
 .poll-refresh-btn {
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 4px 8px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: none;
+  padding: 0;
+  margin: 0;
   cursor: pointer;
-  transition: border-color .15s ease, background .15s ease;
+  color: inherit;
+  font: inherit;
+  transition: opacity .15s ease;
 }
 
 .poll-refresh-btn:hover {
-  border-color: var(--line);
-  background: var(--surface-2);
-  color: var(--text);
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  opacity: .85;
 }
 
 .poll-refresh-btn:focus-visible {
