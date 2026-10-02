@@ -32,6 +32,113 @@ def _batch(state: MarketState15s, sequence: int) -> CollectionBatch:
     )
 
 
+def test_materialization_does_not_load_full_audit_payloads(tmp_path: Path) -> None:
+    import tracemalloc
+
+    journal = ArchiveJournal(
+        tmp_path / "journal", environment="research", max_bytes=1024**2
+    )
+    audit = journal.root / "resolutions.jsonl"
+    with audit.open("w") as stream:
+        for sequence in range(2048):
+            stream.write(
+                json.dumps({"record_id": f"old-{sequence}", "audit": "x" * 8192}) + "\n"
+            )
+    state = fixture_state("BTCUSDT", 0)
+    receipt = journal.accept(
+        _batch(state, 1), SelectionSnapshot(state.bucket_start, ()), (state,)
+    )
+    tracemalloc.start()
+    try:
+        journal.commit_materialization(
+            [receipt], resolutions=[{"record_id": receipt.record_id}]
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024**2, "audit payload history must not become an in-memory list"
+    assert not journal.pending_records()
+
+
+def test_resolution_identity_cache_preserves_restarts_and_external_appends(
+    tmp_path: Path, monkeypatch
+) -> None:
+    journal = ArchiveJournal(
+        tmp_path / "journal", environment="research", max_bytes=1024**2
+    )
+    state = fixture_state("BTCUSDT", 0)
+    selection = SelectionSnapshot(state.bucket_start, ())
+    audit = journal.root / "resolutions.jsonl"
+    audit.write_text(json.dumps({"record_id": "historical"}) + "\n")
+    first = journal.accept(_batch(state, 1), selection, (state,))
+    journal.commit_materialization([first], resolutions=[{"record_id": "new"}])
+    # An unchanged, already validated file must not be parsed on every flush.
+    original = json.loads
+    parsed = []
+
+    def observe_parse(value, *args, **kwargs):
+        parsed.append(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", observe_parse)
+    second = journal.accept(_batch(state, 2), selection, (state,))
+    journal.commit_materialization([second], resolutions=[{"record_id": "historical"}])
+    assert not parsed
+    assert len(audit.read_text().splitlines()) == 2
+    with audit.open("a") as stream:
+        stream.write(json.dumps({"record_id": "external"}) + "\n")
+    third = journal.accept(_batch(state, 3), selection, (state,))
+    journal.commit_materialization([third], resolutions=[{"record_id": "external"}])
+    assert parsed and len(audit.read_text().splitlines()) == 3
+    restarted = ArchiveJournal(journal.root, environment="research", max_bytes=1024**2)
+    restarted.recover()
+    fourth = restarted.accept(_batch(state, 4), selection, (state,))
+    restarted.commit_materialization([fourth], resolutions=[{"record_id": "new"}])
+    assert len(audit.read_text().splitlines()) == 3
+
+
+def test_resolution_cache_limit_falls_back_to_scoped_stream_scan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import crypto_momentum_lab.research_collector.journal as module
+
+    monkeypatch.setattr(module, "_MAX_CACHED_RESOLUTION_IDENTITIES", 2, raising=False)
+    journal = ArchiveJournal(
+        tmp_path / "journal", environment="research", max_bytes=1024**2
+    )
+    audit = journal.root / "resolutions.jsonl"
+    audit.write_text(
+        "".join(json.dumps({"record_id": f"old-{i}"}) + "\n" for i in range(8))
+    )
+    state = fixture_state("BTCUSDT", 0)
+    receipt = journal.accept(
+        _batch(state, 1), SelectionSnapshot(state.bucket_start, ()), (state,)
+    )
+    journal.commit_materialization([receipt], resolutions=[{"record_id": "old-7"}])
+    assert len(audit.read_text().splitlines()) == 8
+    assert journal._cached_resolution_identities is None
+
+
+def test_changed_corrupt_audit_preserves_pending_records(tmp_path: Path) -> None:
+    journal = ArchiveJournal(
+        tmp_path / "journal", environment="research", max_bytes=1024**2
+    )
+    state = fixture_state("BTCUSDT", 0)
+    selection = SelectionSnapshot(state.bucket_start, ())
+    first = journal.accept(_batch(state, 1), selection, (state,))
+    journal.commit_materialization([first], resolutions=[{"record_id": "first"}])
+    audit = journal.root / "resolutions.jsonl"
+    with audit.open("a") as stream:
+        stream.write('{"sequence": 1.9}\n')
+    pending = journal.accept(_batch(state, 2), selection, (state,))
+    with pytest.raises(CollectorStateConflict):
+        journal.commit_materialization(
+            [pending], resolutions=[{"record_id": pending.record_id}]
+        )
+    assert len(journal.pending_records()) == 1
+    assert journal.pending_records()[0].receipt == pending
+
+
 def test_journal_accepts_non_empty_and_empty_batches(tmp_path: Path) -> None:
     journal = ArchiveJournal(
         tmp_path / "journal",

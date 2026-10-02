@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +78,29 @@ def _require_sequence(value: object, name: str = "sequence") -> int:
     return value
 
 
+_MAX_CACHED_RESOLUTION_IDENTITIES = 131072
+
+
+def _resolution_identities(record: Mapping[str, Any]) -> set[bytes]:
+    identities = []
+    record_id = record.get("record_id")
+    if record_id:
+        identities.append(("record", str(record_id)))
+    kind, stream, sequence = (
+        record.get("source_kind"),
+        record.get("stream_id"),
+        record.get("sequence"),
+    )
+    if sequence is not None:
+        sequence = _require_sequence(sequence, "resolution sequence")
+    if kind is not None and stream is not None and sequence is not None:
+        identities.append(("scope", str(kind), str(stream), sequence))
+    return {
+        hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).digest()
+        for identity in identities
+    }
+
+
 class ArchiveJournal:
     """A bounded, atomic JSON write-ahead journal for accepted batches."""
 
@@ -105,6 +128,8 @@ class ArchiveJournal:
         self._highest_committed_sequence: int | None = None
         self._last_materialized_bucket: datetime | None = None
         self._last_materialized_symbol: str | None = None
+        self._cached_resolution_stamp: tuple[int, int, int, int] | None = None
+        self._cached_resolution_identities: set[bytes] | None = None
 
         self._pending_root.mkdir(parents=True, exist_ok=True)
 
@@ -386,47 +411,19 @@ class ArchiveJournal:
         # journal files
         if resolutions:
             res_path = self._root / "resolutions.jsonl"
-            existing_rec_ids: set[str] = set()
-            existing_keys: set[tuple[str, str, int]] = set()
-            for item in self.read_resolutions():
-                rid = item.get("record_id")
-                if rid:
-                    existing_rec_ids.add(str(rid))
-                sk = item.get("source_kind")
-                sid = item.get("stream_id")
-                seq = item.get("sequence")
-                if sk is not None and sid is not None and seq is not None:
-                    existing_seq = _require_sequence(
-                        seq, "existing resolution sequence"
-                    )
-                    existing_keys.add((str(sk), str(sid), existing_seq))
-
+            candidates = set().union(
+                *(_resolution_identities(res) for res in resolutions)
+            )
+            existing = self._resolution_index(candidates)
+            appended_identities: set[bytes] = set()
             to_append: list[dict[str, Any]] = []
             for res in resolutions:
                 res_dict = dict(res)
-                rid = res_dict.get("record_id")
-                sk = res_dict.get("source_kind")
-                sid = res_dict.get("stream_id")
-                seq = res_dict.get("sequence")
-                parsed_seq = (
-                    _require_sequence(seq, "resolution sequence")
-                    if seq is not None
-                    else None
-                )
-                res_key = (
-                    (str(sk), str(sid), parsed_seq)
-                    if (sk is not None and sid is not None and parsed_seq is not None)
-                    else None
-                )
-                if rid and str(rid) in existing_rec_ids:
-                    continue
-                if res_key and res_key in existing_keys:
+                identities = _resolution_identities(res_dict)
+                if identities & existing or identities & appended_identities:
                     continue
                 to_append.append(res_dict)
-                if rid:
-                    existing_rec_ids.add(str(rid))
-                if res_key:
-                    existing_keys.add(res_key)
+                appended_identities.update(identities)
 
             if to_append:
                 with res_path.open("a", encoding="utf-8") as f:
@@ -435,6 +432,16 @@ class ArchiveJournal:
                     f.flush()
                     os.fsync(f.fileno())
                 _fsync_directory(self._root)
+                # Publish cache entries only after the append is durable. A
+                # failed write must never make a later retry skip audit output.
+                if self._cached_resolution_identities is not None:
+                    self._cached_resolution_identities.update(appended_identities)
+                    if (
+                        len(self._cached_resolution_identities)
+                        > _MAX_CACHED_RESOLUTION_IDENTITIES
+                    ):
+                        self._cached_resolution_identities = None
+                self._cached_resolution_stamp = self._resolution_stamp()
 
         # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal
         # files
@@ -482,10 +489,42 @@ class ArchiveJournal:
 
     def read_resolutions(self) -> list[dict[str, Any]]:
         """Read all durable materialization resolutions from disk."""
+        return list(self._iter_resolutions())
+
+    def _resolution_stamp(self) -> tuple[int, int, int, int] | None:
+        try:
+            stat = (self._root / "resolutions.jsonl").stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    def _resolution_index(self, candidates: set[bytes]) -> set[bytes]:
+        """Cache bounded identities, never payloads; validate changed files anew."""
+        stamp = self._resolution_stamp()
+        if (
+            self._cached_resolution_identities is not None
+            and stamp == self._cached_resolution_stamp
+        ):
+            return self._cached_resolution_identities
+        cache: set[bytes] | None = set()
+        matches: set[bytes] = set()
+        for record in self._iter_resolutions():
+            identities = _resolution_identities(record)
+            matches.update(identities & candidates)
+            if cache is not None:
+                cache.update(identities)
+                if len(cache) > _MAX_CACHED_RESOLUTION_IDENTITIES:
+                    cache = None
+        self._cached_resolution_identities = cache
+        self._cached_resolution_stamp = stamp
+        # Once the cache limit is reached, retain only identities relevant to
+        # this batch. Recovery/commit remain correct with bounded memory.
+        return matches if cache is None else cache
+
+    def _iter_resolutions(self) -> Iterator[dict[str, Any]]:
         res_path = self._root / "resolutions.jsonl"
         if not res_path.exists():
-            return []
-        records = []
+            return
         try:
             with res_path.open("r", encoding="utf-8") as f:
                 for line_no, raw_line in enumerate(f, start=1):
@@ -510,12 +549,11 @@ class ArchiveJournal:
                         _require_sequence(
                             seq, f"sequence in {res_path} at line {line_no}"
                         )
-                    records.append(record)
+                    yield record
         except OSError as error:
             raise CollectorStateConflict(
                 f"cannot read collector materialization resolutions {res_path}: {error}"
             ) from error
-        return records
 
     def recover(
         self,
@@ -592,20 +630,6 @@ class ArchiveJournal:
                     f"{self._manifest_path}: {error}"
                 ) from error
 
-        existing_resolutions = self.read_resolutions()
-        existing_res_keys: set[tuple[str, str, int]] = set()
-        existing_record_ids: set[str] = set()
-        for res in existing_resolutions:
-            rec_id = res.get("record_id")
-            if rec_id:
-                existing_record_ids.add(str(rec_id))
-            sk = res.get("source_kind")
-            sid = res.get("stream_id")
-            seq = res.get("sequence")
-            if sk is not None and sid is not None and seq is not None:
-                parsed_seq = _require_sequence(seq, "resolution sequence")
-                existing_res_keys.add((str(sk), str(sid), parsed_seq))
-
         paths: list[Path] = []
         if self._pending_root.exists():
             paths.extend(self._pending_root.rglob("*.json"))
@@ -616,36 +640,31 @@ class ArchiveJournal:
             _clean_temporary_files(legacy_spool_root)
             paths.extend(legacy_spool_root.rglob("*.json"))
 
-        total_bytes = 0
-        for path in sorted(set(paths)):
-            record = self._read_record(path)
-            rec = record.receipt
-            res_tuple = (
-                (
-                    rec.source_kind.value,
-                    str(rec.stream_id),
-                    _require_sequence(rec.sequence, "receipt sequence"),
-                )
-                if (
-                    rec.source_kind
-                    and rec.stream_id is not None
-                    and rec.sequence is not None
-                )
-                else None
+        records = {path: self._read_record(path) for path in sorted(set(paths))}
+        receipt_identities = {
+            path: _resolution_identities(
+                {
+                    "record_id": record.receipt.record_id,
+                    "source_kind": record.receipt.source_kind.value,
+                    "stream_id": record.receipt.stream_id,
+                    "sequence": record.receipt.sequence,
+                }
             )
-            is_already_committed = (
-                (rec.record_id and str(rec.record_id) in existing_record_ids)
-                or (res_tuple is not None and res_tuple in existing_res_keys)
-                or (
-                    rec.source_kind is SourceKind.HUB
-                    and self._highest_committed_sequence is not None
-                    and rec.sequence is not None
-                    and (
-                        self._active_stream_id is None
-                        or rec.stream_id == self._active_stream_id
-                    )
-                    and rec.sequence <= self._highest_committed_sequence
+            for path, record in records.items()
+        }
+        existing = self._resolution_index(set().union(*receipt_identities.values()))
+        total_bytes = 0
+        for path, record in records.items():
+            rec = record.receipt
+            is_already_committed = bool(receipt_identities[path] & existing) or (
+                rec.source_kind is SourceKind.HUB
+                and self._highest_committed_sequence is not None
+                and rec.sequence is not None
+                and (
+                    self._active_stream_id is None
+                    or rec.stream_id == self._active_stream_id
                 )
+                and rec.sequence <= self._highest_committed_sequence
             )
             if is_already_committed:
                 try:

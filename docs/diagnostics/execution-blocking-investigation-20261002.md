@@ -46,6 +46,8 @@
 - CVX 的旧 head 仍为 `legacy-postgres-account/unversioned`：扫描目标只选择新 trade identities、非零 journal 快照或恢复 checkpoint，漏掉了旧 account tables 的真实历史。现在将 legacy head 纳入源扫描集合；这不直接赋予完整性，不完整扫描仍拒绝 epoch adoption。真实 PostgreSQL 回归先复现漏选，再验证完整扫描可采用新 epoch 并跨重启恢复，不完整扫描不能解除保护。
 - UTC 05:36/05:46 研究采集重复重启并非 OOM。实际 traceback 是 Hub replay recovery → `_flush_all_buffers` → `drain_queue` 的固定 10 秒超时，慢速 Parquet 落盘使恢复游标未能推进、再次启动后重复补齐。恢复和 stream 切换现在等待持久化队列完成，暂停上游消费以形成背压；落盘异常独立唤醒等待者并立即暴露，不自动重启失败 worker、不把未落盘 journal 标为完成。健康检查及停机继续使用有限等待。
 - 最后完整单测 3,115 项通过（含 Hub 本地网络检查），研究采集子集 60 项通过；保留两项既有警告。新增 PostgreSQL 完整/不完整 legacy source 扫描检查均通过，独立数据库检查累计 66 项；补充上线结果见下方最终验收。
+- 补充内存/CPU 采样定位到 `ArchiveJournal.commit_materialization → read_resolutions`：每次提交全量解析 137 MB、44,164 行历史 JSONL 并构建字典列表。192 MiB 容器已使用约 163 MB Swap，线程处于 `folio_wait_bit_common`，不是 Python 忙等。将恢复和提交改为逐行严格校验，只缓存最多 131,072 个 SHA-256 身份键；同一已校验文件不重复解析，文件替换/大小/修改时间变化时重新校验，超限退回仅匹配当前待恢复/待提交键的流式扫描。原审计文件保留，append/fsync → manifest → 删除 pending 的顺序保留。
+- 内存回归使用 16 MB 历史审计负载：旧实现峰值约 17.7 MB、测试失败；修复要求额外峰值低于 4 MiB。另覆盖重启、外部追加、缓存超限及文件变坏时保留待落盘记录。完整单测更新为 3,119 项通过。
 
 检查窗口：北京时间 11:19–11:41。服务器：43.167.191.253；线上代码 c0697e7189f78dc0a84058e961f0045b6ef7b076。
 
