@@ -29,3 +29,6 @@
 `cec1679413a884895327f2e8f4a55e8bfe52cf64` 已推送并完成四账户/四策略滚动部署，12 个容器曾全部健康。实际策略产生的 VELVETUSDT GTC 退出分别取得币安订单 ID：primary `2656409747`、account-2 `2656415825`、account-3 `2656422266`、account-4 `2656447684`。account-4 启动时被行情过期准入拒绝的一次尝试，在 UTC 16:00 正式收盘重评后获得确认。订单 ACKNOWLEDGED 时 executed_quantity=0，表示已挂单等待目标价，不表示仓位已平。
 
 后续 UTC 15:59:54–16:09:54 十分钟资源验收失败：primary/account-2/account-3 在下一根收盘重复退出，预留冲突导致通道崩溃；启动恢复另有配置顺序错误。GTC 修复已解决本地缺参数拒单，但整个退出链路尚不能据此验收。进一步修复见 `grace-reservation-ownership-20261003.md`。
+
+
+后续复核：四账户 VELVET GTC 订单均自然成交 1477，仓位记录归零；account-2 FLUID 与 CAP 仍处在原策略宽限挂单阶段。重复退出与启动恢复的额外缺陷已在 8fafa30f 修复、上线并完成跨收盘十分钟验收，详细结果及未解决的行情峰值见 `grace-reservation-ownership-20261003.md`。
