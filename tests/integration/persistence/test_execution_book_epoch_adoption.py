@@ -516,6 +516,158 @@ async def test_new_epoch_without_checkpoint_adoption_fails_closed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bootstrap", ["observe", "read"])
+async def test_flat_bootstrap_cannot_prevent_durable_parent_scan_adoption(
+    async_database_url,
+    bootstrap,
+):
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillLoadScan,
+        AccountFillPageScan,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"flat-parent-{uuid4().hex[:12]}"
+    key = PositionKey("live", account, "BTCUSDT", "LONG")
+    scope = ExecutionScope("live", account, key.symbol, key.position_side)
+    old = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="old"
+    )
+    new = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="new"
+    )
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    baseline = _snapshot(key, start, "0", "0")
+    initial = baseline
+    proof = _coverage(
+        old,
+        load_id="initial",
+        scan_origin=start,
+        anchor_id=stable_snapshot_anchor_id(baseline),
+        anchor_cut=start,
+        anchor_kind="zero_snapshot",
+        checked_through=initial.observed_at,
+    )
+    entry = _fill(key, "entry", "BUY", "970", start + timedelta(minutes=1))
+    closing = _fill(key, "closing", "SELL", "970", start + timedelta(minutes=2))
+    target = _snapshot(key, start + timedelta(minutes=3), "0", "0")
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        assert isinstance(
+            await book.observe(
+                ExecutionEvidence(
+                    "initial",
+                    scope,
+                    initial.observed_at,
+                    snapshot=initial,
+                    coverage_evidence=proof,
+                    fill_load_provenance=proof.load_provenance,
+                    source_anchor_snapshot=baseline,
+                    stream_id="hub",
+                    stream_epoch="old",
+                    sequence=1,
+                )
+            ),
+            Applied,
+        )
+        parent = await book.load_recovery_checkpoint(old)
+        assert parent is not None
+        assert isinstance(
+            await book.observe(
+                ExecutionEvidence(
+                    "closing",
+                    scope,
+                    target.observed_at,
+                    fill=closing,
+                    snapshot=target,
+                    stream_id="hub",
+                    stream_epoch="old",
+                    sequence=2,
+                )
+            ),
+            Applied,
+        )
+        # A consumer reconnect receives a flat bootstrap before the periodic scan.
+        if bootstrap == "observe":
+            from crypto_momentum_lab.domain.execution.observation_models import (
+                EvidenceConflict,
+            )
+
+            result = await book.observe(
+                ExecutionEvidence(
+                    "bootstrap",
+                    scope,
+                    target.observed_at,
+                    snapshot=target,
+                    stream_id="hub",
+                    stream_epoch="new",
+                    sequence=1,
+                )
+            )
+            assert isinstance(result, EvidenceConflict)
+        else:
+            book.register_active_stream(
+                environment="live",
+                account_label=account,
+                stream_id="hub",
+                stream_epoch="new",
+            )
+            with pytest.raises(ValueError, match="durable history"):
+                await book.read(scope, stream_id="hub", stream_epoch="new")
+        assert (await book.load_recovery_checkpoint(old)) == parent
+        scan = AccountFillLoadScan(
+            "live",
+            account,
+            key.symbol,
+            "LONG",
+            AccountFillPageScan(
+                key.symbol,
+                "parent-suffix",
+                int(parent.event_cut.timestamp() * 1000),
+                None,
+                1,
+                True,
+                False,
+                target.observed_at,
+            ),
+            target.observed_at,
+            parent.checkpoint_id,
+            parent.event_cut,
+            "recovery_checkpoint",
+            "hub",
+            "old",
+        )
+        coordinator = OrderExecutionCoordinator(
+            backend=object(),
+            environment="live",
+            account_label=account,
+            execution_book=book,
+        )
+        await coordinator.observe_account_snapshot(
+            target,
+            fills=(entry, closing),
+            fill_load_scans=(scan,),
+            stream_id="hub",
+            stream_epoch="new",
+            sequence=2,
+        )
+        checkpoint = await book.load_recovery_checkpoint(new)
+        assert checkpoint is not None
+        assert checkpoint.parent_checkpoint_id == parent.checkpoint_id
+        assert checkpoint.projection.total_active_quantity == 0
+        restored = _book(factory)
+        await restored.restore(account_label=account)
+        assert (await restored.load_recovery_checkpoint(new)) == checkpoint
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("empty_suffix", [True, False])
 async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically(

@@ -16,6 +16,7 @@ account-2 曾出现账户级 `Execution reservation settlement requires recovery
 4. 修复事务检查最新有效上下文的持仓数量、入场价、事实流和观察时间。内容相同的刷新不再使事务失效；曝光或事实流变化仍中止修复。正常事务锁、版本冲突和提交后 Book 重载检查保留。
 5. 修复查询只补充已验证 checkpoint 之后的成交，避免将 checkpoint 以前已折叠成交再次累加。普通轮询游标和本地已存成交不能延长已验证覆盖区间。
 6. 已收到 SELL、后来补回 BUY 的场景会触发迟到事实。只有扫描分页完整、所有已知成交均包含且经济字段一致、迟到成交位于锚点之后且不穿过已有 checkpoint 时，才按真实成交时间重新构建候选日志。只有生成经过完整校验的恢复 checkpoint 后才允许原子提交；截断、漏成交、费用冲突、锚点前成交仍保留阻塞。原始成交和事务 delta 不丢弃。
+7. 空仓重连的普通快照和跨流读取不能替换已有真实成交、非零仓位观察或恢复 checkpoint 的内存日志。保留原持久化投影直到完整扫描完成流切换，避免补扫被 `local position facts do not match the durable head before stream adoption` 永久拒绝。真正没有交易历史的空仓仍保留快速路径。
 
 ## 验收边界
 

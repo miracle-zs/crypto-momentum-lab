@@ -838,6 +838,22 @@ class ExecutionBook:
             )
         return self._journals[canon]
 
+    def _requires_verified_stream_adoption(self, key: PositionKey) -> bool:
+        journal = self._journals.get(key.canonical_id)
+        if self._head_revisions.get(key.canonical_id, 0) == 0 or journal is None:
+            return False
+        facts = journal.read_cut()
+        return bool(
+            facts.fills
+            or facts.recovery_checkpoint
+            or facts.exit_boundaries
+            or facts.conflicting_fills
+            or facts.fact_conflicts
+            or facts.integrity_issues
+            or facts.has_late_events
+            or any(snapshot.position_amt != 0 for snapshot in facts.snapshots)
+        )
+
     @staticmethod
     def _order_watermark_key(key: PositionKey, order_id: str) -> str:
         return f"{key.canonical_id}\x1f{order_id}"
@@ -941,6 +957,11 @@ class ExecutionBook:
                 and has_no_commands
                 and is_known_active_stream
             ):
+                if self._requires_verified_stream_adoption(key):
+                    raise ValueError(
+                        "requested account stream does not match the restored position; "
+                        "durable history requires a verified source-anchored scan"
+                    )
                 target_scope = AccountFactStreamScope.for_position_key(
                     key, stream_id=stream_id, stream_epoch=stream_epoch
                 )
@@ -1902,6 +1923,14 @@ class ExecutionBook:
             )
             if is_truly_flat:
                 if (
+                    self._requires_verified_stream_adoption(key)
+                    and current_scope != scope
+                ):
+                    return EvidenceConflict(
+                        evidence_id=evidence.evidence_id,
+                        reason="durable flat history requires a verified source-anchored scan",
+                    )
+                if (
                     canon not in self._journals
                     or self._stream_scopes.get(canon) != scope
                 ):
@@ -1922,7 +1951,8 @@ class ExecutionBook:
             current_scope = self._stream_scopes.get(canon)
             current_book = self._books.get(canon)
             can_rollover = (
-                evidence.coverage_evidence is None
+                not self._requires_verified_stream_adoption(key)
+                and evidence.coverage_evidence is None
                 and evidence.stream_checkpoint_adoption is None
                 and evidence.source_anchor_snapshot is None
                 and current_book is not None
