@@ -9,6 +9,7 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
     AccountPositionSnapshot,
+    extract_fill_position_side,
 )
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderEvent
@@ -43,8 +44,36 @@ class ExecutionEvidence:
     sequence: int | None = None
     cumulative_order: ExecutionCumulativeOrderReport | None = None
     source_anchor_snapshot: AccountPositionSnapshot | None = None
+    # Historical trades prove command settlement without replaying a folded
+    # position prefix or assigning old facts to the current stream epoch.
+    settlement_fills: tuple[AccountFillEvent, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.settlement_fills:
+            event, report = self.order_event, self.cumulative_order
+            if event is None or not event.state.terminal or report is None or report.order_id != event.client_order_id:
+                raise ValueError("settlement trades require a matching order report")
+            key = self.scope.to_position_key()
+            seen = set()
+            for fill in self.settlement_fills:
+                if (fill.environment, fill.account_label, fill.symbol,
+                    extract_fill_position_side(fill.raw_payload) or "BOTH") != (
+                    key.environment, key.account_label, key.symbol, key.position_side.value,
+                ):
+                    raise ValueError("settlement trade position scope mismatch")
+                if fill.order_id not in {event.client_order_id, event.exchange_order_id}:
+                    raise ValueError("settlement trade order identity mismatch")
+                if fill.trade_id in seen:
+                    raise ValueError("settlement trades must have distinct identities")
+                if fill.quantity <= 0 or fill.price <= 0:
+                    raise ValueError("settlement trade must have positive quantity and price")
+                if "side" in event.details and fill.side != event.details["side"]:
+                    raise ValueError("settlement trade side mismatch")
+                if fill.trade_at > self.observed_at or fill.raw_payload.get("synthetic_from_order"):
+                    raise ValueError("settlement trade is not an observed real fact")
+                seen.add(fill.trade_id)
+            if sum((fill.quantity for fill in self.settlement_fills), Decimal(0)) != report.cumulative_quantity:
+                raise ValueError("settlement trades do not match cumulative quantity")
         if self.source_anchor_snapshot is not None:
             from crypto_momentum_lab.domain.execution.snapshot_encoding import (
                 stable_snapshot_anchor_id,

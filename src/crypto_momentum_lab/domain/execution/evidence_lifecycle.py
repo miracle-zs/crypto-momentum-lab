@@ -26,6 +26,24 @@ class OrderEventPlan:
     dispatch_reconciled: bool = False
 
 
+def settlement_trade_facts(
+    journal_fills: tuple[AccountFillEvent, ...],
+    historical_fills: tuple[AccountFillEvent, ...],
+) -> tuple[AccountFillEvent, ...]:
+    """Join real identities for settlement only; never append a position fact."""
+    if not historical_fills:
+        return journal_fills
+    trades = {fill.trade_id: fill for fill in journal_fills}
+    for fill in historical_fills:
+        prior = trades.get(fill.trade_id)
+        if prior is not None and (
+            prior.quantity, prior.price, prior.side, prior.trade_at,
+        ) != (fill.quantity, fill.price, fill.side, fill.trade_at):
+            raise ValueError("historical settlement trade conflicts with journal fact")
+        trades[fill.trade_id] = fill
+    return tuple(trades.values())
+
+
 def plan_order_event(
     outbox: OutboxEntry | None,
     event: ExchangeOrderEvent,

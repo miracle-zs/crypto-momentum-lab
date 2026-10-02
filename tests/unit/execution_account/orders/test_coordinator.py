@@ -2789,3 +2789,51 @@ async def test_preparation_failure_never_calls_exchange():
         assert backend.calls == []
     finally:
         await coordinator.aclose()
+
+
+async def test_recovery_admission_rejects_entry_without_terminating_scheduler():
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from tests.unit.execution.test_terminal_settlement import (
+        SCOPE,
+        ObservationUnitOfWork,
+        evidence,
+    )
+    # Exercise the actual restored-settlement rejection, not a mocked exception.
+    book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
+    book._persistence_failed = False
+    await book.observe(evidence("current-stream"))
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+    command = TradeCommand("old", SCOPE.to_position_key(), TradeCommandType.ENTRY,
+                           StrategySide.LONG, EntryType.MARKET, Decimal(1), created_at=NOW)
+    book.register_prepared_command(command, SCOPE)
+    event = ExchangeOrderEvent("old-terminal", "old", ExchangeOrderState.FILLED, NOW, "111", {})
+    await book.observe(evidence("old-terminal", order_event=event))
+    assert book.command_requires_recovery("old")
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=book,
+        reservation_repository=AsyncMock(),
+    )
+    repository = AsyncMock()
+    coordinator.configure_submission(repository)
+    plan = replace(_plan("BTCUSDT", reduce_only=False),
+                   position_side=SCOPE.position_side,
+                   projection_version=(await book.read(SCOPE)).projection_version)
+    try:
+        for _ in range(2):
+            assert await coordinator.prepare_and_execute(
+                plan, preparation=_submission_preparation(plan),
+            ) is None
+        assert backend.calls == []
+        repository.prepare_submission.assert_not_awaited()
+        assert book.command_requires_recovery("old")
+        assert book.get_outbox(plan.client_order_id) is None
+    finally:
+        await coordinator.aclose()

@@ -1,5 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -34,6 +36,77 @@ from tests.unit.execution.test_terminal_settlement import (
     evidence,
     fill,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priced_receipt", [True, False])
+@pytest.mark.parametrize("trade_in_current_cut", [True, False])
+async def test_historical_account_trades_settle_without_replaying_position_prefix(priced_receipt, trade_in_current_cut):
+    """A new epoch can have a flat checkpoint with no old order trades in its cut."""
+    from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+        PostgresOrderReadRepository,
+    )
+
+    book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
+    book._persistence_failed = False
+    await book.observe(evidence("current-epoch-no-historical-trades"))
+    command = TradeCommand(
+        "legacy", SCOPE.to_position_key(), TradeCommandType.ENTRY,
+        StrategySide.LONG, EntryType.MARKET, Decimal(1), created_at=NOW,
+    )
+    book.register_prepared_command(command, SCOPE)
+    await book.mark_unknown("legacy", "restored dispatch")
+    order = SimpleNamespace(
+        intent_id="intent", run_id="old-session", client_order_id="legacy",
+        exchange_order_id="111", symbol="BTCUSDT", side="BUY",
+        order_type="MARKET", quantity=Decimal(1), price=None, reduce_only=False,
+        position_side="LONG", state="filled", created_at=NOW, updated_at=NOW,
+        time_in_force=None, expires_at=None, executed_quantity=Decimal(1),
+    )
+    historical_fill = replace(fill("historical-trade", "1", entry=True), order_id="111")
+    if trade_in_current_cut:
+        await book.observe(evidence("same-trade-in-current-cut", fill=historical_fill))
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.scalar.side_effect = [order, {
+        "environment": "live", "account_label": "primary",
+        "symbol": "BTCUSDT", "position_side": "LONG",
+    }]
+
+    async def rows(query):
+        sql = str(query)
+        values = []
+        if "FROM account_fill_events" in sql:
+            values = [historical_fill]
+        elif "FROM exchange_order_events" in sql and priced_receipt:
+            values = [SimpleNamespace(details={
+                "executed_quantity": "1", "average_price": "100",
+            })]
+        return Mock(all=Mock(return_value=values))
+
+    session.scalars.side_effect = rows
+    orders = PostgresOrderReadRepository(Mock(return_value=session))
+
+    class NoExchangeCalls:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected exchange operation: {name}")
+
+    coordinator = OrderExecutionCoordinator(
+        backend=NoExchangeCalls(), account_label="primary", environment="live",
+        execution_book=book,
+    )
+    try:
+        assert not await recover_restored_commands(
+            book=book, coordinator=coordinator, orders=orders,
+        )
+        assert not book.command_requires_recovery("legacy")
+        assert book.get_outbox("legacy").external_order_id == "111"
+        # Historical settlement proof must not recreate this closed position.
+        assert (await book.read(SCOPE)).total_quantity == int(trade_in_current_cut)
+        expected_fills = (historical_fill,) if trade_in_current_cut else ()
+        assert book._journals[SCOPE.to_position_key().canonical_id].read_cut().fills == expected_fills
+    finally:
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio

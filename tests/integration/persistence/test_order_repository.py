@@ -166,6 +166,69 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
         await coordinator.aclose()
 
 
+@pytest.mark.parametrize("history", ["complete", "partial", "foreign_account"])
+async def test_old_trade_settlement_is_independent_of_current_epoch_position_facts(order_repository, history):
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
+        recover_restored_commands,
+    )
+    from tests.integration.persistence.test_authority_book_transactions import _book
+
+    plans, _, reads, events, submissions, factory = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    await events.append_order_event(ExchangeOrderEvent(
+        "terminal", plan.client_order_id, ExchangeOrderState.FILLED, NOW, "12345",
+        {"executed_quantity": str(plan.quantity), "average_price": "100"},
+    ))
+    account = f"test-history-{uuid4().hex}"
+    scope = ExecutionScope("live", account, plan.symbol, plan.position_side)
+    book = _book(factory)
+    await book.restore(account_label=account)
+    # New stream baseline intentionally has no previous epoch's trade prefix.
+    await book.observe(ExecutionEvidence("current-stream", scope, NOW,
+                                         stream_id="hub", stream_epoch="new"))
+    async with factory.begin() as session:
+        session.add(AccountFillEventRow(
+            environment="live", account_label=account if history != "foreign_account" else account + "-other",
+            symbol=plan.symbol, trade_id="old-real-trade", order_id="12345", side=plan.side,
+            quantity=plan.quantity if history != "partial" else plan.quantity / 2,
+            price=Decimal(100), realized_pnl=Decimal(0), fee=Decimal(0), fee_asset="USDT",
+            trade_at=NOW - timedelta(seconds=1), raw_payload={"positionSide": plan.position_side.value},
+        ))
+    book.register_prepared_command(TradeCommand(
+        plan.client_order_id, scope.to_position_key(), TradeCommandType.ENTRY,
+        StrategySide.LONG, EntryType.LIMIT, plan.quantity, limit_price=plan.price, created_at=NOW,
+    ), scope)
+    await book.mark_dispatching(plan.client_order_id)
+    restored = _book(factory)
+    await restored.restore(account_label=account)
+    coordinator = OrderExecutionCoordinator(backend=object(), account_label=account,
+                                             environment="live", execution_book=restored)
+    try:
+        pending = history != "complete"
+        assert await recover_restored_commands(book=restored, coordinator=coordinator, orders=reads) is pending
+        assert restored.command_requires_recovery(plan.client_order_id) is pending
+        assert (await restored.read(scope)).total_quantity == 0
+        assert restored._journals[scope.to_position_key().canonical_id].read_cut().fills == ()
+        # The head and command transition commit together and survive process loss.
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert restarted.command_requires_recovery(plan.client_order_id) is pending
+        assert (await restarted.read(scope)).total_quantity == 0
+    finally:
+        await coordinator.aclose()
+
+
 @pytest.mark.parametrize("terminal", [ExchangeOrderState.FILLED, ExchangeOrderState.CANCELED])
 async def test_exchange_terminal_fact_precedes_later_local_ack_clock(order_repository, terminal):
     plans, _, _, events, submissions, factory = order_repository

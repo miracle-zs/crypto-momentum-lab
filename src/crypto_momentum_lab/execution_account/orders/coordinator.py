@@ -39,6 +39,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     Blocked,
     CommandConflict,
     ExecutionBook,
+    ExecutionRecoveryPending,
     ExecutionRequest,
     PositionNotReady,
     StaleView,
@@ -63,6 +64,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     FinalSubmissionAdmission,
     OrderPreSubmissionError,
+    OrderRecoveryPendingError,
     OrderSubmissionPreparation,
     OrderSubmissionRepository,
     PreparedOrderSubmission,
@@ -821,7 +823,12 @@ class OrderExecutionCoordinator:
                     reason=act_res.reason,
                     diagnostics=act_res.diagnostics,
                 )
-                raise OrderPreSubmissionError(
+                error_type = (
+                    OrderRecoveryPendingError
+                    if isinstance(act_res, ExecutionRecoveryPending)
+                    else OrderPreSubmissionError
+                )
+                raise error_type(
                     f"Failed to create position entry for "
                     f"{plan.client_order_id}: {act_res.reason}"
                 )
@@ -960,6 +967,8 @@ class OrderExecutionCoordinator:
         self,
         plan: OrderExecutionPlan,
         res: OrderExecutionResult | None,
+        *,
+        settlement_fills: tuple[AccountFillEvent, ...] = (),
     ) -> None:
         if not self.is_execution_book_enabled or res is None:
             return
@@ -997,6 +1006,15 @@ class OrderExecutionCoordinator:
                 str(cumulative_quote),
             )
         )
+        if settlement_fills:
+            from crypto_momentum_lab.domain.execution.evidence_digest import (
+                trade_payload_digest,
+            )
+
+            identity += "\x1f" + "\x1f".join(
+                trade_payload_digest(fill)
+                for fill in sorted(settlement_fills, key=lambda item: item.trade_id)
+            )
         identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         order_ev = ExchangeOrderEvent(
             event_id=f"order_{identity_hash}",
@@ -1007,6 +1025,7 @@ class OrderExecutionCoordinator:
             details={
                 "account_label": self._account_label,
                 "symbol": plan.symbol,
+                **({"side": plan.side} if settlement_fills else {}),
                 "executed_quantity": str(cumulative_quantity),
                 "cumulative_quote_quantity": str(cumulative_quote),
                 "average_price": str(average_price)
@@ -1053,6 +1072,7 @@ class OrderExecutionCoordinator:
                         cumulative_quote=cumulative_quote,
                         observed_at=now_dt,
                     ),
+                    settlement_fills=settlement_fills,
                 )
             )
             if isinstance(result, EvidenceConflict):
@@ -1148,7 +1168,7 @@ class OrderExecutionCoordinator:
             raise RuntimeError("Order execution coordinator is closed")
         if receipt.client_order_id != plan.client_order_id:
             raise ValueError("recovered receipt client order id mismatch")
-        await self._observe_returned_order_result(
+        await self._observe_order_result_in_execution_book(
             plan,
             OrderExecutionResult(
                 receipt.client_order_id, receipt.state, receipt.exchange_order_id,
@@ -1156,6 +1176,7 @@ class OrderExecutionCoordinator:
                 average_price=receipt.average_price,
                 plan=plan,
             ),
+            settlement_fills=receipt.account_fills,
         )
 
     async def submit(
@@ -1286,6 +1307,13 @@ class OrderExecutionCoordinator:
                             open_position_symbols=preparation.open_position_symbols,
                             exposure_notional=preparation.exposure_notional,
                         )
+                except OrderRecoveryPendingError as rejection:
+                    log.info(
+                        "order_submission_recovery_admission_rejected",
+                        client_order_id=plan.client_order_id,
+                        reason=str(rejection),
+                    )
+                    return None
                 except Exception as prepare_err:
                     await self._record_submission_failure(
                         plan,

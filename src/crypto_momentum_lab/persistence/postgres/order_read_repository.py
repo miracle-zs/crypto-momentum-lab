@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
+    account_fill_from_row,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     ExchangeFillRow,
@@ -86,6 +89,7 @@ class PostgresOrderReadRepository:
             receipt = None
             if order.state.terminal:
                 quantity = order.executed_quantity
+                settlement_fills = ()
                 average = Decimal(0) if quantity == 0 else None
                 if quantity > 0:
                     events = (
@@ -132,7 +136,7 @@ class PostgresOrderReadRepository:
                                 )
                                 / quantity
                             )
-                    if average is None and order.exchange_order_id is not None:
+                    if order.exchange_order_id is not None:
                         scope = await session.scalar(
                             select(ExecutionCommandRow.details["scope"]).where(
                                 ExecutionCommandRow.command_id == client_order_id,
@@ -177,7 +181,9 @@ class PostgresOrderReadRepository:
                                 Decimal(0),
                             )
                             if traded_quantity == quantity:
-                                average = traded_quote / quantity
+                                settlement_fills = tuple(account_fill_from_row(fill) for fill in matching_fills)
+                                if average is None:
+                                    average = traded_quote / quantity
                 if average is not None:
                     receipt = order_read_models.PersistedOrderReceipt(
                         client_order_id,
@@ -185,6 +191,7 @@ class PostgresOrderReadRepository:
                         order.exchange_order_id,
                         quantity,
                         average,
+                        settlement_fills,
                     )
             return replace(order, terminal_receipt=receipt)
 

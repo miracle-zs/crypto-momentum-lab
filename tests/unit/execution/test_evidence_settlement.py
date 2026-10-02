@@ -149,6 +149,8 @@ def test_identity_binds_epoch_and_canonical_digest_excludes_transport_observatio
         "event-1", scope, NOW, fill=fill, stream_id="hub", stream_epoch="epoch-1"
     )
     redelivery = replace(evidence, observed_at=NOW + timedelta(seconds=1))
+    # Adding an optional settlement contract cannot invalidate old receipt hashes.
+    assert "settlement_fills" not in _canonical_evidence_payload(evidence)
     assert _canonical_evidence_payload(evidence) == _canonical_evidence_payload(
         redelivery
     )

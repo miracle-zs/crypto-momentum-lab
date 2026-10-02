@@ -50,6 +50,7 @@ from crypto_momentum_lab.domain.execution.evidence_grouping import (
 )
 from crypto_momentum_lab.domain.execution.evidence_lifecycle import (
     plan_order_event,
+    settlement_trade_facts,
     terminal_settlement_is_confirmed,
 )
 from crypto_momentum_lab.domain.execution.evidence_models import (
@@ -258,6 +259,11 @@ class Blocked:
 @dataclass(frozen=True, slots=True)
 class PositionNotReady(Blocked):
     """A typed position readiness guard refused a command before submission."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecoveryPending(Blocked):
+    """Account command evidence is still reconciling; keep the consumer alive."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1315,12 +1321,12 @@ class ExecutionBook:
             or self._external_recovery_positions[identity] == key
         }
         if blocking_recoveries:
-            return Blocked(
+            return ExecutionRecoveryPending(
                 reason="Execution reservation settlement requires recovery",
                 diagnostics=tuple(sorted(blocking_recoveries)),
             )
         if self._dispatch_reconciliation_required_commands:
-            return Blocked(
+            return ExecutionRecoveryPending(
                 reason="Execution command reconciliation is required",
                 diagnostics=tuple(
                     sorted(self._dispatch_reconciliation_required_commands)
@@ -2717,6 +2723,12 @@ class ExecutionBook:
                 if settlement_diagnostic:
                     diagnostics = (settlement_diagnostic,)
 
+        try:
+            settlement_facts = settlement_trade_facts(
+                journal.read_cut().fills, evidence.settlement_fills,
+            )
+        except ValueError as error:
+            return EvidenceConflict(evidence.evidence_id, str(error))
         report = evidence.cumulative_order
         if report is not None:
             report = replace(report, order_id=self._command_order_id(key, report.order_id))
@@ -2731,7 +2743,7 @@ class ExecutionBook:
                 report_plan = plan_cumulative_report(
                     report,
                     previous_watermark=(previous_quantity, previous_quote),
-                    account_fills=journal.read_cut().fills,
+                    account_fills=settlement_facts,
                     outbox=self._outbox_by_command_id.get(report.order_id),
                     has_active_reservations=bool(
                         self._find_active_reservations_for_command(report.order_id)
@@ -2779,7 +2791,7 @@ class ExecutionBook:
                 outbox,
                 evidence.order_event,
                 observed_at=evidence.observed_at,
-                account_fills=journal.read_cut().fills,
+                account_fills=settlement_facts,
                 durable=self._execution_unit_of_work is not None,
                 has_active_reservations=bool(
                     self._find_active_reservations_for_command(cmd_id)
@@ -2839,7 +2851,7 @@ class ExecutionBook:
                 continue
             if terminal_settlement_is_confirmed(
                 pending,
-                account_fills=journal.read_cut().fills,
+                account_fills=settlement_facts,
                 cumulative_quantity=self._order_cumulative_fills.get(
                     self._order_watermark_key(key, command_id), Decimal("0")
                 ),

@@ -18,6 +18,10 @@ class OrderPreSubmissionError(RuntimeError):
     """A local precondition failed before an exchange write was attempted."""
 
 
+class OrderRecoveryPendingError(OrderPreSubmissionError):
+    """Known recovery admission rejection, with no exchange write attempted."""
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedOrderSubmission:
     """Durable write-ahead journal returned by an atomic order preparation."""
