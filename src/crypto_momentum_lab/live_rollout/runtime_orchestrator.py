@@ -459,20 +459,12 @@ async def run_live_daemon(
     ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
     execution_engine = create_execution_database_engine(
         execution_database_url,
-        pool_size=12,
-        max_overflow=6,
-        pool_timeout_seconds=10.0,
-        command_timeout_seconds=10.0,
     )
     ownership_registry.register("execution_engine", execution_engine.dispose)
     market_engine = create_market_database_engine(market_database_url)
     ownership_registry.register("market_engine", market_engine.dispose)
     observability_engine = create_observability_database_engine(
         observability_database_url,
-        pool_size=4,
-        max_overflow=2,
-        pool_timeout_seconds=10.0,
-        command_timeout_seconds=10.0,
     )
     ownership_registry.register("observability_engine", observability_engine.dispose)
     checkpoint_engine = create_checkpoint_database_engine(observability_database_url)

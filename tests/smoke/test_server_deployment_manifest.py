@@ -3,6 +3,24 @@ from pathlib import Path
 import yaml
 
 
+def test_four_live_accounts_leave_database_capacity_for_other_planes() -> None:
+    base = yaml.safe_load(Path("compose.server.yaml").read_text())
+    extra = yaml.safe_load(Path("compose.live.accounts.yaml").read_text())
+    environments = [base["services"]["live-strategy"]["environment"]] + [
+        extra["services"][f"live-strategy-account-{account}"]["environment"]
+        for account in (2, 3, 4)
+    ]
+    critical_and_observability = sum(
+        int(environment[f"CML_DB_{plane}_{option}"])
+        for environment in environments
+        for plane in ("EXECUTION", "OBSERVABILITY")
+        for option in ("POOL_SIZE", "MAX_OVERFLOW")
+    )
+    # PostgreSQL has 100 slots. Market/account/heartbeat/checkpoint/maintenance
+    # pools and rolling-deployment probes also need independent capacity.
+    assert critical_and_observability <= 24
+
+
 def test_server_compose_exposes_complete_paper_stack() -> None:
     manifest = yaml.safe_load(Path("compose.server.yaml").read_text(encoding="utf-8"))
 
