@@ -1867,7 +1867,7 @@ async def test_submit_order_resolves_zero_avg_price_via_query_retry() -> None:
         await client.aclose()
 
 
-async def test_submit_order_falls_back_to_plan_price_when_query_remains_zero() -> None:
+async def test_submit_order_retains_missing_price_when_query_remains_zero() -> None:
     plan = replace(
         _order_plan(), order_type="LIMIT", price=Decimal("12.5"), time_in_force="GTC"
     )
@@ -1901,6 +1901,6 @@ async def test_submit_order_falls_back_to_plan_price_when_query_remains_zero() -
     try:
         snapshot = await client.submit_order(plan)
         assert snapshot.executed_quantity == Decimal("10")
-        assert snapshot.average_price == Decimal("12.5")
+        assert snapshot.average_price == Decimal("0")
     finally:
         await client.aclose()

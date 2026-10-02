@@ -58,6 +58,7 @@ from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrde
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
+    ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -987,6 +988,15 @@ class OrderExecutionCoordinator:
             raise ValueError("exchange cumulative executed quantity cannot be negative")
         average_price = res.average_price
         if cumulative_quantity > Decimal("0") and average_price <= Decimal("0"):
+            if res.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                # Quantity is retained by the durable pending order event, but
+                # cannot settle a reservation until its quote is authoritative.
+                if self._execution_book.get_outbox(res.client_order_id) is not None:
+                    await self._execution_book.mark_unknown(
+                        res.client_order_id,
+                        reason="cumulative_fill_price_pending",
+                    )
+                return
             raise RuntimeError(
                 "positive cumulative fill has no positive cumulative average price; "
                 "execution facts require recovery"

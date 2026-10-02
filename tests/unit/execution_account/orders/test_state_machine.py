@@ -568,7 +568,7 @@ def _snapshot(
             if fills
             else Decimal("0")
         ),
-        average_price=Decimal("30000") if fills else Decimal("0"),
+        average_price=Decimal("30000") if fills or executed_quantity else Decimal("0"),
         fills=fills,
     )
 

@@ -964,3 +964,66 @@ async def test_committed_flat_receipt_invalidates_context_without_replacement():
     assert observed == result
     invalidate.assert_called_once()
     assert not processor._submission.calls
+
+
+async def test_incomplete_terminal_fill_retains_recovery_without_replacement_post():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import (
+        ExchangeOrderSnapshot,
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.domain.strategy import StrategySide
+    from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+
+    submission = SimpleNamespace(execute=AsyncMock(return_value=None))
+    processor = _processor(submission)
+    plan = OrderExecutionPlan(
+        "exit", "run-1", "incomplete-original", "BTCUSDT", "SELL", "MARKET",
+        Decimal("1"), None, True, NOW,
+        position_side=FuturesPositionSide.LONG, batch_id="target",
+    )
+    position = ManagedLivePosition(
+        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
+        Decimal("1"), Decimal("100"), NOW,
+        batch_id="target", projection_version="pv_current",
+    )
+    context = SimpleNamespace(
+        managed_positions=(position,), pending_position_symbols=frozenset(),
+        unmanaged_position_symbols=frozenset(),
+    )
+    processor._context_provider = lambda state: _provide(context)
+    pending = OrderExecutionResult(
+        plan.client_order_id, ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        "exchange-original", executed_quantity=Decimal("1"), plan=plan,
+    )
+    processor._state_machine = SimpleNamespace(
+        apply_observed_snapshot=AsyncMock(return_value=pending),
+    )
+    observation = SimpleNamespace(
+        order=ExchangeOrderSnapshot(
+            plan.client_order_id, "exchange-original", ExchangeOrderState.FILLED,
+            NOW, Decimal("1"), Decimal("0"),
+        ),
+        # The account position can still lag behind the already reported fill.
+        position_quantity=Decimal("1"), active_exit_order_client_ids=(), observed_at=NOW,
+    )
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(return_value=observation),
+    )
+    processor.request_exit_recovery(
+        plan=plan, known_executed_quantity=Decimal("1"), state=_state(),
+        source_candidate=replace(_intent(), reduce_only=True),
+    )
+    await processor.recover_requested_exits()
+    assert processor.has_pending_recovery
+    submission.execute.assert_not_awaited()
+    processor._clock = lambda: processor._exit_recovery_next_attempt_at[plan.client_order_id]
+    observation.position_quantity = Decimal("0")
+    processor._state_machine.apply_observed_snapshot.return_value = replace(
+        pending, state=ExchangeOrderState.FILLED, average_price=Decimal("100"),
+    )
+    await processor.recover_requested_exits()
+    assert not processor.has_pending_recovery
+    submission.execute.assert_not_awaited()

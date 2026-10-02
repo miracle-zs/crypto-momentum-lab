@@ -1172,3 +1172,37 @@ asyncio.run(main())
         ),
     )
     assert duplicate is None
+
+
+async def test_missing_fill_quote_remains_durable_unresolved_until_priced(order_repository):
+    from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
+    from crypto_momentum_lab.execution_account.orders.state_machine import (
+        OrderExecutionStateMachine,
+        SubmitPolicy,
+    )
+
+    plans, _, reads, events, submissions, _ = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    machine = OrderExecutionStateMachine(
+        exchange=object(), repository=plans, event_repository=events,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT, live_submit_enabled=True,
+    )
+    snapshot = ExchangeOrderSnapshot(
+        plan.client_order_id, "actual-exchange-id", ExchangeOrderState.FILLED,
+        NOW, plan.quantity, Decimal("0"),
+    )
+    pending = await machine.apply_observed_snapshot(plan, snapshot)
+    assert pending.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    order = await reads.load_order(plan.client_order_id)
+    assert order.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert order.terminal_receipt is None
+    assert await reads.load_unresolved_orders(plan.run_id)
+    priced = await machine.apply_observed_snapshot(
+        plan, replace(snapshot, average_price=Decimal("100"), observed_at=NOW + timedelta(seconds=1)),
+    )
+    assert priced.state is ExchangeOrderState.FILLED
+    order = await reads.load_order(plan.client_order_id)
+    assert order.terminal_receipt.average_price == Decimal("100")
+    assert not await reads.load_unresolved_orders(plan.run_id)

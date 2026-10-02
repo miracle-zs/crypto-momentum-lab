@@ -385,6 +385,8 @@ async def test_fault_injection_account_overflow_defers_and_recovers() -> None:
             received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
         )
         await daemon._on_event(event)
+        assert daemon._event_queue is not None
+        await asyncio.wait_for(daemon._event_queue.join(), timeout=1)
         assert len(daemon._deferred_events) == 1
         assert applied == []
 

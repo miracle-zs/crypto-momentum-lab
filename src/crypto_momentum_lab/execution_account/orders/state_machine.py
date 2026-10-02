@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
+
 from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -22,7 +24,6 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission as _PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-import structlog
 
 log = structlog.get_logger()
 
@@ -643,6 +644,30 @@ class OrderExecutionStateMachine:
             raise ValueError("exchange response client order id mismatch")
         for fill in snapshot.fills:
             await self._event_repository.save_fill(fill)
+        if snapshot.executed_quantity > 0 and snapshot.average_price <= 0:
+            # A reported fill quantity without its quote is incomplete evidence,
+            # not a settled terminal receipt. Keep the identity and quantity for
+            # recovery; never invent a price from the limit or market quote.
+            await self._append_event(
+                plan,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                exchange_order_id=snapshot.exchange_order_id,
+                details={
+                    "reason": "cumulative_fill_price_pending",
+                    "reported_state": snapshot.state.value,
+                    "executed_quantity": str(snapshot.executed_quantity),
+                    "average_price": str(snapshot.average_price),
+                },
+                occurred_at=snapshot.observed_at,
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                snapshot.exchange_order_id,
+                executed_quantity=snapshot.executed_quantity,
+                average_price=snapshot.average_price,
+                plan=plan,
+            )
         await self._append_event(
             plan,
             snapshot.state,

@@ -589,6 +589,11 @@ class LiveExitProcessor:
                 observation.order,
             )
             self._invalidate_context_cache()
+            if observed_result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                # A terminal exchange status can still lack its fill quote.
+                # Keep recovering this identity even if the position snapshot
+                # lags; it is not permission to submit a replacement order.
+                return observed_result
             if (
                 observation.order.state is ExchangeOrderState.FILLED
                 and observation.position_quantity <= 0

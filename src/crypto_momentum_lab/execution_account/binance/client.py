@@ -16,8 +16,6 @@ from urllib.parse import urlencode
 import httpx
 import structlog
 
-log = structlog.get_logger(__name__)
-
 from crypto_momentum_lab.domain.account.models import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -79,6 +77,8 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
 )
+
+log = structlog.get_logger(__name__)
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:
 # /fapi/v3/account, /fapi/v3/balance, /fapi/v3/positionRisk,
@@ -1142,7 +1142,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                         if queried.entry_leverage is None
                         else queried.entry_leverage,
                     )
-            except Exception as exc:
+            except ExchangeOrderQueryUnknownError as exc:
                 log.warning(
                     "binance_submit_avg_price_query_retry_failed",
                     symbol=plan.symbol,
@@ -1150,14 +1150,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     attempt=attempt,
                     error=str(exc),
                 )
-        if plan.price is not None and plan.price > Decimal("0"):
-            log.warning(
-                "binance_submit_avg_price_fallback_to_plan_price",
-                symbol=plan.symbol,
-                client_order_id=plan.client_order_id,
-                plan_price=str(plan.price),
-            )
-            return replace(initial_snapshot, average_price=plan.price)
         return initial_snapshot
 
     async def inspect_exit_order(
