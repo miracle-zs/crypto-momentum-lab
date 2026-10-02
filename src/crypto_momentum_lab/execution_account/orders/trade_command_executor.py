@@ -191,6 +191,7 @@ class TradeCommandExecutor:
             symbol=command.position_key.symbol,
             side=exchange_side,
             order_type=command.order_type.value.upper(),
+            time_in_force="GTC" if command.order_type is EntryType.LIMIT else None,
             quantity=quantized_quantity,
             price=price,
             reduce_only=command.reduce_only,

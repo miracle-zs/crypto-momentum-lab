@@ -128,6 +128,7 @@ def quantize_order_plan(
         symbol=intent.symbol,
         side=_exchange_side(intent),
         order_type=intent.entry_type.value.upper(),
+        time_in_force="GTC" if intent.entry_type is EntryType.LIMIT else None,
         quantity=quantity,
         price=price,
         reduce_only=intent.reduce_only,

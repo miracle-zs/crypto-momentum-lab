@@ -1899,5 +1899,1144 @@
         0.08364428094653197
       ]
     }
+  },
+  "boundary_profile_after": {
+    "start": "2026-10-02T15:33:44.856368+00:00",
+    "end": "2026-10-02T15:35:56.858506+00:00",
+    "sampler_cpu_seconds": 1.767083,
+    "profiler_log": "py-spy> Sampling process 49 times a second for 130 seconds. Press Control-C to exit.\n\npy-spy> Wrote speedscope file to '/tmp/cml-boundary-profile-20261002T153344Z.speedscope.json'. Samples: 300 Errors: 30\npy-spy> Visit https://www.speedscope.app/ to view\n",
+    "self": [
+      {
+        "file": "/usr/local/lib/python3.12/copy.py",
+        "fn": "deepcopy",
+        "weight": 0.3878,
+        "pct": 6.4
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/decision/policy_transition.py",
+        "fn": "canonicalize_policy_value",
+        "weight": 0.3265,
+        "pct": 5.39
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/strategy/entry_policy.py",
+        "fn": "__post_init__",
+        "weight": 0.2041,
+        "pct": 3.37
+      },
+      {
+        "file": "<string>",
+        "fn": "__init__",
+        "weight": 0.2041,
+        "pct": 3.37
+      },
+      {
+        "file": "/usr/local/lib/python3.12/dataclasses.py",
+        "fn": "replace",
+        "weight": 0.2041,
+        "pct": 3.37
+      },
+      {
+        "file": "/usr/local/lib/python3.12/json/encoder.py",
+        "fn": "iterencode",
+        "weight": 0.1633,
+        "pct": 2.69
+      },
+      {
+        "file": "/usr/local/lib/python3.12/asyncio/events.py",
+        "fn": "_run",
+        "weight": 0.1633,
+        "pct": 2.69
+      },
+      {
+        "file": "/usr/local/lib/python3.12/copy.py",
+        "fn": "_reconstruct",
+        "weight": 0.1633,
+        "pct": 2.69
+      },
+      {
+        "file": "/usr/local/lib/python3.12/json/decoder.py",
+        "fn": "raw_decode",
+        "weight": 0.1429,
+        "pct": 2.36
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "_impulse_metrics",
+        "weight": 0.1429,
+        "pct": 2.36
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/strategy/models.py",
+        "fn": "_normalize_json_value",
+        "weight": 0.1224,
+        "pct": 2.02
+      },
+      {
+        "file": "/usr/local/lib/python3.12/asyncio/base_events.py",
+        "fn": "_run_once",
+        "weight": 0.1224,
+        "pct": 2.02
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/telemetry.py",
+        "fn": "_json_value",
+        "weight": 0.1224,
+        "pct": 2.02
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "<genexpr>",
+        "weight": 0.1224,
+        "pct": 2.02
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/execution/position_book.py",
+        "fn": "get_view",
+        "weight": 0.102,
+        "pct": 1.68
+      },
+      {
+        "file": "/usr/local/lib/python3.12/asyncio/events.py",
+        "fn": "__init__",
+        "weight": 0.102,
+        "pct": 1.68
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "_states_by_symbol",
+        "weight": 0.0816,
+        "pct": 1.35
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/telemetry.py",
+        "fn": "_record_phase",
+        "weight": 0.0816,
+        "pct": 1.35
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/postgres_runtime.py",
+        "fn": "<genexpr>",
+        "weight": 0.0816,
+        "pct": 1.35
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/telemetry.py",
+        "fn": "_ensure_trace",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/entry_cache.py",
+        "fn": "universe_context_for",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/dataclasses.py",
+        "fn": "<genexpr>",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/copy.py",
+        "fn": "<genexpr>",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/dataclasses.py",
+        "fn": "_asdict_inner",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/uuid.py",
+        "fn": "uuid5",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/execution/execution_book.py",
+        "fn": "read",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/runtime_state.py",
+        "fn": "evaluate_buffered_state",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/asyncio/base_events.py",
+        "fn": "time",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/execution/execution_book.py",
+        "fn": "list_position_views",
+        "weight": 0.0612,
+        "pct": 1.01
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/asyncpg/prepared_stmt.py",
+        "fn": "__do_execute",
+        "weight": 0.0408,
+        "pct": 0.67
+      }
+    ],
+    "app_inclusive": [
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/apps/live_rollout/main.py",
+        "fn": "run_command",
+        "weight": 5.3265,
+        "pct": 87.88
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/daemon.py",
+        "fn": "run",
+        "weight": 3.3673,
+        "pct": 55.56
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/daemon_lifecycle.py",
+        "fn": "run",
+        "weight": 3.3673,
+        "pct": 55.56
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/market_loop.py",
+        "fn": "run",
+        "weight": 3.3673,
+        "pct": 55.56
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/market_loop.py",
+        "fn": "_run_prefetched",
+        "weight": 3.3673,
+        "pct": 55.56
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/strategy/models.py",
+        "fn": "__post_init__",
+        "weight": 0.9184,
+        "pct": 15.15
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/market_loop.py",
+        "fn": "_record_processed_state",
+        "weight": 0.898,
+        "pct": 14.81
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/checkpoint_coordinator.py",
+        "fn": "record_processed_state",
+        "weight": 0.898,
+        "pct": 14.81
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/checkpoint_coordinator.py",
+        "fn": "_checkpoint_for_persistence",
+        "weight": 0.898,
+        "pct": 14.81
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/decision/decision_engine.py",
+        "fn": "_filter",
+        "weight": 0.7755,
+        "pct": 12.79
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/decision/decision_engine.py",
+        "fn": "evaluate_one",
+        "weight": 0.7755,
+        "pct": 12.79
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/entry_lane.py",
+        "fn": "process",
+        "weight": 0.5918,
+        "pct": 9.76
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py",
+        "fn": "on_market_state",
+        "weight": 0.5714,
+        "pct": 9.43
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/runtime_state.py",
+        "fn": "evaluate_buffered_state",
+        "weight": 0.5714,
+        "pct": 9.43
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/postgres_runtime.py",
+        "fn": "__call__",
+        "weight": 0.5306,
+        "pct": 8.75
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/checkpoint_coordinator.py",
+        "fn": "_with_hub_cursor",
+        "weight": 0.5306,
+        "pct": 8.75
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py",
+        "fn": "_find_event",
+        "weight": 0.4898,
+        "pct": 8.08
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py",
+        "fn": "_latest_event_for_state",
+        "weight": 0.4898,
+        "pct": 8.08
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "find_order_flow_impulses",
+        "weight": 0.4898,
+        "pct": 8.08
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/decision_facts.py",
+        "fn": "commit_decision",
+        "weight": 0.4082,
+        "pct": 6.73
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/postgres_runtime.py",
+        "fn": "_with_execution_book",
+        "weight": 0.3673,
+        "pct": 6.06
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/runtime_state.py",
+        "fn": "checkpoint",
+        "weight": 0.3673,
+        "pct": 6.06
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/entry_lane.py",
+        "fn": "_evaluate_entry_policy",
+        "weight": 0.3469,
+        "pct": 5.72
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/entry_runtime.py",
+        "fn": "_load_entry_universe_policy_snapshot",
+        "weight": 0.3469,
+        "pct": 5.72
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/persistence/postgres/execution_unit_of_work.py",
+        "fn": "commit_decision",
+        "weight": 0.3469,
+        "pct": 5.72
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "_find_symbol_events",
+        "weight": 0.3469,
+        "pct": 5.72
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py",
+        "fn": "checkpoint",
+        "weight": 0.3469,
+        "pct": 5.72
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/domain/strategy/entry_policy_compare.py",
+        "fn": "universe_snapshot_for_symbols",
+        "weight": 0.3265,
+        "pct": 5.39
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/strategies/order_flow_impulse/event_study.py",
+        "fn": "_candidate_at",
+        "weight": 0.3265,
+        "pct": 5.39
+      },
+      {
+        "file": "/usr/local/lib/python3.12/site-packages/crypto_momentum_lab/live_rollout/exit_lane.py",
+        "fn": "_run_quote_worker",
+        "weight": 0.3265,
+        "pct": 5.39
+      }
+    ],
+    "services": {
+      "crypto-momentum-lab-live-strategy-account-4-1": {
+        "weighted_cpu_pct": 4.613,
+        "max_cpu_pct": 77.304,
+        "total_runqueue_ms": 5447.821,
+        "max_runqueue_ms": 199.999,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-live-strategy-account-3-1": {
+        "weighted_cpu_pct": 3.353,
+        "max_cpu_pct": 64.777,
+        "total_runqueue_ms": 4796.027,
+        "max_runqueue_ms": 193.682,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-live-strategy-account-2-1": {
+        "weighted_cpu_pct": 3.85,
+        "max_cpu_pct": 56.569,
+        "total_runqueue_ms": 4885.939,
+        "max_runqueue_ms": 158.947,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-live-strategy-1": {
+        "weighted_cpu_pct": 3.655,
+        "max_cpu_pct": 62.798,
+        "total_runqueue_ms": 4273.949,
+        "max_runqueue_ms": 203.451,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-execution-account-live-account-4-1": {
+        "weighted_cpu_pct": 0.335,
+        "max_cpu_pct": 25.535,
+        "total_runqueue_ms": 39.809,
+        "max_runqueue_ms": 20.796,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-execution-account-live-account-3-1": {
+        "weighted_cpu_pct": 0.409,
+        "max_cpu_pct": 46.108,
+        "total_runqueue_ms": 17.243,
+        "max_runqueue_ms": 3.454,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-execution-account-live-account-2-1": {
+        "weighted_cpu_pct": 0.358,
+        "max_cpu_pct": 24.067,
+        "total_runqueue_ms": 50.237,
+        "max_runqueue_ms": 29.873,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-execution-account-live-1": {
+        "weighted_cpu_pct": 0.301,
+        "max_cpu_pct": 22.911,
+        "total_runqueue_ms": 38.755,
+        "max_runqueue_ms": 7.329,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-research-collector-1": {
+        "weighted_cpu_pct": 0.923,
+        "max_cpu_pct": 66.305,
+        "total_runqueue_ms": 616.744,
+        "max_runqueue_ms": 147.366,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-market-data-1": {
+        "weighted_cpu_pct": 21.239,
+        "max_cpu_pct": 98.939,
+        "total_runqueue_ms": 5513.797,
+        "max_runqueue_ms": 188.546,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-dashboard-1": {
+        "weighted_cpu_pct": 1.791,
+        "max_cpu_pct": 98.288,
+        "total_runqueue_ms": 201.019,
+        "max_runqueue_ms": 18.271,
+        "throttled_us": 0
+      },
+      "crypto-momentum-lab-postgres-1": {
+        "weighted_cpu_pct": 4.5,
+        "max_cpu_pct": 70.444,
+        "total_runqueue_ms": 30.598,
+        "max_runqueue_ms": 4.17,
+        "throttled_us": 0
+      }
+    },
+    "profiler_mean_cpu_pct": 0.9905122177713807,
+    "top_market_wait": [
+      {
+        "at": "2026-10-02T15:35:02.360270+00:00",
+        "seconds": 0.24621867801761255,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 25.719007392067237,
+            "runqueue_ms": 185.670794,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 25.884307605388535,
+            "runqueue_ms": 185.263605,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 40.50017683583976,
+            "runqueue_ms": 149.129315,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 35.7714535343658,
+            "runqueue_ms": 174.368959,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 19.478213588885158,
+            "runqueue_ms": 147.366011,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 22.86625874742641,
+            "runqueue_ms": 188.545717,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.20185308604591262,
+            "runqueue_ms": 5.575605,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 6.986066263733889,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 12.184290908203982
+      },
+      {
+        "at": "2026-10-02T15:35:01.111711+00:00",
+        "seconds": 0.24628524901345372,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 32.32105873935293,
+            "runqueue_ms": 169.332774,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 44.36928335648339,
+            "runqueue_ms": 141.669246,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 35.38823390727675,
+            "runqueue_ms": 125.102641,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 33.72796394942124,
+            "runqueue_ms": 165.941639,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 33.570829081803225,
+            "runqueue_ms": 161.316782,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.09826004641746951,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 18.081066640563368,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 0.0
+      },
+      {
+        "at": "2026-10-02T15:35:02.610572+00:00",
+        "seconds": 0.25030194502323866,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 31.61142035578426,
+            "runqueue_ms": 167.868877,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 30.67375285192923,
+            "runqueue_ms": 173.508062,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 39.92537892213417,
+            "runqueue_ms": 150.134255,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 39.98450750780548,
+            "runqueue_ms": 148.838424,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.08429818632868004,
+            "runqueue_ms": 3.018428,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.43227790335370525,
+            "runqueue_ms": 0.024444,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 27.89031463319978,
+            "runqueue_ms": 160.019231,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.09188901827296876,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 7.3647050558430704,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 3.995174707520381
+      },
+      {
+        "at": "2026-10-02T15:33:46.114086+00:00",
+        "seconds": 0.2529977089725435,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 22.710482333354058,
+            "runqueue_ms": 145.00361,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 18.92823464468488,
+            "runqueue_ms": 93.522921,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 34.659207135158766,
+            "runqueue_ms": 158.947382,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 25.674936055270543,
+            "runqueue_ms": 119.213739,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 18.787917168514166,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 17.79344175993525,
+            "runqueue_ms": 133.161215,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.09960564505639387,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 22.15830342008508,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 3.9526049625553124
+      },
+      {
+        "at": "2026-10-02T15:34:02.613240+00:00",
+        "seconds": 0.2525886900257319,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 21.32122384201511,
+            "runqueue_ms": 199.999288,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 21.501754490459245,
+            "runqueue_ms": 193.681591,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 28.1220034011672,
+            "runqueue_ms": 146.944673,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 21.64269508442002,
+            "runqueue_ms": 203.451463,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.08432681604956306,
+            "runqueue_ms": 1.055923,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 13.93847048195759,
+            "runqueue_ms": 116.177243,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 25.718491193482233,
+            "runqueue_ms": 128.144768,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.09897513620840735,
+            "runqueue_ms": 1.535032,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 7.094141862873806,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 11.877016345008881
+      },
+      {
+        "at": "2026-10-02T15:34:01.113174+00:00",
+        "seconds": 0.25243733800016344,
+        "host_cpu_pct": 94.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 21.42432669764763,
+            "runqueue_ms": 145.381272,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 21.789169714649894,
+            "runqueue_ms": 145.507399,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 22.468546233823492,
+            "runqueue_ms": 149.108666,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 32.466670996168936,
+            "runqueue_ms": 120.410935,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 7.181584207637407,
+            "runqueue_ms": 35.306781,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 46.57195363069622,
+            "runqueue_ms": 127.263767,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.16994316427141307,
+            "runqueue_ms": 4.301662,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 27.091079529588338,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 3.961379120545759
+      },
+      {
+        "at": "2026-10-02T15:34:01.612381+00:00",
+        "seconds": 0.25247592403320596,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 35.786382541614856,
+            "runqueue_ms": 80.206366,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 22.21677184261843,
+            "runqueue_ms": 84.542395,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 52.872764209566014,
+            "runqueue_ms": 98.476932,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 12.023720723567846,
+            "runqueue_ms": 56.262598,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 41.76358613351663,
+            "runqueue_ms": 109.826731,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.15367801959166996,
+            "runqueue_ms": 2.49851,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 24.55798517717091,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 0.0
+      },
+      {
+        "at": "2026-10-02T15:34:01.359928+00:00",
+        "seconds": 0.24675280298106372,
+        "host_cpu_pct": 100.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 33.83142926502295,
+            "runqueue_ms": 166.411913,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 35.77912750469353,
+            "runqueue_ms": 163.514561,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 28.46168276572306,
+            "runqueue_ms": 149.326813,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 28.21811916979256,
+            "runqueue_ms": 138.96504,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 23.803174387651204,
+            "runqueue_ms": 107.551365,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.1013159716849034,
+            "runqueue_ms": 0.032069,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 39.33410231917342,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 8.105277734792272
+      },
+      {
+        "at": "2026-10-02T15:34:15.859708+00:00",
+        "seconds": 0.24709539499599487,
+        "host_cpu_pct": 97.91666666666667,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 24.81389829259822,
+            "runqueue_ms": 102.982324,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 24.642709347532346,
+            "runqueue_ms": 107.862206,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 39.87083612043716,
+            "runqueue_ms": 122.824692,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 38.5531264156275,
+            "runqueue_ms": 128.509622,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.07082284961354159,
+            "runqueue_ms": 1.001981,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 16.82953257816644,
+            "runqueue_ms": 90.851238,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.16511841509899983,
+            "runqueue_ms": 0.081327,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 24.100813372489302,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 4.047019977916662
+      },
+      {
+        "at": "2026-10-02T15:33:45.615924+00:00",
+        "seconds": 0.2552864250028506,
+        "host_cpu_pct": 92.0,
+        "services": {
+          "crypto-momentum-lab-live-strategy-account-4-1": {
+            "cpu_pct": 69.6374670129894,
+            "runqueue_ms": 54.489361,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-3-1": {
+            "cpu_pct": 21.91851760209153,
+            "runqueue_ms": 130.485262,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-account-2-1": {
+            "cpu_pct": 22.08656414040441,
+            "runqueue_ms": 131.965031,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-live-strategy-1": {
+            "cpu_pct": 23.45013057366115,
+            "runqueue_ms": 130.259126,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-4-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-3-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-account-2-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-execution-account-live-1": {
+            "cpu_pct": 0.0,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-research-collector-1": {
+            "cpu_pct": 6.227514839389709,
+            "runqueue_ms": 33.114836,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-market-data-1": {
+            "cpu_pct": 13.810370057713143,
+            "runqueue_ms": 88.947219,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-dashboard-1": {
+            "cpu_pct": 0.09283689878823505,
+            "runqueue_ms": 3.414741,
+            "throttled_us": 0
+          },
+          "crypto-momentum-lab-postgres-1": {
+            "cpu_pct": 10.19364817369722,
+            "runqueue_ms": 0.0,
+            "throttled_us": 0
+          }
+        },
+        "profiler_cpu_pct": 3.9171687252419853
+      }
+    ]
   }
 }
