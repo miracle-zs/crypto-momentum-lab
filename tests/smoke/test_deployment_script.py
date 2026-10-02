@@ -41,7 +41,7 @@ live_up_and_wait_parallel 300 {parallel} one two three four
     ("mode", "expected_status", "expected_attempts"),
     [
         ("transient", 0, 2),
-        ("persistent", 1, 3),
+        ("persistent", 1, 20),
         ("mismatch", 1, 1),
         ("unknown", 1, 1),
         ("timeout", 124, 1),
@@ -82,7 +82,7 @@ def test_preflight_retries_only_transient_account_syncing(
     invocation = (
         f"set -Eeuo pipefail\n{functions}\nsleep() {{ :; }}\n"
         'timeout() { shift 3; "$@"; }\n'
-        f'{runner} preflight 5 python3 "$1" "$2" "$3"\n'
+        f'{runner} preflight 30 python3 "$1" "$2" "$3"\n'
     )
     result = subprocess.run(
         ["bash", "-c", invocation, "test", str(command), str(counter), mode],
@@ -92,6 +92,30 @@ def test_preflight_retries_only_transient_account_syncing(
     )
     assert result.returncode == expected_status, result.stdout + result.stderr
     assert int(counter.read_text()) == expected_attempts
+
+
+def test_preflight_syncing_retries_share_one_timeout_budget(tmp_path):
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("run_with_account_ready_retry() {")
+    end = script.index("\nlog_service_timing()", start)
+    clock = tmp_path / "clock"
+    clock.write_text("100")
+    invocation = f'''set -Eeuo pipefail
+{script[start:end]}
+clock_file="$1"
+date() {{ local current; current=$(cat "$clock_file"); echo "$((current+1))" > "$clock_file"; echo "$current"; }}
+sleep() {{ :; }}
+run_with_timeout() {{
+  echo '{{"account_state":"syncing","preflight_ok":false,"preflight_errors":["account_ready"],"preflight_checks":{{"account_ready":false,"approval_present":true}}}}'
+  return 1
+}}
+run_with_account_ready_retry preflight 3 unused
+'''
+    result = subprocess.run(["bash", "-c", invocation, "test", str(clock)],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 124
+    assert result.stdout.count('"account_state"') == 1
+    assert "operation=timeout" in result.stderr
 
 
 def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:

@@ -355,10 +355,17 @@ run_with_timeout() {
 run_with_account_ready_retry() {
   local label="$1" timeout_seconds="$2"
   shift 2
-  local attempt status output_file
-  for attempt in 1 2 3; do
+  local attempt status output_file remaining_seconds
+  local max_attempts=20
+  local deadline=$(( $(date +%s) + timeout_seconds ))
+  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+    remaining_seconds=$(( deadline - $(date +%s) ))
+    if (( remaining_seconds <= 0 )); then
+      echo "operation=timeout name=$label reason=account_syncing timeout_seconds=$timeout_seconds" >&2
+      return 124
+    fi
     output_file="$(mktemp)"
-    if run_with_timeout "$label" "$timeout_seconds" "$@" 2>&1 | tee "$output_file"; then
+    if run_with_timeout "$label" "$remaining_seconds" "$@" 2>&1 | tee "$output_file"; then
       rm -f "$output_file"
       return 0
     else
@@ -366,7 +373,7 @@ run_with_account_ready_retry() {
     fi
     # Only the explicit transient account state is retryable. Approval,
     # configuration, database, timeout and unstructured failures still stop.
-    if [[ "$status" != 1 || "$attempt" == 3 ]] || ! python3 - "$output_file" <<'PREFLIGHT_RETRY'
+    if [[ "$status" != 1 || "$attempt" == "$max_attempts" ]] || ! python3 - "$output_file" <<'PREFLIGHT_RETRY'
 import json
 from pathlib import Path
 import sys
@@ -399,8 +406,11 @@ PREFLIGHT_RETRY
       return "$status"
     fi
     rm -f "$output_file"
-    echo "operation=retry name=$label reason=account_syncing attempt=$attempt max_attempts=3"
-    sleep 3
+    echo "operation=retry name=$label reason=account_syncing attempt=$attempt max_attempts=$max_attempts"
+    remaining_seconds=$(( deadline - $(date +%s) ))
+    if (( remaining_seconds > 0 )); then
+      sleep "$(( remaining_seconds < 3 ? remaining_seconds : 3 ))"
+    fi
   done
 }
 
