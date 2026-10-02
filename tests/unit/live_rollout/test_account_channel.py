@@ -16,8 +16,13 @@ NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
 async def test_telemetry_outage_cannot_discard_account_trade_facts():
     ordering = []
     event = SimpleNamespace(
-        event_type="ACCOUNT_UPDATE", client_order_id=None, has_fill=True,
-        trade_id="trade-1", symbol="BTCUSDT", received_at=NOW, symbols=(),
+        event_type="ACCOUNT_UPDATE",
+        client_order_id=None,
+        has_fill=True,
+        trade_id="trade-1",
+        symbol="BTCUSDT",
+        received_at=NOW,
+        symbols=(),
     )
 
     class Telemetry:
@@ -30,7 +35,9 @@ async def test_telemetry_outage_cannot_discard_account_trade_facts():
             return ()
 
     runtime = LiveAccountEventRuntime(
-        daemon=object(), latest_market_states=Cache(), latest_market_quotes=Cache(),
+        daemon=object(),
+        latest_market_states=Cache(),
+        latest_market_quotes=Cache(),
         telemetry=Telemetry(),
         on_account_snapshot=lambda event: ordering.append("durable-facts"),
         is_transient_error=lambda error: isinstance(error, ConnectionError),

@@ -35,6 +35,85 @@ from crypto_momentum_lab.live_rollout.position_self_healing import (
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("change", ["refresh", "quantity", "entry_price", "stream"])
+async def test_repair_survives_refresh_but_rejects_changed_exposure(change):
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.live_rollout.position_self_healing import (
+        LiveUnmanagedPositionRepair,
+    )
+
+    request, loaded = repair_case()
+    position = SimpleNamespace(
+        symbol="TESTUSDT",
+        position_side="LONG",
+        position_amt=Decimal("2"),
+        entry_price=Decimal("10"),
+        observed_at=NOW,
+    )
+    original = SimpleNamespace(
+        unmanaged_position_symbols=frozenset({"TESTUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(position,)),
+    )
+    updated = SimpleNamespace(
+        unmanaged_position_symbols=original.unmanaged_position_symbols,
+        account_snapshot=SimpleNamespace(
+            positions=(
+                SimpleNamespace(
+                    **{
+                        **vars(position),
+                        "position_amt": Decimal("3")
+                        if change == "quantity"
+                        else Decimal("2"),
+                        "entry_price": Decimal("11")
+                        if change == "entry_price"
+                        else Decimal("10"),
+                    }
+                ),
+            )
+        ),
+    )
+    current = [original]
+    stream = ["hub", "epoch"]
+    invalidated = []
+
+    class RefreshingUow(MemoryRepairUow):
+        async def load_repair_facts(self, request):
+            current[0] = updated
+            if change == "stream":
+                stream[1] = "next-epoch"
+            worker.request(updated)
+            return await super().load_repair_facts(request)
+
+    uow = RefreshingUow(loaded)
+
+    async def reload(*args, **kwargs):
+        return reloaded_view(uow.persisted[-1])
+
+    book = SimpleNamespace(
+        get_active_stream=lambda *args: tuple(stream),
+        reload_position=AsyncMock(side_effect=reload),
+    )
+    worker = LiveUnmanagedPositionRepair(
+        account_label="account-3",
+        run_id="run-3",
+        book=book,
+        uow=uow,
+        context_is_current=lambda context: context is current[0],
+        invalidate_context=lambda: invalidated.append(True),
+        request_recovery=lambda: None,
+    )
+    worker.request(original)
+    await worker.repair_pending()
+    if change == "refresh":
+        assert uow.commits == 1
+        assert invalidated == [True]
+        book.reload_position.assert_awaited_once()
+    else:
+        assert not uow.persisted
+        book.reload_position.assert_not_awaited()
+
+
 def repair_case():
     key = PositionKey("live", "account-3", "TESTUSDT", "LONG")
     scope = AccountFactStreamScope.for_position_key(

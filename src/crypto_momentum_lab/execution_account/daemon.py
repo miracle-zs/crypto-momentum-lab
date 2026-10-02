@@ -247,6 +247,8 @@ class UserDataAccountSyncConfig:
     event_queue_size: int = 256
     persistence_queue_size: int = 256
     deferred_event_buffer_size: int = 512
+    fill_reconciliation_interval_seconds: float = 300.0
+
     def __post_init__(self) -> None:
         if self.heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive")
@@ -263,6 +265,8 @@ class UserDataAccountSyncConfig:
             raise ValueError("persistence_queue_size must be positive")
         if self.deferred_event_buffer_size <= 0:
             raise ValueError("deferred_event_buffer_size must be positive")
+        if self.fill_reconciliation_interval_seconds <= 0:
+            raise ValueError("fill_reconciliation_interval_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +342,7 @@ class UserDataAccountSyncDaemon:
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Task[None] | None = None
         recovery_task: asyncio.Task[None] | None = None
+        fill_scan_timer: asyncio.Task[None] | None = None
         stop_task = (
             asyncio.create_task(
                 _wait_for_stop(stop_requested),
@@ -413,10 +418,18 @@ class UserDataAccountSyncDaemon:
                         self._wait_for_pipeline_recovery(),
                         name="binance-user-data-pipeline-recovery-waiter",
                     )
+                if fill_scan_timer is None:
+                    fill_scan_timer = asyncio.create_task(
+                        asyncio.sleep(
+                            self._config.fill_reconciliation_interval_seconds
+                        ),
+                        name="account-authoritative-fill-scan-timer",
+                    )
                 wait_tasks: set[asyncio.Future[None]] = {
                     heartbeat_task,
                     stream_task,
                     recovery_task,
+                    fill_scan_timer,
                 }
                 if self._event_worker_task is not None:
                     wait_tasks.add(self._event_worker_task)
@@ -432,6 +445,9 @@ class UserDataAccountSyncDaemon:
                     return
                 if recovery_task in done:
                     recovery_task = None
+                    if fill_scan_timer is not None:
+                        await _cancel_task(fill_scan_timer)
+                        fill_scan_timer = None
                     try:
                         result = await self._recover_pipeline()
                         if _is_usable_result(result):
@@ -453,6 +469,22 @@ class UserDataAccountSyncDaemon:
                             consecutive_failures,
                             _retry_after_seconds(error),
                         )
+                    continue
+                if fill_scan_timer in done:
+                    fill_scan_timer = None
+                    try:
+                        # A healthy WS does not prove every consumer committed
+                        # every fill. Replay verified anchored REST scans through
+                        # the normal serialized reconciliation and snapshot path.
+                        await self._reconcile(include_fills=True)
+                    except Exception as error:
+                        log.warning(
+                            "periodic_fill_reconciliation_failed",
+                            error_type=type(error).__name__,
+                        )
+                        self._report_error(error)
+                        # _reconcile retains closed admission and requests the
+                        # existing recovery worker on failure; never forge a cut.
                     continue
                 if self._event_worker_task in done:
                     self._observe_worker_failure(
@@ -491,6 +523,8 @@ class UserDataAccountSyncDaemon:
                 await _cancel_task(heartbeat_task)
             if recovery_task is not None:
                 await _cancel_task(recovery_task)
+            if fill_scan_timer is not None:
+                await _cancel_task(fill_scan_timer)
             await self._stop_pipeline()
             if stream_task is not None and not stream_task.done():
                 stream_task.cancel()
@@ -512,9 +546,7 @@ class UserDataAccountSyncDaemon:
         try:
             queue.put_nowait(receipt)
         except asyncio.QueueFull:
-            self._request_pipeline_recovery(
-                "event_queue_overflow", origin_event=event
-            )
+            self._request_pipeline_recovery("event_queue_overflow", origin_event=event)
 
     async def _record_received_event(self, receipt: _ReceivedUserDataEvent) -> None:
         record = getattr(self._service, "record_user_data_event", None)
@@ -631,7 +663,10 @@ class UserDataAccountSyncDaemon:
             event = receipt.event
             try:
                 await self._record_received_event(receipt)
-                if self._reconciliation_active or self._pipeline_recovery_event.is_set():
+                if (
+                    self._reconciliation_active
+                    or self._pipeline_recovery_event.is_set()
+                ):
                     self._defer_event(event)
                 else:
                     await self._process_event(event, replay=True)
@@ -1110,7 +1145,6 @@ class UserDataAccountSyncDaemon:
         except Exception as error:
             self._report_error(error)
 
-
     def _check_stream_queue_health(self) -> None:
         metrics = getattr(self._stream, "metrics", None)
         overflow_count = _metric_int(metrics, "event_queue_overflow_count")
@@ -1191,8 +1225,6 @@ def _metric_int(metrics: object, name: str) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
     return None
-
-
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:

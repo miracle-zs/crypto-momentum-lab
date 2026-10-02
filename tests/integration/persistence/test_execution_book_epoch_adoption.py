@@ -347,35 +347,61 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_databas
     entry = _fill(key, "missing-entry", "BUY", "970", start + timedelta(minutes=1))
     target = _snapshot(key, start + timedelta(minutes=3), "970", "100")
     scan = AccountFillLoadScan(
-        "live", account, key.symbol, "LONG",
+        "live",
+        account,
+        key.symbol,
+        "LONG",
         AccountFillPageScan(
-            key.symbol, "complete-missing-entry-scan",
-            int(start.timestamp() * 1000), None, 1, True, False,
+            key.symbol,
+            "complete-missing-entry-scan",
+            int(start.timestamp() * 1000),
+            None,
+            1,
+            True,
+            False,
             target.observed_at,
         ),
-        target.observed_at, stable_snapshot_anchor_id(baseline), start,
-        "zero_snapshot", source_anchor_snapshot=baseline,
+        target.observed_at,
+        stable_snapshot_anchor_id(baseline),
+        start,
+        "zero_snapshot",
+        source_anchor_snapshot=baseline,
     )
     try:
         book = _book(factory)
         await book.restore(account_label=account)
         for sequence, snapshot in ((1, baseline), (2, target)):
-            assert isinstance(await book.observe(ExecutionEvidence(
-                f"snapshot-{sequence}", scope, snapshot.observed_at,
-                snapshot=snapshot, stream_id="hub", stream_epoch="epoch",
-                sequence=sequence,
-            )), Applied)
+            assert isinstance(
+                await book.observe(
+                    ExecutionEvidence(
+                        f"snapshot-{sequence}",
+                        scope,
+                        snapshot.observed_at,
+                        snapshot=snapshot,
+                        stream_id="hub",
+                        stream_epoch="epoch",
+                        sequence=sequence,
+                    )
+                ),
+                Applied,
+            )
         before = await book.read(scope, stream_id="hub", stream_epoch="epoch")
         assert before.total_quantity == 0
         assert not before.is_ready_for_trade
         for sequence in (3, 4):
             coordinator = OrderExecutionCoordinator(
-                backend=object(), environment="live", account_label=account,
+                backend=object(),
+                environment="live",
+                account_label=account,
                 execution_book=book,
             )
             await coordinator.observe_account_snapshot(
-                target, fills=(entry,), fill_load_scans=(scan,),
-                stream_id="hub", stream_epoch="epoch", sequence=sequence,
+                target,
+                fills=(entry,),
+                fill_load_scans=(scan,),
+                stream_id="hub",
+                stream_epoch="epoch",
+                sequence=sequence,
             )
             view = await book.read(scope, stream_id="hub", stream_epoch="epoch")
             assert view.total_quantity == Decimal("970")

@@ -778,7 +778,9 @@ class OrderExecutionCoordinator:
                         f"projection {proj_ver}; current projection is "
                         f"{current_view.projection_version}"
                     )
-                strategy_name = (plan.strategy_name or "").strip() or "orderflow_impulse"
+                strategy_name = (
+                    plan.strategy_name or ""
+                ).strip() or "orderflow_impulse"
                 strategy_version = (plan.strategy_version or "").strip() or "v0"
                 req = ExecutionRequest(
                     request_id=plan.client_order_id,

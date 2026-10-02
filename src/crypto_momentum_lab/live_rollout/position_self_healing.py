@@ -1,6 +1,7 @@
 """Unmanaged-position repair use case; transactions and ORM live in adapters."""
 
 from collections.abc import Callable
+from decimal import Decimal
 
 import structlog
 
@@ -108,13 +109,39 @@ class LiveUnmanagedPositionRepair:
         self._invalidate = invalidate_context
         self._request_recovery = request_recovery
         self._pending: LiveDaemonRuntimeContext | None = None
+        self._latest: LiveDaemonRuntimeContext | None = None
 
     def request(self, context: LiveDaemonRuntimeContext) -> None:
         if not self._is_current(context):
             return
+        self._latest = context
         self._pending = context if context.unmanaged_position_symbols else None
         if self._pending is not None:
             self._request_recovery()
+
+    def _repair_is_current(
+        self, request: PositionRepairRequest, entry_price: Decimal
+    ) -> bool:
+        context = self._latest
+        if (
+            context is None
+            or not self._is_current(context)
+            or context.account_snapshot is None
+            or request.key.symbol not in context.unmanaged_position_symbols
+            or self._book.get_active_stream("live", self._account)
+            != (request.scope.stream_id, request.scope.stream_epoch)
+        ):
+            return False
+        # A new mark price/context version is not a new position. The normal
+        # transaction lock and CAS still validate the latest durable facts.
+        return any(
+            position.symbol == request.key.symbol
+            and position.position_side.upper() == request.key.position_side.value
+            and abs(position.position_amt) == request.expected_quantity
+            and position.entry_price == entry_price
+            and position.observed_at >= request.observed_at
+            for position in context.account_snapshot.positions
+        )
 
     async def repair_pending(self) -> None:
         context = self._pending
@@ -157,7 +184,9 @@ class LiveUnmanagedPositionRepair:
                         request=request,
                         uow=self._uow,
                         book=self._book,
-                        is_current=lambda: self._is_current(context),
+                        is_current=lambda: self._repair_is_current(
+                            request, position.entry_price
+                        ),
                     )
                     or repaired
                 )

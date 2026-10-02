@@ -112,6 +112,31 @@ class BlockingReconciliationService(FakeService):
         )
 
 
+async def test_healthy_websocket_still_runs_periodic_authoritative_fill_recovery():
+    stop = asyncio.Event()
+    snapshots = []
+
+    class PeriodicService(FakeService):
+        async def sync_once(self, **kwargs):
+            result = await super().sync_once(**kwargs)
+            if self.sync_calls == 2:
+                stop.set()
+            return result
+
+    service = PeriodicService(_snapshot())
+    stream = BlockingStream()
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(fill_reconciliation_interval_seconds=0.01),
+        on_snapshot=snapshots.append,
+    )
+    await asyncio.wait_for(daemon.run(stop_requested=stop), 1)
+    assert service.sync_include_fills == [True, True]
+    assert len(snapshots) == 2
+    assert stream.stop_count == 1
+
+
 async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up() -> (
     None
 ):
@@ -188,8 +213,6 @@ async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> No
         await asyncio.wait_for(task, timeout=1)
 
 
-
-
 async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
     class FailingService(FakeService):
         def __init__(self, snapshot: AccountSnapshot) -> None:
@@ -238,10 +261,6 @@ async def test_publish_heartbeat_backward_compatible_with_old_signature() -> Non
     assert len(calls) == 1
 
 
-
-
-
-
 async def test_healthy_ws_persists_events_without_rest_polling() -> None:
     from unittest.mock import AsyncMock
 
@@ -265,7 +284,8 @@ async def test_healthy_ws_persists_events_without_rest_polling() -> None:
         await asyncio.wait_for(service.sync_started.wait(), 1)
         event = parse_user_data_event(
             {
-                "e": "ACCOUNT_UPDATE", "E": 1783123201000,
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
                 "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
             },
             received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
@@ -339,13 +359,17 @@ async def test_recovered_fills_do_not_require_replay_on_live_ws() -> None:
     service = RealtimeFakeService(_snapshot())
     stream = FakeStream()
     stream.metrics = SimpleNamespace(
-        parsed_event_count=1, fill_event_count=0, fill_event_keys=(),
+        parsed_event_count=1,
+        fill_event_count=0,
+        fill_event_keys=(),
         event_queue_overflow_count=0,
     )
     stream.request_reconnect = AsyncMock()
     recovered = []
     daemon = UserDataAccountSyncDaemon(
-        service=service, stream=stream, config=UserDataAccountSyncConfig(),
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
         on_reconciled_fill=lambda fill, result: recovered.append(fill),
     )
     await daemon._reconcile(include_fills=True)
@@ -362,7 +386,8 @@ async def test_stream_queue_overflow_still_requests_recovery() -> None:
     stream = FakeStream()
     stream.metrics = SimpleNamespace(event_queue_overflow_count=1)
     daemon = UserDataAccountSyncDaemon(
-        service=FakeService(_snapshot()), stream=stream,
+        service=FakeService(_snapshot()),
+        stream=stream,
         config=UserDataAccountSyncConfig(),
     )
     await daemon._reconcile(include_fills=True)
@@ -766,8 +791,6 @@ def _snapshot() -> AccountSnapshot:
     )
 
 
-
-
 @pytest.mark.parametrize("frozen", [False, True])
 async def test_raw_event_is_durable_before_application_even_during_repair(frozen):
     class JournalService(FakeService):
@@ -875,7 +898,6 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
             await self.release_fetch.wait()
             return result
 
-
     service = PendingReceiptService()
     daemon = UserDataAccountSyncDaemon(
         service=service,
@@ -926,16 +948,6 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
         await daemon._stop_pipeline()
 
 
-
-
-
-
-
-
-
-
-
-
 async def test_slow_journal_does_not_block_receive_and_captures_each_stream_token():
     class SlowJournal(FakeService):
         def __init__(self):
@@ -953,15 +965,22 @@ async def test_slow_journal_does_not_block_receive_and_captures_each_stream_toke
     service = SlowJournal()
     stream = BlockingStream()
     stream.continuity_token = 1
-    daemon = UserDataAccountSyncDaemon(service=service, stream=stream,
-                                      config=UserDataAccountSyncConfig())
+    daemon = UserDataAccountSyncDaemon(
+        service=service, stream=stream, config=UserDataAccountSyncConfig()
+    )
     await daemon._reconcile(include_fills=True)
     daemon._start_pipeline()
-    events = [parse_user_data_event(
-        {"e": "ACCOUNT_UPDATE", "E": 1783123201000 + i,
-         "a": {"B": [{"a": "USDT", "wb": str(101 + i), "cw": "81"}], "P": []}},
-        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC)
-    ) for i in range(2)]
+    events = [
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000 + i,
+                "a": {"B": [{"a": "USDT", "wb": str(101 + i), "cw": "81"}], "P": []},
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+        for i in range(2)
+    ]
     try:
         await asyncio.wait_for(daemon._on_event(events[0]), 1)
         await asyncio.wait_for(service.started.wait(), 1)
@@ -969,13 +988,17 @@ async def test_slow_journal_does_not_block_receive_and_captures_each_stream_toke
         await asyncio.wait_for(daemon._on_event(events[1]), 1)
         assert daemon._event_queue.qsize() == 1
         assert service.receipts == []
-        assert daemon._state.snapshot(events[0].received_at).balances[0].wallet_balance == Decimal("100")
+        assert daemon._state.snapshot(events[0].received_at).balances[
+            0
+        ].wallet_balance == Decimal("100")
         service.release.set()
         await asyncio.wait_for(daemon._event_queue.join(), 1)
         assert [r["event"] for r in service.receipts] == events
         assert [r["stream_token"] for r in service.receipts] == [1, 2]
         assert daemon._event_queue.empty()
-        assert daemon._state.snapshot(events[1].received_at).balances[0].wallet_balance == Decimal("102")
+        assert daemon._state.snapshot(events[1].received_at).balances[
+            0
+        ].wallet_balance == Decimal("102")
     finally:
         service.release.set()
         await daemon._stop_pipeline()
@@ -989,13 +1012,17 @@ async def test_queued_journal_failure_cannot_apply_unrecorded_event():
     service = FailingJournal(_snapshot())
     applied = []
     daemon = UserDataAccountSyncDaemon(
-        service=service, stream=BlockingStream(), config=UserDataAccountSyncConfig(),
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
         on_event_applied=lambda *args: applied.append(args),
     )
     await daemon._reconcile(include_fills=True)
     daemon._start_pipeline()
-    event = parse_user_data_event({"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
-                                 received_at=datetime(2026, 7, 4, tzinfo=UTC))
+    event = parse_user_data_event(
+        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
+        received_at=datetime(2026, 7, 4, tzinfo=UTC),
+    )
     try:
         await asyncio.wait_for(daemon._on_event(event), 1)
         await asyncio.wait_for(daemon._event_queue.join(), 1)
@@ -1021,13 +1048,16 @@ async def test_receipt_queue_overflow_requests_repair_without_blocking_reader():
 
     service = SlowJournal()
     daemon = UserDataAccountSyncDaemon(
-        service=service, stream=BlockingStream(),
+        service=service,
+        stream=BlockingStream(),
         config=UserDataAccountSyncConfig(event_queue_size=1),
     )
     await daemon._reconcile(include_fills=True)
     daemon._start_pipeline()
-    event = parse_user_data_event({"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
-                                 received_at=datetime(2026, 7, 4, tzinfo=UTC))
+    event = parse_user_data_event(
+        {"e": "ACCOUNT_CONFIG_UPDATE", "E": 1783123201000},
+        received_at=datetime(2026, 7, 4, tzinfo=UTC),
+    )
     try:
         await daemon._on_event(event)
         await asyncio.wait_for(service.started.wait(), 1)
@@ -1126,4 +1156,3 @@ async def test_heartbeat_does_not_publish_snapshot_when_syncing() -> None:
     await daemon._publish_heartbeat()
 
     assert len(published) == 0
-

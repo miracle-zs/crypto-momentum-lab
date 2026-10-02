@@ -53,7 +53,8 @@ class PostgresPositionRepairTransaction:
         # Normal execution's advisory lock is already held before these reads.
         head = await tx.load_head(key)
         owned_order_ids = frozenset(
-            (
+            order_id
+            for order_id in (
                 await session.scalars(
                     select(ExchangeOrderRow.exchange_order_id).where(
                         ExchangeOrderRow.run_id == request.run_id,
@@ -64,6 +65,7 @@ class PostgresPositionRepairTransaction:
                     )
                 )
             ).all()
+            if order_id is not None
         )
         cut = await tx.load_recovery(scope=request.scope, as_of=datetime.now(UTC))
         checkpoint = cut.checkpoint or cut.facts.recovery_checkpoint
