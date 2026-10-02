@@ -896,7 +896,33 @@ class PositionLedger:
             snap_time = latest_snapshot.observed_at
             obs_amt = abs(latest_snapshot.position_amt)
 
-            if high_watermark is not None and snap_time < high_watermark:
+            comparison_start = (
+                checkpoint.event_cut
+                if checkpoint_usable and checkpoint is not None
+                else min((fill.trade_at for fill in facts.fills), default=snap_time)
+            )
+            coverage = facts.coverage
+            has_complete_cut = (
+                (facts.prefix_facts_complete or checkpoint_usable)
+                and coverage is not None
+                and coverage.stream_scope == facts.stream_scope
+                and coverage.covers_range(min(comparison_start, snap_time), snap_time)
+            )
+            snapshot_matches = obs_amt == total_active_qty and (
+                high_watermark is None or snap_time >= high_watermark
+            )
+            if not has_complete_cut and not snapshot_matches:
+                # A position update and its trades are separate messages. A
+                # clock window cannot prove that a quantity mismatch is real.
+                health_status = (
+                    PositionHealthStatus.CATCHING_UP
+                    if facts.prefix_facts_complete else PositionHealthStatus.INCOMPLETE
+                )
+                is_comparable = False
+                reconciliation_gap = Decimal("0")
+                discrepancy = None
+                diagnostics.append("Snapshot awaits a verified complete fact cut")
+            elif high_watermark is not None and snap_time < high_watermark:
                 # Fills stream has advanced past snapshot observed_at (mixed cut /
                 # in-flight gap).
                 # Replay and verify cut consistency at snap_time.
@@ -942,26 +968,12 @@ class PositionLedger:
                     health_status = PositionHealthStatus.READY
                     is_comparable = True
                 else:
-                    # Check if snapshot is slightly ahead within in-flight stream window
-                    is_transient = high_watermark is not None and (
-                        snap_time - high_watermark
-                    ) <= timedelta(seconds=3.0)
-                    if is_transient:
-                        health_status = PositionHealthStatus.CATCHING_UP
-                        is_comparable = False
-                        diagnostics.append(
-                            f"Transient snapshot lead: snapshot={obs_amt} ahead of "
-                            f"fills_qty={total_active_qty} by {reconciliation_gap}"
-                            "within flight window."
-                        )
-                    else:
-                        health_status = PositionHealthStatus.CONFLICT
-                        is_comparable = True
-                        diagnostics.append(
-                            f"Reconciliation gap detected: snapshot={obs_amt}, "
-                            f"ledger_active={total_active_qty},"
-                            "gap={reconciliation_gap}"
-                        )
+                    health_status = PositionHealthStatus.CONFLICT
+                    is_comparable = True
+                    diagnostics.append(
+                        f"Reconciliation gap detected: snapshot={obs_amt}, "
+                        f"ledger_active={total_active_qty}, gap={reconciliation_gap}"
+                    )
 
             if health_status in {
                 PositionHealthStatus.CONFLICT,

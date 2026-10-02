@@ -57,4 +57,6 @@ def trade_payload_digest(fill: AccountFillEvent) -> str:
 def view_projection_digest(view: PositionView) -> str:
     payload = asdict(view)
     payload.pop("projection_version", None)
+    payload.pop("pending_command_ids", None)
+    payload.pop("active_entry_command_ids", None)
     return digest_json_payload(payload)

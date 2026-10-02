@@ -1274,8 +1274,6 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
                 try:
-                    await self._ensure_reservation(plan)
-                    await self._mark_dispatching_if_accepted(plan)
                     if self._submission_repository is None:
                         raise OrderPreSubmissionError(
                             "submission repository is not configured"
@@ -1288,7 +1286,9 @@ class OrderExecutionCoordinator:
                             "submission admission is not configured"
                         )
                     rejection = (
-                        self._submission_admission.rejection_reason(plan, preparation)
+                        self._submission_admission.rejection_reason(
+                            plan, preparation
+                        )
                         if self._submission_admission is not None
                         else None
                     )
@@ -1299,8 +1299,21 @@ class OrderExecutionCoordinator:
                             client_order_id=plan.client_order_id,
                             reason=rejection,
                         )
+                        return None
+                    await self._ensure_reservation(plan)
+                    # Account/risk facts may advance while Book acceptance
+                    # commits. Recheck this later boundary before dispatch.
+                    rejection = (
+                        self._submission_admission.rejection_reason(
+                            plan, preparation
+                        )
+                        if self._submission_admission is not None
+                        else None
+                    )
                     if rejection is None:
-                        prepared = await self._submission_repository.prepare_submission(
+                        await self._mark_dispatching_if_accepted(plan)
+                        repository = self._submission_repository
+                        prepared = await repository.prepare_submission(
                             plan=plan,
                             prepared_at=self._submission_clock(),
                             intent=preparation.intent,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, Callable
+from collections.abc import AsyncIterable, Callable, Collection
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -28,11 +28,8 @@ log = structlog.get_logger()
 _MAX_RETAINED_CANDLES = 4096
 
 
-
 def _never_order_identity_conflict(_error: Exception) -> bool:
     return False
-
-
 
 
 class LiveExitChannelRuntime:
@@ -59,76 +56,203 @@ class LiveExitChannelRuntime:
         self._on_exit_failure = on_exit_failure
         self._on_order_identity_conflict = on_order_identity_conflict
         self._candle_facts_changed = asyncio.Event()
+        self._quote_facts_changed = asyncio.Event()
+        self._grace_facts_changed = asyncio.Event()
+        self._facts_generation = 0
+        self._symbol_facts_generation: dict[str, int] = {}
+        self._quote_retries: dict[str, tuple[float, float]] = {}
+        self._grace_retries: dict[str, tuple[float, float]] = {}
+        self._sync_waits: dict[str, set[str]] = {"quote": set(), "grace": set()}
+        self._quote_ready: set[str] = set()
         self._pending_candles: dict[tuple[str, datetime], ClosedCandle15mEvent] = {}
         self._evaluated_candles: dict[tuple[str, datetime], None] = {}
-
 
     async def run_quote_channel(
         self,
         *,
         source: AsyncIterable[RealtimeMarketQuote],
     ) -> None:
-        retries: dict[str, tuple[float, float]] = {}
-        async for quote in source:
-            loop_time = asyncio.get_running_loop().time()
-            managed_symbols = self._daemon.managed_position_symbols
-            self._latest_market_quotes.observe(quote)
-            if quote.symbol not in managed_symbols:
-                self._clear_retry(quote.symbol, retries)
-            if loop_time < retries.get(quote.symbol, (0.0, 1.0))[0]:
-                continue
-            for state in self._latest_market_states.for_symbols((quote.symbol,)):
-                try:
-                    failure = await self._daemon.process_market_quote(quote, state)
-                except Exception as error:
-                    order_identity_conflict = self._is_order_identity_conflict(error)
-                    if not (self._is_transient_error(error) or order_identity_conflict):
-                        raise
-                    failure = (
-                        ORDER_IDENTITY_CONFLICT_REASON
-                        if order_identity_conflict
-                        else type(error).__name__
-                    )
-                    if order_identity_conflict:
-                        if self._on_order_identity_conflict is not None:
-                            self._on_order_identity_conflict(quote.symbol)
-                        if self._on_exit_failure is not None:
-                            self._on_exit_failure(quote.symbol, failure)
-                    log.warning(
-                        "live_market_quote_processing_degraded",
-                        symbol=quote.symbol,
-                        error_type=type(error).__name__,
-                        reason=failure,
-                    )
-                    continue
-                self._record_result(quote.symbol, failure, retries, channel="quote")
+        retries = self._quote_retries
+        iterator = aiter(source)
+        next_quote = asyncio.ensure_future(anext(iterator))
+        changed = asyncio.create_task(self._quote_facts_changed.wait())
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {next_quote, changed}, return_when=asyncio.FIRST_COMPLETED
+                )
+                incoming = None
+                exhausted = False
+                if next_quote in done:
+                    try:
+                        incoming = next_quote.result()
+                    except StopAsyncIteration:
+                        exhausted = True
+                    else:
+                        next_quote = asyncio.ensure_future(anext(iterator))
+                        if incoming.symbol not in self._daemon.managed_position_symbols:
+                            self._clear_retry(incoming.symbol, retries)
+                        self._latest_market_quotes.observe(incoming)
+                ready = set()
+                if changed in done:
+                    self._quote_facts_changed.clear()
+                    changed = asyncio.create_task(self._quote_facts_changed.wait())
+                    ready, self._quote_ready = self._quote_ready, set()
+                if incoming is not None:
+                    ready.discard(incoming.symbol)
+                    await self._evaluate_quote(incoming, retries)
+                for symbol in sorted(ready):
+                    quotes = self._latest_market_quotes.for_symbols((symbol,))
+                    for quote in quotes:
+                        await self._evaluate_quote(quote, retries)
+                if exhausted:
+                    return
+        finally:
+            for task in (next_quote, changed):
+                task.cancel()
+            await asyncio.gather(next_quote, changed, return_exceptions=True)
 
-    def _clear_retry(self, symbol: str, retries: dict[str, tuple[float, float]]) -> None:
+    async def _evaluate_quote(
+        self,
+        quote: RealtimeMarketQuote,
+        retries: dict[str, tuple[float, float]],
+    ) -> None:
+        loop_time = asyncio.get_running_loop().time()
+        if quote.symbol not in self._daemon.managed_position_symbols:
+            self._clear_retry(quote.symbol, retries)
+        if loop_time < retries.get(quote.symbol, (0.0, 1.0))[0]:
+            return
+        for state in self._latest_market_states.for_symbols((quote.symbol,)):
+            generation = self._evaluation_generation(quote.symbol)
+            try:
+                failure = await self._daemon.process_market_quote(quote, state)
+            except Exception as error:
+                order_identity_conflict = self._is_order_identity_conflict(error)
+                if not (self._is_transient_error(error) or order_identity_conflict):
+                    raise
+                failure = (
+                    ORDER_IDENTITY_CONFLICT_REASON
+                    if order_identity_conflict
+                    else type(error).__name__
+                )
+                if order_identity_conflict:
+                    if self._on_order_identity_conflict is not None:
+                        self._on_order_identity_conflict(quote.symbol)
+                    if self._on_exit_failure is not None:
+                        self._on_exit_failure(quote.symbol, failure)
+                log.warning(
+                    "live_market_quote_processing_degraded",
+                    symbol=quote.symbol,
+                    error_type=type(error).__name__,
+                    reason=failure,
+                )
+                continue
+            self._record_result(
+                quote.symbol,
+                failure,
+                retries,
+                channel="quote",
+                evaluation_generation=generation,
+            )
+
+    def _clear_retry(
+        self, symbol: str, retries: dict[str, tuple[float, float]]
+    ) -> None:
+        channel = "quote" if retries is self._quote_retries else "grace"
+        self._sync_waits[channel].discard(symbol)
         if retries.pop(symbol, None) is not None and self._on_exit_failure is not None:
             self._on_exit_failure(symbol, None)
 
     def _record_result(
-        self, symbol: str, failure: str | None,
-        retries: dict[str, tuple[float, float]], *, channel: str,
+        self,
+        symbol: str,
+        failure: str | None,
+        retries: dict[str, tuple[float, float]],
+        *,
+        channel: str,
+        evaluation_generation: tuple[int, int] | None = None,
     ) -> None:
         if is_pending_context_refresh(failure):
+            self._sync_waits[channel].add(symbol)
+            if (
+                evaluation_generation is not None
+                and evaluation_generation != self._evaluation_generation(symbol)
+            ):
+                self._wake_sync_waits((symbol,))
             return
         if failure is None:
+            if (
+                evaluation_generation is not None
+                and evaluation_generation != self._evaluation_generation(symbol)
+            ):
+                # An older evaluation cannot clear a newer protection state.
+                self._sync_waits[channel].add(symbol)
+                self._wake_sync_waits((symbol,))
+                return
+            self._sync_waits[channel].discard(symbol)
             retries.pop(symbol, None)
             if self._on_exit_failure is not None:
                 self._on_exit_failure(symbol, None)
             return
         pending = is_pending_exit_evaluation(failure)
+        if pending:
+            self._sync_waits[channel].add(symbol)
+        else:
+            self._sync_waits[channel].discard(symbol)
         if not pending and self._on_exit_failure is not None:
             self._on_exit_failure(symbol, failure)
         delay = retries.get(symbol, (0.0, 1.0))[1]
-        retries[symbol] = (asyncio.get_running_loop().time() + delay, min(delay * 2, 60.0))
-        log.warning("live_exit_evaluation_deferred" if pending else "live_exit_retry_scheduled",
-                    symbol=symbol, channel=channel, reason=failure, retry_delay_seconds=delay)
+        retries[symbol] = (
+            asyncio.get_running_loop().time() + delay,
+            min(delay * 2, 60.0),
+        )
+        if (
+            pending
+            and evaluation_generation is not None
+            and evaluation_generation != self._evaluation_generation(symbol)
+        ):
+            self._wake_sync_waits((symbol,))
+        log.warning(
+            "live_exit_evaluation_deferred" if pending else "live_exit_retry_scheduled",
+            symbol=symbol,
+            channel=channel,
+            reason=failure,
+            retry_delay_seconds=delay,
+        )
 
-    def note_account_facts_changed(self) -> None:
-        """Wake candle evaluation only after committed account facts are published."""
+    def note_account_facts_changed(
+        self,
+        symbols: Collection[str] | None = None,
+    ) -> None:
+        """Wake fact waits after publication; preserve network-failure backoff."""
+        if symbols is None:
+            self._facts_generation += 1
+        else:
+            for symbol in symbols:
+                self._symbol_facts_generation[symbol] = (
+                    self._symbol_facts_generation.get(symbol, 0) + 1
+                )
         self._candle_facts_changed.set()
+        self._wake_sync_waits(symbols)
+
+    def _evaluation_generation(self, symbol: str) -> tuple[int, int]:
+        return self._facts_generation, self._symbol_facts_generation.get(symbol, 0)
+
+    def _wake_sync_waits(self, symbols: Collection[str] | None) -> None:
+        requested = None if symbols is None else frozenset(symbols)
+        for channel, retries in (
+            ("quote", self._quote_retries),
+            ("grace", self._grace_retries),
+        ):
+            waiting = self._sync_waits[channel]
+            ready = set(waiting) if requested is None else waiting & requested
+            for symbol in ready:
+                retries.pop(symbol, None)
+            if channel == "quote" and ready:
+                self._quote_ready.update(ready)
+                self._quote_facts_changed.set()
+            elif channel == "grace" and ready:
+                self._grace_facts_changed.set()
 
     async def run_closed_candle_channel(
         self,
@@ -136,18 +260,26 @@ class LiveExitChannelRuntime:
         source: AsyncIterable[ClosedCandle15mEvent],
     ) -> None:
         iterator = aiter(source)
-        next_event: asyncio.Future[ClosedCandle15mEvent] | None = asyncio.ensure_future(anext(iterator))
+        next_event: asyncio.Future[ClosedCandle15mEvent] | None = asyncio.ensure_future(
+            anext(iterator)
+        )
         changed = asyncio.create_task(self._candle_facts_changed.wait())
         try:
             while next_event is not None or self._pending_candles:
-                waiting: set[asyncio.Future[ClosedCandle15mEvent] | asyncio.Task[bool]] = {changed}
+                waiting: set[
+                    asyncio.Future[ClosedCandle15mEvent] | asyncio.Task[bool]
+                ] = {changed}
                 if next_event is not None:
                     waiting.add(next_event)
-                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    waiting, return_when=asyncio.FIRST_COMPLETED
+                )
                 if changed in done:
                     self._candle_facts_changed.clear()
                     changed = asyncio.create_task(self._candle_facts_changed.wait())
-                    for key in sorted(self._pending_candles, key=lambda k: (k[1], k[0])):
+                    for key in sorted(
+                        self._pending_candles, key=lambda k: (k[1], k[0])
+                    ):
                         await self._evaluate_candle(key)
                 if next_event is not None and next_event in done:
                     try:
@@ -157,12 +289,17 @@ class LiveExitChannelRuntime:
                     else:
                         next_event = asyncio.ensure_future(anext(iterator))
                         key = (event.candle.symbol, event.candle.candle_start)
-                        if key in self._evaluated_candles or key in self._pending_candles:
+                        if (
+                            key in self._evaluated_candles
+                            or key in self._pending_candles
+                        ):
                             continue
                         # Bounded retention fails explicitly instead of discarding
                         # an unevaluated official closing event.
                         if len(self._pending_candles) >= _MAX_RETAINED_CANDLES:
-                            raise RuntimeError("unevaluated closed-candle capacity exceeded")
+                            raise RuntimeError(
+                                "unevaluated closed-candle capacity exceeded"
+                            )
                         self._pending_candles[key] = event
                         await self._evaluate_candle(key)
         finally:
@@ -178,9 +315,14 @@ class LiveExitChannelRuntime:
             try:
                 failure = await self._daemon.process_closed_candle(
                     event,
-                    latest_quote=next(iter(self._latest_market_quotes.for_symbols(
-                        (event.candle.symbol,)
-                    )), None),
+                    latest_quote=next(
+                        iter(
+                            self._latest_market_quotes.for_symbols(
+                                (event.candle.symbol,)
+                            )
+                        ),
+                        None,
+                    ),
                 )
                 if is_pending_context_refresh(failure) and attempt < 2:
                     # A projection fence invalidated the context. Reevaluate
@@ -208,18 +350,24 @@ class LiveExitChannelRuntime:
             ):
                 self._on_exit_failure(event.candle.symbol, None)
         elif is_pending_exit_evaluation(failure):
-            log.warning("live_closed_candle_position_sync_pending",
-                        symbol=event.candle.symbol, reason=failure)
+            log.warning(
+                "live_closed_candle_position_sync_pending",
+                symbol=event.candle.symbol,
+                reason=failure,
+            )
         else:
             if self._on_exit_failure is not None:
                 self._on_exit_failure(event.candle.symbol, failure)
-            log.error("live_closed_candle_exit_degraded",
-                      symbol=event.candle.symbol, reason=failure)
+            log.error(
+                "live_closed_candle_exit_degraded",
+                symbol=event.candle.symbol,
+                reason=failure,
+            )
 
     async def run_grace_timeout_channel(self, *, interval_seconds: float = 1.0) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
-        retries: dict[str, tuple[float, float]] = {}
+        retries = self._grace_retries
         while True:
             now = datetime.now(tz=UTC)
             loop_time = asyncio.get_running_loop().time()
@@ -236,6 +384,7 @@ class LiveExitChannelRuntime:
                     iter(self._latest_market_quotes.for_symbols((state.symbol,))),
                     None,
                 )
+                generation = self._evaluation_generation(state.symbol)
                 try:
                     failure = await self._daemon.process_grace_timeout(
                         state,
@@ -249,7 +398,9 @@ class LiveExitChannelRuntime:
                         failure = ORDER_IDENTITY_CONFLICT_REASON
                         if self._on_order_identity_conflict is not None:
                             self._on_order_identity_conflict(state.symbol)
-                        self._record_result(state.symbol, failure, retries, channel="grace")
+                        self._record_result(
+                            state.symbol, failure, retries, channel="grace"
+                        )
                         continue
                     if not self._is_transient_error(error):
                         raise
@@ -259,8 +410,26 @@ class LiveExitChannelRuntime:
                         error_type=type(error).__name__,
                     )
                     continue
-                self._record_result(state.symbol, failure, retries, channel="grace")
-            await asyncio.sleep(interval_seconds)
+                self._record_result(
+                    state.symbol,
+                    failure,
+                    retries,
+                    channel="grace",
+                    evaluation_generation=generation,
+                )
+            sleeping = asyncio.create_task(asyncio.sleep(interval_seconds))
+            changed = asyncio.create_task(self._grace_facts_changed.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {sleeping, changed}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    task.result()
+                self._grace_facts_changed.clear()
+            finally:
+                sleeping.cancel()
+                changed.cancel()
+                await asyncio.gather(sleeping, changed, return_exceptions=True)
 
 
 __all__ = [

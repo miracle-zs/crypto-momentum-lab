@@ -972,6 +972,10 @@ class PositionView:
     is_comparable: bool = True
     zero_position_snapshot_confirmed: bool = False
     stream_scope: AccountFactStreamScope | None = None
+    # Operational dispatch state is attached by ExecutionBook, not projected
+    # from fills or included in the durable projection digest.
+    pending_command_ids: tuple[str, ...] = ()
+    active_entry_command_ids: tuple[str, ...] = ()
 
     @property
     def total_quantity(self) -> Decimal:
@@ -1008,7 +1012,8 @@ class PositionView:
             )
         )
         return (
-            (is_ready_health or is_clean_stream_no_coverage)
+            not self.pending_command_ids
+            and (is_ready_health or is_clean_stream_no_coverage)
             and (
                 self.reconciliation_gap is None
                 or self.reconciliation_gap == Decimal("0")

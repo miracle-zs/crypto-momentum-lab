@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.execution.position_context_ports import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
+    PositionHealthStatus,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -201,9 +202,11 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._execution_book: PositionContextBook | None = None
         self._cached_book_bucket_end: datetime | None = None
         self._cached_book_result: (
-            tuple[frozenset[str], tuple[Any, ...], frozenset[str]] | None
+            tuple[frozenset[str], tuple[Any, ...], frozenset[str], frozenset[str]]
+            | None
         ) = None
         self._cached_book_unresolved: tuple[Any, ...] | None = None
+        self._cached_book_revision: int | None = None
         self._rules_load_tasks: dict[
             str,
             asyncio.Task[_SymbolTradingRules],
@@ -328,15 +331,17 @@ class PostgresLiveContextProvider(LiveContextReader):
         cached_result = getattr(self, "_cached_book_result", None)
         if (
             cached_result is not None
+            and getattr(book, "context_revision", None) is not None
+            and getattr(self, "_cached_book_revision", None) == book.context_revision
             and cached_bucket_end == state.bucket_end
             and cached_unresolved == context.unresolved_orders
         ):
-            visible_position_symbols, managed, unmanaged = cached_result
+            visible_position_symbols, managed, pending, unmanaged = cached_result
             return replace(
                 context,
                 open_position_symbols=visible_position_symbols,
                 managed_positions=managed,
-                pending_position_symbols=frozenset(),
+                pending_position_symbols=pending,
                 unmanaged_position_symbols=unmanaged,
             )
         # Only scopes that can still represent current exposure need a read.
@@ -348,6 +353,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         # market decision. Reading an earlier cut hides fills already visible
         # in the current snapshot and falsely triggers repeated self-healing.
         # LiveDecisionFactSource still reads its exact market cut separately.
+        book_revision = getattr(book, "context_revision", None)
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
@@ -383,34 +389,90 @@ class PostgresLiveContextProvider(LiveContextReader):
                 in account_position_keys
             )
         )
-        active_symbols = frozenset(position.symbol for position in managed)
+        managed_keys = {
+            (position.symbol, position.position_side.value) for position in managed
+        }
+        pending_keys: set[tuple[str, str]] = set()
+        unmanaged_keys: set[tuple[str, str]] = set()
+        if context.account_snapshot is not None:
+            views_by_key = {
+                (view.key.symbol, view.key.position_side.value): view for view in views
+            }
+            for position in context.account_snapshot.positions:
+                if position.position_amt == 0:
+                    continue
+                key = (position.symbol, position.position_side.upper())
+                view = views_by_key.get(key)
+                if (
+                    view is not None
+                    and view.health_status == PositionHealthStatus.CONFLICT
+                ):
+                    unmanaged_keys.add(key)
+                elif view is not None and (
+                    view.pending_command_ids
+                    or (
+                        view.active_entry_command_ids
+                        and (
+                            view.total_quantity != abs(position.position_amt)
+                            or not view.is_ready_for_trade
+                        )
+                    )
+                    or (
+                        key in managed_keys
+                        and view.health_status != PositionHealthStatus.CONFLICT
+                        and not view.is_ready_for_trade
+                    )
+                ):
+                    pending_keys.add(key)
+                elif (
+                    key not in managed_keys
+                    or view is None
+                    or view.total_quantity != abs(position.position_amt)
+                    or not view.is_ready_for_trade
+                ):
+                    unmanaged_keys.add(key)
+        else:
+            # Without a scoped exposure observation, never infer new ownership.
+            active_symbols = frozenset(position.symbol for position in managed)
+            unmanaged_keys = {
+                (symbol, "")
+                for symbol in context.open_position_symbols - active_symbols
+            }
+        pending = frozenset(key[0] for key in pending_keys)
+        unmanaged = frozenset(key[0] for key in unmanaged_keys)
+        managed = tuple(
+            position
+            for position in managed
+            if (position.symbol, position.position_side.value)
+            not in pending_keys | unmanaged_keys
+        )
         await self._observe_book_drift(book=book, context=context)
-        # The account view determines current exposure. Book-only residuals
-        # are durable accounting drift, not live positions to exit or subscribe
-        # to. A real account position without a matching Book lot remains
-        # unmanaged and still triggers the protective halt.
-        unmanaged = (
-            frozenset(context.unmanaged_position_symbols)
-            | context.open_position_symbols
-        ) - active_symbols
+        if book_revision != getattr(book, "context_revision", None):
+            raise LiveContextChangedDuringLoad("execution facts changed during load")
         self._cached_book_bucket_end = state.bucket_end
         self._cached_book_unresolved = context.unresolved_orders
+        self._cached_book_revision = book_revision
         visible_position_symbols = context.open_position_symbols
-        self._cached_book_result = (visible_position_symbols, managed, unmanaged)
+        self._cached_book_result = (
+            visible_position_symbols,
+            managed,
+            pending,
+            unmanaged,
+        )
         cached_context = getattr(self, "_cached_context", None)
         if cached_context is not None and self.is_current(context):
             # Debounce actual Book uncertainty, not the discarded legacy
             # classification. Account updates still invalidate this cache.
             self._cached_context = replace(
                 cached_context,
-                pending_position_symbols=frozenset(),
+                pending_position_symbols=pending,
                 unmanaged_position_symbols=unmanaged,
             )
         result = replace(
             context,
             open_position_symbols=visible_position_symbols,
             managed_positions=managed,
-            pending_position_symbols=frozenset(),
+            pending_position_symbols=pending,
             unmanaged_position_symbols=unmanaged,
         )
         request_repair = getattr(self, "_request_position_repair", None)
@@ -816,6 +878,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_book_bucket_end = None
         self._cached_book_result = None
         self._cached_book_unresolved = None
+        self._cached_book_revision = None
         if event is not None:
             log.info(
                 "live_context_cache_invalidated",

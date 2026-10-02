@@ -711,3 +711,17 @@ async def test_live_exit_manager_uses_exit_allocator(
     assert len(shadow_allocations) == 1
     assert shadow_allocations[0] is not None
     assert shadow_allocations[0].requested_quantity == Decimal("1.25")
+
+
+async def test_reallocated_exit_has_distinct_command_identity():
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    position = replace(_long_position(), projection_version="pv_before")
+    def build(position):
+        return manager._build_order_request(
+            state=_state(), position=position, reason="candle_15m_close",
+            trigger_at=_state().bucket_end, reference_price=Decimal("99"),
+        )
+    original = build(position)
+    refreshed = build(replace(position, projection_version="pv_after"))
+    assert original.candidate.candidate_id != refreshed.candidate.candidate_id
+    assert build(position).candidate.candidate_id == original.candidate.candidate_id

@@ -719,6 +719,8 @@ async def test_reservation_creation_failure_fails_closed() -> None:
         account_label="primary",
         reservation_repository=BrokenReservationRepo(),
     )
+    from unittest.mock import AsyncMock
+    coordinator.configure_submission(AsyncMock())
     plan = OrderExecutionPlan(
         intent_id="intent-test-fail-res",
         run_id="run-1",
@@ -2835,5 +2837,42 @@ async def test_recovery_admission_rejects_entry_without_terminating_scheduler():
         repository.prepare_submission.assert_not_awaited()
         assert book.command_requires_recovery("old")
         assert book.get_outbox(plan.client_order_id) is None
+    finally:
+        await coordinator.aclose()
+
+
+async def test_rejected_context_does_not_consume_command_identity():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    book = ExecutionBook()
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    await book.observe(ExecutionEvidence(
+        "flat", scope, NOW, snapshot=AccountPositionSnapshot(
+            "live", "primary", "BTCUSDT", "BOTH", Decimal(0), Decimal(0),
+            Decimal(100), Decimal(0), Decimal(0), 1, "cross", NOW, {},
+        ),
+    ))
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=book,
+        reservation_repository=AsyncMock(),
+    )
+    class Admission:
+        def rejection_reason(self, plan, preparation):
+            return "submission_context_invalidated"
+    repository = AsyncMock()
+    coordinator.configure_submission(repository, admission=Admission())
+    plan = _plan("BTCUSDT", reduce_only=False)
+    try:
+        assert await coordinator.prepare_and_execute(
+            plan, preparation=_submission_preparation(plan),
+        ) is None
+        assert book.get_outbox(plan.client_order_id) is None
+        assert backend.calls == []
+        repository.prepare_submission.assert_not_awaited()
     finally:
         await coordinator.aclose()

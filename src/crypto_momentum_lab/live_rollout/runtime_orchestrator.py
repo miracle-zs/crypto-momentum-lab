@@ -1295,6 +1295,10 @@ async def run_live_daemon(
                 interval_seconds=interval_seconds,
             )
 
+        def invalidate_repaired_context() -> None:
+            context_provider.invalidate()
+            exit_channel_runtime.note_account_facts_changed()
+
         position_repair = LiveUnmanagedPositionRepair(
             account_label=account_label,
             run_id=session_id,
@@ -1305,7 +1309,7 @@ async def run_live_daemon(
             context_is_current=(
                 lambda context: context_provider.is_current(context)
             ),
-            invalidate_context=lambda: context_provider.invalidate(),
+            invalidate_context=invalidate_repaired_context,
             request_recovery=order_reconciliation.request_recovery,
         )
         order_reconciliation.repair_positions = position_repair.repair_pending
@@ -1656,7 +1660,7 @@ async def run_live_daemon(
                 order_reconciliation.request_recovery()
             control_plane_runtime.on_account_snapshot(event)
             if event.account_snapshot is not None or event.fills:
-                exit_channel_runtime.note_account_facts_changed()
+                exit_channel_runtime.note_account_facts_changed(event.symbols)
 
         account_event_runtime = LiveAccountEventRuntime(
             daemon=daemon,

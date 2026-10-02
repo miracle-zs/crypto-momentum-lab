@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     DiscrepancyKind,
+    FactCoverageInterval,
     PositionDiscrepancy,
     PositionHealthStatus,
     PositionKey,
@@ -128,7 +129,12 @@ def test_sand_true_cut_divergence_detected() -> None:
     early = _snapshot("1403", "20.594640")
 
     ledger = PositionLedger(key)
-    proj = ledger.project(AccountFacts(key, (first_corrupt, second), (early,)))
+    proj = ledger.project(AccountFacts(
+        key, (first_corrupt, second), (early,),
+        coverage=FactCoverageInterval(
+            start_at=first_corrupt.trade_at, end_at=second.trade_at,
+        ),
+    ))
 
     # At cut 20.594640, cut_qty=1000 != 1403, gap=403
     assert proj.reconciliation_gap == Decimal("403")

@@ -891,6 +891,7 @@ class LiveExitManager:
             f"{batch_component}:"
             f"{reason}:{identity_trigger_at.isoformat()}"
             f":quantity:{order_quantity}"
+            f":projection:{position.projection_version}"
         )
         epoch = self._grace_identity_epoch_for(position.symbol)
         if epoch:

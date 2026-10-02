@@ -326,6 +326,12 @@ class ExecutionBook:
         self._recovery_required_commands: set[str] = set()
         self._external_recovery_positions: dict[str, PositionKey] = {}
         self._dispatch_reconciliation_required_commands: set[str] = set()
+        self._context_revision = 0
+
+    @property
+    def context_revision(self) -> int:
+        """Published facts/commands generation used by operational read caches."""
+        return self._context_revision
 
     def register_active_stream(
         self,
@@ -468,6 +474,7 @@ class ExecutionBook:
 
         self._journals[canon] = journal
         self._books[canon] = book
+        self._context_revision += 1
         self._stream_scopes[canon] = scope
         self._journal_revisions[canon] = target_state.cut.revision
         self._seen_trade_ids.update(target_state.trade_ids)
@@ -584,6 +591,7 @@ class ExecutionBook:
         ):
             setattr(self, name, getattr(candidate, name))
         self._coordinator.publish_from(candidate._coordinator)
+        self._context_revision += 1
         # The candidate's append-only delta is now durable, so it must not be
         # re-sent by the next observation. A candidate that rolled back is
         # never published, which keeps its pending events queued for retry.
@@ -1092,7 +1100,22 @@ class ExecutionBook:
             else:
                 book = PositionBook(AccountJournal(key, stream_scope=source_scope))
         if event_cut is None:
-            return book.get_view(requirement=requirement, now=now)
+            view = book.get_view(requirement=requirement, now=now)
+            entries = self.list_outbox(scope=scope)
+            return replace(
+                view,
+                pending_command_ids=tuple(sorted(
+                    entry.command_id for entry in entries
+                    if self.command_requires_recovery(entry.command_id)
+                )),
+                active_entry_command_ids=tuple(sorted(
+                    entry.command_id for entry in entries
+                    if entry.command.command_type == TradeCommandType.ENTRY
+                    and entry.state not in {
+                        DispatchState.REJECTED, DispatchState.TERMINAL
+                    }
+                )),
+            )
         current_view = book.get_view(requirement=requirement, now=now)
         if (
             self._execution_unit_of_work is not None
@@ -1336,19 +1359,26 @@ class ExecutionBook:
         key = request.scope.to_position_key()
         blocking_recoveries = {
             identity for identity in self._recovery_required_commands
-            if identity not in self._external_recovery_positions
-            or self._external_recovery_positions[identity] == key
+            if (request.action == TradeCommandType.ENTRY
+                and identity not in self._external_recovery_positions)
+            or self._recovery_blocks_position(identity, key)
         }
         if blocking_recoveries:
             return ExecutionRecoveryPending(
                 reason="Execution reservation settlement requires recovery",
                 diagnostics=tuple(sorted(blocking_recoveries)),
             )
-        if self._dispatch_reconciliation_required_commands:
+        dispatch_recoveries = {
+            identity for identity in self._dispatch_reconciliation_required_commands
+            if (request.action == TradeCommandType.ENTRY
+                and identity not in self._external_recovery_positions)
+            or self._recovery_blocks_position(identity, key)
+        }
+        if dispatch_recoveries:
             return ExecutionRecoveryPending(
                 reason="Execution command reconciliation is required",
                 diagnostics=tuple(
-                    sorted(self._dispatch_reconciliation_required_commands)
+                    sorted(dispatch_recoveries)
                 ),
             )
         key = request.scope.to_position_key()
@@ -1648,6 +1678,7 @@ class ExecutionBook:
                 diagnostics=tuple(diagnostics),
             )
 
+        self._context_revision += 1
         receipt = ExecutionReceipt(
             request_id=request.request_id,
             scope=request.scope,
@@ -1678,6 +1709,7 @@ class ExecutionBook:
             updated_at=command.created_at,
         )
         self._outbox_by_command_id[command.command_id] = entry
+        self._context_revision += 1
         if reservation_ids:
             self._command_reservations[command.command_id] = list(reservation_ids)
         return entry
@@ -1692,6 +1724,14 @@ class ExecutionBook:
             command_id in self._recovery_required_commands
             or command_id in self._dispatch_reconciliation_required_commands
         )
+
+    def _recovery_blocks_position(self, identity: str, key: PositionKey) -> bool:
+        external_key = self._external_recovery_positions.get(identity)
+        if external_key is not None:
+            return external_key == key
+        entry = self._outbox_by_command_id.get(identity)
+        # Unknown scope must remain globally protected until restored.
+        return entry is None or entry.scope.to_position_key() == key
 
     def list_outbox(
         self,
@@ -1915,6 +1955,7 @@ class ExecutionBook:
     ) -> None:
         await self._persist_outbox_state(updated)
         self._outbox_by_command_id[updated.command_id] = updated
+        self._context_revision += 1
 
     async def _release_command_reservations(
         self,
@@ -1988,6 +2029,7 @@ class ExecutionBook:
             # append-only delta must not accumulate in memory.
             for journal in self._journals.values():
                 journal.mark_facts_persisted()
+            self._context_revision += 1
             return result
         try:
             durable_input = prepare_durable_evidence(evidence)

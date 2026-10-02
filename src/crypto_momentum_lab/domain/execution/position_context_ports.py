@@ -26,6 +26,9 @@ class PositionRepairBook(Protocol):
 class PositionContextBook(PositionRepairBook, Protocol):
     """Read current account positions and reload committed repairs."""
 
+    @property
+    def context_revision(self) -> int: ...
+
     async def list_position_views(
         self,
         *,
