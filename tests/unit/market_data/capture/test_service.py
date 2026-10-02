@@ -143,6 +143,35 @@ async def test_low_disk_space_halts_before_accepting_an_envelope(
     assert service.metrics_snapshot().disk_free_bytes == 190
 
 
+async def test_healthy_disk_checks_are_bounded_and_low_space_still_halts(
+    raw_envelope: RawEnvelope, monkeypatch,
+) -> None:
+    import time
+
+    now, free, reads = [0.0], [400], []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    def disk_free():
+        reads.append(now[0])
+        return free[0]
+
+    coordinator = FakeCoordinator()
+    service = build_service(queue_max_events=1, disk_free_bytes_provider=disk_free)
+    service._coordinator = coordinator
+    for _ in range(100):
+        await service.submit(raw_envelope)
+    assert reads == [0.0]
+    now[0], free[0] = 1.0, 190
+    with pytest.raises(CaptureQueueFull, match="disk free space"):
+        await service.submit(raw_envelope)
+    assert len(coordinator.envelopes) == 100
+    assert service.state is MarketDataState.HALTED
+    # Explicit safety/health checks bypass the healthy interval cache.
+    free[0] = 260
+    assert await service.ensure_disk_space() is DiskStatus.HEALTHY
+    assert service.state is MarketDataState.READY
+
+
 async def test_start_applies_initial_symbols_and_stop_persists_state() -> None:
     repository = FakeRepository()
     connection_pool = FakeConnectionPool()

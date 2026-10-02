@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -126,12 +127,17 @@ class MarketDataCaptureService:
         disk_guard: DiskSpaceGuard,
         disk_free_bytes_provider: Callable[[], int] | None = None,
         coordinator: CaptureRunner | None = None,
+        disk_check_interval_seconds: float = 1.0,
     ) -> None:
+        if disk_check_interval_seconds <= 0:
+            raise ValueError("disk_check_interval_seconds must be positive")
         self._queue = queue
         self._repository = repository
         self._connection_pool = connection_pool
         self._disk_guard = disk_guard
         self._disk_free_bytes_provider = disk_free_bytes_provider
+        self._disk_check_interval_seconds = disk_check_interval_seconds
+        self._disk_check_valid_until = 0.0
         self._coordinator = coordinator
         self._state = MarketDataState.STARTING
         self._monitoring_generation = 0
@@ -192,7 +198,8 @@ class MarketDataCaptureService:
                 await self._transition(MarketDataState.READY, reason="queue drained")
             else:
                 raise CaptureQueueFull("capture is halted")
-        await self.ensure_disk_space()
+        if time.monotonic() >= self._disk_check_valid_until:
+            await self.ensure_disk_space()
         try:
             if self._coordinator is None:
                 await self._queue.put(envelope)
@@ -222,6 +229,14 @@ class MarketDataCaptureService:
             raise ValueError("disk free bytes must not be negative")
         self._disk_free_bytes = free_bytes
         status = self._disk_guard.evaluate(free_bytes)
+        # Avoid a blocking statvfs for every market packet while healthy.
+        # Warning/halting capacity is checked on every call; explicit checks
+        # always refresh, including recovery and periodic health checks.
+        self._disk_check_valid_until = (
+            time.monotonic() + self._disk_check_interval_seconds
+            if status is DiskStatus.HEALTHY
+            else 0.0
+        )
         if status is DiskStatus.HALT:
             self._halted_by_disk = True
             if self._state is not MarketDataState.HALTED:

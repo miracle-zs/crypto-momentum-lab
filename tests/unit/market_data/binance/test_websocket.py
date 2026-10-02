@@ -363,6 +363,8 @@ async def test_realtime_sink_does_not_block_socket_reader() -> None:
 
     await asyncio.wait_for(sink_started.wait(), timeout=1)
     assert data_queue.qsize() == 1
+    envelope = data_queue.get_nowait()
+    assert envelope.raw_payload_size_bytes == connection._received_bytes
 
     connection._stopping = True
     release_sink.set()

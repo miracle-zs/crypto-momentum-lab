@@ -554,11 +554,12 @@ class BinanceWebSocketConnection:
         while True:
             message = await connection.recv()
             self._received_messages += 1
-            self._received_bytes += (
+            message_size = (
                 len(message)
                 if isinstance(message, bytes)
                 else len(message.encode("utf-8"))
             )
+            self._received_bytes += message_size
             self._last_received_monotonic = time.monotonic()
             decoded = _decode_message(message)
             if _is_control_ack(decoded):
@@ -589,6 +590,7 @@ class BinanceWebSocketConnection:
                     received_at=received_at,
                     received_monotonic_ns=received_monotonic_ns,
                     expected_stream=self._stream,
+                    raw_payload_size_bytes=message_size,
                 )
             except BinancePayloadError:
                 continue
