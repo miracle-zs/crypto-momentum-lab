@@ -9,6 +9,34 @@ DEPLOY_SCRIPT = ROOT / "deploy/ops/update_server.sh"
 DOCKERFILE = ROOT / "Dockerfile"
 
 
+@pytest.mark.parametrize(("parallel", "fail_health"), [(1, False), (2, False), (1, True)])
+def test_live_startup_concurrency_waits_for_health_before_next_batch(parallel, fail_health):
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("  live_up_and_wait_parallel() {")
+    end = script.index("\n  collect_active_live_pairs()", start)
+    invocation = f'''set -Eeuo pipefail
+{script[start:end]}
+compose=(compose)
+deploy_operation_timeout=300
+record_restart_baseline() {{ :; }}
+log_service_timings() {{ :; }}
+stop_live_services() {{ echo "stop $*"; }}
+run_with_timeout() {{ echo "$1"; }}
+wait_for_services_healthy() {{ shift; echo "healthy $*"; return {17 if fail_health else 0}; }}
+live_up_and_wait_parallel 300 {parallel} one two three four
+'''
+    result = subprocess.run(["bash", "-c", invocation], capture_output=True, text=True, timeout=5)
+    assert result.returncode == (17 if fail_health else 0), result.stderr
+    expected = []
+    services = ["one", "two", "three", "four"]
+    for index in range(0, len(services), parallel):
+        batch = " ".join(services[index:index + parallel])
+        expected += [f"stop {batch}", f"compose-up:{batch}", f"healthy {batch}"]
+        if fail_health:
+            break
+    assert result.stdout.splitlines() == expected
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_status", "expected_attempts"),
     [

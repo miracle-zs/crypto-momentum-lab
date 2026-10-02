@@ -7,7 +7,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
@@ -40,6 +40,9 @@ from crypto_momentum_lab.persistence.postgres.command_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
+)
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+    ExecutionBookHeadRow,
 )
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
@@ -121,6 +124,41 @@ async def test_book_nonzero_restore_preserves_token_and_evidence_identity(
         assert historical.projection_version != view.projection_version
         assert isinstance(await restored.observe(evidence), Duplicate)
         assert (await restored.read(evidence.scope)).total_quantity == Decimal("2")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_dispatch_without_head_restores_unknown_atomically(async_database_url):
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"test-headless-{uuid4().hex}"
+    first = _evidence(account, "1")
+    scope = first.scope
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        assert isinstance(await book.observe(first), Applied)
+        command = TradeCommand("legacy-dispatch", scope.to_position_key(), TradeCommandType.ENTRY,
+                               StrategySide.LONG, EntryType.MARKET, Decimal("1"), created_at=first.observed_at)
+        book.register_prepared_command(command, scope)
+        await book.mark_dispatching(command.command_id)
+        # Old deployments persisted journals/commands before adopting Book heads.
+        async with factory.begin() as session:
+            await session.execute(delete(ExecutionBookHeadRow).where(ExecutionBookHeadRow.account_label == account))
+        restored = _book(factory)
+        await restored.restore(account_label=account)
+        assert restored.get_outbox(command.command_id).state == DispatchState.UNKNOWN
+        assert command.command_id in restored._dispatch_reconciliation_required_commands
+        state = await restored._execution_unit_of_work.load_position(scope.to_position_key(), as_of=datetime.now(UTC))
+        assert state.head.revision == 1
+        assert state.cut.facts.fills[0].trade_id == "1"
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert restarted.get_outbox(command.command_id).state == DispatchState.UNKNOWN
+        assert (await restarted.read(scope)).total_quantity == Decimal("1")
     finally:
         await engine.dispose()
 

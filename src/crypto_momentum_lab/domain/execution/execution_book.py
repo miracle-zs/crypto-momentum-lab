@@ -1704,11 +1704,15 @@ class ExecutionBook:
             try:
                 async with unit_of_work.transaction(key) as tx:
                     head = await tx.load_head(key)
-                    if head is None or self._head_revisions.get(canon) != head.revision:
+                    # Legacy journals can exist before the first Book head.
+                    # Revision zero is valid only after that journal was restored;
+                    # persist_head still performs the first-writer CAS in this tx.
+                    expected_head_revision = head.revision if head is not None else 0
+                    if self._head_revisions.get(canon) != expected_head_revision:
                         raise RuntimeError(
                             "durable execution head changed; restore is required"
                         )
-                    if (
+                    if head is not None and (
                         head.stream_id != stream_scope.stream_id
                         or head.stream_epoch != stream_scope.stream_epoch
                     ):
@@ -1731,7 +1735,7 @@ class ExecutionBook:
                         key=key,
                         stream_id=stream_scope.stream_id,
                         stream_epoch=stream_scope.stream_epoch,
-                        expected_revision=head.revision,
+                        expected_revision=expected_head_revision,
                         projection_version=candidate._ensure_book(key)
                         .get_view()
                         .projection_version,

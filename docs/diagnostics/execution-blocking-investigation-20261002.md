@@ -29,6 +29,15 @@
 - 完整单元测试（启用 Hub 本地网络测试）：3,108 项通过；保留两项已有测试依赖/资源回收警告。变更文件 Ruff F/I 检查及 git diff --check 通过。
 - 线上部署与运行观察另行记录；这里的测试结果不等同于线上平仓验收。
 
+### 首轮上线验收发现与补充修复
+
+- `130d83d` 首轮上线后三个账户的结构化 readiness 显示 FULLY_TRADEABLE；primary 恢复遗留 CVXUSDT 命令 `cml_036b4aeada766b5d63fb247b51c563be` 时失败。该仓位已有旧 journal、没有 durable head，恢复时将 DISPATCHING 转为 UNKNOWN 却误把首次建 head 当作版本冲突。
+- 命令变更现在仅允许已经恢复的本地 head revision=0 与不存在的数据库 head 配对；在同一事务内用 expected_revision=0 首次创建 head。已存在 head 缺失、版本不符或 stream 改变继续封闭 Book 并暴露异常；UNKNOWN 对账门禁保留，不重发订单。
+- 本场景先通过真实 Book 单测重现失败，再修复。完整单测更新为 3,110 项通过；真实 PostgreSQL Book 集成检查 4 项通过，包含首次恢复和第二次进程恢复。加上此前覆盖，独立 PostgreSQL 验证累计 55 项。
+- 首轮部署同时恢复四策略，启动窗口 CPU 饱和。`CML_LIVE_CONCURRENCY=1` 原本只限制 Compose Docker API 并行操作，未限制 Python 恢复并发。部署脚本改为分批停止/启动，并等待每批健康后再启动下一批；50 项部署脚本检查通过，新增行为测试验证并发限制 1/2 的实际启动顺序及健康失败后停止后续批次。
+- 研究采集服务在重负载窗口曾因行情 Hub 超过 120 秒不可用而重启，两次重启无 cgroup OOM。该观察不能等同于研究采集内存泄漏或死循环。
+- UTC 04:41:30–32（北京时间 12:41），账户 Hub 最新快照显示四个账户均无持仓、无挂单。最近持仓已在旧运行时阶段退出，不能把当前空仓视为新版本退出链路的自然成交验收。
+
 检查窗口：北京时间 11:19–11:41。服务器：43.167.191.253；线上代码 c0697e7189f78dc0a84058e961f0045b6ef7b076。
 
 最初诊断只读取进程、容器日志、Postgres 和账户 Hub，并进行非阻塞 Python 采样、本地离线复现。以下第 1–5 节保留当时证据；末尾记录随后授权的修复与验证。时间窗口中的持仓和阻塞状态不代表部署后的状态。
@@ -134,7 +143,7 @@ RESULTS ['True', 'execution evidence was not durably accepted: execution head ch
 
 ## 离线复现运行
 
-从仓库根目录执行下列命令。脚本使用测试夹具，不连接交易所或生产数据库；断言的是已记录的缺陷仍能出现，不能当作修复后的通过测试。
+从仓库根目录执行下列命令。脚本使用测试夹具，不连接交易所或生产数据库；现已改为运行永久回归检查，上方失败输出保留为原始事故证据。
 
 ```bash
 rtk proxy env PYTHONPATH=.:src .venv/bin/python scripts/diagnostics/cml_repair_race_20261002.py

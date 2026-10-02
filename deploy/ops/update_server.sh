@@ -1653,32 +1653,39 @@ print(
       return 0
     fi
     local restart_started_at operation_status
-    restart_started_at="$(date +%s)"
-    failure_service="$1"
-    record_restart_baseline "$@"
-    if stop_live_services "$@"; then
-      :
-    else
-      operation_status=$?
-      log_service_timings "restart" "$restart_started_at" failed "$@"
-      return "$operation_status"
-    fi
-    if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
-      "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"; then
-      :
-    else
-      operation_status=$?
-      log_service_timings "restart" "$restart_started_at" failed "$@"
-      return "$operation_status"
-    fi
-    if wait_for_services_healthy "$health_timeout" "$@"; then
-      :
-    else
-      operation_status=$?
-      log_service_timings "restart" "$restart_started_at" failed "$@"
-      return "$operation_status"
-    fi
-    log_service_timings "restart" "$restart_started_at" success "$@"
+    local -a batch=()
+    # Compose --parallel limits Docker API work, not application recovery.
+    # Wait for each bounded batch to recover before starting another one.
+    while (( $# > 0 )); do
+      batch=("${@:1:parallel}")
+      restart_started_at="$(date +%s)"
+      failure_service="${batch[0]}"
+      record_restart_baseline "${batch[@]}"
+      if stop_live_services "${batch[@]}"; then
+        :
+      else
+        operation_status=$?
+        log_service_timings "restart" "$restart_started_at" failed "${batch[@]}"
+        return "$operation_status"
+      fi
+      if run_with_timeout "compose-up:${batch[*]}" "$deploy_operation_timeout" \
+        "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "${batch[@]}"; then
+        :
+      else
+        operation_status=$?
+        log_service_timings "restart" "$restart_started_at" failed "${batch[@]}"
+        return "$operation_status"
+      fi
+      if wait_for_services_healthy "$health_timeout" "${batch[@]}"; then
+        :
+      else
+        operation_status=$?
+        log_service_timings "restart" "$restart_started_at" failed "${batch[@]}"
+        return "$operation_status"
+      fi
+      log_service_timings "restart" "$restart_started_at" success "${batch[@]}"
+      shift "${#batch[@]}"
+    done
   }
 
   collect_active_live_pairs() {
