@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -102,6 +102,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.position_recovery import (
     create_verified_recovery_checkpoint,
+    rebuild_ordered_scan_journal,
     recover_durable_position,
 )
 from crypto_momentum_lab.domain.execution.position_repair import (
@@ -2209,16 +2210,30 @@ class ExecutionBook:
 
                     candidate._active_transaction = tx
                     result = await observe_evidence_group(
-                        evidence, observe_one=candidate._observe_mutating,
+                        evidence,
+                        observe_one=candidate._observe_mutating,
                         forget_identity=candidate._seen_evidence_ids.discard,
                     )
                     if isinstance(result, EvidenceConflict):
                         raise _AbortObservation(result)
+                    journal = candidate._ensure_journal(key)
+                    fact_delta = journal.pending_fact_delta()
                     checkpoint = None
                     if (
                         evidence.coverage_evidence is not None
                         and evidence.fill_load_provenance is not None
                     ):
+                        rebuilt = rebuild_ordered_scan_journal(
+                            journal=journal,
+                            proof=evidence.coverage_evidence,
+                            provenance=evidence.fill_load_provenance,
+                            scanned_fills=fills_to_record,
+                        )
+                        rebuilt_order = rebuilt is not journal
+                        if rebuilt is not journal:
+                            journal = rebuilt
+                            candidate._journals[canon] = journal
+                            candidate._books[canon] = PositionBook(journal)
                         checkpoint = create_verified_recovery_checkpoint(
                             key=key,
                             scope=scope,
@@ -2228,6 +2243,13 @@ class ExecutionBook:
                             adoption=evidence.stream_checkpoint_adoption,
                             adopting_epoch=adopting_epoch,
                         )
+                        if rebuilt_order and checkpoint is None:
+                            raise _AbortObservation(
+                                EvidenceConflict(
+                                    evidence_id=evidence.evidence_id,
+                                    reason="ordered replay did not produce a verified checkpoint",
+                                )
+                            )
                     if adopting_epoch and not can_rollover and checkpoint is None:
                         raise _AbortObservation(
                             EvidenceConflict(
@@ -2241,13 +2263,20 @@ class ExecutionBook:
                     journal = candidate._ensure_journal(key)
                     if checkpoint is not None:
                         journal.set_recovery_checkpoint(checkpoint)
+                    if isinstance(result, Applied):
+                        result = replace(
+                            result,
+                            updated_view_token=candidate._ensure_book(key)
+                            .get_view(now=evidence.observed_at)
+                            .projection_version,
+                        )
                     facts = journal.read_cut()
                     persist_result = await tx.persist_facts(
                         scope=scope,
                         facts=facts,
                         revision=journal.revision,
                         checkpoint=checkpoint,
-                        delta=journal.pending_fact_delta(),
+                        delta=fact_delta,
                     )
                     if persist_result.has_conflicts:
                         raise _AbortObservation(

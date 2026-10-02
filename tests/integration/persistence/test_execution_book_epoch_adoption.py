@@ -327,7 +327,10 @@ async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
 
 
 @pytest.mark.asyncio
-async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_database_url):
+@pytest.mark.parametrize("closed", [False, True])
+async def test_missing_entry_scan_replay_is_durable_and_idempotent(
+    async_database_url, closed
+):
     """A snapshot cannot replace a lost trade; a verified scan can restore it."""
     from crypto_momentum_lab.domain.account.models import (
         AccountFillLoadScan,
@@ -345,7 +348,11 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_databas
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
     baseline = _snapshot(key, start, "0", "0")
     entry = _fill(key, "missing-entry", "BUY", "970", start + timedelta(minutes=1))
-    target = _snapshot(key, start + timedelta(minutes=3), "970", "100")
+    exit_fill = _fill(key, "observed-exit", "SELL", "970", start + timedelta(minutes=2))
+    target = _snapshot(
+        key, start + timedelta(minutes=3), "0" if closed else "970", "100"
+    )
+    expected = Decimal("0" if closed else "970")
     scan = AccountFillLoadScan(
         "live",
         account,
@@ -378,6 +385,7 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_databas
                         scope,
                         snapshot.observed_at,
                         snapshot=snapshot,
+                        fill=exit_fill if closed and sequence == 2 else None,
                         stream_id="hub",
                         stream_epoch="epoch",
                         sequence=sequence,
@@ -387,7 +395,8 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_databas
             )
         before = await book.read(scope, stream_id="hub", stream_epoch="epoch")
         assert before.total_quantity == 0
-        assert not before.is_ready_for_trade
+        if not closed:
+            assert not before.is_ready_for_trade
         for sequence in (3, 4):
             coordinator = OrderExecutionCoordinator(
                 backend=object(),
@@ -397,21 +406,39 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(async_databas
             )
             await coordinator.observe_account_snapshot(
                 target,
-                fills=(entry,),
+                fills=(entry, exit_fill) if closed else (entry,),
                 fill_load_scans=(scan,),
                 stream_id="hub",
                 stream_epoch="epoch",
                 sequence=sequence,
             )
             view = await book.read(scope, stream_id="hub", stream_epoch="epoch")
-            assert view.total_quantity == Decimal("970")
+            assert view.total_quantity == expected
             assert view.is_ready_for_trade
             # Rebuild all in-memory state from actual committed PostgreSQL rows.
             book = _book(factory)
             await book.restore(account_label=account)
         restored = await book.read(scope, stream_id="hub", stream_epoch="epoch")
-        assert restored.total_quantity == Decimal("970")
+        assert restored.total_quantity == expected
         assert restored.is_ready_for_trade
+        from sqlalchemy import select
+
+        from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+            PositionFactJournalEventRow,
+        )
+
+        async with factory() as session:
+            payloads = (
+                await session.scalars(
+                    select(PositionFactJournalEventRow.payload).where(
+                        PositionFactJournalEventRow.account_label == account,
+                        PositionFactJournalEventRow.event_kind == "fill",
+                    )
+                )
+            ).all()
+        assert sorted(payload["trade_id"] for payload in payloads) == sorted(
+            [entry.trade_id, exit_fill.trade_id] if closed else [entry.trade_id]
+        )
     finally:
         await engine.dispose()
 

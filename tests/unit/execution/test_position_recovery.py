@@ -79,6 +79,76 @@ def _fill(
     )
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [None, "truncated", "missing_trade", "changed_fee", "before_anchor", "conflict"],
+)
+def test_ordered_recovery_requires_complete_matching_trade_facts(failure):
+    from crypto_momentum_lab.domain.execution.position_recovery import (
+        rebuild_ordered_scan_journal,
+    )
+
+    key = _key()
+    scope = _scope(key)
+    entry = _fill(key, "entry", "BUY", "2", "10", _time(1))
+    closing = _fill(key, "closing", "SELL", "2", "10", _time(2))
+    journal = AccountJournal(key, stream_scope=scope)
+    journal.append_fill(closing)
+    journal.append_fill(entry)
+    assert journal.has_late_events
+    start = _time(2) if failure == "before_anchor" else _time(0)
+    end = _time(3)
+    provenance = AccountFillLoadProvenance(
+        stream_scope=scope,
+        load_id="verified-scan",
+        scan_origin_from_id=None,
+        scan_origin_start_time_ms=int(start.timestamp() * 1000),
+        request_from_id=None,
+        next_from_id=None,
+        page_count=1,
+        page_exhausted=True,
+        truncated=False,
+        checked_through=end,
+        observed_at=end,
+        source_anchor_id="zero-anchor",
+        source_anchor_event_cut=start,
+        source_anchor_kind="zero_snapshot",
+    )
+    proof = CoverageEvidence(
+        fill_cursor_id="verified-scan",
+        fill_load_start=start,
+        fill_checked_through=end,
+        checkpoint_id="scan-cut",
+        checkpoint_event_cut=end,
+        stream_scope=scope,
+        evidence_observed_at=end,
+        page_exhausted=True,
+        not_truncated=failure != "truncated",
+        load_provenance=provenance,
+    )
+    scanned = (entry, closing)
+    if failure == "missing_trade":
+        scanned = (entry,)
+    elif failure == "changed_fee":
+        scanned = (replace(entry, fee=Decimal("0.1")), closing)
+    elif failure == "conflict":
+        journal.append_fill(replace(entry, fee=Decimal("0.1")))
+    rebuilt = rebuild_ordered_scan_journal(
+        journal=journal,
+        proof=proof,
+        provenance=provenance,
+        scanned_fills=scanned,
+    )
+    assert journal.has_late_events  # Never mutate the published journal.
+    if failure is None:
+        assert rebuilt is not journal
+        assert not rebuilt.has_late_events
+        assert rebuilt.read_cut().fills == journal.read_cut().fills
+        assert rebuilt.revision == journal.revision
+    else:
+        assert rebuilt is journal
+
+
 def test_checkpoint_plus_suffix_restores_nonzero_batches_and_cost_basis() -> None:
     key = _key()
     scope = _scope(key)
@@ -508,10 +578,15 @@ def test_nonzero_checkpoint_adopts_across_stream_epoch_with_real_suffix_proof(
         target_facts,
         coverage=replace(target_coverage, start_at=parent_cut + timedelta(seconds=1)),
     )
-    assert ledger.project(gap_facts, stream_adoption=adoption).health_status.value == "INCOMPLETE"
+    assert (
+        ledger.project(gap_facts, stream_adoption=adoption).health_status.value
+        == "INCOMPLETE"
+    )
     with pytest.raises(ValueError, match="covered"):
         ledger.create_recovery_checkpoint(
-            gap_facts, source_revision=1, event_cut=target_cut,
+            gap_facts,
+            source_revision=1,
+            event_cut=target_cut,
             stream_adoption=adoption,
         )
     adopted = ledger.project(target_facts, stream_adoption=adoption)

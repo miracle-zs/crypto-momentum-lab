@@ -7,11 +7,15 @@ are mutated here; migration diagnostics are returned to the caller.
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
+from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_codec import (
     recovery_checkpoint_head_binding,
 )
-from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
+from crypto_momentum_lab.domain.execution.evidence_digest import (
+    trade_payload_digest,
+    view_projection_digest,
+)
 from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import (
@@ -27,9 +31,79 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    DurableJournalCut,
     PositionRecoveryCheckpoint,
     StreamCheckpointAdoption,
 )
+
+
+def rebuild_ordered_scan_journal(
+    *,
+    journal: AccountJournal,
+    proof: CoverageEvidence,
+    provenance: AccountFillLoadProvenance,
+    scanned_fills: tuple[AccountFillEvent, ...],
+) -> AccountJournal:
+    """Reconstruct arrival-order lateness only from an exhaustive matching scan.
+
+    Facts at/before a folded checkpoint and conflicting facts cannot be healed
+    by replay. Missing previously observed trades also invalidate the scan.
+    The caller must still validate and commit the resulting checkpoint.
+    """
+    facts = journal.read_cut()
+    start, end = provenance.source_anchor_event_cut, proof.checkpoint_event_cut
+    if (
+        not facts.has_late_events
+        or not facts.late_fills
+        or facts.conflicting_fills
+        or facts.fact_conflicts
+        or facts.has_synthetic_fills
+        or facts.integrity_issues
+        or proof.load_provenance != provenance
+        or journal.stream_scope != provenance.stream_scope
+        or end is None
+        or not proof.proves_complete(start, end, expected_scope=journal.stream_scope)
+    ):
+        return journal
+    checkpoint = facts.recovery_checkpoint
+    if any(
+        not (start < fill.trade_at <= end)
+        or (checkpoint is not None and fill.trade_at <= checkpoint.event_cut)
+        for fill in facts.late_fills
+    ):
+        return journal
+    scanned: dict[str, str] = {}
+    for fill in scanned_fills:
+        digest = trade_payload_digest(fill)
+        if fill.trade_id in scanned and scanned[fill.trade_id] != digest:
+            return journal
+        scanned[fill.trade_id] = digest
+    if any(
+        scanned.get(fill.trade_id) != trade_payload_digest(fill)
+        for fill in facts.fills
+        if start < fill.trade_at <= end
+    ):
+        return journal
+    # Re-run normal journal ingestion in event-time order. No facts are deleted,
+    # and no source coverage, conflicts or checkpoint prefix are manufactured.
+    ordered = AccountJournal(facts.position_key, stream_scope=journal.stream_scope)
+    for fill in sorted(facts.fills, key=lambda item: (item.trade_at, item.trade_id)):
+        ordered.append_fill(fill)
+    rebuilt = replace(
+        facts,
+        has_late_events=ordered.read_cut().has_late_events,
+        late_fills=ordered.read_cut().late_fills,
+    )
+    assert journal.stream_scope is not None
+    return AccountJournal.from_durable_cut(
+        DurableJournalCut(
+            scope=journal.stream_scope,
+            facts=rebuilt,
+            revision=journal.revision,
+            as_of=end,
+            checkpoint=checkpoint,
+        )
+    )
 
 
 def create_verified_recovery_checkpoint(
