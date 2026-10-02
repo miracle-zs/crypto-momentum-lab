@@ -336,6 +336,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 context,
                 open_position_symbols=visible_position_symbols,
                 managed_positions=managed,
+                pending_position_symbols=frozenset(),
                 unmanaged_position_symbols=unmanaged,
             )
         # Only scopes that can still represent current exposure need a read.
@@ -396,10 +397,20 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_book_unresolved = context.unresolved_orders
         visible_position_symbols = context.open_position_symbols
         self._cached_book_result = (visible_position_symbols, managed, unmanaged)
+        cached_context = getattr(self, "_cached_context", None)
+        if cached_context is not None and self.is_current(context):
+            # Debounce actual Book uncertainty, not the discarded legacy
+            # classification. Account updates still invalidate this cache.
+            self._cached_context = replace(
+                cached_context,
+                pending_position_symbols=frozenset(),
+                unmanaged_position_symbols=unmanaged,
+            )
         result = replace(
             context,
             open_position_symbols=visible_position_symbols,
             managed_positions=managed,
+            pending_position_symbols=frozenset(),
             unmanaged_position_symbols=unmanaged,
         )
         request_repair = getattr(self, "_request_position_repair", None)
@@ -983,6 +994,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                     ).all()
                 )
             active = [row for row in rows if row.position_amt != 0]
+            if getattr(self, "_execution_book", None) is not None:
+                return _book_owned_account_exposure(active, process_at)
             orders: list[ExchangeOrderRow] = []
             entry_fill_times: dict[str, datetime] = {}
             entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
@@ -1127,6 +1140,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         """
         rows: list[AccountPositionSnapshot] = list(snapshot.positions)
         active = [row for row in rows if row.position_amt != 0]
+        if getattr(self, "_execution_book", None) is not None:
+            return _book_owned_account_exposure(active, snapshot.config.observed_at)
         orders: list[ExchangeOrderRow] = []
         entry_fill_times: dict[str, datetime] = {}
         entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
@@ -1365,6 +1380,24 @@ def _coverage_evidence_from_sources(
         fill_checked_through=checked_through,
         checkpoint_id=checkpoint_id,
         checkpoint_event_cut=checkpoint_cut,
+    )
+
+
+def _book_owned_account_exposure(
+    active: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
+    observed_at: datetime | None,
+) -> tuple[
+    datetime | None, frozenset[str], Decimal, Decimal,
+    tuple[ManagedLivePosition, ...], frozenset[str], frozenset[str],
+    Mapping[str, CoverageEvidence],
+]:
+    """Account exposure is factual; the Book supplies ownership and readiness."""
+    return (
+        observed_at,
+        frozenset(position.symbol for position in active),
+        sum((position.unrealized_pnl for position in active), Decimal("0")),
+        sum((abs(position.notional) for position in active), Decimal("0")),
+        (), frozenset(), frozenset(), {},
     )
 
 
