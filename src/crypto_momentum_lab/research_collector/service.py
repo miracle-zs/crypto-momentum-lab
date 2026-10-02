@@ -146,6 +146,7 @@ class ResearchStateCollector:
         )
         self._materializer_task: asyncio.Task[None] | None = None
         self._materializer_error: BaseException | None = None
+        self._materializer_failed = asyncio.Event()
 
     @property
     def config(self) -> CollectorConfig:
@@ -212,8 +213,10 @@ class ResearchStateCollector:
             pass
 
     def _ensure_materializer_task(self) -> None:
-        if not self._stopping and (
-            self._materializer_task is None or self._materializer_task.done()
+        if (
+            not self._stopping
+            and self._materializer_error is None
+            and (self._materializer_task is None or self._materializer_task.done())
         ):
             self._materializer_task = asyncio.create_task(self._materializer_worker())
 
@@ -248,6 +251,7 @@ class ResearchStateCollector:
                     break
                 except Exception as exc:
                     self._materializer_error = exc
+                    self._materializer_failed.set()
                     log.exception(
                         "research_collector_materializer_worker_failed",
                         environment=self._config.environment,
@@ -258,7 +262,11 @@ class ResearchStateCollector:
                     for _ in records:
                         self._queue.task_done()
         finally:
-            if not self._stopping and not self._queue.empty():
+            if (
+                not self._stopping
+                and self._materializer_error is None
+                and not self._queue.empty()
+            ):
                 self._materializer_task = asyncio.create_task(
                     self._materializer_worker()
                 )
@@ -303,11 +311,17 @@ class ResearchStateCollector:
         if getattr(self._queue, "_unfinished_tasks", 0) == 0:
             return
         self._ensure_materializer_task()
-        if timeout_seconds is not None:
+        joined = asyncio.create_task(self._queue.join())
+        failed = asyncio.create_task(self._materializer_failed.wait())
+        try:
             async with asyncio.timeout(timeout_seconds):
-                await self._queue.join()
-        else:
-            await self._queue.join()
+                await asyncio.wait(
+                    (joined, failed), return_when=asyncio.FIRST_COMPLETED
+                )
+        finally:
+            joined.cancel()
+            failed.cancel()
+            await asyncio.gather(joined, failed, return_exceptions=True)
         if self._materializer_error is not None:
             raise RuntimeError(
                 f"Materializer worker failed: {self._materializer_error}"
@@ -750,9 +764,15 @@ class ResearchStateCollector:
 
     async def _flush_all_buffers(self) -> MaterializerFlushResult:
         self._ensure_capacity()
+        if self._materializer_error is not None:
+            raise RuntimeError(
+                f"Materializer worker failed: {self._materializer_error}"
+            ) from self._materializer_error
         if self._materializer_task is not None and not self._materializer_task.done():
             if getattr(self._queue, "_unfinished_tasks", 0) > 0:
-                await self.drain_queue(timeout_seconds=10.0)
+                # Replay recovery pauses ingress until durable output completes.
+                # A slow disk must not restart recovery from the old Hub cursor.
+                await self.drain_queue(timeout_seconds=10.0 if self._stopping else None)
         result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
         await self._save_checkpoint()
@@ -907,7 +927,7 @@ class ResearchStateCollector:
         if stream_id == self._active_stream_id:
             return
         if getattr(self._queue, "_unfinished_tasks", 0) > 0:
-            await self.drain_queue(timeout_seconds=10.0)
+            await self.drain_queue(timeout_seconds=None)
         await self._flush_all_buffers()
         self._active_stream_id = stream_id
         self._journal.set_active_stream_id(stream_id)

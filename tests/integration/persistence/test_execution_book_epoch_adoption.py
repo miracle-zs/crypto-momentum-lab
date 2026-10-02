@@ -184,6 +184,135 @@ def _evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("complete", [True, False])
+async def test_flat_legacy_head_requires_source_scan_before_epoch_adoption(
+    async_database_url, complete
+):
+    from crypto_momentum_lab.domain.account.models import (
+        AccountFillLoadScan,
+        AccountFillPageScan,
+    )
+    from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
+        load_fill_recovery_sources,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"legacy-anchor-{uuid4().hex[:12]}"
+    key = PositionKey("live", account, "CVXUSDT", "LONG")
+    scope = ExecutionScope("live", account, key.symbol, key.position_side)
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    baseline = _snapshot(key, start, "0", "0")
+    target = _snapshot(key, start + timedelta(minutes=1), "0", "0")
+    try:
+        from dataclasses import replace
+
+        legacy_scope = AccountFactStreamScope.for_position_key(
+            key, stream_id="legacy-postgres-account", stream_epoch="unversioned"
+        )
+        proof = _coverage(
+            legacy_scope,
+            load_id="legacy-incomplete",
+            scan_origin=start,
+            anchor_id=stable_snapshot_anchor_id(baseline),
+            anchor_cut=start,
+            anchor_kind="zero_snapshot",
+            checked_through=start,
+        )
+        proof = replace(
+            proof,
+            page_exhausted=False,
+            not_truncated=False,
+            load_provenance=replace(
+                proof.load_provenance, page_exhausted=False, truncated=True
+            ),
+        )
+        book = _book(factory)
+        await book.restore(account_label=account)
+        assert isinstance(
+            await book.observe(
+                ExecutionEvidence(
+                    "legacy-flat",
+                    scope,
+                    start,
+                    snapshot=baseline,
+                    coverage_evidence=proof,
+                    fill_load_provenance=proof.load_provenance,
+                    stream_id=legacy_scope.stream_id,
+                    stream_epoch=legacy_scope.stream_epoch,
+                    sequence=1,
+                )
+            ),
+            Applied,
+        )
+        # Legacy heads have neither modern trade identities nor a verified
+        # checkpoint. Being flat must not exclude them from source recovery.
+        sources = await load_fill_recovery_sources(
+            factory, environment="live", account_label=account
+        )
+        anchor = sources[(key.symbol, key.position_side.value)]
+        assert anchor is not None and anchor.zero_snapshot == baseline
+        planned = plan_fill_scan(target, anchor)
+        assert planned is not None
+        scan = AccountFillLoadScan(
+            "live",
+            account,
+            key.symbol,
+            key.position_side.value,
+            AccountFillPageScan(
+                key.symbol,
+                "legacy-source-repair",
+                planned.start_time_ms,
+                None,
+                1,
+                complete,
+                not complete,
+                target.observed_at,
+            ),
+            target.observed_at,
+            planned.source_anchor_id,
+            planned.source_anchor_event_cut,
+            planned.source_anchor_kind,
+            planned.source_stream_id,
+            planned.source_stream_epoch,
+            source_anchor_snapshot=planned.source_anchor_snapshot,
+        )
+        coordinator = OrderExecutionCoordinator(
+            backend=object(),
+            environment="live",
+            account_label=account,
+            execution_book=book,
+        )
+        await coordinator.observe_account_snapshot(
+            target,
+            fill_load_scans=(scan,),
+            stream_id="hub",
+            stream_epoch="new",
+            sequence=1,
+        )
+        checkpoint = await book.load_recovery_checkpoint(
+            AccountFactStreamScope.for_position_key(
+                key, stream_id="hub", stream_epoch="new"
+            )
+        )
+        if not complete:
+            assert checkpoint is None
+            return
+        assert checkpoint is not None and checkpoint.coverage.is_authoritative
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert (
+            await restarted.read(scope, stream_id="hub", stream_epoch="new")
+        ).total_quantity == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
     async_database_url: str,
 ) -> None:

@@ -42,6 +42,10 @@
 - 恢复扫描增加 Book 命令路径：对已有终态订单读取不可变领域回执；成交数量与价格必须来自数量精确匹配的持久化回执、真实订单成交或按账户/位置隔离的 account fills。沿用既有 positionSide 提取规则处理旧嵌套 payload。通过 Coordinator 的正常 Book 观察/结算重放，未获得真实成交时继续保留 settlement gate；缺少完整价格事实时只查询交易所，绝不重发订单。
 - 新增真实 Book 测试验证“订单表已终态但命令 UNKNOWN”的遗漏、跨 session 恢复、零成交取消、缺真实成交继续保护；真实 PostgreSQL 覆盖规范化回执、数量/价格精确性、跨账户隔离、嵌套旧 payload、无 head 首次恢复及终态重放后的再次启动。最终完整单测 3,113 项通过，独立 PostgreSQL 检查累计 64 项通过；临时测试库和角色均已删除。
 - 历史仓位的连续扫描/epoch 证明与订单终态回执属于不同证据。回执恢复不放宽 `source-anchored fill scan` 要求，不把旧未确认 coverage 强制改为 READY。
+- `18cee108` 部署完成后，primary 的 CVX/AZTEC/ZEST 三笔成交命令及 SUPER 取消命令均通过真实持久化事实重放恢复为 TERMINAL，并保留真实交易所订单 ID。
+- CVX 的旧 head 仍为 `legacy-postgres-account/unversioned`：扫描目标只选择新 trade identities、非零 journal 快照或恢复 checkpoint，漏掉了旧 account tables 的真实历史。现在将 legacy head 纳入源扫描集合；这不直接赋予完整性，不完整扫描仍拒绝 epoch adoption。真实 PostgreSQL 回归先复现漏选，再验证完整扫描可采用新 epoch 并跨重启恢复，不完整扫描不能解除保护。
+- UTC 05:36/05:46 研究采集重复重启并非 OOM。实际 traceback 是 Hub replay recovery → `_flush_all_buffers` → `drain_queue` 的固定 10 秒超时，慢速 Parquet 落盘使恢复游标未能推进、再次启动后重复补齐。恢复和 stream 切换现在等待持久化队列完成，暂停上游消费以形成背压；落盘异常独立唤醒等待者并立即暴露，不自动重启失败 worker、不把未落盘 journal 标为完成。健康检查及停机继续使用有限等待。
+- 最后完整单测 3,115 项通过（含 Hub 本地网络检查），研究采集子集 60 项通过；保留两项既有警告。新增 PostgreSQL 完整/不完整 legacy source 扫描检查均通过，独立数据库检查累计 66 项；补充上线结果见下方最终验收。
 
 检查窗口：北京时间 11:19–11:41。服务器：43.167.191.253；线上代码 c0697e7189f78dc0a84058e961f0045b6ef7b076。
 

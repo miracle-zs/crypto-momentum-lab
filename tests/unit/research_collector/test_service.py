@@ -24,6 +24,122 @@ from tests.unit.persistence.postgres.test_runtime_state_repository import (
 )
 
 
+async def test_replay_recovery_waits_for_slow_durable_materialization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=1024**2,
+        hard_limit_bytes=2 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        max_spool_bytes=1024**2,
+    )
+    source = _RecoverySource()
+    recovered = fixture_state("BTCUSDT", 1)
+    collector = ResearchStateCollector(
+        config=config,
+        source=source,
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+        backfill_source=_BackfillSource(recovered, []),
+    )
+    gate = asyncio.Event()
+    process = collector._process_materializer_batch
+    drain = collector.drain_queue
+
+    async def slow_materialize(records):
+        await gate.wait()
+        await process(records)
+
+    async def compressed_deadline(timeout_seconds=10.0):
+        # Scale the former 10-second deadline while retaining the real queue,
+        # journal, recovery and checkpoint paths.
+        await drain(timeout_seconds=None if timeout_seconds is None else 0.01)
+
+    async def release():
+        await asyncio.sleep(0.05)
+        gate.set()
+
+    monkeypatch.setattr(collector, "_process_materializer_batch", slow_materialize)
+    monkeypatch.setattr(collector, "drain_queue", compressed_deadline)
+    release_task = asyncio.create_task(release())
+    try:
+        await collector.initialize()
+        await collector._recover_replay_gap(
+            MarketStateHubReplayUnavailable(
+                "Hub stream reset",
+                requested_sequence=7,
+                latest_sequence=1,
+                stream_id="stream-b",
+            )
+        )
+        checkpoint = CheckpointStore(tmp_path / "checkpoints" / "research.json").load(
+            environment="research"
+        )
+        assert checkpoint.stream_id == "stream-b"
+        assert checkpoint.last_sequence == 1
+        assert source.resume_calls == [("stream-b", 1)]
+        assert not collector._journal.pending_records()
+    finally:
+        gate.set()
+        await release_task
+        await drain(timeout_seconds=1.0)
+        await collector.stop()
+
+
+async def test_materializer_failure_wakes_unbounded_drain_without_retrying_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    import pytest
+
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=1024**2,
+        hard_limit_bytes=2 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        max_spool_bytes=1024**2,
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def failed_materialize(records):
+        calls.append(records)
+        entered.set()
+        await release.wait()
+        raise OSError("durable storage unavailable")
+
+    monkeypatch.setattr(collector, "_process_materializer_batch", failed_materialize)
+    try:
+        await collector.ingest(_batch(fixture_state("BTCUSDT", 0), 1))
+        await asyncio.wait_for(entered.wait(), 1)
+        await collector.ingest(_batch(fixture_state("BTCUSDT", 1), 2))
+        drain_task = asyncio.create_task(collector.drain_queue(timeout_seconds=None))
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(RuntimeError, match="durable storage unavailable"):
+            await asyncio.wait_for(drain_task, 1)
+        assert len(calls) == 1
+        assert collector._queue.qsize() == 1
+        assert len(collector._journal.pending_records()) == 2
+    finally:
+        release.set()
+        with pytest.raises(RuntimeError, match="durable storage unavailable"):
+            await collector.stop()
+
+
 async def _empty_batches():
     if False:
         yield MarketStateBatch(
@@ -454,7 +570,9 @@ async def test_recovered_journal_sequence_gap_raises(tmp_path: Path) -> None:
         await collector.ingest(_batch(s3, 3))
 
         # Artificially remove sequence 2 from the pending journal on disk
-        pending_files = list((tmp_path / "journal" / "pending" / "hub").glob("**/*.json"))
+        pending_files = list(
+            (tmp_path / "journal" / "pending" / "hub").glob("**/*.json")
+        )
         deleted = False
         for f in pending_files:
             import json
@@ -492,7 +610,6 @@ async def test_collector_pipeline_decoupled_ingress_and_queue_backpressure(
 
     from crypto_momentum_lab.research_collector.models import CollectorPaused
 
-
     config = CollectorConfig(
         environment="research",
         root=tmp_path,
@@ -502,7 +619,7 @@ async def test_collector_pipeline_decoupled_ingress_and_queue_backpressure(
         global_pause_free_bytes=1,
         window_seconds=15,
         late_tolerance_seconds=1,  # Short backpressure timeout
-        max_queue_batches=2,       # Small queue capacity to test backpressure
+        max_queue_batches=2,  # Small queue capacity to test backpressure
     )
     collector = ResearchStateCollector(
         config=config,
@@ -564,4 +681,3 @@ async def test_collector_pipeline_decoupled_ingress_and_queue_backpressure(
     assert r4.durable_receipt.sequence == 4
 
     await collector.stop()
-
