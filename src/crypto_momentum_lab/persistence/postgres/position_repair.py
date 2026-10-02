@@ -65,17 +65,21 @@ class PostgresPositionRepairTransaction:
                 )
             ).all()
         )
-        rows = (
-            await session.scalars(
-                select(AccountFillEventRow)
-                .where(
-                    AccountFillEventRow.environment == key.environment,
-                    AccountFillEventRow.account_label == key.account_label,
-                    AccountFillEventRow.symbol == key.symbol,
-                )
-                .order_by(AccountFillEventRow.trade_at.asc())
+        cut = await tx.load_recovery(scope=request.scope, as_of=datetime.now(UTC))
+        checkpoint = cut.checkpoint or cut.facts.recovery_checkpoint
+
+        fill_stmt = select(AccountFillEventRow).where(
+            AccountFillEventRow.environment == key.environment,
+            AccountFillEventRow.account_label == key.account_label,
+            AccountFillEventRow.symbol == key.symbol,
+        )
+        if checkpoint is not None:
+            fill_stmt = fill_stmt.where(
+                AccountFillEventRow.trade_at > checkpoint.event_cut
             )
-        ).all()
+        fill_stmt = fill_stmt.order_by(AccountFillEventRow.trade_at.asc())
+
+        rows = (await session.scalars(fill_stmt)).all()
         fills = tuple(account_fill_from_row(row) for row in rows)
         # Do not borrow fills from the opposite hedge side; missing side cannot
         # prove ownership and the domain journal remains fail-closed.
@@ -85,7 +89,9 @@ class PostgresPositionRepairTransaction:
             if fill.raw_position_side is not None
             and str(fill.raw_position_side).upper() == key.position_side.value
         )
-        cut = await tx.load_recovery(scope=request.scope, as_of=datetime.now(UTC))
+
+        # Stored fills can repair facts, but a polling cursor is not evidence
+        # of an exhaustive anchored scan. Preserve the verified coverage cut.
         return PositionRepairFacts(cut, head, fills, owned_order_ids)
 
     async def persist_repair(self, repair: PositionRepair) -> PositionRepairReceipt:

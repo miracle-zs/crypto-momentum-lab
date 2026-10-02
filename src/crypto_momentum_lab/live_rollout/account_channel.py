@@ -75,21 +75,21 @@ class LiveAccountEventRuntime:
         """Consume a reconnecting account stream until it closes."""
 
         async for event in resilient_account_event_stream(source):
-            await self._process_event(event)
+            # Retain this exact envelope until its account facts are applied.
+            # A later full snapshot does not necessarily include these fills.
+            for attempt in range(3):
+                error = await self._process_event(event)
+                if error is None:
+                    break
+                if attempt == 2:
+                    raise error
+                await asyncio.sleep(0.1 * (attempt + 1))
 
-    async def _process_event(self, event: AccountEvent) -> None:
+    async def _process_event(self, event: AccountEvent) -> Exception | None:
         reconciliation_run_id = self._reconciliation_run_id
         applying_snapshot = False
+        reconciling_order = False
         try:
-            if (
-                self._telemetry is not None
-                and event.has_fill
-                and self._remember_fill(event)
-            ):
-                await self._telemetry.account_fill(
-                    event,
-                    occurred_at=event.received_at,
-                )
             if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
                 if self._order_reconciliation is None:
                     log.warning(
@@ -98,7 +98,9 @@ class LiveAccountEventRuntime:
                         client_order_id=event.client_order_id,
                     )
                 else:
+                    reconciling_order = True
                     await self._order_reconciliation.reconcile_account_event(event)
+                    reconciling_order = False
             event_run_id = self._reconciliation_run_id
             # ORDER_TRADE_UPDATE can carry both the account projection and
             # the order identity. Reconcile the order first so the live
@@ -110,6 +112,17 @@ class LiveAccountEventRuntime:
                 if inspect.isawaitable(result):
                     await result
                 applying_snapshot = False
+            # Observability must not prevent real trade facts from reaching
+            # the durable Book and the account projection.
+            if (
+                self._telemetry is not None
+                and event.has_fill
+                and self._remember_fill(event)
+            ):
+                await self._telemetry.account_fill(
+                    event,
+                    occurred_at=event.received_at,
+                )
             for state in self._latest_market_states.for_symbols(event.symbols):
                 quote = next(
                     iter(self._latest_market_quotes.for_symbols((state.symbol,))),
@@ -142,7 +155,11 @@ class LiveAccountEventRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if applying_snapshot or not self._is_transient_error(error):
+            if (
+                reconciling_order
+                or applying_snapshot
+                or not self._is_transient_error(error)
+            ):
                 self._request_account_snapshot_recovery(
                     f"account_event_processing_failed:{type(error).__name__}"
                 )
@@ -159,18 +176,20 @@ class LiveAccountEventRuntime:
                     reason=failure,
                 )
 
-                return
+                return None
             if not self._is_transient_error(error):
                 raise
-            # The account stream itself is still healthy. Do not kill the
-            # process because persistence is briefly unavailable; periodic
-            # reconciliation and the next market state provide retry paths.
+            # Pre-publication failures must retain this envelope for retry.
+            # Only failures after fact publication can await later evaluation.
             log.warning(
                 "live_account_event_processing_degraded",
                 run_id=reconciliation_run_id,
                 event_type=event.event_type,
                 error_type=type(error).__name__,
             )
+            if reconciling_order or applying_snapshot:
+                return error
+        return None
 
     def _remember_fill(self, event: AccountEvent) -> bool:
         """Return false for a replayed fill while keeping the stream live."""

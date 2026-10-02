@@ -13,6 +13,142 @@ NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
+async def test_telemetry_outage_cannot_discard_account_trade_facts():
+    ordering = []
+    event = SimpleNamespace(
+        event_type="ACCOUNT_UPDATE", client_order_id=None, has_fill=True,
+        trade_id="trade-1", symbol="BTCUSDT", received_at=NOW, symbols=(),
+    )
+
+    class Telemetry:
+        async def account_fill(self, event, *, occurred_at):
+            ordering.append("telemetry")
+            raise ConnectionError("telemetry unavailable")
+
+    class Cache:
+        def for_symbols(self, symbols):
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(), latest_market_states=Cache(), latest_market_quotes=Cache(),
+        telemetry=Telemetry(),
+        on_account_snapshot=lambda event: ordering.append("durable-facts"),
+        is_transient_error=lambda error: isinstance(error, ConnectionError),
+    )
+    await runtime._process_event(event)
+    assert ordering == ["durable-facts", "telemetry"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures", [2, 3])
+async def test_runtime_retains_event_until_order_and_book_facts_are_applied(
+    failures: int,
+) -> None:
+    events = tuple(
+        SimpleNamespace(
+            event_type="ORDER_TRADE_UPDATE",
+            client_order_id=f"entry-{i}",
+            has_fill=False,
+            received_at=NOW,
+            symbols=(),
+        )
+        for i in (1, 2)
+    )
+    ordering: list[tuple[str, str]] = []
+    calls = 0
+
+    class Reconciliation:
+        run_id = "run-1"
+
+        async def reconcile_account_event(self, event: object) -> None:
+            nonlocal calls
+            calls += 1
+            ordering.append(("reconcile", event.client_order_id))
+            if calls <= failures:
+                raise ConnectionError("temporary persistence failure")
+
+    class Source:
+        index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.index == len(events):
+                raise StopAsyncIteration
+            event = events[self.index]
+            self.index += 1
+            return event
+
+    class EmptyCache:
+        def for_symbols(self, _symbols):
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(),
+        latest_market_states=EmptyCache(),
+        latest_market_quotes=EmptyCache(),
+        order_reconciliation=Reconciliation(),
+        is_transient_error=lambda error: isinstance(error, ConnectionError),
+        on_account_snapshot=lambda event: ordering.append(
+            ("book", event.client_order_id)
+        ),
+    )
+    if failures == 3:
+        with pytest.raises(ConnectionError, match="temporary persistence failure"):
+            await runtime.run(Source())
+        assert ordering == [("reconcile", "entry-1")] * 3
+        return
+    await runtime.run(Source())
+    assert ordering == [
+        ("reconcile", "entry-1"),
+        ("reconcile", "entry-1"),
+        ("reconcile", "entry-1"),
+        ("book", "entry-1"),
+        ("reconcile", "entry-2"),
+        ("book", "entry-2"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transient_order_failure_requests_account_fact_recovery() -> None:
+    event = SimpleNamespace(
+        event_type="ORDER_TRADE_UPDATE",
+        client_order_id="entry-1",
+        has_fill=False,
+        received_at=NOW,
+        symbols=(),
+    )
+    recoveries: list[str] = []
+    published: list[object] = []
+
+    class Reconciliation:
+        run_id = "run-1"
+
+        async def reconcile_account_event(self, _event: object) -> None:
+            raise ConnectionError("order persistence temporarily unavailable")
+
+    class EmptyCache:
+        def for_symbols(self, _symbols: tuple[str, ...]) -> tuple[object, ...]:
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(),  # type: ignore[arg-type]
+        latest_market_states=EmptyCache(),  # type: ignore[arg-type]
+        latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
+        order_reconciliation=Reconciliation(),  # type: ignore[arg-type]
+        is_transient_error=lambda error: isinstance(error, ConnectionError),
+        on_account_snapshot=published.append,
+        on_account_snapshot_recovery=recoveries.append,
+    )
+
+    await runtime._process_event(event)  # type: ignore[arg-type]
+
+    assert published == []
+    assert recoveries == ["account_event_processing_failed:ConnectionError"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_reconciles_order_before_publishing_snapshot() -> None:
     event = SimpleNamespace(
         event_type="ORDER_TRADE_UPDATE",
@@ -291,10 +427,15 @@ async def test_blocked_exit_repair_does_not_block_account_publication():
         await asyncio.Event().wait()
 
     repair = LiveOrderReconciliation(
-        order_repository=SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=())),
-        state_machine=SimpleNamespace(), run_id="run", interval_seconds=3600,
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=())
+        ),
+        state_machine=SimpleNamespace(),
+        run_id="run",
+        interval_seconds=3600,
         recover_exits=recover,
     )
+
     class Cache:
         def for_symbols(self, symbols):
             return ()
@@ -305,13 +446,21 @@ async def test_blocked_exit_repair_does_not_block_account_publication():
         repair.request_recovery()
 
     runtime = LiveAccountEventRuntime(
-        daemon=object(), latest_market_states=Cache(), latest_market_quotes=Cache(),
-        order_reconciliation=repair, is_transient_error=lambda error: False,
+        daemon=object(),
+        latest_market_states=Cache(),
+        latest_market_quotes=Cache(),
+        order_reconciliation=repair,
+        is_transient_error=lambda error: False,
         on_account_snapshot=publish,
     )
     worker = asyncio.create_task(repair.run_requested())
-    event = SimpleNamespace(event_type="ACCOUNT_UPDATE", client_order_id=None,
-                            has_fill=False, symbols=(), sequence=1)
+    event = SimpleNamespace(
+        event_type="ACCOUNT_UPDATE",
+        client_order_id=None,
+        has_fill=False,
+        symbols=(),
+        sequence=1,
+    )
     try:
         await runtime._process_event(event)
         await asyncio.wait_for(started.wait(), 1)

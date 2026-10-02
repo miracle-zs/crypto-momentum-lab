@@ -810,6 +810,14 @@ class OrderExecutionCoordinator:
                 ) from err
 
             if isinstance(act_res, Blocked):
+                log.warning(
+                    "order_execution_book_command_blocked",
+                    account_label=self._account_label,
+                    client_order_id=plan.client_order_id,
+                    symbol=plan.symbol,
+                    reason=act_res.reason,
+                    diagnostics=act_res.diagnostics,
+                )
                 raise OrderPreSubmissionError(
                     f"Failed to create position entry for "
                     f"{plan.client_order_id}: {act_res.reason}"
@@ -909,6 +917,14 @@ class OrderExecutionCoordinator:
             ) from err
 
         if isinstance(act_res, Blocked):
+            log.warning(
+                "order_execution_book_command_blocked",
+                account_label=self._account_label,
+                client_order_id=plan.client_order_id,
+                symbol=plan.symbol,
+                reason=act_res.reason,
+                diagnostics=act_res.diagnostics,
+            )
             cause = (
                 ExecutionReadinessError(act_res.reason)
                 if isinstance(act_res, PositionNotReady)

@@ -408,3 +408,142 @@ async def test_repair_reads_exact_account_run_and_hedge_side():
     assert set(queries[1].params.values()) == {"live", "account-3", "TESTUSDT"}
     tx.load_head.assert_awaited_once_with(request.key)
     assert tx.load_recovery.await_args.kwargs["scope"] == request.scope
+
+
+async def test_repair_filters_checkpoint_fills_without_forging_cursor_coverage():
+    from dataclasses import asdict
+    from datetime import timedelta
+    from unittest.mock import Mock
+
+    import crypto_momentum_lab.persistence.postgres.position_repair as adapter
+    from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFillLoadProvenance,
+        FactCoverageInterval,
+        FactCoverageStatus,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        PositionRecoveryCheckpoint,
+    )
+    from crypto_momentum_lab.persistence.postgres.models import (
+        AccountFillEventRow,
+        AccountFillReconciliationCursorRow,
+    )
+
+    request, loaded = repair_case()
+    checkpoint_time = NOW - timedelta(minutes=10)
+    fill_time = NOW - timedelta(minutes=5)
+    cursor_time = NOW
+
+    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+        stable_snapshot_anchor_id,
+    )
+
+    zero_snap_time = checkpoint_time - timedelta(hours=1)
+    zero_snapshot = AccountPositionSnapshot(
+        environment=request.key.environment,
+        account_label=request.key.account_label,
+        symbol=request.key.symbol,
+        position_side=request.key.position_side.value,
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        mark_price=Decimal("10"),
+        notional=Decimal("0"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=zero_snap_time,
+        raw_payload={},
+    )
+    anchor_id = stable_snapshot_anchor_id(zero_snapshot)
+
+    provenance = AccountFillLoadProvenance(
+        stream_scope=request.scope,
+        load_id="scan-1",
+        scan_origin_from_id=None,
+        scan_origin_start_time_ms=1000,
+        request_from_id=None,
+        next_from_id=None,
+        page_count=1,
+        page_exhausted=True,
+        truncated=False,
+        checked_through=checkpoint_time,
+        observed_at=checkpoint_time,
+        source_anchor_id=anchor_id,
+        source_anchor_event_cut=zero_snap_time,
+        source_anchor_kind="zero_snapshot",
+    )
+    coverage = FactCoverageInterval(
+        start_at=zero_snap_time,
+        end_at=checkpoint_time,
+        source_cursor="scan-1",
+        status=FactCoverageStatus.CONFIRMED,
+        stream_scope=request.scope,
+        evidence_observed_at=checkpoint_time,
+        checkpoint_id="chk-1",
+        checkpoint_event_cut=checkpoint_time,
+        load_provenance=provenance,
+        page_exhausted=True,
+        not_truncated=True,
+    )
+    facts_at_checkpoint = AccountFacts(
+        position_key=request.key,
+        stream_scope=request.scope,
+        coverage=coverage,
+        snapshots=(zero_snapshot,),
+        fill_load_provenance=provenance,
+    )
+    checkpoint = PositionRecoveryCheckpoint(
+        key=request.key,
+        stream_scope=request.scope,
+        event_cut=checkpoint_time,
+        projection=PositionLedger(request.key).project(facts_at_checkpoint),
+        facts_hash=facts_at_checkpoint.compute_facts_hash(),
+        source_revision=1,
+        coverage=coverage,
+        checkpoint_id="chk-1",
+    )
+    cut_with_checkpoint = DurableJournalCut(
+        scope=request.scope,
+        facts=replace(facts_at_checkpoint, recovery_checkpoint=checkpoint),
+        revision=1,
+        as_of=NOW,
+        checkpoint=checkpoint,
+    )
+
+    new_fill = replace(
+        loaded.account_fills[0],
+        trade_id="fill-new",
+        trade_at=fill_time,
+    )
+
+    results = [Mock(), Mock()]
+    results[0].all.return_value = ["order-1"]
+    # DB query returns new_fill
+    results[1].all.return_value = [AccountFillEventRow(**asdict(new_fill))]
+
+    cursor_row = AccountFillReconciliationCursorRow(
+        environment=request.key.environment,
+        account_label=request.key.account_label,
+        symbol=request.key.symbol,
+        start_time_ms=1000,
+        last_checked_at=cursor_time,
+    )
+
+    tx = AsyncMock()
+    tx.session.scalars.side_effect = results
+    tx.session.scalar.return_value = cursor_row
+    tx.load_head.return_value = None
+    tx.load_recovery.return_value = cut_with_checkpoint
+
+    actual = await adapter.PostgresPositionRepairTransaction(tx).load_repair_facts(
+        request
+    )
+
+    # 1. account_fills only has the new fill
+    assert actual.account_fills == (new_fill,)
+    # A polling timestamp and locally stored fills do not prove that a REST
+    # scan exhausted every page between the checkpoint and the new snapshot.
+    assert actual.cut.facts.coverage == coverage
+    assert actual.cut.facts.fill_load_provenance == provenance
