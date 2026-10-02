@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, func, select
@@ -27,6 +28,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillEventRow,
     ExchangeFillRow,
     ExchangeOrderEventRow,
     ExchangeOrderRow,
@@ -59,6 +61,109 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("price_source", ["event", "fills", "missing", "wrong_quantity", "zero_cancel", "account_fills", "nested_account_fills", "wrong_account"])
+async def test_terminal_receipt_requires_exact_priced_execution_facts(order_repository, price_source):
+    plans, _, reads, events, submissions, factory = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    quantity = Decimal(0) if price_source == "zero_cancel" else plan.quantity
+    details = {"executed_quantity": str(quantity)}
+    if price_source == "event":
+        details["average_price"] = "100"
+    elif price_source == "wrong_quantity":
+        await events.append_order_event(ExchangeOrderEvent("priced-partial", plan.client_order_id,
+            ExchangeOrderState.PARTIALLY_FILLED, NOW, "12345", {"executed_quantity": str(quantity / 2), "average_price": "100"}))
+    if price_source == "fills":
+        await events.save_fill(ExchangeOrderFill("fill-receipt", plan.client_order_id,
+            "real-trade", Decimal(100), quantity, Decimal(0), "USDT", NOW, {}))
+    if price_source in {"account_fills", "nested_account_fills", "wrong_account"}:
+        account = f"test-receipt-{uuid4().hex}"
+        async with factory.begin() as session:
+            session.add(ExecutionCommandRow(command_id=plan.client_order_id, client_order_id=plan.client_order_id,
+                command="entry", status="unknown", requested_at=NOW, details={"scope": {
+                    "environment": "live", "account_label": account, "symbol": plan.symbol,
+                    "position_side": plan.position_side.value,
+                }}))
+            # Same exchange ID in another account must not influence the receipt.
+            session.add(AccountFillEventRow(environment="live", account_label=account + "-other",
+                symbol=plan.symbol, trade_id="other-account", order_id="12345", side=plan.side,
+                price=Decimal(200), quantity=quantity, realized_pnl=Decimal(0), fee=Decimal(0),
+                fee_asset="USDT", trade_at=NOW, raw_payload={"positionSide": plan.position_side.value}))
+            if price_source in {"account_fills", "nested_account_fills"}:
+                session.add(AccountFillEventRow(environment="live", account_label=account,
+                    symbol=plan.symbol, trade_id="actual-trade", order_id="12345", side=plan.side,
+                    price=Decimal(100), quantity=quantity, realized_pnl=Decimal(0), fee=Decimal(0),
+                    fee_asset="USDT", trade_at=NOW, raw_payload={"event": {"o": {"ps": plan.position_side.value}}} if price_source == "nested_account_fills" else {"positionSide": plan.position_side.value}))
+    state = ExchangeOrderState.CANCELED if price_source == "zero_cancel" else ExchangeOrderState.FILLED
+    await events.append_order_event(ExchangeOrderEvent("terminal", plan.client_order_id, state,
+        NOW + timedelta(seconds=1), None if price_source == "zero_cancel" else "12345", details))
+    order = await reads.load_order(plan.client_order_id)
+    assert not await reads.load_unresolved_orders(plan.run_id)
+    if price_source in {"missing", "wrong_quantity", "wrong_account"}:
+        assert order.terminal_receipt is None
+    else:
+        receipt = order.terminal_receipt
+        assert receipt.state == state
+        assert receipt.executed_quantity == quantity
+        assert receipt.average_price == (Decimal(0) if quantity == 0 else Decimal(100))
+
+
+async def test_restored_unknown_with_terminal_order_replays_through_real_postgres_book(order_repository):
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.command_models import (
+        DispatchState,
+        ExecutionScope,
+    )
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
+        recover_restored_commands,
+    )
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+        ExecutionBookHeadRow,
+    )
+    from tests.integration.persistence.test_authority_book_transactions import _book
+
+    plans, _, reads, events, submissions, factory = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    await events.append_order_event(ExchangeOrderEvent("terminal", plan.client_order_id, ExchangeOrderState.FILLED,
+        NOW, "12345", {"executed_quantity": str(plan.quantity), "average_price": "100"}))
+    account = f"test-replay-{uuid4().hex}"
+    scope = ExecutionScope("live", account, plan.symbol, plan.position_side)
+    book = _book(factory)
+    await book.restore(account_label=account)
+    fill = AccountFillEvent("live", account, plan.symbol, "real-trade", "12345", "BUY", Decimal(100),
+        plan.quantity, Decimal(0), Decimal(0), "USDT", NOW, {"positionSide": plan.position_side.value})
+    await book.observe(ExecutionEvidence("true-fill", scope, NOW, fill=fill, stream_id="legacy", stream_epoch="one"))
+    book.register_prepared_command(TradeCommand(plan.client_order_id, scope.to_position_key(), TradeCommandType.ENTRY,
+        StrategySide.LONG, EntryType.LIMIT, plan.quantity, limit_price=plan.price, created_at=NOW), scope)
+    await book.mark_dispatching(plan.client_order_id)
+    async with factory.begin() as session:
+        await session.execute(delete(ExecutionBookHeadRow).where(ExecutionBookHeadRow.account_label == account))
+    restored = _book(factory)
+    await restored.restore(account_label=account)
+    assert restored.command_requires_recovery(plan.client_order_id)
+    coordinator = OrderExecutionCoordinator(backend=object(), account_label=account, environment="live", execution_book=restored)
+    try:
+        assert not await recover_restored_commands(book=restored, coordinator=coordinator, orders=reads)
+        assert restored.get_outbox(plan.client_order_id).state == DispatchState.TERMINAL
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert not restarted.command_requires_recovery(plan.client_order_id)
+        assert (await restarted.read(scope)).total_quantity == plan.quantity
+    finally:
+        await coordinator.aclose()
 
 
 @pytest.mark.parametrize("terminal", [ExchangeOrderState.FILLED, ExchangeOrderState.CANCELED])

@@ -1,5 +1,6 @@
 """Read durable exchange orders without exposing lifecycle writes."""
 
+from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -8,13 +9,18 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import crypto_momentum_lab.domain.execution.order_read_models as order_read_models
+from crypto_momentum_lab.domain.account.models import extract_fill_position_side
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillEventRow,
+    ExchangeFillRow,
+    ExchangeOrderEventRow,
     ExchangeOrderRow,
+    ExecutionCommandRow,
     OrderIntentExecutionRow,
 )
 
@@ -40,7 +46,6 @@ class PostgresOrderReadRepository:
             return None
         value = details.get("desired_notional")
         return None if value is None else Decimal(str(value))
-
 
     async def load_unresolved_orders(
         self,
@@ -75,7 +80,113 @@ class PostgresOrderReadRepository:
                     ExchangeOrderRow.client_order_id == client_order_id
                 )
             )
-        return None if row is None else _persisted_order(row)
+            if row is None:
+                return None
+            order = _persisted_order(row)
+            receipt = None
+            if order.state.terminal:
+                quantity = order.executed_quantity
+                average = Decimal(0) if quantity == 0 else None
+                if quantity > 0:
+                    events = (
+                        await session.scalars(
+                            select(ExchangeOrderEventRow)
+                            .where(
+                                ExchangeOrderEventRow.client_order_id
+                                == client_order_id,
+                            )
+                            .order_by(ExchangeOrderEventRow.occurred_at.desc())
+                        )
+                    ).all()
+                    for event in events:
+                        details = event.details
+                        event_quantity = details.get("executed_quantity")
+                        price = details.get("average_price")
+                        if (
+                            event_quantity is not None
+                            and price is not None
+                            and Decimal(str(event_quantity)) == quantity
+                        ):
+                            parsed_price = Decimal(str(price))
+                            if not parsed_price.is_finite() or parsed_price < 0:
+                                raise ValueError("persisted order price is invalid")
+                            if parsed_price > 0:
+                                average = parsed_price
+                                break
+                    if average is None:
+                        fills = (
+                            await session.scalars(
+                                select(ExchangeFillRow).where(
+                                    ExchangeFillRow.client_order_id == client_order_id,
+                                )
+                            )
+                        ).all()
+                        if (
+                            sum((fill.quantity for fill in fills), Decimal(0))
+                            == quantity
+                        ):
+                            average = (
+                                sum(
+                                    (fill.quantity * fill.price for fill in fills),
+                                    Decimal(0),
+                                )
+                                / quantity
+                            )
+                    if average is None and order.exchange_order_id is not None:
+                        scope = await session.scalar(
+                            select(ExecutionCommandRow.details["scope"]).where(
+                                ExecutionCommandRow.command_id == client_order_id,
+                            )
+                        )
+                        if scope is not None:
+                            if (
+                                scope["symbol"] != row.symbol
+                                or scope["position_side"] != row.position_side
+                            ):
+                                raise ValueError(
+                                    "persisted command and order position disagree"
+                                )
+                            account_fills = (
+                                await session.scalars(
+                                    select(AccountFillEventRow).where(
+                                        AccountFillEventRow.environment
+                                        == scope["environment"],
+                                        AccountFillEventRow.account_label
+                                        == scope["account_label"],
+                                        AccountFillEventRow.symbol == row.symbol,
+                                        AccountFillEventRow.order_id
+                                        == order.exchange_order_id,
+                                        AccountFillEventRow.side == row.side,
+                                    )
+                                )
+                            ).all()
+                            matching_fills = [
+                                fill
+                                for fill in account_fills
+                                if (
+                                    extract_fill_position_side(fill.raw_payload)
+                                    or "BOTH"
+                                )
+                                == row.position_side
+                            ]
+                            traded_quantity = sum(
+                                (fill.quantity for fill in matching_fills), Decimal(0)
+                            )
+                            traded_quote = sum(
+                                (fill.quantity * fill.price for fill in matching_fills),
+                                Decimal(0),
+                            )
+                            if traded_quantity == quantity:
+                                average = traded_quote / quantity
+                if average is not None:
+                    receipt = order_read_models.PersistedOrderReceipt(
+                        client_order_id,
+                        order.state,
+                        order.exchange_order_id,
+                        quantity,
+                        average,
+                    )
+            return replace(order, terminal_receipt=receipt)
 
 
 def _persisted_order(row: ExchangeOrderRow) -> order_read_models.PersistedExchangeOrder:

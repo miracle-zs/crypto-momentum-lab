@@ -12,12 +12,36 @@ from crypto_momentum_lab.domain.execution.order_state import (
 
 
 @dataclass(frozen=True, slots=True)
+class PersistedOrderReceipt:
+    """A priced terminal exchange fact recovered from durable observations."""
+
+    client_order_id: str
+    state: ExchangeOrderState
+    exchange_order_id: str | None
+    executed_quantity: Decimal
+    average_price: Decimal
+
+    def __post_init__(self) -> None:
+        if not self.state.terminal:
+            raise ValueError("persisted terminal receipt must be terminal")
+        if not self.executed_quantity.is_finite() or self.executed_quantity < 0:
+            raise ValueError(
+                "persisted executed quantity must be finite and nonnegative"
+            )
+        if not self.average_price.is_finite() or self.average_price < 0:
+            raise ValueError("persisted average price must be finite and nonnegative")
+        if self.executed_quantity > 0 and self.average_price <= 0:
+            raise ValueError("persisted positive execution requires a priced fact")
+
+
+@dataclass(frozen=True, slots=True)
 class PersistedExchangeOrder:
     plan: OrderExecutionPlan
     state: ExchangeOrderState
     exchange_order_id: str | None
     updated_at: datetime
     executed_quantity: Decimal = Decimal("0")
+    terminal_receipt: PersistedOrderReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)

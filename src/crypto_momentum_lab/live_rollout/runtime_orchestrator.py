@@ -97,6 +97,9 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
 )
+from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
+    recover_restored_commands,
+)
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
@@ -988,6 +991,9 @@ async def run_live_daemon(
             state_machine=execution_coordinator,
             run_id=session_id,
             recover_exits=recover_decision_exits,
+            recover_commands=lambda: recover_restored_commands(
+                book=execution_book, coordinator=execution_coordinator, orders=order_read_repository,
+            ),
         )
         await order_reconciliation.reconcile_all(include_confirmed=True)
         log_startup_phase("order_state_reconciled")

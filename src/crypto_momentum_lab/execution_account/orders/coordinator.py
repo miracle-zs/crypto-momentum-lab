@@ -53,6 +53,7 @@ from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
 from crypto_momentum_lab.domain.execution.observation_models import (
     EvidenceConflict,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrderReceipt
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -1138,6 +1139,24 @@ class OrderExecutionCoordinator:
         result: OrderExecutionResult,
     ) -> None:
         await self._observe_order_result_in_execution_book(plan, result)
+
+    async def observe_recovered_receipt(
+        self, plan: OrderExecutionPlan, receipt: PersistedOrderReceipt,
+    ) -> None:
+        """Replay a durable exchange terminal fact through normal Book settlement."""
+        if self._closed:
+            raise RuntimeError("Order execution coordinator is closed")
+        if receipt.client_order_id != plan.client_order_id:
+            raise ValueError("recovered receipt client order id mismatch")
+        await self._observe_returned_order_result(
+            plan,
+            OrderExecutionResult(
+                receipt.client_order_id, receipt.state, receipt.exchange_order_id,
+                executed_quantity=receipt.executed_quantity,
+                average_price=receipt.average_price,
+                plan=plan,
+            ),
+        )
 
     async def submit(
         self,

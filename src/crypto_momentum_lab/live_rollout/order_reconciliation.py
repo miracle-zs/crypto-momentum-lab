@@ -46,6 +46,7 @@ class LiveOrderReconciliation:
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     on_unknown_order: Callable[[str], None] | None = None
     recover_exits: Callable[[], Awaitable[bool]] | None = None
+    recover_commands: Callable[[], Awaitable[bool]] | None = None
     repair_positions: Callable[[], Awaitable[None]] | None = None
     request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
     _requested: asyncio.Event = field(
@@ -126,6 +127,8 @@ class LiveOrderReconciliation:
         self._requested_runs.clear()
         pending = False
         try:
+            if self.recover_commands is not None:
+                pending = await self.recover_commands()
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
                     if not include_confirmed and order.state in {

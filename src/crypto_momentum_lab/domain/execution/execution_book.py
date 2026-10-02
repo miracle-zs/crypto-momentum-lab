@@ -1661,6 +1661,13 @@ class ExecutionBook:
         """Returns the outbox record for command_id if found."""
         return self._outbox_by_command_id.get(command_id)
 
+    def command_requires_recovery(self, command_id: str) -> bool:
+        """Expose the command's dispatch/settlement gate to its repair owner."""
+        return (
+            command_id in self._recovery_required_commands
+            or command_id in self._dispatch_reconciliation_required_commands
+        )
+
     def list_outbox(
         self,
         scope: ExecutionScope | None = None,
