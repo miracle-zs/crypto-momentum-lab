@@ -2,10 +2,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowDirection,
     OrderFlowImpulseConfig,
+    event_study,
     find_order_flow_impulses,
     summarize_order_flow_impulses,
 )
@@ -195,6 +198,70 @@ def test_applies_causal_five_minute_volume_ratio_filter() -> None:
         )
         == ()
     )
+
+
+@pytest.mark.parametrize("confirmation", (1, 2, 5, 145))
+@pytest.mark.parametrize("cooldown", (0, 4))
+@pytest.mark.parametrize("volume_threshold", ("0", "1.25"))
+def test_volume_scan_bound_preserves_legacy_events(
+    monkeypatch: pytest.MonkeyPatch,
+    confirmation: int,
+    cooldown: int,
+    volume_threshold: str,
+) -> None:
+    config = replace(
+        _config(),
+        confirmation_buckets=confirmation,
+        cooldown_buckets=cooldown,
+        min_notional_5m_vs_30m=Decimal(volume_threshold),
+    )
+    price = Decimal("100")
+    items = []
+    for i in range(190):
+        expanding = i % 40 >= 25
+        price += Decimal("0.8") if expanding else Decimal("-0.3")
+        notional = Decimal("300") if expanding else Decimal("100")
+        items.append(_state(i, price, notional=notional, buy=notional * Decimal("0.9")))
+    rising = tuple(items)
+    falling = tuple(
+        replace(
+            state,
+            symbol="ETHUSDT",
+            open_price=Decimal("200") - state.open_price,
+            high_price=Decimal("200") - state.high_price,
+            low_price=Decimal("200") - state.low_price,
+            close_price=Decimal("200") - state.close_price,
+            midpoint=Decimal("200") - state.midpoint,
+            aggressive_buy_notional=state.aggressive_sell_notional,
+            aggressive_sell_notional=state.aggressive_buy_notional,
+        )
+        for state in rising
+    )
+    gap = rising[:130] + rising[131:]
+    missing = (
+        rising[:138] + (_state(138, None, notional=Decimal("100")),) + rising[139:]
+    )
+    for states in (
+        rising[:139],
+        rising[:140],
+        rising,
+        falling,
+        gap,
+        missing,
+        tuple(reversed(rising + falling)),
+    ):
+        actual = find_order_flow_impulses(states, config)
+        with monkeypatch.context() as legacy:
+            legacy.setattr(
+                event_study,
+                "_first_candidate_index",
+                lambda cfg: max(
+                    cfg.baseline_window_buckets + cfg.impulse_window_buckets - 1,
+                    cfg.breakout_window_buckets,
+                ),
+            )
+            expected = find_order_flow_impulses(states, config)
+        assert actual == expected
 
 
 def _config() -> OrderFlowImpulseConfig:

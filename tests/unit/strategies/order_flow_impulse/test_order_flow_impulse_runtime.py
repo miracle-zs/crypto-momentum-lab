@@ -2,6 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RejectionReason,
@@ -15,6 +17,7 @@ from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
     OrderFlowImpulseRuntimeConfig,
     OrderFlowImpulseRuntimeStrategy,
+    event_study,
 )
 
 
@@ -77,6 +80,31 @@ def test_volume_filter_requires_140_consecutive_states_for_warmup() -> None:
     strategy = _strategy(min_notional_5m_vs_30m=Decimal("1.50"))
 
     assert strategy.required_data().warmup_buckets == 140
+
+
+def test_volume_filter_does_not_recompute_impossible_historical_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = _strategy(min_notional_5m_vs_30m=Decimal("1.25"))
+    states = tuple(_state(i, Decimal("100")) for i in range(156))
+    for state in states[:-1]:
+        strategy.warm_market_state(state)
+    candidate_calls: list[int] = []
+    original = event_study._candidate_at
+
+    def record_candidate(states, index, config):
+        candidate_calls.append(index)
+        return original(states, index, config)
+
+    monkeypatch.setattr(event_study, "_candidate_at", record_candidate)
+
+    decision = strategy.on_market_state(states[-1])
+
+    assert decision.signals == ()
+    # With 140 required buckets, only 17 detection points in this 156-state
+    # buffer can possibly pass the volume filter. Earlier impulse calculations
+    # cannot contribute either a signal or an accepted-event cooldown.
+    assert len(candidate_calls) <= 17
 
 
 def test_orderflow_impulse_restores_checkpoint() -> None:

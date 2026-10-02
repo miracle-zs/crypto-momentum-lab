@@ -183,10 +183,18 @@ def _states_by_symbol(
 
 
 def _first_candidate_index(config: OrderFlowImpulseConfig) -> int:
-    return max(
+    first_index = max(
         config.baseline_window_buckets + config.impulse_window_buckets - 1,
         config.breakout_window_buckets,
     )
+    if config.min_notional_5m_vs_30m > 0:
+        # Volume eligibility is evaluated at confirmation, not at the impulse
+        # trigger. Earlier detections cannot build an event or start cooldown.
+        first_index = max(
+            first_index,
+            VOLUME_RATIO_TOTAL_BUCKETS - config.confirmation_buckets,
+        )
+    return first_index
 
 
 def _candidate_at(
