@@ -414,6 +414,160 @@ async def test_unrelated_submission_corruption_still_propagates():
         )
 
 
+async def test_stale_exit_projection_defers_before_post_and_invalidates_context():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from tests.unit.execution_account.orders.test_coordinator import (
+        _submission_preparation,
+    )
+
+    book = ExecutionBook()
+    backend, repository = AsyncMock(), AsyncMock()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=book,
+        reservation_repository=AsyncMock(),
+    )
+    coordinator.configure_submission(repository)
+    plan = OrderExecutionPlan(
+        intent_id="exit",
+        run_id="run-1",
+        client_order_id="stale-exit",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=NOW,
+        batch_id="real-batch",
+        projection_version="pv_outdated",
+    )
+
+    class QueuedSubmission:
+        async def execute(self, *_args, **_kwargs):
+            return await coordinator.prepare_and_execute(
+                plan,
+                preparation=_submission_preparation(plan),
+            )
+
+    processor = _processor(QueuedSubmission())
+    invalidations = []
+    processor._invalidate_context_cache = lambda: invalidations.append(True)
+    try:
+        for _ in range(2):
+            result = await processor.process_requests(
+                (
+                    LiveExitOrderRequest(
+                        candidate=replace(_intent(), reduce_only=True),
+                        quantity=Decimal("1"),
+                    ),
+                ),
+                state=_state(),
+                context=_context(),
+            )
+            assert result == (0, 0, "pending_live_context:BTCUSDT")
+        assert invalidations == [True, True]
+        backend.submit.assert_not_awaited()
+        repository.prepare_submission.assert_not_awaited()
+        assert book.get_outbox(plan.client_order_id) is None
+    finally:
+        await coordinator.aclose()
+
+
+def test_recovery_rebuilds_current_target_batch_without_closing_addons():
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.domain.strategy import StrategySide
+    from crypto_momentum_lab.live_rollout.exit_processor import (
+        _build_exit_recovery_candidate,
+    )
+    from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+
+    position = ManagedLivePosition(
+        "BTCUSDT",
+        StrategySide.LONG,
+        FuturesPositionSide.LONG,
+        Decimal("0.4"),
+        Decimal("100"),
+        NOW,
+        batch_id="target",
+        projection_version="pv_current",
+    )
+    context = SimpleNamespace(
+        managed_positions=(
+            position,
+            replace(position, batch_id="new-addon", quantity=Decimal("2")),
+        )
+    )
+    plan = OrderExecutionPlan(
+        "exit",
+        "run-1",
+        "original",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("1"),
+        None,
+        True,
+        NOW,
+        position_side=FuturesPositionSide.LONG,
+        batch_id="target",
+        projection_version="pv_old",
+    )
+    source = replace(
+        _intent(),
+        reduce_only=True,
+        features={
+            "batch_id": "target",
+            "projection_version": "pv_old",
+        },
+    )
+    candidate = _build_exit_recovery_candidate(
+        plan=plan,
+        source_candidate=source,
+        context=context,
+        state=_state(),
+        now=NOW,
+        reference_price=Decimal("100"),
+        root_client_order_id="original",
+        attempt=1,
+        quantity=Decimal("2.4"),
+    )
+    assert candidate.features["quantity"] == "0.4"
+    assert candidate.features["projection_version"] == "pv_current"
+    assert candidate.features["batch_id"] == "target"
+    assert candidate.desired_notional == Decimal("40")
+    context.managed_positions = context.managed_positions[1:]
+    assert (
+        _build_exit_recovery_candidate(
+            plan=plan,
+            source_candidate=source,
+            context=context,
+            state=_state(),
+            now=NOW,
+            reference_price=Decimal("100"),
+            root_client_order_id="original",
+            attempt=1,
+            quantity=Decimal("2"),
+        )
+        is None
+    )
+
+
 async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinator():
     from unittest.mock import MagicMock
 

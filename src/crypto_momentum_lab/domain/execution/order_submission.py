@@ -22,6 +22,10 @@ class OrderRecoveryPendingError(OrderPreSubmissionError):
     """Known recovery admission rejection, with no exchange write attempted."""
 
 
+class OrderProjectionConflictError(OrderPreSubmissionError):
+    """The unaccepted plan must be rebuilt from current position facts."""
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedOrderSubmission:
     """Durable write-ahead journal returned by an atomic order preparation."""

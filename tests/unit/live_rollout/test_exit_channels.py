@@ -279,6 +279,42 @@ async def test_candle_conflict_stays_pending_until_success():
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("conflicts", [1, 5])
+async def test_stale_context_retry_is_bounded_and_retains_original_candle(
+    conflicts,
+):
+    event = SimpleNamespace(
+        candle=SimpleNamespace(
+            symbol="BTCUSDT", candle_start=datetime(2026, 8, 4, tzinfo=UTC)
+        )
+    )
+    calls = 0
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            nonlocal calls
+            calls += 1
+            return (
+                "pending_live_context:BTCUSDT" if calls <= conflicts else None
+            )
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(),
+        is_transient_error=lambda error: False,
+    )
+    key = (event.candle.symbol, event.candle.candle_start)
+    runtime._pending_candles[key] = event
+    await runtime._evaluate_candle(key)
+    assert calls == min(conflicts + 1, 3)
+    assert (key in runtime._pending_candles) is (conflicts >= 3)
+    if conflicts >= 3:
+        assert runtime._pending_candles[key] is event
+        await runtime._evaluate_candle(key)
+    assert key not in runtime._pending_candles
+
+
 @pytest.mark.parametrize("channel", ["quote", "grace"])
 async def test_context_refresh_wait_does_not_fault_or_back_off(channel):
     state = SimpleNamespace(symbol="BTCUSDT")

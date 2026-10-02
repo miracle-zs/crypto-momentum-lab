@@ -64,6 +64,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     FinalSubmissionAdmission,
     OrderPreSubmissionError,
+    OrderProjectionConflictError,
     OrderRecoveryPendingError,
     OrderSubmissionPreparation,
     OrderSubmissionRepository,
@@ -868,7 +869,7 @@ class OrderExecutionCoordinator:
                     f"exit {plan.client_order_id} has no Book projection token"
                 )
             if proj_ver != current_view.projection_version:
-                raise OrderPreSubmissionError(
+                raise OrderProjectionConflictError(
                     f"exit {plan.client_order_id} was allocated from stale position "
                     f"projection {proj_ver}; current projection is "
                     f"{current_view.projection_version}"
@@ -915,6 +916,8 @@ class OrderExecutionCoordinator:
                 created_at=plan.created_at,
             )
             act_res = await self._execution_book.act(req)
+        except OrderProjectionConflictError:
+            raise
         except Exception as err:
             log.error(
                 "order_reservation_creation_failed_refusing_submission",
@@ -945,7 +948,7 @@ class OrderExecutionCoordinator:
                 f"{plan.client_order_id}: {act_res.reason}"
             ) from cause
         if isinstance(act_res, StaleView):
-            raise OrderPreSubmissionError(
+            raise OrderProjectionConflictError(
                 f"Failed to create position reservation (stale view) for "
                 f"{plan.client_order_id}: {act_res.reason}"
             )

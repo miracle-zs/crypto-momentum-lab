@@ -28,6 +28,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderProjectionConflictError,
+)
 from crypto_momentum_lab.domain.market.models import (
     JsonValue,
     MarketState15s,
@@ -680,6 +683,7 @@ class LiveExitProcessor:
         )
         if recovery_candidate is None:
             return observed_result
+        recovery_quantity = Decimal(str(recovery_candidate.features["quantity"]))
         self._exit_recovery_attempts[root] = recovery_attempt
         delay_index = min(
             recovery_attempt - 1,
@@ -696,6 +700,13 @@ class LiveExitProcessor:
                 context=context,
                 reference_price=reference_price,
             )
+        except OrderProjectionConflictError:
+            self._invalidate_context_cache()
+            self._exit_recovery_attempts[root] = current_attempt
+            self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+            )
+            return observed_result
         except Exception as error:
             if not (
                 _is_position_readiness_guard(error) or _is_missing_position_facts(error)
@@ -810,6 +821,16 @@ class LiveExitProcessor:
                     context=context,
                     reference_price=reference_price,
                 )
+            except OrderProjectionConflictError:
+                # Reevaluate the trigger with fresh batches and quantities.
+                # Retrying this candidate would merely reuse its old allocation.
+                self._invalidate_context_cache()
+                log.info(
+                    "live_exit_projection_refresh_required",
+                    symbol=state.symbol,
+                    candidate_id=request.candidate.candidate_id,
+                )
+                return None, context, f"pending_live_context:{state.symbol}"
             except Exception as error:
                 if _is_position_readiness_guard(error):
                     log.warning(
@@ -990,6 +1011,9 @@ class LiveExitProcessor:
                         context=context,
                         reference_price=reference_price,
                     )
+                except OrderProjectionConflictError:
+                    self._invalidate_context_cache()
+                    return approved, submitted, f"pending_live_context:{state.symbol}"
                 except Exception as error:
                     if _is_missing_position_facts(error):
                         log.error(
@@ -1161,6 +1185,26 @@ def _build_exit_recovery_candidate(
     signal_id = f"live-exit-recovery-signal-{uuid5(NAMESPACE_URL, candidate_id)}"
     base = source_candidate
     features: dict[str, JsonValue] = {} if base is None else dict(base.features)
+    target_batch_id = plan.batch_id or features.get("batch_id")
+    if target_batch_id:
+        target = next(
+            (
+                batch
+                for position in context.managed_positions
+                if position.symbol == plan.symbol
+                and position.position_side == plan.position_side
+                for batch in position.batch_views()
+                if batch.batch_id == target_batch_id
+            ),
+            None,
+        )
+        if target is None:
+            # The original batch has closed. New add-ons belong to their own
+            # exit decision and must not inherit this recovery request.
+            return None
+        quantity = min(quantity, target.quantity)
+        features["batch_id"] = target.batch_id
+        features["projection_version"] = target.projection_version
     features.update(
         {
             "recovery": True,

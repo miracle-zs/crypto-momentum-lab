@@ -182,6 +182,10 @@ class LiveExitChannelRuntime:
                         (event.candle.symbol,)
                     )), None),
                 )
+                if is_pending_context_refresh(failure) and attempt < 2:
+                    # A projection fence invalidated the context. Reevaluate
+                    # the original event, never the old order allocation.
+                    continue
                 break
             except asyncio.CancelledError:
                 raise
