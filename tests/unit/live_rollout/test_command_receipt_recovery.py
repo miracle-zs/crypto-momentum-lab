@@ -244,3 +244,63 @@ async def test_receipt_without_real_trades_keeps_settlement_gate():
         assert (await book.read(SCOPE)).total_quantity == 0
     finally:
         await coordinator.aclose()
+
+
+async def test_restored_completed_exit_reservation_can_prove_terminal_settlement():
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class RestoreUnitOfWork(ObservationUnitOfWork):
+        async def load_positions(self, **kwargs):
+            return ()
+
+    reservation = PositionReservation(
+        reservation_id="closed-reservation", command_id="exit",
+        position_key=SCOPE.to_position_key(), batch_id="closed-batch",
+        reserved_quantity=Decimal("2"), consumed_quantity=Decimal("2"),
+        created_at=NOW,
+    )
+    commands = AsyncMock()
+    commands.load_active_execution_commands.return_value = [{
+        "command_id": "exit", "client_order_id": "exit", "command": "exit",
+        "status": "terminal", "requested_at": NOW,
+        "details": {
+            "scope": {"environment": "live", "account_label": "primary",
+                      "symbol": "BTCUSDT", "position_side": "LONG"},
+            "side": "long", "order_type": "market", "quantity": "2",
+            "reduce_only": True, "reservations": [reservation.reservation_id],
+            "request_id": "exit", "attempt_count": 1, "external_order_id": "111",
+        },
+    }]
+    reservations = AsyncMock()
+    reservations.load_active_reservations.return_value = ()
+    reservations.load_reservation.return_value = reservation
+    book = ExecutionBook(
+        execution_unit_of_work=RestoreUnitOfWork(), command_repository=commands,
+        reservation_repository=reservations,
+    )
+    await book.restore(account_label="primary")
+    await book.observe(evidence("restored-stream"))
+    watermark_key = book._order_watermark_key(SCOPE.to_position_key(), "exit")
+    book._order_cumulative_fills[watermark_key] = Decimal("2")
+    book._order_cumulative_quotes[watermark_key] = Decimal("200")
+    # A recovered head may still be gated after the durable reservation has settled.
+    book._recovery_required_commands.add("exit")
+    assert not book.get_active_reservations()
+    plan = OrderExecutionPlan(
+        "intent", "old-session", "exit", "BTCUSDT", "SELL", "MARKET",
+        Decimal("2"), None, True, NOW, position_side=SCOPE.position_side,
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=object(), account_label="primary", environment="live",
+        execution_book=book,
+    )
+    try:
+        await coordinator.observe_recovered_receipt(plan, PersistedOrderReceipt(
+            "exit", ExchangeOrderState.FILLED, "111", Decimal("2"), Decimal("100"),
+            (replace(fill("real-close", "2"), order_id="111"),),
+        ))
+        assert not book.command_requires_recovery("exit")
+        assert (await book.read(SCOPE)).total_quantity == 0
+        reservations.update_reservation.assert_not_awaited()
+    finally:
+        await coordinator.aclose()

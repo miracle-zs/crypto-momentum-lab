@@ -40,6 +40,57 @@ from tests.unit.live_rollout.test_exit_processor import NOW, _context, _processo
 from tests.unit.shadow_operation.test_service import _intent, _state
 
 
+async def test_exit_settlement_gate_defers_without_post_or_strategy_crash():
+    book = ExecutionBook()
+    book._recovery_required_commands.add("settling-earlier-exit")
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    view = await book.read(scope)
+    backend, repository = AsyncMock(), AsyncMock()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=book,
+        reservation_repository=AsyncMock(),
+    )
+    coordinator.configure_submission(repository)
+    plan = OrderExecutionPlan(
+        "exit",
+        "run-1",
+        "later-exit",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("1"),
+        None,
+        True,
+        NOW,
+        position_side=FuturesPositionSide.LONG,
+        batch_id="target",
+        projection_version=view.projection_version,
+    )
+
+    class Submission:
+        async def execute(self, *_args, **_kwargs):
+            return await coordinator.prepare_and_execute(
+                plan, preparation=_submission_preparation(plan)
+            )
+
+    processor = _processor(Submission())
+    try:
+        outcome = await processor.process_requests(
+            (LiveExitOrderRequest(replace(_intent(), reduce_only=True), Decimal("1")),),
+            state=_state(),
+            context=_context(),
+        )
+        assert outcome == (0, 0, "position_not_ready")
+        backend.submit.assert_not_awaited()
+        repository.prepare_submission.assert_not_awaited()
+        assert book.command_requires_recovery("settling-earlier-exit")
+    finally:
+        await coordinator.aclose()
+
+
 @pytest.mark.parametrize("race_at", ["before_read", "before_act"])
 async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)

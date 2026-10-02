@@ -99,6 +99,71 @@ def _evidence(account, identity, quantity="1"):
     )
 
 
+async def test_committed_exit_reservation_survives_restart_until_real_trade_proof(
+    async_database_url,
+):
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+    from crypto_momentum_lab.persistence.postgres.models import PositionReservationRow
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"test-settled-exit-{uuid4().hex}"
+    opening = _evidence(account, "1")
+    scope = opening.scope
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        await book.observe(opening)
+        view = await book.read(scope)
+        command_id = f"exit-{uuid4().hex[:30]}"
+        reservation = PositionReservation(
+            reservation_id=f"res-{uuid4().hex}", command_id=command_id,
+            position_key=scope.to_position_key(), batch_id=view.batches[0].batch_id,
+            reserved_quantity=Decimal("1"), created_at=opening.observed_at,
+        )
+        async with factory.begin() as session:
+            session.add(PositionReservationRow(
+                reservation_id=reservation.reservation_id, environment="live",
+                account_label=account, strategy_name="authority-test", symbol="BTCUSDT",
+                position_side="BOTH", batch_id=reservation.batch_id, command_id=command_id,
+                reserved_quantity=Decimal("1"), consumed_quantity=Decimal("0"),
+                released_quantity=Decimal("0"), status="ACTIVE",
+                created_at=opening.observed_at, updated_at=opening.observed_at,
+            ))
+        book.coordinator.register_reservation(reservation)
+        command = TradeCommand(
+            command_id, scope.to_position_key(), TradeCommandType.EXIT,
+            StrategySide.LONG, EntryType.MARKET, Decimal("1"), reduce_only=True,
+            created_at=opening.observed_at,
+        )
+        book.register_prepared_command(command, scope, [reservation.reservation_id])
+        report = replace(opening, evidence_id="exit-report", fill=None, sequence=2,
+            order_event=ExchangeOrderEvent("exit-report", command_id,
+                ExchangeOrderState.FILLED, opening.observed_at, "real-exit-order", {}),
+            cumulative_order=ExecutionCumulativeOrderReport(command_id,
+                Decimal("1"), Decimal("100"), opening.observed_at))
+        assert isinstance(await book.observe(report), Applied)
+        assert book.command_requires_recovery(command_id)
+        restored = _book(factory)
+        await restored.restore(account_label=account)
+        assert not restored.get_active_reservations()
+        assert restored.coordinator.get_reservation(
+            reservation.reservation_id
+        ).consumed_quantity == Decimal("1")
+        closing = replace(opening, evidence_id="real-exit-trade", sequence=3,
+            fill=replace(opening.fill, trade_id="real-exit-trade",
+                order_id="real-exit-order", side="SELL"))
+        assert isinstance(await restored.observe(closing), Applied)
+        assert not restored.command_requires_recovery(command_id)
+        assert (await restored.read(scope)).total_quantity == 0
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert not restarted.command_requires_recovery(command_id)
+        assert (await restarted.read(scope)).total_quantity == 0
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_book_nonzero_restore_preserves_token_and_evidence_identity(
     async_database_url,

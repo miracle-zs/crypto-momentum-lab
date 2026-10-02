@@ -860,8 +860,27 @@ class ExecutionBook:
                     ):
                         continue
                     self._coordinator.register_reservation(reservation)
+                # Terminal commands retained by a recovery gate also need their
+                # consumed reservations to prove settlement after a restart.
+                # Restore only referenced rows, not the entire reservation history.
+                for command_id, reservation_ids in self._command_reservations.items():
+                    entry = self._outbox_by_command_id[command_id]
+                    for reservation_id in reservation_ids:
+                        if self._coordinator.get_reservation(reservation_id) is not None:
+                            continue
+                        reservation = await self._reservation_repo.load_reservation(
+                            reservation_id
+                        )
+                        if reservation is None:
+                            continue
+                        if (
+                            reservation.command_id != command_id
+                            or reservation.position_key != entry.scope.to_position_key()
+                        ):
+                            raise ValueError("restored command reservation scope mismatch")
+                        self._coordinator.register_reservation(reservation)
             except Exception as err:
-                raise RuntimeError("Failed to restore active reservations") from err
+                raise RuntimeError("Failed to restore command reservations") from err
         for canon, expected_ids in self._head_expected_reservation_ids.items():
             journal = self._journals.get(canon)
             if journal is None:

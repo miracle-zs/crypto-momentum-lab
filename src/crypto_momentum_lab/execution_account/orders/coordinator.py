@@ -940,7 +940,7 @@ class OrderExecutionCoordinator:
             )
             cause = (
                 ExecutionReadinessError(act_res.reason)
-                if isinstance(act_res, PositionNotReady)
+                if isinstance(act_res, (PositionNotReady, ExecutionRecoveryPending))
                 else None
             )
             raise OrderPreSubmissionError(
