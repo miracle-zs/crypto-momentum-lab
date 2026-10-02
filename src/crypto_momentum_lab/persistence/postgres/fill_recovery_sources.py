@@ -52,7 +52,10 @@ async def load_fill_recovery_sources(
         ).all()
         if not heads:
             return {}
-        keys = [(head.symbol, head.position_side) for head in heads]
+        heads_by_key = {(head.symbol, head.position_side): head for head in heads}
+        result: dict[tuple[str, str], AccountFillSourceAnchor | None] = {
+            key: None for key in heads_by_key
+        }
         bindings = []
         for head in heads:
             binding = head.state_payload.get("recovery_checkpoint")
@@ -85,6 +88,14 @@ async def load_fill_recovery_sources(
             if bindings
             else []
         )
+        for row in checkpoints:
+            key = (row.symbol, row.position_side)
+            anchor = _checkpoint_anchor(row, heads_by_key[key], environment, account_label)
+            if anchor is not None:
+                result[key] = anchor
+        keys = [key for key, anchor in result.items() if anchor is None]
+        if not keys:
+            return result
         flat_rows = (
             await session.scalars(
                 select(AccountPositionSnapshotRow)
@@ -153,47 +164,6 @@ async def load_fill_recovery_sources(
                 )
             )
         ).all()
-    heads_by_key = {(head.symbol, head.position_side): head for head in heads}
-    # Preserve the exact heads needing recovery even when no trusted durable
-    # anchor exists. None requests a real prior REST zero, never a synthetic cut.
-    result: dict[tuple[str, str], AccountFillSourceAnchor | None] = {
-        key: None for key in heads_by_key
-    }
-    for row in checkpoints:
-        key = (row.symbol, row.position_side)
-        head = heads_by_key[key]
-        if result.get(key) is not None or (row.stream_id, row.stream_epoch) != (
-            head.stream_id,
-            head.stream_epoch,
-        ):
-            continue
-        checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
-        binding = head.state_payload.get("recovery_checkpoint")
-        if (
-            not isinstance(binding, dict)
-            or recovery_checkpoint_head_binding(checkpoint) != binding
-            or checkpoint.key.environment != environment
-            or checkpoint.key.account_label != account_label
-            or (checkpoint.key.symbol, checkpoint.key.position_side.value) != key
-        ):
-            continue
-        if (
-            checkpoint.coverage is None
-            or not checkpoint.coverage.is_authoritative
-            or checkpoint.has_conflicts
-            or checkpoint.has_synthetic_fills
-            or checkpoint.has_late_events
-            or checkpoint.integrity_issues
-        ):
-            continue
-        result[key] = AccountFillSourceAnchor(
-            row.symbol,
-            row.position_side,
-            checkpoint.checkpoint_id,
-            checkpoint.event_cut,
-            row.stream_id,
-            row.stream_epoch,
-        )
     for flat_row in flat_rows:
         key = (flat_row.symbol, flat_row.position_side)
         if result.get(key) is not None:
@@ -254,3 +224,41 @@ async def load_fill_recovery_sources(
             zero_snapshot=snapshot,
         )
     return result
+
+
+def _checkpoint_anchor(
+    row: PositionRecoveryCheckpointRow,
+    head: ExecutionBookHeadRow,
+    environment: str,
+    account_label: str,
+) -> AccountFillSourceAnchor | None:
+    if (row.stream_id, row.stream_epoch) != (head.stream_id, head.stream_epoch):
+        return None
+    checkpoint = PositionRecoveryCodec.decode_checkpoint(row.payload)
+    binding = head.state_payload.get("recovery_checkpoint")
+    if (
+        not isinstance(binding, dict)
+        or recovery_checkpoint_head_binding(checkpoint) != binding
+        or checkpoint.key.environment != environment
+        or checkpoint.key.account_label != account_label
+        or (checkpoint.key.symbol, checkpoint.key.position_side.value)
+        != (head.symbol, head.position_side)
+    ):
+        return None
+    if (
+        checkpoint.coverage is None
+        or not checkpoint.coverage.is_authoritative
+        or checkpoint.has_conflicts
+        or checkpoint.has_synthetic_fills
+        or checkpoint.has_late_events
+        or checkpoint.integrity_issues
+    ):
+        return None
+    return AccountFillSourceAnchor(
+        row.symbol,
+        row.position_side,
+        checkpoint.checkpoint_id,
+        checkpoint.event_cut,
+        row.stream_id,
+        row.stream_epoch,
+    )
