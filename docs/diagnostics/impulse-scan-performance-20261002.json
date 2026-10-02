@@ -3038,5 +3038,585 @@
         "profiler_cpu_pct": 3.9171687252419853
       }
     ]
+  },
+  "ten_minute_observation_after_scan_fix": {
+    "started_at": "2026-10-02T15:36:18.581176+00:00",
+    "last_sample_at": "2026-10-02T15:46:18.837311+00:00",
+    "elapsed_seconds": 600.256,
+    "complete": true,
+    "cpu_cores": 2,
+    "collector_process_cpu_seconds": 1.692903252,
+    "collection_errors": [],
+    "host": {
+      "samples": 596,
+      "cpu_mean_percent": 28.922888950350867,
+      "cpu_p50_percent": 24.0410779696494,
+      "cpu_p95_percent": 69.625,
+      "cpu_max_percent": 100.0,
+      "cpu_ge90_seconds": 4.005999999999972,
+      "cpu_ge90_longest_seconds": 2.002999999999929,
+      "iowait_mean_percent": 0.4861808586311545,
+      "iowait_max_percent": 22.797927461139896,
+      "mem_total_mib": 3723.90625,
+      "available_start_mib": 882.828125,
+      "available_end_mib": 814.7109375,
+      "available_min_mib": 789.35546875,
+      "swap_start_mib": 573.5390625,
+      "swap_end_mib": 559.2890625,
+      "swap_in_mib": 12.9609375,
+      "swap_out_mib": 0.0,
+      "oom_kill_delta": 0,
+      "major_fault_delta": 1549
+    },
+    "pressure": {
+      "cpu_some_total": 11.054872833333333,
+      "cpu_full_total": 0.0,
+      "memory_some_total": 0.020094499999999998,
+      "memory_full_total": 0.014862666666666666,
+      "io_some_total": 0.7830093333333333,
+      "io_full_total": 0.48795716666666666
+    },
+    "containers": [
+      {
+        "name": "crypto-momentum-lab-market-data-1",
+        "cpu_mean_singlecore_percent": 20.936407363400438,
+        "cpu_peak_5sec_singlecore_percent": 47.57694802384349,
+        "working_start_mib": 239.203125,
+        "working_end_mib": 241.484375,
+        "working_peak_mib": 241.77734375,
+        "anon_start_mib": 233.21875,
+        "anon_end_mib": 235.39453125,
+        "memory_peak_mib": 243.53515625,
+        "limit_mib": 640.0,
+        "swap_end_mib": 89.4453125,
+        "swap_delta_mib": -2.59765625,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-postgres-1",
+        "cpu_mean_singlecore_percent": 4.683766926631907,
+        "cpu_peak_5sec_singlecore_percent": 17.524285340643402,
+        "working_start_mib": 564.19921875,
+        "working_end_mib": 677.1953125,
+        "working_peak_mib": 677.1953125,
+        "anon_start_mib": 190.9296875,
+        "anon_end_mib": 214.9375,
+        "memory_peak_mib": 854.98828125,
+        "limit_mib": 1280.0,
+        "swap_end_mib": 138.12890625,
+        "swap_delta_mib": -10.2734375,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-live-strategy-account-2-1",
+        "cpu_mean_singlecore_percent": 4.022995816096752,
+        "cpu_peak_5sec_singlecore_percent": 30.590114166259752,
+        "working_start_mib": 174.7421875,
+        "working_end_mib": 175.0546875,
+        "working_peak_mib": 175.0546875,
+        "anon_start_mib": 171.42578125,
+        "anon_end_mib": 171.73828125,
+        "memory_peak_mib": 190.01171875,
+        "limit_mib": 512.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-live-strategy-1",
+        "cpu_mean_singlecore_percent": 3.6987584612122215,
+        "cpu_peak_5sec_singlecore_percent": 22.830720016038303,
+        "working_start_mib": 224.98046875,
+        "working_end_mib": 224.99609375,
+        "working_peak_mib": 225.41015625,
+        "anon_start_mib": 221.70703125,
+        "anon_end_mib": 221.72265625,
+        "memory_peak_mib": 225.43359375,
+        "limit_mib": 512.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-live-strategy-account-4-1",
+        "cpu_mean_singlecore_percent": 3.5796235833465166,
+        "cpu_peak_5sec_singlecore_percent": 22.529394651066788,
+        "working_start_mib": 185.5859375,
+        "working_end_mib": 185.6015625,
+        "working_peak_mib": 185.83984375,
+        "anon_start_mib": 182.46875,
+        "anon_end_mib": 182.484375,
+        "memory_peak_mib": 185.859375,
+        "limit_mib": 512.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-live-strategy-account-3-1",
+        "cpu_mean_singlecore_percent": 3.5507620560703623,
+        "cpu_peak_5sec_singlecore_percent": 19.152388139626805,
+        "working_start_mib": 176.421875,
+        "working_end_mib": 176.421875,
+        "working_peak_mib": 176.43359375,
+        "anon_start_mib": 173.3125,
+        "anon_end_mib": 173.3125,
+        "memory_peak_mib": 176.453125,
+        "limit_mib": 512.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-dashboard-1",
+        "cpu_mean_singlecore_percent": 1.5886955511947518,
+        "cpu_peak_5sec_singlecore_percent": 11.527444835910323,
+        "working_start_mib": 91.95703125,
+        "working_end_mib": 91.95703125,
+        "working_peak_mib": 104.87890625,
+        "anon_start_mib": 90.5390625,
+        "anon_end_mib": 90.5390625,
+        "memory_peak_mib": 107.79296875,
+        "limit_mib": 192.0,
+        "swap_end_mib": 53.04296875,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-research-collector-1",
+        "cpu_mean_singlecore_percent": 0.8726917005227355,
+        "cpu_peak_5sec_singlecore_percent": 7.930184932490473,
+        "working_start_mib": 104.76953125,
+        "working_end_mib": 106.203125,
+        "working_peak_mib": 106.203125,
+        "anon_start_mib": 95.2421875,
+        "anon_end_mib": 96.5625,
+        "memory_peak_mib": 119.76171875,
+        "limit_mib": 192.0,
+        "swap_end_mib": 24.8359375,
+        "swap_delta_mib": -0.8359375,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-execution-account-live-account-2-1",
+        "cpu_mean_singlecore_percent": 0.5310685951442486,
+        "cpu_peak_5sec_singlecore_percent": 7.146658953377615,
+        "working_start_mib": 86.140625,
+        "working_end_mib": 89.04296875,
+        "working_peak_mib": 91.08984375,
+        "anon_start_mib": 83.796875,
+        "anon_end_mib": 86.66796875,
+        "memory_peak_mib": 91.1015625,
+        "limit_mib": 160.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-execution-account-live-1",
+        "cpu_mean_singlecore_percent": 0.4905549141508831,
+        "cpu_peak_5sec_singlecore_percent": 4.158977697696359,
+        "working_start_mib": 86.22265625,
+        "working_end_mib": 89.41015625,
+        "working_peak_mib": 90.5390625,
+        "anon_start_mib": 83.87109375,
+        "anon_end_mib": 87.05078125,
+        "memory_peak_mib": 90.671875,
+        "limit_mib": 160.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-execution-account-live-account-3-1",
+        "cpu_mean_singlecore_percent": 0.4711411655014794,
+        "cpu_peak_5sec_singlecore_percent": 3.6370455898640293,
+        "working_start_mib": 86.05859375,
+        "working_end_mib": 88.25,
+        "working_peak_mib": 90.87890625,
+        "anon_start_mib": 83.72265625,
+        "anon_end_mib": 85.90625,
+        "memory_peak_mib": 90.890625,
+        "limit_mib": 160.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      },
+      {
+        "name": "crypto-momentum-lab-execution-account-live-account-4-1",
+        "cpu_mean_singlecore_percent": 0.46523388456735476,
+        "cpu_peak_5sec_singlecore_percent": 3.3137852195716775,
+        "working_start_mib": 86.08203125,
+        "working_end_mib": 89.33203125,
+        "working_peak_mib": 91.06640625,
+        "anon_start_mib": 83.7421875,
+        "anon_end_mib": 86.9921875,
+        "memory_peak_mib": 91.078125,
+        "limit_mib": 160.0,
+        "swap_end_mib": 0.0,
+        "swap_delta_mib": 0.0,
+        "memory_events_delta": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "throttled_usec_delta": 0,
+        "restarts_start": 0,
+        "restarts_end": 0,
+        "health_end": "healthy",
+        "all_healthy": true,
+        "identity_count": 1
+      }
+    ],
+    "minutes": [
+      {
+        "minute": 1,
+        "samples": 59,
+        "cpu_mean_percent": 29.21702752904646,
+        "cpu_peak_percent": 77.8894472361809,
+        "available_min_mib": 837.95703125,
+        "swap_end_mib": 573.5390625
+      },
+      {
+        "minute": 2,
+        "samples": 60,
+        "cpu_mean_percent": 29.782026072652087,
+        "cpu_peak_percent": 82.91457286432161,
+        "available_min_mib": 829.41796875,
+        "swap_end_mib": 568.0390625
+      },
+      {
+        "minute": 3,
+        "samples": 59,
+        "cpu_mean_percent": 28.522527514228663,
+        "cpu_peak_percent": 74.61928934010152,
+        "available_min_mib": 825.40234375,
+        "swap_end_mib": 568.0390625
+      },
+      {
+        "minute": 4,
+        "samples": 60,
+        "cpu_mean_percent": 26.989308479915476,
+        "cpu_peak_percent": 86.86868686868686,
+        "available_min_mib": 823.86328125,
+        "swap_end_mib": 568.0390625
+      },
+      {
+        "minute": 5,
+        "samples": 59,
+        "cpu_mean_percent": 26.12912014294077,
+        "cpu_peak_percent": 84.84848484848484,
+        "available_min_mib": 807.515625,
+        "swap_end_mib": 566.7890625
+      },
+      {
+        "minute": 6,
+        "samples": 60,
+        "cpu_mean_percent": 28.63685543844499,
+        "cpu_peak_percent": 82.32323232323232,
+        "available_min_mib": 816.54296875,
+        "swap_end_mib": 566.7890625
+      },
+      {
+        "minute": 7,
+        "samples": 59,
+        "cpu_mean_percent": 29.8679273422484,
+        "cpu_peak_percent": 72.77486910994764,
+        "available_min_mib": 822.40625,
+        "swap_end_mib": 566.7890625
+      },
+      {
+        "minute": 8,
+        "samples": 60,
+        "cpu_mean_percent": 26.603167691707856,
+        "cpu_peak_percent": 73.33333333333333,
+        "available_min_mib": 816.1015625,
+        "swap_end_mib": 566.5390625
+      },
+      {
+        "minute": 9,
+        "samples": 60,
+        "cpu_mean_percent": 31.195688857902642,
+        "cpu_peak_percent": 93.5,
+        "available_min_mib": 819.2578125,
+        "swap_end_mib": 564.0390625
+      },
+      {
+        "minute": 10,
+        "samples": 60,
+        "cpu_mean_percent": 31.993306761972566,
+        "cpu_peak_percent": 100.0,
+        "available_min_mib": 789.35546875,
+        "swap_end_mib": 559.2890625
+      }
+    ],
+    "window_logs": [
+      {
+        "service": "live-strategy-account-4",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "live-strategy-account-3",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "live-strategy-account-2",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "live-strategy",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "execution-account-live-account-4",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "execution-account-live-account-3",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "execution-account-live-account-2",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "execution-account-live",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "research-collector",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "market-data",
+        "counts": {
+          "warning:market_data_event_loop_lag": 9
+        },
+        "lag_ms_max": 639.0,
+        "events": [
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:37:10 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:38:12 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:39:12 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:40:13 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:41:13 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:42:13 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:43:14 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:44:15 [warning  ] mar"
+          },
+          {
+            "level": "warning",
+            "event": "market_data_event_loop_lag",
+            "time": "2026-10-02 15:46:15 [warning  ] mar"
+          }
+        ]
+      },
+      {
+        "service": "dashboard",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      },
+      {
+        "service": "postgres",
+        "counts": {},
+        "lag_ms_max": null,
+        "events": []
+      }
+    ]
   }
 }

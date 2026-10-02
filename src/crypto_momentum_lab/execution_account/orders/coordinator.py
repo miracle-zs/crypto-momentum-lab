@@ -419,6 +419,7 @@ class OrderExecutionCoordinator:
                 "exit_headroom must be non-negative and less than max_queue_depth"
             )
         self._submission_repository = submission_repository
+        self._submission_configuration_locked = False
         self._submission_admission = submission_admission
         self._submission_clock = submission_clock or (lambda: datetime.now(UTC))
         self._backend = backend
@@ -944,7 +945,15 @@ class OrderExecutionCoordinator:
                 if isinstance(act_res, (PositionNotReady, ExecutionRecoveryPending))
                 else None
             )
-            raise OrderPreSubmissionError(
+            # Another accepted exit can consume the available batch quantity
+            # without changing its fill projection. Rebuild from current Book
+            # ownership instead of killing the closing-candle channel.
+            error_type = (
+                OrderProjectionConflictError
+                if "ReservationConflictError" in act_res.diagnostics
+                else OrderPreSubmissionError
+            )
+            raise error_type(
                 f"Failed to create position reservation for "
                 f"{plan.client_order_id}: {act_res.reason}"
             ) from cause
@@ -1198,6 +1207,7 @@ class OrderExecutionCoordinator:
         *,
         prepared_submission: PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
+        self._submission_configuration_locked = True
         priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
 
         async def operation() -> OrderExecutionResult:
@@ -1248,7 +1258,7 @@ class OrderExecutionCoordinator:
         admission: FinalSubmissionAdmission | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        if self._schedulers:
+        if self._submission_configuration_locked:
             raise RuntimeError("cannot configure submission after execution starts")
         self._submission_repository = repository
         self._submission_admission = admission
@@ -1269,6 +1279,7 @@ class OrderExecutionCoordinator:
         cancel operations for this key cannot interleave the two steps.
         """
 
+        self._submission_configuration_locked = True
         priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
 
         async def operation() -> OrderExecutionResult | None:

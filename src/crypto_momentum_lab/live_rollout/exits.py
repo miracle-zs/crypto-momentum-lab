@@ -190,6 +190,14 @@ def managed_live_positions_from_views(
             continue
 
         recovery_by_batch: dict[str, object] = {}
+        reserved_by_order: dict[str, dict[str, Decimal]] = {}
+        for reservation in view.reservations:
+            if reservation.active_quantity > 0:
+                quantities = reserved_by_order.setdefault(reservation.command_id, {})
+                quantities[reservation.batch_id] = (
+                    quantities.get(reservation.batch_id, Decimal("0"))
+                    + reservation.active_quantity
+                )
         for order in unresolved_orders:
             plan = getattr(order, "plan", None)
             if plan is None or not plan.reduce_only or plan.symbol != view.key.symbol:
@@ -199,6 +207,10 @@ def managed_live_positions_from_views(
             allocated_ids = {item.batch_id for item in plan.allocations}
             if plan.batch_id:
                 allocated_ids.add(plan.batch_id)
+            # Exchange order rows contain wire fields, not batch allocation.
+            # Match their client ID to the Book's committed reservations;
+            # never infer ownership from symbol, quantity or time proximity.
+            allocated_ids.update(reserved_by_order.get(plan.client_order_id, {}))
             for batch in active_batches:
                 if batch.batch_id in allocated_ids:
                     previous = recovery_by_batch.get(batch.batch_id)
@@ -214,6 +226,10 @@ def managed_live_positions_from_views(
                 if recovery is None
                 else max(Decimal("0"), plan.quantity - recovery.executed_quantity)
             )
+            if plan is not None and plan.client_order_id in reserved_by_order:
+                remaining = reserved_by_order[plan.client_order_id].get(
+                    batch.batch_id, Decimal("0")
+                )
             managed_batches.append(
                 ManagedLivePositionBatch(
                     batch_id=batch.batch_id,

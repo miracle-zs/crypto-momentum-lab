@@ -1104,6 +1104,7 @@ class ExecutionBook:
             entries = self.list_outbox(scope=scope)
             return replace(
                 view,
+                reservations=self.get_active_reservations(key),
                 pending_command_ids=tuple(sorted(
                     entry.command_id for entry in entries
                     if self.command_requires_recovery(entry.command_id)
