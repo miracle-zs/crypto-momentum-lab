@@ -386,7 +386,7 @@ async def test_recovery_guard_preserves_receipt_and_post_attempts():
         context=_context(),
         source_candidate=replace(_intent(), reduce_only=True),
     )
-    assert result is original_receipt
+    assert result is None
     assert processor._exit_recovery_attempts["original-client-id"] == 0
     assert processor._exit_recovery_next_attempt_at["original-client-id"] > NOW
     await processor._recover_unknown_exit(
@@ -813,6 +813,84 @@ async def test_receipt_read_invalidated_by_account_update_does_not_commit_or_sub
     processor._state_machine.mark_absent_reconciled.assert_not_awaited()
     processor._state_machine.apply_observed_snapshot.assert_not_awaited()
     assert not processor._submission.calls
+
+
+@pytest.mark.parametrize("blocked_by", ["projection", "readiness", "admission"])
+async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_terminal(
+    blocked_by,
+):
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ExecutionReadinessError,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderProjectionConflictError,
+    )
+    from crypto_momentum_lab.domain.strategy import StrategySide
+    from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+
+    error = {
+        "projection": OrderProjectionConflictError("facts advanced"),
+        "readiness": ExecutionReadinessError("PositionView not ready for trade"),
+        "admission": None,
+    }[blocked_by]
+    submission = SimpleNamespace(
+        execute=AsyncMock(side_effect=error, return_value=None)
+    )
+    processor = _processor(submission)
+    plan = OrderExecutionPlan(
+        "exit", "run-1", "original", "BTCUSDT", "SELL", "MARKET",
+        Decimal("1"), None, True, NOW,
+        position_side=FuturesPositionSide.LONG,
+        batch_id="target", projection_version="pv_old",
+    )
+    position = ManagedLivePosition(
+        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
+        Decimal("0.4"), Decimal("100"), NOW,
+        batch_id="target", projection_version="pv_current",
+    )
+    context = SimpleNamespace(
+        managed_positions=(position,), pending_position_symbols=frozenset(),
+        unmanaged_position_symbols=frozenset(),
+    )
+    processor._context_provider = lambda state: _provide(context)
+    processor._state_machine = SimpleNamespace(
+        mark_absent_reconciled=AsyncMock(return_value=OrderExecutionResult(
+            "original", ExchangeOrderState.ABSENT_RECONCILED, None,
+        ))
+    )
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(return_value=SimpleNamespace(
+            order=None, position_quantity=Decimal("0.4"),
+            active_exit_order_client_ids=(), observed_at=NOW,
+        ))
+    )
+    processor.request_exit_recovery(
+        plan=plan, known_executed_quantity=Decimal("0"), state=_state(),
+        source_candidate=replace(_intent(), reduce_only=True),
+    )
+    assert await processor.recover_requested_exits() == ()
+    assert processor.has_pending_recovery
+    assert processor._exit_recovery_attempts["original"] == 0
+    assert processor._exit_recovery_next_attempt_at["original"] > NOW
+    assert submission.execute.call_args.kwargs["requested_quantity"] == Decimal("0.4")
+    assert await processor.recover_requested_exits() == ()
+    submission.execute.assert_awaited_once()
+    processor._clock = lambda: processor._exit_recovery_next_attempt_at["original"]
+    submission.execute.side_effect = None
+    submission.execute.return_value = OrderExecutionResult(
+        "replacement", ExchangeOrderState.FILLED, "exchange-replacement",
+    )
+    outcomes = await processor.recover_requested_exits()
+    assert len(outcomes) == 1
+    assert outcomes[0][1].submitted_order_count == 1
+    assert not processor.has_pending_recovery
+    assert submission.execute.await_count == 2
 
 
 async def test_recovery_batch_rotates_stale_reads_without_starving_later_orders():

@@ -666,7 +666,10 @@ class LiveExitProcessor:
             state=state, context=context
         )
         if failure is not None:
-            return observed_result
+            self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+            )
+            return None
         recovery_attempt = current_attempt + 1
         recovery_candidate = _build_exit_recovery_candidate(
             plan=plan,
@@ -706,7 +709,8 @@ class LiveExitProcessor:
             self._exit_recovery_next_attempt_at[root] = now + timedelta(
                 seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
             )
-            return observed_result
+            # A terminal original receipt does not complete its replacement.
+            return None
         except Exception as error:
             if not (
                 _is_position_readiness_guard(error) or _is_missing_position_facts(error)
@@ -723,8 +727,12 @@ class LiveExitProcessor:
                 symbol=plan.symbol,
                 client_order_id=plan.client_order_id,
             )
-            return observed_result
+            return None
         if recovery_result is None:
+            self._exit_recovery_attempts[root] = current_attempt
+            self._exit_recovery_next_attempt_at[root] = now + timedelta(
+                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
+            )
             log.error(
                 "live_exit_recovery_not_submitted",
                 run_id=self._config.run_id,
@@ -732,7 +740,7 @@ class LiveExitProcessor:
                 client_order_id=plan.client_order_id,
                 recovery_attempt=recovery_attempt,
             )
-            return observed_result
+            return None
         log.warning(
             "live_exit_recovery_submitted",
             run_id=self._config.run_id,
