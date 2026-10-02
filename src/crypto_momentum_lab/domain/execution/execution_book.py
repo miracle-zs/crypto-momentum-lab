@@ -98,6 +98,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     FreshnessRequirement,
     PositionKey,
+    PositionStreamMismatchError,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.position_recovery import (
@@ -958,7 +959,7 @@ class ExecutionBook:
                 and is_known_active_stream
             ):
                 if self._requires_verified_stream_adoption(key):
-                    raise ValueError(
+                    raise PositionStreamMismatchError(
                         "requested account stream does not match the restored position; "
                         "durable history requires a verified source-anchored scan"
                     )
@@ -976,7 +977,9 @@ class ExecutionBook:
                     self._last_sequences.pop(canon, None)
                 source_scope = target_scope
             else:
-                raise ValueError("requested account stream does not match the restored position")
+                raise PositionStreamMismatchError(
+                    "requested account stream does not match the restored position"
+                )
         book = self._books.get(canon)
         if book is None:
             # An unknown position is incomplete; reading it must not create a

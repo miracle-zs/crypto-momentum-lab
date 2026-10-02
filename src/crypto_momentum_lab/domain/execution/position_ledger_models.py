@@ -37,6 +37,10 @@ if TYPE_CHECKING:
     )
 
 
+class PositionStreamMismatchError(ValueError):
+    """The requested stream is not yet adopted by the durable position."""
+
+
 class FactCoverageStatus(StrEnum):
     """Integrity and completeness status of a fact coverage interval."""
 

@@ -37,6 +37,7 @@ from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    PositionStreamMismatchError,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
@@ -317,12 +318,7 @@ class LiveDecisionFactSource:
                             stream_id=self._stream_id,
                             stream_epoch=self._stream_epoch,
                         )
-                    except ValueError as error:
-                        if str(error) != (
-                            "requested account stream does not match the "
-                            "restored position"
-                        ):
-                            raise
+                    except PositionStreamMismatchError:
                         continue
                     if (
                         side_view.total_quantity > 0
@@ -348,11 +344,7 @@ class LiveDecisionFactSource:
                 stream_id=self._stream_id,
                 stream_epoch=self._stream_epoch,
             )
-        except ValueError as error:
-            if str(error) != (
-                "requested account stream does not match the restored position"
-            ):
-                raise
+        except PositionStreamMismatchError:
             mismatch = (state.symbol, self._stream_id, self._stream_epoch)
             if mismatch not in self._reported_stream_mismatches:
                 self._reported_stream_mismatches.add(mismatch)
@@ -565,11 +557,7 @@ class LiveDecisionFactSource:
                 stream_id=self._stream_id,
                 stream_epoch=self._stream_epoch,
             )
-        except ValueError as error:
-            if str(error) != (
-                "requested account stream does not match the restored position"
-            ):
-                raise
+        except PositionStreamMismatchError:
             return None
 
     async def _exit_matches_current_book(

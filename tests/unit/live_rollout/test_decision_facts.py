@@ -24,6 +24,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
+    PositionStreamMismatchError,
     PositionView,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -250,15 +251,17 @@ def test_account_stream_registration_is_explicit_and_rebound_with_book() -> None
     assert initial.call_count == replacement.call_count == 1
 
 
-async def test_fact_source_degrades_only_mismatched_restored_stream() -> None:
+@pytest.mark.parametrize("hedge_mode", [False, True])
+async def test_fact_source_degrades_only_mismatched_restored_stream(hedge_mode) -> None:
     class FakeBook:
         async def read(self, *_args, **_kwargs):
-            raise ValueError(
-                "requested account stream does not match the restored position"
+            raise PositionStreamMismatchError(
+                "requested account stream does not match the restored position; "
+                "durable history requires a verified source-anchored scan"
             )
 
     src = LiveDecisionFactSource(
-        "primary", execution_book=FakeBook(), hedge_mode=False
+        "primary", execution_book=FakeBook(), hedge_mode=hedge_mode
     )
     src.bind_context(_Ctx(account_snapshot=_snapshot()))
     src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
@@ -410,7 +413,7 @@ def _pending_exit_case(*, request_exit_recovery=lambda: None):
 
 async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
     source, uow, book, _, handler, command = _pending_exit_case()
-    book.read.side_effect = ValueError(
+    book.read.side_effect = PositionStreamMismatchError(
         "requested account stream does not match the restored position"
     )
     await source.recover_pending_exits()
@@ -443,7 +446,7 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     elif mismatch == "not_ready":
         view.is_ready_for_trade = False
     elif mismatch == "epoch":
-        book.read.side_effect = ValueError(
+        book.read.side_effect = PositionStreamMismatchError(
             "requested account stream does not match the restored position"
         )
     elif mismatch == "dispatch_recovery":
