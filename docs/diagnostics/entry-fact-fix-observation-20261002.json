@@ -1,0 +1,921 @@
+{
+  "started_at": "2026-10-02T14:41:55.239257+00:00",
+  "last_sample_at": "2026-10-02T14:51:55.443663+00:00",
+  "elapsed_seconds": 600.204,
+  "complete": true,
+  "cpu_cores": 2,
+  "collector_process_cpu_seconds": 1.825889689,
+  "collection_errors": [],
+  "host": {
+    "samples": 595,
+    "cpu_mean_percent": 33.73496435430605,
+    "cpu_p50_percent": 26.804123711340207,
+    "cpu_p95_percent": 78.39172979797978,
+    "cpu_max_percent": 100.0,
+    "cpu_ge90_seconds": 13.061000000000092,
+    "cpu_ge90_longest_seconds": 1.016999999999996,
+    "iowait_mean_percent": 0.4255494982587402,
+    "iowait_max_percent": 12.307692307692308,
+    "mem_total_mib": 3723.90625,
+    "available_start_mib": 782.0,
+    "available_end_mib": 805.65234375,
+    "available_min_mib": 782.0,
+    "swap_start_mib": 535.54296875,
+    "swap_end_mib": 534.29296875,
+    "swap_in_mib": 2.5625,
+    "swap_out_mib": 1.23046875,
+    "oom_kill_delta": 0,
+    "major_fault_delta": 811
+  },
+  "pressure": {
+    "cpu_some_total": 13.871723666666666,
+    "cpu_full_total": 0.0,
+    "memory_some_total": 0.04990883333333333,
+    "memory_full_total": 0.04036616666666667,
+    "io_some_total": 0.7453053333333334,
+    "io_full_total": 0.42314783333333333
+  },
+  "containers": [
+    {
+      "name": "crypto-momentum-lab-market-data-1",
+      "cpu_mean_singlecore_percent": 26.143652452280115,
+      "cpu_peak_5sec_singlecore_percent": 50.333961523753935,
+      "working_start_mib": 233.125,
+      "working_end_mib": 233.5078125,
+      "working_peak_mib": 233.78125,
+      "anon_start_mib": 228.34765625,
+      "anon_end_mib": 229.11328125,
+      "memory_peak_mib": 234.81640625,
+      "limit_mib": 640.0,
+      "swap_end_mib": 83.16015625,
+      "swap_delta_mib": -0.73828125,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-live-strategy-account-2-1",
+      "cpu_mean_singlecore_percent": 4.806994601301673,
+      "cpu_peak_5sec_singlecore_percent": 46.975659233697954,
+      "working_start_mib": 178.625,
+      "working_end_mib": 178.640625,
+      "working_peak_mib": 179.29296875,
+      "anon_start_mib": 175.52734375,
+      "anon_end_mib": 175.53515625,
+      "memory_peak_mib": 181.50390625,
+      "limit_mib": 512.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-postgres-1",
+      "cpu_mean_singlecore_percent": 4.7838392126071625,
+      "cpu_peak_5sec_singlecore_percent": 16.074103312291587,
+      "working_start_mib": 561.95703125,
+      "working_end_mib": 537.921875,
+      "working_peak_mib": 562.73828125,
+      "anon_start_mib": 222.35546875,
+      "anon_end_mib": 197.51171875,
+      "memory_peak_mib": 936.5,
+      "limit_mib": 1280.0,
+      "swap_end_mib": 129.4375,
+      "swap_delta_mib": -0.08203125,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-live-strategy-1",
+      "cpu_mean_singlecore_percent": 4.221509382571166,
+      "cpu_peak_5sec_singlecore_percent": 26.818751144478114,
+      "working_start_mib": 227.6328125,
+      "working_end_mib": 227.65625,
+      "working_peak_mib": 227.6640625,
+      "anon_start_mib": 224.265625,
+      "anon_end_mib": 224.28515625,
+      "memory_peak_mib": 228.1953125,
+      "limit_mib": 512.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-live-strategy-account-4-1",
+      "cpu_mean_singlecore_percent": 4.190552866387681,
+      "cpu_peak_5sec_singlecore_percent": 28.046277523042384,
+      "working_start_mib": 185.84765625,
+      "working_end_mib": 185.859375,
+      "working_peak_mib": 186.11328125,
+      "anon_start_mib": 182.7265625,
+      "anon_end_mib": 182.73828125,
+      "memory_peak_mib": 186.1328125,
+      "limit_mib": 512.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-live-strategy-account-3-1",
+      "cpu_mean_singlecore_percent": 4.106759553644836,
+      "cpu_peak_5sec_singlecore_percent": 30.043357990010442,
+      "working_start_mib": 183.1640625,
+      "working_end_mib": 183.1796875,
+      "working_peak_mib": 184.33203125,
+      "anon_start_mib": 180.046875,
+      "anon_end_mib": 180.05859375,
+      "memory_peak_mib": 184.34765625,
+      "limit_mib": 512.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-dashboard-1",
+      "cpu_mean_singlecore_percent": 1.7796253360525782,
+      "cpu_peak_5sec_singlecore_percent": 12.262860657605867,
+      "working_start_mib": 92.7421875,
+      "working_end_mib": 93.53125,
+      "working_peak_mib": 105.6640625,
+      "anon_start_mib": 91.08203125,
+      "anon_end_mib": 91.08203125,
+      "memory_peak_mib": 108.48046875,
+      "limit_mib": 192.0,
+      "swap_end_mib": 52.66796875,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-research-collector-1",
+      "cpu_mean_singlecore_percent": 0.9673724261188721,
+      "cpu_peak_5sec_singlecore_percent": 7.150044524923264,
+      "working_start_mib": 100.05078125,
+      "working_end_mib": 107.8125,
+      "working_peak_mib": 107.8125,
+      "anon_start_mib": 91.4140625,
+      "anon_end_mib": 91.42578125,
+      "memory_peak_mib": 110.18359375,
+      "limit_mib": 192.0,
+      "swap_end_mib": 28.17578125,
+      "swap_delta_mib": 0.125,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-execution-account-live-account-2-1",
+      "cpu_mean_singlecore_percent": 0.5616330936340419,
+      "cpu_peak_5sec_singlecore_percent": 6.063806233669309,
+      "working_start_mib": 88.83984375,
+      "working_end_mib": 90.6171875,
+      "working_peak_mib": 93.30078125,
+      "anon_start_mib": 86.41015625,
+      "anon_end_mib": 88.17578125,
+      "memory_peak_mib": 93.94921875,
+      "limit_mib": 160.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-execution-account-live-1",
+      "cpu_mean_singlecore_percent": 0.5442039231774138,
+      "cpu_peak_5sec_singlecore_percent": 4.664026770061493,
+      "working_start_mib": 88.95703125,
+      "working_end_mib": 90.60546875,
+      "working_peak_mib": 90.82421875,
+      "anon_start_mib": 86.60546875,
+      "anon_end_mib": 88.24609375,
+      "memory_peak_mib": 90.875,
+      "limit_mib": 160.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-execution-account-live-account-4-1",
+      "cpu_mean_singlecore_percent": 0.5355631476210251,
+      "cpu_peak_5sec_singlecore_percent": 4.791081467419409,
+      "working_start_mib": 88.74609375,
+      "working_end_mib": 90.234375,
+      "working_peak_mib": 90.33203125,
+      "anon_start_mib": 86.40625,
+      "anon_end_mib": 87.89453125,
+      "memory_peak_mib": 90.33984375,
+      "limit_mib": 160.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    },
+    {
+      "name": "crypto-momentum-lab-execution-account-live-account-3-1",
+      "cpu_mean_singlecore_percent": 0.5204940372209229,
+      "cpu_peak_5sec_singlecore_percent": 4.967187091981269,
+      "working_start_mib": 88.3984375,
+      "working_end_mib": 89.85546875,
+      "working_peak_mib": 89.85546875,
+      "anon_start_mib": 86.02734375,
+      "anon_end_mib": 87.48828125,
+      "memory_peak_mib": 89.86328125,
+      "limit_mib": 160.0,
+      "swap_end_mib": 0.0,
+      "swap_delta_mib": 0.0,
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "throttled_usec_delta": 0,
+      "restarts_start": 0,
+      "restarts_end": 0,
+      "health_end": "healthy",
+      "all_healthy": true,
+      "identity_count": 1
+    }
+  ],
+  "minutes": [
+    {
+      "minute": 1,
+      "samples": 59,
+      "cpu_mean_percent": 26.7801252235609,
+      "cpu_peak_percent": 81.4070351758794,
+      "available_min_mib": 782.0,
+      "swap_end_mib": 535.29296875
+    },
+    {
+      "minute": 2,
+      "samples": 60,
+      "cpu_mean_percent": 26.167101664654428,
+      "cpu_peak_percent": 78.76447876447877,
+      "available_min_mib": 788.4375,
+      "swap_end_mib": 535.29296875
+    },
+    {
+      "minute": 3,
+      "samples": 59,
+      "cpu_mean_percent": 31.73415733765053,
+      "cpu_peak_percent": 88.3248730964467,
+      "available_min_mib": 802.02734375,
+      "swap_end_mib": 535.04296875
+    },
+    {
+      "minute": 4,
+      "samples": 59,
+      "cpu_mean_percent": 41.7429246408032,
+      "cpu_peak_percent": 100.0,
+      "available_min_mib": 801.0234375,
+      "swap_end_mib": 534.54296875
+    },
+    {
+      "minute": 5,
+      "samples": 60,
+      "cpu_mean_percent": 34.52539884450754,
+      "cpu_peak_percent": 100.0,
+      "available_min_mib": 795.6953125,
+      "swap_end_mib": 535.54296875
+    },
+    {
+      "minute": 6,
+      "samples": 59,
+      "cpu_mean_percent": 36.51087143455924,
+      "cpu_peak_percent": 100.0,
+      "available_min_mib": 793.2109375,
+      "swap_end_mib": 535.29296875
+    },
+    {
+      "minute": 7,
+      "samples": 60,
+      "cpu_mean_percent": 35.205966791150935,
+      "cpu_peak_percent": 95.40816326530613,
+      "available_min_mib": 795.7734375,
+      "swap_end_mib": 535.04296875
+    },
+    {
+      "minute": 8,
+      "samples": 59,
+      "cpu_mean_percent": 31.43943658315358,
+      "cpu_peak_percent": 92.07920792079207,
+      "available_min_mib": 798.30078125,
+      "swap_end_mib": 535.04296875
+    },
+    {
+      "minute": 9,
+      "samples": 60,
+      "cpu_mean_percent": 39.12787447431025,
+      "cpu_peak_percent": 100.0,
+      "available_min_mib": 805.03515625,
+      "swap_end_mib": 534.54296875
+    },
+    {
+      "minute": 10,
+      "samples": 60,
+      "cpu_mean_percent": 32.91457200367749,
+      "cpu_peak_percent": 89.94974874371859,
+      "available_min_mib": 800.00390625,
+      "swap_end_mib": 534.29296875
+    }
+  ],
+  "log_audit": {
+    "runtime": [
+      {
+        "container": "crypto-momentum-lab-live-strategy-account-3-1",
+        "service": "live-strategy-account-3",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:38:56.918305049Z",
+        "readiness": {
+          "account_label": "account-3",
+          "code_commit": "bdfa8a0f6c436a328c5fc00b04742c1c552cbcea",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "latest_market_state_age_seconds": 0.426536
+        }
+      },
+      {
+        "container": "crypto-momentum-lab-live-strategy-account-4-1",
+        "service": "live-strategy-account-4",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:38:56.921256707Z",
+        "readiness": {
+          "account_label": "account-4",
+          "code_commit": "bdfa8a0f6c436a328c5fc00b04742c1c552cbcea",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "latest_market_state_age_seconds": 0.436502
+        }
+      },
+      {
+        "container": "crypto-momentum-lab-live-strategy-account-2-1",
+        "service": "live-strategy-account-2",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:37:21.953443085Z",
+        "readiness": {
+          "account_label": "account-2",
+          "code_commit": "bdfa8a0f6c436a328c5fc00b04742c1c552cbcea",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "latest_market_state_age_seconds": 0.42318
+        }
+      },
+      {
+        "container": "crypto-momentum-lab-live-strategy-1",
+        "service": "live-strategy",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:37:21.948963455Z",
+        "readiness": {
+          "account_label": "primary",
+          "code_commit": "bdfa8a0f6c436a328c5fc00b04742c1c552cbcea",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "latest_market_state_age_seconds": 0.42697
+        }
+      },
+      {
+        "container": "crypto-momentum-lab-execution-account-live-account-3-1",
+        "service": "execution-account-live-account-3",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:35:27.579162172Z"
+      },
+      {
+        "container": "crypto-momentum-lab-execution-account-live-account-4-1",
+        "service": "execution-account-live-account-4",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:35:27.591551702Z"
+      },
+      {
+        "container": "crypto-momentum-lab-execution-account-live-1",
+        "service": "execution-account-live",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:34:02.563558348Z"
+      },
+      {
+        "container": "crypto-momentum-lab-execution-account-live-account-2-1",
+        "service": "execution-account-live-account-2",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T14:34:02.567210181Z"
+      },
+      {
+        "container": "crypto-momentum-lab-research-collector-1",
+        "service": "research-collector",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T11:22:17.256169426Z"
+      },
+      {
+        "container": "crypto-momentum-lab-market-data-1",
+        "service": "market-data",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T11:21:30.166268728Z"
+      },
+      {
+        "container": "crypto-momentum-lab-dashboard-1",
+        "service": "dashboard",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-10-02T11:21:30.158964998Z"
+      },
+      {
+        "container": "crypto-momentum-lab-postgres-1",
+        "service": "postgres",
+        "health": "healthy",
+        "restarts": 0,
+        "oom": false,
+        "started_at": "2026-09-29T07:41:39.668520732Z"
+      }
+    ],
+    "live-strategy-account-3": {
+      "service": "live-strategy-account-3",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "live-strategy-account-4": {
+      "service": "live-strategy-account-4",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "live-strategy-account-2": {
+      "service": "live-strategy-account-2",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "live-strategy": {
+      "service": "live-strategy",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "execution-account-live-account-3": {
+      "service": "execution-account-live-account-3",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "execution-account-live-account-4": {
+      "service": "execution-account-live-account-4",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "execution-account-live": {
+      "service": "execution-account-live",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "execution-account-live-account-2": {
+      "service": "execution-account-live-account-2",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "research-collector": {
+      "service": "research-collector",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "market-data": {
+      "service": "market-data",
+      "counts": {
+        "warning:market_data_event_loop_lag": 10
+      },
+      "lag_ms_max": 334.0,
+      "events": [
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:42:02 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:43:02 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:44:04 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:45:06 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:46:07 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:47:08 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:48:09 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:49:09 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:50:09 [warning  ] mar"
+        },
+        {
+          "level": "warning",
+          "event": "market_data_event_loop_lag",
+          "time": "2026-10-02 14:51:10 [warning  ] mar"
+        }
+      ]
+    },
+    "dashboard": {
+      "service": "dashboard",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    },
+    "postgres": {
+      "service": "postgres",
+      "counts": {},
+      "lag_ms_max": null,
+      "events": []
+    }
+  },
+  "database_final": {
+    "head_recovery": [
+      {
+        "account_label": "account-2",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "account-3",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "account-4",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "primary",
+        "command_gates": 0,
+        "external_gates": 0
+      }
+    ],
+    "commands": [
+      {
+        "account_label": "account-2",
+        "status": "acknowledged",
+        "count": 1
+      },
+      {
+        "account_label": "account-2",
+        "status": "rejected",
+        "count": 45
+      },
+      {
+        "account_label": "account-2",
+        "status": "terminal",
+        "count": 105
+      },
+      {
+        "account_label": "account-3",
+        "status": "rejected",
+        "count": 35
+      },
+      {
+        "account_label": "account-3",
+        "status": "terminal",
+        "count": 90
+      },
+      {
+        "account_label": "account-4",
+        "status": "rejected",
+        "count": 75
+      },
+      {
+        "account_label": "account-4",
+        "status": "terminal",
+        "count": 92
+      },
+      {
+        "account_label": "primary",
+        "status": "acknowledged",
+        "count": 1
+      },
+      {
+        "account_label": "primary",
+        "status": "rejected",
+        "count": 46
+      },
+      {
+        "account_label": "primary",
+        "status": "terminal",
+        "count": 90
+      }
+    ],
+    "recent_orders": [
+      {
+        "run_id": "live-b1-long-100u-5x-v1",
+        "symbol": "MAGMAUSDT",
+        "reduce_only": false,
+        "order_type": "LIMIT",
+        "price": 0.26652,
+        "expires_at": "2026-10-02T14:54:16.640278+00:00",
+        "state": "acknowledged",
+        "quantity": 365.0,
+        "executed_quantity": 0.0,
+        "created_at": "2026-10-02T14:39:15+00:00",
+        "updated_at": "2026-10-02T14:39:17.376129+00:00"
+      },
+      {
+        "run_id": "live-account-2-v1",
+        "symbol": "MAGMAUSDT",
+        "reduce_only": false,
+        "order_type": "LIMIT",
+        "price": 0.26652,
+        "expires_at": "2026-10-02T14:54:17.065458+00:00",
+        "state": "acknowledged",
+        "quantity": 365.0,
+        "executed_quantity": 0.0,
+        "created_at": "2026-10-02T14:39:15+00:00",
+        "updated_at": "2026-10-02T14:39:17.625954+00:00"
+      }
+    ],
+    "db_wait": [
+      {
+        "lock_waiters": 0,
+        "long_idle_transactions": 0
+      }
+    ]
+  },
+  "database_after_entry_expiry": {
+    "head_recovery": [
+      {
+        "account_label": "account-2",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "account-3",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "account-4",
+        "command_gates": 0,
+        "external_gates": 0
+      },
+      {
+        "account_label": "primary",
+        "command_gates": 0,
+        "external_gates": 0
+      }
+    ],
+    "commands": [
+      {
+        "account_label": "account-2",
+        "status": "rejected",
+        "count": 45
+      },
+      {
+        "account_label": "account-2",
+        "status": "terminal",
+        "count": 106
+      },
+      {
+        "account_label": "account-3",
+        "status": "rejected",
+        "count": 35
+      },
+      {
+        "account_label": "account-3",
+        "status": "terminal",
+        "count": 90
+      },
+      {
+        "account_label": "account-4",
+        "status": "rejected",
+        "count": 75
+      },
+      {
+        "account_label": "account-4",
+        "status": "terminal",
+        "count": 92
+      },
+      {
+        "account_label": "primary",
+        "status": "rejected",
+        "count": 46
+      },
+      {
+        "account_label": "primary",
+        "status": "terminal",
+        "count": 91
+      }
+    ],
+    "recent_orders": [
+      {
+        "run_id": "live-b1-long-100u-5x-v1",
+        "symbol": "MAGMAUSDT",
+        "reduce_only": false,
+        "order_type": "LIMIT",
+        "price": 0.26652,
+        "expires_at": "2026-10-02T14:54:16.640278+00:00",
+        "state": "canceled",
+        "quantity": 365.0,
+        "executed_quantity": 0.0,
+        "created_at": "2026-10-02T14:39:15+00:00",
+        "updated_at": "2026-10-02T14:54:15.077+00:00"
+      },
+      {
+        "run_id": "live-account-2-v1",
+        "symbol": "MAGMAUSDT",
+        "reduce_only": false,
+        "order_type": "LIMIT",
+        "price": 0.26652,
+        "expires_at": "2026-10-02T14:54:17.065458+00:00",
+        "state": "canceled",
+        "quantity": 365.0,
+        "executed_quantity": 0.0,
+        "created_at": "2026-10-02T14:39:15+00:00",
+        "updated_at": "2026-10-02T14:54:16.099+00:00"
+      }
+    ],
+    "db_wait": [
+      {
+        "lock_waiters": 0,
+        "long_idle_transactions": 0
+      }
+    ]
+  }
+}
