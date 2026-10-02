@@ -64,9 +64,11 @@ def cumulative_order_delta(
     previous_quantity: Decimal,
     previous_quote: Decimal,
     account_fills: tuple[AccountFillEvent, ...],
+    order_ids: frozenset[str] | None = None,
 ) -> CumulativeOrderDelta:
     real_fills = tuple(
-        fill for fill in account_fills if fill.order_id == report.order_id
+        fill for fill in account_fills
+        if fill.order_id in (order_ids or frozenset({report.order_id}))
     )
     real_quantity = sum((fill.quantity for fill in real_fills), Decimal("0"))
     real_quote = sum((fill.quantity * fill.price for fill in real_fills), Decimal("0"))
@@ -91,9 +93,11 @@ def account_trade_delta(
     previous_quantity: Decimal,
     previous_quote: Decimal,
     account_fills: tuple[AccountFillEvent, ...],
+    order_ids: frozenset[str] | None = None,
 ) -> CumulativeOrderDelta:
     """Advance settlement from real trades without counting a report twice."""
-    fills = tuple(fill for fill in account_fills if fill.order_id == order_id)
+    fills = tuple(fill for fill in account_fills
+                  if fill.order_id in (order_ids or frozenset({order_id})))
     quantity = sum((fill.quantity for fill in fills), Decimal("0"))
     quote = sum((fill.quantity * fill.price for fill in fills), Decimal("0"))
     delta = max(Decimal("0"), quantity - previous_quantity)

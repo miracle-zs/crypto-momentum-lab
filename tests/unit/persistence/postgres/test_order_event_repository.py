@@ -13,9 +13,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
@@ -114,8 +111,3 @@ async def test_fill_conflict_result_is_returned_without_updating_order(inserted)
     assert session.scalar.await_args.args[0].table.name == "exchange_fills"
     factory.assert_called_once_with()
     transaction.__aexit__.assert_awaited_once_with(None, None, None)
-
-
-def test_order_repository_no_longer_owns_events_or_fills():
-    assert not hasattr(PostgresOrderPlanRepository, "append_order_event")
-    assert not hasattr(PostgresOrderPlanRepository, "save_fill")

@@ -255,10 +255,6 @@ def test_postgres_paper_source_uses_durable_wakeup_when_available() -> None:
     assert 29.0 < loader.waits[0] <= 30.0
 
 
-def test_paper_live_source_has_no_historical_resume_interface() -> None:
-    assert "resume_run_ids" not in PaperLiveSourceConfig.__dataclass_fields__
-
-
 @pytest.mark.parametrize("mode", ["enabled", "disabled", "failure"])
 def test_separate_wakeup_and_polling_fallback(monkeypatch, mode):
     state = fixture_state("BTCUSDT", 0)

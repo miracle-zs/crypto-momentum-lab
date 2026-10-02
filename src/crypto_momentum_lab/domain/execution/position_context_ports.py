@@ -1,23 +1,26 @@
 """Execution facts required to build operational position context."""
 
-from decimal import Decimal
+from collections.abc import Callable
 from typing import Protocol
 
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
-    PositionKey,
     PositionView,
+)
+from crypto_momentum_lab.domain.execution.position_repair_models import (
+    PositionRepairRequest,
+    PositionRepairUnitOfWork,
+    PublishedPositionRepair,
 )
 
 
 class PositionRepairBook(Protocol):
-    async def reload_position(
+    async def repair_position(
         self,
-        key: PositionKey,
+        request: PositionRepairRequest,
         *,
-        expected_scope: AccountFactStreamScope,
-        expected_quantity: Decimal,
-    ) -> PositionView | None: ...
+        uow: PositionRepairUnitOfWork,
+        is_current: Callable[[], bool] | None = None,
+    ) -> PublishedPositionRepair: ...
 
 
 class PositionContextBook(PositionRepairBook, Protocol):

@@ -11,6 +11,7 @@ Tests:
 7. Invariants and post-init validations.
 """
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -20,7 +21,22 @@ from crypto_momentum_lab.domain.runtime.runtime_plan import (
     RuntimePlan,
     RuntimePlanCompiler,
 )
-from crypto_momentum_lab.domain.strategy.models import EntryType
+from crypto_momentum_lab.domain.strategy.models import EntryType, StrategySide
+from crypto_momentum_lab.domain.strategy.position_exit import position_exit_reason
+
+
+def test_explicit_candle_only_policy_does_not_invent_twenty_minute_exit():
+    plan = RuntimePlanCompiler.compile(
+        environment="live", account_label="primary",
+        overrides={"target_notional": Decimal("100"), "max_holding_seconds": None},
+    )
+    opened = datetime(2026, 10, 2, 3, 15, 3, tzinfo=UTC)
+    assert position_exit_reason(
+        held_until=opened + timedelta(minutes=20, seconds=12), opened_at=opened,
+        symbol="USUSDT", side=StrategySide.LONG,
+        policy=plan.effective_policy.exit_policy, closed_candle=None,
+    ) is None
+    assert plan.options_source_chain["exit_policy"] == "override"
 
 
 def test_runtime_plan_compilation_deterministic_hashes() -> None:

@@ -2340,7 +2340,7 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
         evidence_ids=(),
         watermarks=(),
     )
-    uow.load_positions.return_value = (state,) if has_position else ()
+    uow.load_position.return_value = state if has_position else None
     result = await book.reload_position(key, as_of=now)
     if has_position:
         assert result is not None
@@ -2348,11 +2348,8 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
         assert result.total_quantity == Decimal("0")
     else:
         assert result is None
-    uow.load_positions.assert_awaited_once_with(
-        environment="live",
-        account_label="incident-account",
-        as_of=now,
-    )
+    uow.load_position.assert_awaited_once_with(key, as_of=now)
+    uow.load_positions.assert_not_awaited()
 
 
 def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:

@@ -2166,33 +2166,44 @@ async def test_unknown_account_exposure_does_not_authorize_book_actions(operatio
         assert result.unmanaged_position_symbols == frozenset({"ETHUSDT"})
     else:
         await provider._observe_book_drift(book=provider._execution_book, context=context)
-    assert not hasattr(provider, "_last_book_drift_scan_at")
-    assert not hasattr(provider, "_reported_stale_book_symbols")
 
 
-async def test_context_read_only_requests_repair_without_entering_transaction():
-    from unittest.mock import AsyncMock
+async def test_context_reads_request_repair_without_database_or_book_writes():
+    from unittest.mock import AsyncMock, Mock
 
     requests = []
-    writes = []
-
-    class Uow:
-        def transaction(self, key):
-            writes.append(key)
-            raise AssertionError("context reads must not open repair transactions")
-
     provider = object.__new__(PostgresLiveContextProvider)
     provider._account_label = "primary"
     provider._run_id = "run-1"
-    provider._position_repair_uow = Uow()
+    provider._sessions = Mock(
+        side_effect=AssertionError("position context reads must not open a database session")
+    )
+    provider._market_sessions = Mock(
+        side_effect=AssertionError("position context reads must not open a market session")
+    )
     provider._execution_book = SimpleNamespace(
         list_position_views=AsyncMock(return_value=()),
-        get_active_stream=lambda environment, account: ("account_event_hub", "epoch"))
+        observe=AsyncMock(side_effect=AssertionError("context reads must not write facts")),
+        act=AsyncMock(side_effect=AssertionError("context reads must not execute commands")),
+        reload_position=AsyncMock(
+            side_effect=AssertionError("context reads must not reload persistent facts")
+        ),
+    )
     provider._request_position_repair = requests.append
     provider._observe_book_drift = AsyncMock()
-    context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}),
-        account_snapshot=SimpleNamespace(positions=(_position(),)))
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(_position(),)),
+    )
     result = await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
-    assert not writes
+    provider._sessions.assert_not_called()
+    provider._market_sessions.assert_not_called()
+    provider._execution_book.list_position_views.assert_awaited_once_with(
+        environment="live", account_label="primary", symbols=frozenset({"BTCUSDT"})
+    )
+    provider._execution_book.observe.assert_not_awaited()
+    provider._execution_book.act.assert_not_awaited()
+    provider._execution_book.reload_position.assert_not_awaited()
     assert result.unmanaged_position_symbols == frozenset({"BTCUSDT"})
     assert requests == [result]

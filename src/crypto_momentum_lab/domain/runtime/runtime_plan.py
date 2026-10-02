@@ -173,9 +173,11 @@ class RuntimePlanCompiler:
         )
 
         max_holding_raw = user_overrides.get("max_holding_seconds")
-        if max_holding_raw is not None:
+        if "max_holding_seconds" in user_overrides:
             exit_policy = PositionExitPolicy(
-                max_holding_seconds=int(max_holding_raw),
+                max_holding_seconds=(
+                    int(max_holding_raw) if max_holding_raw is not None else None
+                ),
                 mode=PositionExitMode.CANDLE_15M,
             )
             sources["exit_policy"] = "override"

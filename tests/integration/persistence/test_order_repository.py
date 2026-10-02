@@ -61,6 +61,26 @@ from crypto_momentum_lab.persistence.postgres.session import (
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("terminal", [ExchangeOrderState.FILLED, ExchangeOrderState.CANCELED])
+async def test_exchange_terminal_fact_precedes_later_local_ack_clock(order_repository, terminal):
+    plans, _, _, events, submissions, factory = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    await events.append_order_event(ExchangeOrderEvent(
+        "local-ack", plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED,
+        NOW + timedelta(seconds=3, microseconds=348681), "12345", {},
+    ))
+    await events.append_order_event(ExchangeOrderEvent(
+        "exchange-terminal", plan.client_order_id, terminal,
+        NOW + timedelta(seconds=3, microseconds=345000), "12345", {},
+    ))
+    async with factory() as session:
+        row = await session.get(ExchangeOrderRow, plan.client_order_id)
+        assert row.state == terminal.value
+        assert row.updated_at == NOW + timedelta(seconds=3, microseconds=348681)
+
+
 @pytest.fixture
 async def order_repository(
     async_database_url: str,

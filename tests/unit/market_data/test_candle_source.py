@@ -4,12 +4,12 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
 from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
     ClosedCandleEmaProvider,
     ClosedCandleSourceError,
 )
-from crypto_momentum_lab.strategy_runner.portfolio import ClosedCandle15m
 
 
 class FakeClosedCandleSource:

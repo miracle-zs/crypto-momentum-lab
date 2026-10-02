@@ -9,6 +9,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     AccountFactStreamScope,
     JournalFactDelta,
+    PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
     DurableJournalCut,
@@ -59,4 +60,5 @@ class ExecutionJournalStore(Protocol):
         *,
         environment: str,
         account_label: str,
+        key: PositionKey | None = None,
     ) -> tuple[AccountFactStreamScope, ...]: ...

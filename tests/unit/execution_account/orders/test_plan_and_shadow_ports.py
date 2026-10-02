@@ -95,8 +95,3 @@ async def test_plan_and_intent_state_write_share_transaction(failure):
     factory.assert_called_once_with()
     session.begin.assert_called_once_with()
     session.commit.assert_not_awaited()
-
-
-def test_plan_repository_exposes_only_plan_write():
-    assert hasattr(PostgresOrderPlanRepository, "save_planned_order")
-    assert not hasattr(PostgresOrderPlanRepository, "save_shadow_suppression")

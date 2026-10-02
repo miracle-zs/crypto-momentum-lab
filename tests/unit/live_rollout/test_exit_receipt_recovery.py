@@ -83,6 +83,25 @@ async def test_fresh_explicit_flat_and_verified_order_absence_supersede():
     exchange.query_order_by_client_id.assert_awaited_once_with("BTCUSDT", command.client_order_id("run"))
 
 
+@pytest.mark.parametrize("local_order", [False, True])
+async def test_obsolete_timeout_is_retired_only_after_verified_non_submission(local_order):
+    command, exchange, session, recovery = case()
+    command = replace(command, reason="max_holding_period")
+    recovery._obsolete_exit_reasons = frozenset({"max_holding_period"})
+    exchange.fetch_positions.return_value = (
+        replace(exchange.fetch_positions.return_value[0], position_amt=Decimal("2")),
+    )
+    if local_order:
+        session.scalar.side_effect = [SimpleNamespace(
+            run_id="run", symbol="BTCUSDT", reduce_only=True,
+            client_order_id=command.client_order_id("run"),
+            state="submitted", exchange_order_id=None,
+        ), 0]
+    result = await recovery(command)
+    assert result.status == ("PENDING" if local_order else "SUPERSEDED")
+    exchange.query_order_by_client_id.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "condition",
     [

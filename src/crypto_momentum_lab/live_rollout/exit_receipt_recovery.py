@@ -49,12 +49,14 @@ class LiveExitReceiptRecovery:
         account_label: str,
         run_id: str,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        obsolete_exit_reasons: frozenset[str] = frozenset(),
     ) -> None:
         self._sessions = sessions
         self._exchange = exchange
         self._account = account_label
         self._run_id = run_id
         self._clock = clock
+        self._obsolete_exit_reasons = obsolete_exit_reasons
         self._retry_not_before: datetime | None = None
         self._account_cut: datetime | None = None
         self._positions: tuple[AccountPositionSnapshot, ...] = ()
@@ -139,7 +141,8 @@ class LiveExitReceiptRecovery:
         ]
         if (
             len(matching) != 1
-            or matching[0].position_amt != 0
+            or (matching[0].position_amt != 0
+                and command.reason not in self._obsolete_exit_reasons)
             or not 0 <= (checked_at - matching[0].observed_at).total_seconds() <= 180
         ):
             return pending("explicit_fresh_exchange_flat_cut_required")
@@ -168,6 +171,10 @@ class LiveExitReceiptRecovery:
         if order is None:
             if row is not None:
                 return pending("durable_order_exists_but_exchange_receipt_unknown")
+            if command.reason in self._obsolete_exit_reasons:
+                return ExitRecoveryDisposition(
+                    "SUPERSEDED", "obsolete_exit_policy_verified_unsubmitted"
+                )
             return ExitRecoveryDisposition(
                 "SUPERSEDED", "exchange_absence_verified_explicit_position_flat"
             )

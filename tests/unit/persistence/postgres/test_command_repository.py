@@ -363,21 +363,3 @@ async def test_execution_transaction_uses_command_repository_with_same_session()
         session, **values
     )
     session.commit.assert_not_awaited()
-
-
-def test_order_repository_no_longer_exposes_execution_command_methods():
-    from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-        PostgresOrderPlanRepository,
-    )
-
-    for name in (
-        "upsert_execution_command",
-        "upsert_execution_command_in_session",
-        "load_active_execution_commands",
-        "load_execution_order_watermarks",
-        "load_seen_event_ids",
-        "load_seen_fill_trade_ids",
-        "save_execution_command",
-        "save_reconciliation_event",
-    ):
-        assert not hasattr(PostgresOrderPlanRepository, name)

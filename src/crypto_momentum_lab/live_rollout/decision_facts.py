@@ -167,6 +167,7 @@ class LiveDecisionFactSource:
         decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
         request_exit_recovery: Callable[[], None] = lambda: None,
+        obsolete_exit_reasons: frozenset[str] = frozenset(),
     ) -> None:
         if not account_label.strip() or not strategy_name.strip():
             raise ValueError("account and strategy identity must not be empty")
@@ -178,6 +179,7 @@ class LiveDecisionFactSource:
         self._decision_uow = decision_unit_of_work
         self._hedge_mode = hedge_mode
         self._request_exit_recovery = request_exit_recovery
+        self._obsolete_exit_reasons = obsolete_exit_reasons
         self._context: LiveDaemonRuntimeContext | None = None
         self._policy_state = PolicyState()
         self._policy_revision = 0
@@ -478,7 +480,8 @@ class LiveDecisionFactSource:
             total_qty = (
                 getattr(view, "total_quantity", None) if view is not None else None
             )
-            if total_qty is not None and total_qty <= Decimal("0"):
+            if (command.reason in self._obsolete_exit_reasons
+                or (total_qty is not None and total_qty <= Decimal("0"))):
                 recovery = self._exit_recovery_handler
                 if recovery is None:
                     continue

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -107,7 +107,14 @@ from crypto_momentum_lab.domain.execution.position_recovery import (
     recover_durable_position,
 )
 from crypto_momentum_lab.domain.execution.position_repair import (
+    build_position_repair,
     validate_repaired_position,
+)
+from crypto_momentum_lab.domain.execution.position_repair_models import (
+    PositionRepairBlocked,
+    PositionRepairRequest,
+    PositionRepairUnitOfWork,
+    PublishedPositionRepair,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import (
     PositionRecoveryCodec,
@@ -172,6 +179,15 @@ def _execution_head_payload(
         "active_reservation_ids": sorted(
             reservation.reservation_id
             for reservation in book.get_active_reservations(key)
+        ),
+        "external_recovery_ids": sorted(
+            identity for identity, position in book._external_recovery_positions.items()
+            if position == key
+        ),
+        "recovery_command_ids": sorted(
+            identity for identity in book._recovery_required_commands
+            if identity in book._outbox_by_command_id
+            and book._outbox_by_command_id[identity].scope.to_position_key() == key
         ),
     }
 
@@ -302,6 +318,7 @@ class ExecutionBook:
         self._order_cumulative_quotes: dict[str, Decimal] = {}
         self._persistence_failed = execution_unit_of_work is not None
         self._recovery_required_commands: set[str] = set()
+        self._external_recovery_positions: dict[str, PositionKey] = {}
         self._dispatch_reconciliation_required_commands: set[str] = set()
 
     def register_active_stream(
@@ -340,7 +357,56 @@ class ExecutionBook:
                 return (s.stream_id, s.stream_epoch)
         return None
 
+    async def repair_position(
+        self, request: PositionRepairRequest, *, uow: PositionRepairUnitOfWork,
+        is_current: Callable[[], bool] | None = None,
+    ) -> PublishedPositionRepair:
+        """Serialize fact load, durable repair commit and publication with observe.
+
+        Every writer takes the Book lock before the database lock. No observer
+        can see a committed repair head against the old in-memory projection.
+        """
+        async with self._mutation_lock(request.key):
+            for attempt in range(3):
+                try:
+                    async with uow.transaction(request.key) as tx:
+                        loaded = await tx.load_repair_facts(request)
+                        if is_current is not None and not is_current():
+                            raise PositionRepairBlocked("repair context advanced during fact load")
+                        repair = build_position_repair(request, loaded)
+                        receipt = await tx.persist_repair(repair)
+                    break
+                except DecisionCommitConflict:
+                    if attempt == 2:
+                        raise
+            try:
+                view = await self._reload_position(
+                    request.key, expected_scope=request.scope,
+                    expected_quantity=request.expected_quantity,
+                )
+                if (view is None or view.stream_scope != receipt.scope
+                    or view.total_quantity != request.expected_quantity
+                    or not view.is_ready_for_trade):
+                    raise PositionRepairBlocked("durable repair committed but Book reload is not ready")
+            except Exception:
+                # Commit succeeded; admission must remain sealed until restore
+                # if the committed projection cannot be published.
+                self._persistence_failed = True
+                raise
+            return PublishedPositionRepair(receipt, view, repair.new_facts)
+
     async def reload_position(
+        self, key: PositionKey, *, as_of: datetime | None = None,
+        expected_scope: AccountFactStreamScope | None = None,
+        expected_quantity: Decimal | None = None,
+    ) -> PositionView | None:
+        async with self._mutation_lock(key):
+            return await self._reload_position(
+                key, as_of=as_of, expected_scope=expected_scope,
+                expected_quantity=expected_quantity,
+            )
+
+    async def _reload_position(
         self,
         key: PositionKey,
         *,
@@ -353,78 +419,65 @@ class ExecutionBook:
             return None
         as_of = as_of or datetime.now(UTC)
         canon = key.canonical_id
-        async with self._mutation_lock(key):
-            states = await self._execution_unit_of_work.load_positions(
-                account_label=key.account_label,
-                environment=key.environment,
-                as_of=as_of,
+        target_state = await self._execution_unit_of_work.load_position(
+            key, as_of=as_of,
+        )
+        if target_state is None:
+            return None
+        journal = AccountJournal.from_durable_cut(target_state.cut)
+        book = PositionBook(journal)
+        if expected_scope is not None:
+            validate_repaired_position(
+                state=target_state,
+                scope=expected_scope,
+                expected_quantity=expected_quantity,
+                reservation_ids={
+                    r.reservation_id for r in self.get_active_reservations(key)
+                },
             )
-            target_state = next(
-                (
-                    s
-                    for s in states
-                    if (
-                        s.scope.matches(key)
-                    )
-                ),
-                None,
+        head = target_state.head
+        scope = target_state.cut.scope
+        if head is not None:
+            payload = head.state_payload
+            view = book.get_view()
+            book.use_durable_projection_version(
+                head.projection_version,
+                event_cut=view.event_cut,
             )
-            if target_state is None:
-                return None
-            journal = AccountJournal.from_durable_cut(target_state.cut)
-            book = PositionBook(journal)
-            if expected_scope is not None:
-                validate_repaired_position(
-                    state=target_state,
-                    scope=expected_scope,
-                    expected_quantity=expected_quantity,
-                    reservation_ids={
-                        r.reservation_id for r in self.get_active_reservations(key)
-                    },
-                )
-            head = target_state.head
-            scope = target_state.cut.scope
-            if head is not None:
-                payload = head.state_payload
-                view = book.get_view()
-                book.use_durable_projection_version(
-                    head.projection_version,
-                    event_cut=view.event_cut,
-                )
-                self._head_revisions[canon] = head.revision
-                self._head_projection_digests[canon] = str(
-                    payload.get("projection_digest", "")
-                )
-                active_res = payload.get("active_reservation_ids", [])
-                self._head_expected_reservation_ids[canon] = (
-                    set(active_res) if isinstance(active_res, list) else set()
-                )
-                last_sequence = payload.get("last_sequence")
-                if isinstance(last_sequence, int) and last_sequence >= 0:
-                    self._last_sequences[canon] = last_sequence
-                else:
-                    self._last_sequences.pop(canon, None)
+            self._head_revisions[canon] = head.revision
+            self._head_projection_digests[canon] = str(
+                payload.get("projection_digest", "")
+            )
+            active_res = payload.get("active_reservation_ids", [])
+            self._head_expected_reservation_ids[canon] = (
+                set(active_res) if isinstance(active_res, list) else set()
+            )
+            last_sequence = payload.get("last_sequence")
+            if isinstance(last_sequence, int) and last_sequence >= 0:
+                self._last_sequences[canon] = last_sequence
             else:
-                self._head_revisions[canon] = 0
+                self._last_sequences.pop(canon, None)
+        else:
+            self._head_revisions[canon] = 0
 
-            self._journals[canon] = journal
-            self._books[canon] = book
-            self._stream_scopes[canon] = scope
-            self._journal_revisions[canon] = target_state.cut.revision
-            self._seen_trade_ids.update(target_state.trade_ids)
-            self._seen_evidence_ids.update(
-                _scoped_evidence_identity(scope, identity)
-                for identity in target_state.evidence_ids
+        self._journals[canon] = journal
+        self._books[canon] = book
+        self._stream_scopes[canon] = scope
+        self._journal_revisions[canon] = target_state.cut.revision
+        self._seen_trade_ids.update(target_state.trade_ids)
+        self._seen_evidence_ids.update(
+            _scoped_evidence_identity(scope, identity)
+            for identity in target_state.evidence_ids
+        )
+        for watermark in target_state.watermarks:
+            watermark_key = self._order_watermark_key(key, watermark.order_id)
+            self._order_cumulative_fills[watermark_key] = (
+                watermark.cumulative_quantity
             )
-            for watermark in target_state.watermarks:
-                watermark_key = self._order_watermark_key(key, watermark.order_id)
-                self._order_cumulative_fills[watermark_key] = (
-                    watermark.cumulative_quantity
-                )
-                self._order_cumulative_quotes[watermark_key] = (
-                    watermark.cumulative_quote
-                )
-            return book.get_view()
+            self._order_cumulative_quotes[watermark_key] = (
+                watermark.cumulative_quote
+            )
+        return book.get_view()
 
     @property
     def coordinator(self) -> ExecutionCoordinator:
@@ -480,6 +533,7 @@ class ExecutionBook:
         candidate._order_cumulative_fills = dict(self._order_cumulative_fills)
         candidate._order_cumulative_quotes = dict(self._order_cumulative_quotes)
         candidate._recovery_required_commands = set(self._recovery_required_commands)
+        candidate._external_recovery_positions = dict(self._external_recovery_positions)
         candidate._dispatch_reconciliation_required_commands = set(
             self._dispatch_reconciliation_required_commands
         )
@@ -511,6 +565,7 @@ class ExecutionBook:
             "_order_cumulative_fills",
             "_order_cumulative_quotes",
             "_recovery_required_commands",
+            "_external_recovery_positions",
             "_dispatch_reconciliation_required_commands",
             "_stream_scopes",
             "_active_streams",
@@ -639,6 +694,12 @@ class ExecutionBook:
                 log.warning(event, **values)
             self._head_revisions[canon] = recovered.head_revision
             if state.head is not None:
+                self._recovery_required_commands.update(
+                    state.head.state_payload.get("recovery_command_ids", ())
+                )
+                for identity in state.head.state_payload.get("external_recovery_ids", ()):
+                    self._external_recovery_positions[identity] = key
+                    self._recovery_required_commands.add(identity)
                 self._head_projection_digests[canon] = recovered.projection_digest
                 self._head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
                 if recovered.last_sequence is not None:
@@ -697,6 +758,7 @@ class ExecutionBook:
             self._requests_by_id.clear()
             self._receipts_by_id.clear()
             self._recovery_required_commands.clear()
+            self._external_recovery_positions.clear()
             self._dispatch_reconciliation_required_commands.clear()
             self._coordinator.clear_reservations()
             await self._restore_durable_positions(
@@ -869,6 +931,21 @@ class ExecutionBook:
             if r is not None and r.active_quantity > Decimal("0"):
                 active.append(r)
         return active
+
+    def _command_order_id(self, key: PositionKey, order_id: str) -> str:
+        matches = [entry.command_id for entry in self._outbox_by_command_id.values()
+                   if entry.scope.to_position_key() == key
+                   and order_id in (entry.command_id, entry.external_order_id)]
+        if len(matches) > 1:
+            raise ValueError("exchange order identity belongs to multiple commands")
+        return matches[0] if matches else order_id
+
+    def _command_order_ids(self, key: PositionKey, order_id: str) -> frozenset[str]:
+        command_id = self._command_order_id(key, order_id)
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is not None and entry.external_order_id is not None:
+            return frozenset({command_id, entry.external_order_id})
+        return frozenset({command_id})
 
     def get_active_reservations(
         self, key: PositionKey | None = None
@@ -1231,10 +1308,16 @@ class ExecutionBook:
                     "Execution persistence failed; restore is required before trading"
                 )
             )
-        if self._recovery_required_commands:
+        key = request.scope.to_position_key()
+        blocking_recoveries = {
+            identity for identity in self._recovery_required_commands
+            if identity not in self._external_recovery_positions
+            or self._external_recovery_positions[identity] == key
+        }
+        if blocking_recoveries:
             return Blocked(
                 reason="Execution reservation settlement requires recovery",
-                diagnostics=tuple(sorted(self._recovery_required_commands)),
+                diagnostics=tuple(sorted(blocking_recoveries)),
             )
         if self._dispatch_reconciliation_required_commands:
             return Blocked(
@@ -1839,6 +1922,7 @@ class ExecutionBook:
         quantity: Decimal,
         *,
         reported_quantity: Decimal,
+        key: PositionKey,
     ) -> tuple[Decimal, bool, str | None]:
         plan = plan_reservation_settlement(
             tuple(self._find_active_reservations_for_command(order_id)),
@@ -1849,7 +1933,12 @@ class ExecutionBook:
         for updated in plan.updates:
             await self._persist_reservation_update(updated)
         if plan.recovery_required:
-            self._recovery_required_commands.add(order_id)
+            if order_id in self._outbox_by_command_id:
+                self._recovery_required_commands.add(order_id)
+            else:
+                identity = f"external:{self._order_watermark_key(key, order_id)}"
+                self._external_recovery_positions[identity] = key
+                self._recovery_required_commands.add(identity)
         return plan.consumed_quantity, plan.recovery_required, plan.diagnostic
 
     async def observe(self, evidence: ExecutionEvidence) -> ExecutionObserveResult:
@@ -2464,11 +2553,54 @@ class ExecutionBook:
         pending_watermark: tuple[str, Decimal, Decimal] | None = None
         dispatch_reconciled_command_id: str | None = None
 
+        # Bind exchange identity before processing trades or cumulative reports.
+        # Late/terminal observations still supply missing identity, but never
+        # rewrite the true order_id of an account trade.
+        if evidence.order_event is not None:
+            event = evidence.order_event
+            entry = self._outbox_by_command_id.get(event.client_order_id)
+            if entry is not None and event.exchange_order_id is not None:
+                if entry.scope.to_position_key() != key or entry.external_order_id not in (
+                    None, event.exchange_order_id,
+                ):
+                    return EvidenceConflict(evidence.evidence_id, "exchange order identity mismatch")
+                owner = self._command_order_id(key, event.exchange_order_id)
+                if owner not in (event.exchange_order_id, entry.command_id):
+                    return EvidenceConflict(evidence.evidence_id, "exchange order already bound")
+                if entry.external_order_id is None:
+                    bound = replace(entry, external_order_id=event.exchange_order_id)
+                    await self._persist_transition(entry, bound)
+                    watermark_key = self._order_watermark_key(key, entry.command_id)
+                    trade_delta = account_trade_delta(
+                        entry.command_id,
+                        previous_quantity=self._order_cumulative_fills.get(watermark_key, Decimal("0")),
+                        previous_quote=self._order_cumulative_quotes.get(watermark_key, Decimal("0")),
+                        account_fills=journal.read_cut().fills,
+                        order_ids=frozenset({entry.command_id, event.exchange_order_id}),
+                    )
+                    if trade_delta.watermark is not None:
+                        quantity, quote = trade_delta.watermark
+                        if entry.command.reduce_only:
+                            consumed, needs_recovery, diagnostic = await self._settle_reservation_quantity(
+                                entry.command_id, trade_delta.quantity,
+                                reported_quantity=quantity, key=key,
+                            )
+                            consumed_qty += consumed
+                            settlement_recovery_required = needs_recovery
+                            if diagnostic:
+                                diagnostics = (diagnostic,)
+                        # These real trades predate the identity receipt. Their
+                        # canonical watermark prevents the report counting them
+                        # a second time in this same transaction.
+                        self._order_cumulative_fills[watermark_key] = quantity
+                        self._order_cumulative_quotes[watermark_key] = quote
+                        pending_watermark = (watermark_key, quantity, quote)
+
         # 1. Process Fill
         if evidence.fill is not None:
             fill = evidence.fill
             trade_id = fill.trade_id
-            order_id = fill.order_id
+            order_id = self._command_order_id(key, fill.order_id)
             existing_trade = next(
                 (prior for prior in journal.read_cut().fills if prior.trade_id == trade_id),
                 None,
@@ -2522,7 +2654,6 @@ class ExecutionBook:
             if (
                 not is_cumulative
                 and is_new_trade
-                and self._active_transaction is not None
                 and not adopted_prefix_trade
             ):
                 watermark_key = self._order_watermark_key(key, order_id)
@@ -2538,6 +2669,7 @@ class ExecutionBook:
                         previous_quantity=previous_quantity,
                         previous_quote=previous_quote,
                         account_fills=journal.read_cut().fills,
+                        order_ids=self._command_order_ids(key, order_id),
                     )
                 except ValueError as error:
                     return EvidenceConflict(evidence.evidence_id, str(error))
@@ -2565,6 +2697,7 @@ class ExecutionBook:
                     reported_quantity=(
                         cumulative_qty if is_cumulative else settlement_delta_qty
                     ),
+                    key=key,
                 )
                 consumed_qty += consumed
                 settlement_recovery_required = (
@@ -2575,6 +2708,7 @@ class ExecutionBook:
 
         report = evidence.cumulative_order
         if report is not None:
+            report = replace(report, order_id=self._command_order_id(key, report.order_id))
             watermark_key = self._order_watermark_key(key, report.order_id)
             previous_quantity = self._order_cumulative_fills.get(
                 watermark_key, Decimal("0")
@@ -2605,6 +2739,7 @@ class ExecutionBook:
                         report.order_id,
                         report_plan.settlement_quantity,
                         reported_quantity=report_plan.reported_quantity,
+                        key=key,
                     )
                     consumed_qty += consumed
                     settlement_recovery_required = (
@@ -2680,7 +2815,14 @@ class ExecutionBook:
                 dispatch_reconciled_command_id
             )
 
-        for command_id in tuple(self._recovery_required_commands):
+        recovery_commands = self._recovery_required_commands | {
+            entry.command_id for entry in self._outbox_by_command_id.values()
+            if entry.scope.to_position_key() == key
+            and (entry.external_order_id in self._recovery_required_commands
+                 or f"external:{self._order_watermark_key(key, entry.external_order_id)}"
+                 in self._recovery_required_commands)
+        }
+        for command_id in recovery_commands:
             pending = self._outbox_by_command_id.get(command_id)
             if pending is None or pending.scope.to_position_key() != key:
                 continue
@@ -2696,9 +2838,32 @@ class ExecutionBook:
                 ),
             ):
                 self._recovery_required_commands.discard(command_id)
+                if pending.external_order_id is not None:
+                    self._recovery_required_commands.discard(pending.external_order_id)
+                    external_identity = f"external:{self._order_watermark_key(key, pending.external_order_id)}"
+                    self._recovery_required_commands.discard(external_identity)
+                    self._external_recovery_positions.pop(external_identity, None)
 
         self._seen_evidence_ids.add(identity)
         updated_view = book.get_view(now=evidence.observed_at)
+
+        # An external exit has no command or reservation lifecycle. Resolve
+        # its position-scoped quarantine only from complete real facts and a
+        # subsequent matching account cut, never merely from an order receipt.
+        facts = journal.read_cut()
+        latest_snapshot = max(facts.snapshots, key=lambda s: s.observed_at, default=None)
+        latest_trade_at = max((f.trade_at for f in facts.fills), default=None)
+        coverage = updated_view.coverage
+        if (updated_view.is_ready_for_trade and not self.get_active_reservations(key)
+            and latest_snapshot is not None and latest_trade_at is not None
+            and latest_snapshot.observed_at >= latest_trade_at
+            and abs(latest_snapshot.position_amt) == updated_view.total_quantity
+            and coverage is not None and coverage.is_authoritative
+            and coverage.end_at >= latest_trade_at):
+            for identity, position in tuple(self._external_recovery_positions.items()):
+                if position == key:
+                    self._external_recovery_positions.pop(identity)
+                    self._recovery_required_commands.discard(identity)
 
         return Applied(
             evidence_id=evidence.evidence_id,

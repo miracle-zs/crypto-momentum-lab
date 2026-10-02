@@ -41,20 +41,24 @@ def plan_order_event(
     ):
         return OrderEventPlan()
     state = event.state
-    if state in (
-        ExchangeOrderState.ACKNOWLEDGED,
-        ExchangeOrderState.SUBMITTED,
-    ) and outbox.state in (
+    acknowledged = state in (
+        ExchangeOrderState.ACKNOWLEDGED, ExchangeOrderState.SUBMITTED,
+    ) or (state is ExchangeOrderState.PARTIALLY_FILLED
+          and event.exchange_order_id is not None)
+    eligible = outbox.state in (
         DispatchState.PREPARED,
         DispatchState.DISPATCHING,
         DispatchState.UNKNOWN,
-    ):
+    ) or (outbox.state is DispatchState.ACKNOWLEDGED
+          and event.exchange_order_id is not None)
+    if acknowledged and eligible:
         return OrderEventPlan(
             updated=replace(
                 outbox,
                 state=DispatchState.ACKNOWLEDGED,
                 updated_at=observed_at,
-            )
+            ),
+            dispatch_reconciled=event.exchange_order_id is not None,
         )
     if state in (
         ExchangeOrderState.CANCELED,
@@ -83,7 +87,7 @@ def plan_order_event(
             (
                 fill.quantity
                 for fill in account_fills
-                if fill.order_id == event.client_order_id
+                if fill.order_id in (event.client_order_id, outbox.external_order_id)
             ),
             Decimal("0"),
         )
@@ -133,7 +137,8 @@ def terminal_settlement_is_confirmed(
     if outbox.state is not DispatchState.TERMINAL:
         return False
     confirmed = sum(
-        (fill.quantity for fill in account_fills if fill.order_id == outbox.command_id),
+        (fill.quantity for fill in account_fills
+         if fill.order_id in (outbox.command_id, outbox.external_order_id)),
         Decimal("0"),
     )
     if (

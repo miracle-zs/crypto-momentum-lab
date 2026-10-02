@@ -64,15 +64,29 @@ class PostgresOrderEventRepository:
                         # FILLED is the strongest terminal observation; a
                         # later cancel/reject event must not erase it.
                         or_(
-                            ExchangeOrderRow.state != ExchangeOrderState.FILLED.value,
+                            ExchangeOrderRow.state.not_in(terminal_states),
                             literal(event.state is ExchangeOrderState.FILLED),
+                            and_(
+                                ExchangeOrderRow.state != ExchangeOrderState.FILLED.value,
+                                ExchangeOrderRow.updated_at <= event.occurred_at,
+                            ),
                         ),
                     )
-                    advance_state = and_(
-                        ExchangeOrderRow.updated_at <= event.occurred_at,
-                        or_(
+                    # REST receipt time and exchange event time use different
+                    # clocks. A verified terminal fact dominates a nonterminal
+                    # receipt even when its exchange timestamp is earlier.
+                    advance_state = or_(
+                        terminal_transition,
+                        and_(
+                            ExchangeOrderRow.updated_at <= event.occurred_at,
                             ExchangeOrderRow.state.not_in(terminal_states),
-                            terminal_transition,
+                            or_(
+                                ExchangeOrderRow.state != ExchangeOrderState.PARTIALLY_FILLED.value,
+                                literal(event.state not in (
+                                    ExchangeOrderState.ACKNOWLEDGED,
+                                    ExchangeOrderState.SUBMITTED,
+                                )),
+                            ),
                         ),
                     )
                     order_values: dict[str, object] = {

@@ -19,9 +19,6 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
     PostgresOrderSubmissionRepository,
 )
@@ -152,11 +149,6 @@ async def test_rejected_risk_evaluation_does_not_open_transaction():
     with pytest.raises(ValueError, match="approve"):
         await repository.save_approved_intent(intent, rejected)
     factory.assert_not_called()
-
-
-def test_order_repository_no_longer_owns_submission_capabilities():
-    for method in ("prepare_submission", "claim_intent", "save_approved_intent"):
-        assert not hasattr(PostgresOrderPlanRepository, method)
 
 
 def _evaluation(

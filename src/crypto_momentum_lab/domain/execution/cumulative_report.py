@@ -35,6 +35,9 @@ def plan_cumulative_report(
         previous_quantity=previous_watermark[0],
         previous_quote=previous_watermark[1],
         account_fills=account_fills,
+        order_ids=(frozenset({outbox.command_id, outbox.external_order_id})
+                   if outbox is not None and outbox.external_order_id is not None
+                   else frozenset({report.order_id})),
     )
     exit_report = has_active_reservations or (
         outbox is not None and outbox.command.reduce_only
@@ -73,6 +76,12 @@ def plan_watermark_publication(
         else ""
     )
     outbox = outbox_by_command_id.get(command_id)
+    if outbox is None:
+        outbox = next((entry for entry in outbox_by_command_id.values()
+                       if entry.scope == evidence.scope
+                       and entry.external_order_id == command_id), None)
+    if outbox is not None:
+        command_id = outbox.command_id
     observed_fills = evidence.fills or (
         (evidence.fill,) if evidence.fill is not None else ()
     )

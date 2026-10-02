@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
+    PositionView,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
 
@@ -65,6 +66,13 @@ class PositionRepairReceipt:
     head_revision: int
     projection_version: str
     changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedPositionRepair:
+    receipt: PositionRepairReceipt
+    view: PositionView
+    new_facts: int
 
 
 class PositionRepairTransaction(Protocol):

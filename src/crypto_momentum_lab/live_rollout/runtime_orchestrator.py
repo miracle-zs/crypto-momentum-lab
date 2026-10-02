@@ -588,6 +588,7 @@ async def run_live_daemon(
         decision_unit_of_work = AsyncPostgresDecisionUnitOfWork(execution_factory)
         fact_source = LiveDecisionFactSource(
             account_label,
+            obsolete_exit_reasons=frozenset({"max_holding_period"}),
             strategy_name=strategy_name,
             decision_unit_of_work=decision_unit_of_work,
             hedge_mode=hedge_mode,
@@ -733,8 +734,9 @@ async def run_live_daemon(
             "max_order_notional": getattr(
                 risk_config, "max_order_notional", target_notional
             ),
-            "max_holding_seconds": getattr(config.strategy, "max_holding_seconds", None)
-            or 1200,
+            # Live exits belong to LiveExitManager (closed candle + grace).
+            # Never inject a second, time-based exit through the entry policy.
+            "max_holding_seconds": None,
         }
         runtime_plan = RuntimePlanCompiler.compile(
             environment="live",
@@ -962,6 +964,7 @@ async def run_live_daemon(
                 exchange=client,
                 account_label=account_label,
                 run_id=session_id,
+                obsolete_exit_reasons=frozenset({"max_holding_period"}),
             )
         )
         await fact_source.restore()

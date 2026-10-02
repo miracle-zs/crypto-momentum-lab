@@ -607,12 +607,29 @@ class AsyncPostgresExecutionUnitOfWork:
                 as_of=as_of,
             )
 
+    async def load_position(
+        self, key: PositionKey, *, as_of: datetime,
+    ) -> _DurableExecutionPositionState | None:
+        states = await self._load_position_states(
+            environment=key.environment, account_label=key.account_label,
+            as_of=as_of, key=key,
+        )
+        return states[0] if states else None
+
     async def load_positions(
+        self, *, environment: str, account_label: str, as_of: datetime,
+    ) -> tuple[_DurableExecutionPositionState, ...]:
+        return await self._load_position_states(
+            environment=environment, account_label=account_label, as_of=as_of,
+        )
+
+    async def _load_position_states(
         self,
         *,
         environment: str,
         account_label: str,
         as_of: datetime,
+        key: PositionKey | None = None,
     ) -> tuple[_DurableExecutionPositionState, ...]:
         """Load the exact adopted account stream and all cross-epoch identities."""
         if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -625,6 +642,7 @@ class AsyncPostgresExecutionUnitOfWork:
                 session,
                 environment=environment,
                 account_label=account_label,
+                **({"key": key} if key is not None else {}),
             )
             by_position: dict[str, list[AccountFactStreamScope]] = {}
             for scope in scopes:

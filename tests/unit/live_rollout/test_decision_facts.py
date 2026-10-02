@@ -660,3 +660,23 @@ async def test_flat_book_does_not_prove_pending_exit_was_never_submitted():
     uow.mark_exit_superseded.assert_not_awaited()
     uow.mark_exit_dispatched.assert_not_awaited()
     handler.assert_not_awaited()
+
+
+async def test_obsolete_pending_timeout_uses_receipt_recovery_without_resubmission():
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.decision.ports import ExitRecoveryDisposition
+    source, uow, _, view, handler, command = _pending_exit_case()
+    source._obsolete_exit_reasons = frozenset({"max_holding_period"})
+    command = replace(command, reason="max_holding_period")
+    uow.load_pending_exits.return_value = (("incident-decision", command),)
+    view.total_quantity = Decimal("1")
+    recovery = AsyncMock(return_value=ExitRecoveryDisposition("SUPERSEDED", "verified_unsubmitted"))
+    source.set_exit_recovery_handler(recovery)
+    await source.recover_pending_exits()
+    handler.assert_not_awaited()
+    recovery.assert_awaited_once_with(command)
+    uow.mark_exit_superseded.assert_awaited_once_with(
+        "incident-decision", command.command_id, "verified_unsubmitted",
+    )

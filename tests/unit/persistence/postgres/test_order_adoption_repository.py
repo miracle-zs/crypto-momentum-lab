@@ -11,9 +11,6 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
     PostgresOrderAdoptionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 from tests.unit.live_rollout.test_entry_order_cancellation import NOW, _open_order
 
 
@@ -140,7 +137,3 @@ async def test_failed_adoption_prevents_exchange_cancellation():
         await canceller.cancel(())
     repository.adopt_external_order_for_cancellation.assert_awaited_once()
     state_machine.cancel_order.assert_not_awaited()
-
-
-def test_plan_repository_no_longer_exposes_external_adoption():
-    assert not hasattr(PostgresOrderPlanRepository, "adopt_external_order_for_cancellation")

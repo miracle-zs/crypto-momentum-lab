@@ -220,11 +220,13 @@ async def test_repair_context_advanced_during_fact_read_cannot_persist():
     request = PositionRepairRequest(key=key, run_id="run-1",
         scope=AccountFactStreamScope.for_position_key(key, stream_id="hub", stream_epoch="epoch"),
         expected_quantity=Decimal("1"), observed_at=NOW)
-    book = SimpleNamespace(reload_position=AsyncMock())
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    book = ExecutionBook()
+    book._reload_position = AsyncMock()
     assert not await auto_heal_unmanaged_position(request=request, uow=Uow(), book=book,
                                                  is_current=lambda: current[0])
     persisted.assert_not_awaited()
-    book.reload_position.assert_not_awaited()
+    book._reload_position.assert_not_awaited()
 
 
 async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch):

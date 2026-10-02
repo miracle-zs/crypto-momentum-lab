@@ -172,6 +172,10 @@ class ExecutionTransactionPort(Protocol):
 class ExecutionUnitOfWorkPort(Protocol):
     """Durable reads and atomic transaction seam used by ExecutionBook."""
 
+    async def load_position(
+        self, key: PositionKey, *, as_of: datetime,
+    ) -> DurableExecutionPositionState | None: ...
+
     async def load_journal_cut(
         self,
         *,

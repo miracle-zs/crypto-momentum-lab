@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import (
+    exists,
+    func,
     or_,
     select,
 )
@@ -13,6 +15,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+    ExecutionBookHeadRow,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeFillRow,
     ExchangeOrderEventRow,
@@ -286,28 +291,34 @@ class PostgresCommandRepository:
                     ),
                 )
                 .where(
-                    ExecutionCommandRow.status.in_(
-                        ["prepared", "dispatching", "acknowledged", "unknown"]
-                    ),
                     or_(
-                        ExchangeOrderRow.state.is_(None),
-                        ExchangeOrderRow.state.not_in(
-                            [
-                                "filled",
-                                "canceled",
-                                "rejected",
-                                "expired",
-                                "absent_reconciled",
-                                "suppressed",
-                            ]
+                        ExecutionCommandRow.status.in_(
+                            ["prepared", "dispatching", "acknowledged", "unknown"]
                         ),
+                        exists(select(ExecutionBookHeadRow.symbol).where(
+                            ExecutionBookHeadRow.environment == ExecutionCommandRow.details["scope"]["environment"].astext,
+                            ExecutionBookHeadRow.account_label == ExecutionCommandRow.details["scope"]["account_label"].astext,
+                            ExecutionBookHeadRow.symbol == ExecutionCommandRow.details["scope"]["symbol"].astext,
+                            ExecutionBookHeadRow.position_side == ExecutionCommandRow.details["scope"]["position_side"].astext,
+                            ExecutionBookHeadRow.state_payload["recovery_command_ids"].contains(
+                                func.jsonb_build_array(ExecutionCommandRow.command_id)
+                            ),
+                        )),
                     ),
                 )
             )
+            if account_label is not None:
+                query = query.where(
+                    ExecutionCommandRow.details["scope"]["account_label"].astext == account_label
+                )
             rows = (
                 await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
             ).all()
             result = []
+            exchange_ids = dict((await session.execute(
+                select(ExchangeOrderRow.client_order_id, ExchangeOrderRow.exchange_order_id)
+                .where(ExchangeOrderRow.client_order_id.in_([r.client_order_id for r in rows]))
+            )).all()) if rows else {}
             for r in rows:
                 if getattr(r, "command", None) in (
                     "resolve_unknown_order",
@@ -316,6 +327,8 @@ class PostgresCommandRepository:
                 ):
                     continue
                 dtls = dict(r.details) if isinstance(r.details, dict) else {}
+                if dtls.get("external_order_id") is None:
+                    dtls["external_order_id"] = exchange_ids.get(r.client_order_id)
                 scope = dtls.get("scope")
                 acc = (
                     scope.get("account_label")

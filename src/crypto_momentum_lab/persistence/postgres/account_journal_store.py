@@ -452,6 +452,7 @@ class PostgresAccountJournalStore:
         *,
         environment: str,
         account_label: str,
+        key: PositionKey | None = None,
     ) -> tuple[AccountFactStreamScope, ...]:
         scopes: set[AccountFactStreamScope] = set()
         for model in (
@@ -469,6 +470,10 @@ class PostgresAccountJournalStore:
                 model.environment == environment,
                 model.account_label == account_label,
             )
+            if key is not None:
+                statement = statement.where(
+                    model.symbol == key.symbol, model.position_side == key.position_side.value,
+                )
             for row in (await session.execute(statement)).all():
                 scopes.add(_scope_from_columns(row))
 
@@ -477,6 +482,8 @@ class PostgresAccountJournalStore:
             AccountFillEventRow.environment == environment,
             AccountFillEventRow.account_label == account_label,
         )
+        if key is not None:
+            fill_statement = fill_statement.where(AccountFillEventRow.symbol == key.symbol)
         for row in (await session.scalars(fill_statement)).all():
             raw_side = _raw_position_side(row.raw_payload)
             side = raw_side or "BOTH"
@@ -487,6 +494,11 @@ class PostgresAccountJournalStore:
             AccountPositionSnapshotRow.environment == environment,
             AccountPositionSnapshotRow.account_label == account_label,
         )
+        if key is not None:
+            snapshot_statement = snapshot_statement.where(
+                AccountPositionSnapshotRow.symbol == key.symbol,
+                AccountPositionSnapshotRow.position_side == key.position_side.value,
+            )
         for row in (await session.scalars(snapshot_statement)).all():
             side = str(row.position_side).upper()
             if side in {"BOTH", "LONG", "SHORT"}:
@@ -494,6 +506,8 @@ class PostgresAccountJournalStore:
 
         for symbol, sides in legacy_symbols.items():
             for side in sides:
+                if key is not None and side != key.position_side.value:
+                    continue
                 scopes.add(
                     AccountFactStreamScope(
                         environment=environment,

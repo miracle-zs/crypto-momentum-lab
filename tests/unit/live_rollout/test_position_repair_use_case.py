@@ -35,6 +35,15 @@ from crypto_momentum_lab.live_rollout.position_self_healing import (
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 
+def repair_book():
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+    book = ExecutionBook()
+    # Only the durable projection read is stubbed; locking, repair, retries and
+    # publication validation all exercise the real Book implementation.
+    book.reload_position = book._reload_position = AsyncMock()
+    return book
+
+
 @pytest.mark.parametrize("change", ["refresh", "quantity", "entry_price", "stream"])
 async def test_repair_survives_refresh_but_rejects_changed_exposure(change):
     from types import SimpleNamespace
@@ -90,10 +99,9 @@ async def test_repair_survives_refresh_but_rejects_changed_exposure(change):
     async def reload(*args, **kwargs):
         return reloaded_view(uow.persisted[-1])
 
-    book = SimpleNamespace(
-        get_active_stream=lambda *args: tuple(stream),
-        reload_position=AsyncMock(side_effect=reload),
-    )
+    book = repair_book()
+    book.get_active_stream = lambda *args: tuple(stream)
+    book.reload_position.side_effect = reload
     worker = LiveUnmanagedPositionRepair(
         account_label="account-3",
         run_id="run-3",
@@ -247,7 +255,7 @@ async def test_unproven_repair_rolls_back_without_reload(reason):
             + (replace(loaded.account_fills[0], quantity=Decimal("1")),),
         )
     uow = MemoryRepairUow(loaded)
-    book = AsyncMock()
+    book = repair_book()
     assert not await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
     assert uow.commits == 0 and uow.rollbacks == 1
     assert not uow.persisted
@@ -257,7 +265,7 @@ async def test_unproven_repair_rolls_back_without_reload(reason):
 async def test_repair_reloads_only_after_commit_and_is_idempotent():
     request, loaded = repair_case()
     uow = MemoryRepairUow(loaded)
-    book = AsyncMock()
+    book = repair_book()
 
     async def reload(key, **kwargs):
         assert uow.commits == 1
@@ -288,7 +296,7 @@ async def test_repair_reloads_only_after_commit_and_is_idempotent():
 async def test_revision_conflict_reloads_and_recomputes_before_retry():
     request, loaded = repair_case()
     uow = MemoryRepairUow(loaded, failures=2)
-    book = AsyncMock()
+    book = repair_book()
     book.reload_position.side_effect = lambda *args, **kwargs: reloaded_view(
         uow.persisted[-1]
     )
@@ -301,7 +309,7 @@ async def test_revision_conflict_reloads_and_recomputes_before_retry():
 async def test_repeated_revision_conflict_is_bounded():
     request, loaded = repair_case()
     uow = MemoryRepairUow(loaded, failures=3)
-    book = AsyncMock()
+    book = repair_book()
     with pytest.raises(DecisionCommitConflict):
         await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
     assert uow.loads == 3 and uow.rollbacks == 3 and uow.commits == 0
@@ -312,11 +320,15 @@ async def test_repeated_revision_conflict_is_bounded():
 async def test_post_commit_reload_failure_does_not_report_success(failure):
     request, loaded = repair_case()
     uow = MemoryRepairUow(loaded)
-    book = AsyncMock()
+    book = repair_book()
     book.reload_position.side_effect = failure
     book.reload_position.return_value = None
-    with pytest.raises((PositionRepairBlocked, RuntimeError)):
-        await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
+    if failure is None:
+        assert not await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
+    else:
+        with pytest.raises(RuntimeError):
+            await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
+    assert book._persistence_failed
     assert uow.commits == 1
 
 
@@ -365,7 +377,7 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
         watermarks=(),
     )
     execution_uow = AsyncMock()
-    execution_uow.load_positions.return_value = (state,)
+    execution_uow.load_position.return_value = state
     book = ExecutionBook(execution_unit_of_work=execution_uow)
     if corruption:
         with pytest.raises(PositionRepairBlocked):

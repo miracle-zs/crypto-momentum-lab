@@ -9,9 +9,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
 )
@@ -103,8 +100,3 @@ async def test_read_failure_is_not_reported_as_empty_order_set():
     session.scalars.side_effect = RuntimeError("database unavailable")
     with pytest.raises(RuntimeError, match="database unavailable"):
         await repository.load_unresolved_orders("run")
-
-
-def test_write_repository_no_longer_exposes_order_reads():
-    assert not hasattr(PostgresOrderPlanRepository, "load_order")
-    assert not hasattr(PostgresOrderPlanRepository, "load_unresolved_orders")

@@ -1,16 +1,21 @@
 """Cross-module acceptance of staged Book facts and PostgreSQL rollback."""
 
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+from crypto_momentum_lab.domain.execution.evidence_models import (
+    ExecutionCumulativeOrderReport,
+    ExecutionEvidence,
+)
 from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
 )
@@ -18,6 +23,15 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     Duplicate,
 )
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+)
+from crypto_momentum_lab.domain.execution.trade_command import (
+    TradeCommand,
+    TradeCommandType,
+)
+from crypto_momentum_lab.domain.strategy.models import EntryType, StrategySide
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
 )
@@ -107,6 +121,55 @@ async def test_book_nonzero_restore_preserves_token_and_evidence_identity(
         assert historical.projection_version != view.projection_version
         assert isinstance(await restored.observe(evidence), Duplicate)
         assert (await restored.read(evidence.scope)).total_quantity == Decimal("2")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_command_identity_and_trade_wait_survive_process_restart(async_database_url):
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"test-terminal-identity-{uuid4().hex}"
+    first = _evidence(account, "1")
+    scope = first.scope
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        await book.observe(replace(first, fill=None))
+        command = TradeCommand(
+            "terminal-entry", scope.to_position_key(), TradeCommandType.ENTRY,
+            StrategySide.LONG, EntryType.LIMIT, Decimal("1"), created_at=first.observed_at,
+        )
+        book.register_prepared_command(command, scope)
+        report = replace(first, evidence_id="terminal-report", fill=None, sequence=2,
+            order_event=ExchangeOrderEvent("terminal-report", command.command_id,
+                ExchangeOrderState.FILLED, first.observed_at, "1332041709", {}),
+            cumulative_order=ExecutionCumulativeOrderReport(command.command_id,
+                Decimal("1"), Decimal("100"), first.observed_at))
+        assert isinstance(await book.observe(report), Applied)
+        restored = _book(factory)
+        await restored.restore(account_label=account)
+        assert restored.get_outbox(command.command_id).external_order_id == "1332041709"
+        assert command.command_id in restored._recovery_required_commands
+        trade = replace(first, evidence_id="true-trade", sequence=3,
+            fill=replace(first.fill, order_id="1332041709"))
+        assert isinstance(await restored.observe(trade), Applied)
+        assert not restored._recovery_required_commands
+        assert (await restored.read(scope)).total_quantity == Decimal("1")
+        assert isinstance(await restored.observe(trade), Duplicate)
+        reads = []
+        def record_read(conn, cursor, statement, parameters, context, many):
+            if statement.startswith("SELECT") and any(table in statement for table in (
+                "position_fact_journal_events", "position_recovery_checkpoints",
+                "account_fill_events", "account_position_snapshots",
+            )):
+                reads.append(statement)
+        event.listen(engine.sync_engine, "before_cursor_execute", record_read)
+        state = await restored._execution_unit_of_work.load_position(scope.to_position_key(), as_of=datetime.now(UTC))
+        event.remove(engine.sync_engine, "before_cursor_execute", record_read)
+        assert reads and all(".symbol =" in query for query in reads)
+        assert state.scope.matches(scope.to_position_key())
+        assert state.cut.facts.fills[0].order_id == "1332041709"
     finally:
         await engine.dispose()
 
