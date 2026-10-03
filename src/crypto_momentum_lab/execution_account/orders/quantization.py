@@ -7,15 +7,13 @@ from crypto_momentum_lab.domain.execution.order_rules import (
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
+    deterministic_client_order_id,
 )
 from crypto_momentum_lab.domain.execution.trade_command import ExitAllocation
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategySide,
-)
-from crypto_momentum_lab.execution_account.orders.ids import (
-    deterministic_client_order_id,
 )
 
 

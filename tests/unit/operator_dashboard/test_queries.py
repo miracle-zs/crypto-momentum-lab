@@ -5,40 +5,77 @@ from types import SimpleNamespace
 
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
+from crypto_momentum_lab.operator_dashboard.account_queries import (
+    _aggregate_account_fills,
+    _live_strategy_signal,
+)
+from crypto_momentum_lab.operator_dashboard.common_equity import (
+    EquityObservation as _EquityObservation,
+)
+from crypto_momentum_lab.operator_dashboard.common_equity import (
+    build_common_equity_curve as _build_common_equity_curve,
+)
+from crypto_momentum_lab.operator_dashboard.common_equity import (
+    common_equity_interval_seconds as _common_equity_interval_seconds,
+)
+from crypto_momentum_lab.operator_dashboard.common_equity import (
+    live_account_equity_point as _live_account_equity_point,
+)
+from crypto_momentum_lab.operator_dashboard.common_equity import (
+    live_equity_observations as _live_equity_observations,
+)
+from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+    account_equity_statement as _account_equity_statement,
+)
+from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+    account_margin_statement as _account_margin_statement,
+)
+from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+    live_account_metric_points as _live_account_metric_points,
+)
+from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+    live_account_metrics_window_start as _live_account_metrics_window_start,
+)
+from crypto_momentum_lab.operator_dashboard.overview_queries import (
+    latest_live_account_process_statement as _latest_live_account_process_statement,
+)
+from crypto_momentum_lab.operator_dashboard.overview_queries import (
+    live_account_summaries,
+)
+from crypto_momentum_lab.operator_dashboard.overview_queries import (
+    live_observation as _live_observation,
+)
+from crypto_momentum_lab.operator_dashboard.overview_queries import (
+    universe_membership as _universe_membership,
+)
+from crypto_momentum_lab.operator_dashboard.paper_account_queries import (
+    _downsample_equity_snapshots,
+    _is_dashboard_paper_run,
+    _paper_account_summary,
+    _paper_exit_label,
+)
+from crypto_momentum_lab.operator_dashboard.paper_equity_queries import (
+    _live_common_equity_statement,
+    _paper_common_equity_statement,
+    _paper_equity_statement,
+    _paper_first_equity_statement,
+    _paper_latest_equity_statement,
+)
 from crypto_momentum_lab.operator_dashboard.queries import (
     FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
-    _account_equity_statement,
-    _account_margin_statement,
-    _aggregate_account_fills,
-    _build_common_equity_curve,
     _checkpoint_times_statement,
-    _common_equity_interval_seconds,
-    _decision_slo_response,
-    _downsample_equity_snapshots,
-    _EquityObservation,
-    _is_dashboard_paper_run,
     _latest_checkpoint_at_statement,
-    _latest_live_account_process_statement,
-    _live_account_equity_point,
-    _live_account_metric_points,
-    _live_account_metrics_window_start,
-    _live_common_equity_statement,
-    _live_equity_observations,
-    _live_observation,
-    _live_strategy_signal,
-    _paper_account_summary,
-    _paper_common_equity_statement,
-    _paper_equity_statement,
-    _paper_exit_label,
-    _paper_first_equity_statement,
-    _paper_latest_equity_statement,
-    _split_exchange_orders,
-    _universe_membership,
     parse_common_equity_start_at,
     parse_live_cash_flow_adjustments,
 )
+from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
+    split_exchange_orders as _split_exchange_orders,
+)
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
+from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
+    _decision_slo_response,
+)
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
 
 
@@ -70,7 +107,7 @@ def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
         for label in ("primary", "account-2", "account-3", "account-4")
     ]
 
-    summaries = DashboardQueries._live_account_summaries(
+    summaries = live_account_summaries(
         processes,
         strategy_states,
         leases,
@@ -95,7 +132,7 @@ def test_live_account_summary_uses_active_lease_when_strategy_state_missing() ->
     observed_at = datetime(2026, 9, 6, tzinfo=UTC)
     lease_expires_at = observed_at + timedelta(minutes=10)
 
-    summaries = DashboardQueries._live_account_summaries(
+    summaries = live_account_summaries(
         [
             SimpleNamespace(
                 account_label="primary",

@@ -81,71 +81,14 @@ _PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 FIXED_COMMON_EQUITY_START_AT = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
 DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
-_decision_slo_response = _telemetry_queries._decision_slo_response
 RiskExecutionQueries = _risk_execution_queries.RiskExecutionQueries
-_split_exchange_orders = _risk_execution_queries.split_exchange_orders
-_exchange_order = _risk_execution_queries.exchange_order
 LiveCashFlowAdjustment = _common_equity.LiveCashFlowAdjustment
 _as_utc = _common_equity.as_utc
-_EquityObservation = _common_equity.EquityObservation
-_common_equity_interval_seconds = _common_equity.common_equity_interval_seconds
-_build_common_equity_curve = _common_equity.build_common_equity_curve
-_build_common_equity_result = _common_equity.build_common_equity_result
-_live_account_equity_point = _common_equity.live_account_equity_point
-_live_cash_flow_payload = _common_equity.live_cash_flow_payload
-_common_equity_note = _common_equity.common_equity_note
-_paper_equity_observations = _common_equity.paper_equity_observations
-_paper_equity_observations_from_values = (
-    _common_equity.paper_equity_observations_from_values
-)
-_live_equity_observations = _common_equity.live_equity_observations
-_live_aggregated_equity_observations = (
-    _common_equity.live_aggregated_equity_observations
-)
-_apply_live_cash_flow_adjustments = _common_equity.apply_live_cash_flow_adjustments
 LiveAccountMetricsQueries = _live_account_metrics_queries.LiveAccountMetricsQueries
-_AccountEquityPoint = _live_account_metrics_queries.AccountEquityPoint
-_account_equity_range = _live_account_metrics_queries.account_equity_range
-_account_equity_statement = _live_account_metrics_queries.account_equity_statement
-_account_margin_statement = _live_account_metrics_queries.account_margin_statement
-_live_account_metrics_window_start = (
-    _live_account_metrics_queries.live_account_metrics_window_start
-)
-_live_account_metric_points = _live_account_metrics_queries.live_account_metric_points
-_latest_live_account_process_statement = (
-    _overview_queries.latest_live_account_process_statement
-)
-_account_label_sort_key = _overview_queries.account_label_sort_key
-_live_account_status = _overview_queries.live_account_status
-_live_account_fleet_status = _overview_queries.live_account_fleet_status
-_live_account_summaries = _overview_queries.live_account_summaries
-_service = _overview_queries.service
-_live_observation = _overview_queries.live_observation
-_age = _overview_queries.age
-_universe_entry = _overview_queries.universe_entry
-_universe_membership = _overview_queries.universe_membership
 PaperAccountQueries = _paper_account_queries.PaperAccountQueries
-_PaperEquitySummaryPoint = _paper_account_queries._PaperEquitySummaryPoint
-_downsample_equity_snapshots = _paper_account_queries._downsample_equity_snapshots
-_is_dashboard_paper_run = _paper_account_queries._is_dashboard_paper_run
-_paper_account_summary = _paper_account_queries._paper_account_summary
 _paper_exit_details = _paper_account_queries._paper_exit_details
-_paper_exit_label = _paper_account_queries._paper_exit_label
-_json_mapping = _paper_account_queries._json_mapping
-_json_value = _paper_account_queries._json_value
 PaperEquityQueries = _paper_equity_queries.PaperEquityQueries
-_PaperEquityPoint = _paper_equity_queries._PaperEquityPoint
-_paper_run_values = _paper_equity_queries._paper_run_values
-_paper_first_equity_statement = _paper_equity_queries._paper_first_equity_statement
-_paper_latest_equity_statement = _paper_equity_queries._paper_latest_equity_statement
-_paper_common_equity_statement = _paper_equity_queries._paper_common_equity_statement
-_paper_equity_statement = _paper_equity_queries._paper_equity_statement
-_live_common_equity_statement = _paper_equity_queries._live_common_equity_statement
 LiveAccountQueries = _account_queries.LiveAccountQueries
-_AccountFillAggregate = _account_queries._AccountFillAggregate
-_aggregate_account_fills = _account_queries._aggregate_account_fills
-_live_strategy_signal = _account_queries._live_strategy_signal
-_order_intent_reason = _account_queries._order_intent_reason
 
 
 DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS: tuple[LiveCashFlowAdjustment, ...] = ()
@@ -250,7 +193,6 @@ def parse_common_equity_start_at(value: str | None = None) -> datetime:
 
 
 class DashboardQueries:
-    _live_account_summaries = staticmethod(_overview_queries.live_account_summaries)
 
     def __init__(
         self,

@@ -4,7 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
-from crypto_momentum_lab.operator_dashboard.queries import _account_equity_range
+from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
+    account_equity_range as _account_equity_range,
+)
 from tests.unit.apps.operator_dashboard.test_main import FakeQueries
 
 
