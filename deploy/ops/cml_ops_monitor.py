@@ -131,6 +131,10 @@ _ALERT_LABELS = {
     "live_heartbeat_restart_failed": "实时策略自动重启失败",
     "live_heartbeat_restart_suppressed": "策略自愈超限熔断",
     "live_crash_log_archive_failed": "worker 崩溃日志归档失败",
+    "live_local_fact_inconsistency": "局部事实或投影不一致",
+    "live_exit_evaluation_deferred": "平仓评估多次延后",
+    "live_candidate_expired": "候选执行前已超期",
+    "live_order_command_terminal_mismatch": "订单命令终态失步",
     "ops_monitor_failed": "运维监控自身异常",
 }
 _ALERT_IMPACTS = {
@@ -191,6 +195,18 @@ _ALERT_IMPACTS = {
     ),
     "live_crash_log_archive_failed": (
         "worker 重启前的日志没有可靠留存，故障根因可能无法复盘。"
+    ),
+    "live_local_fact_inconsistency": (
+        "该标的因事实不一致局部延后动作，其他标的正常交易继续。"
+    ),
+    "live_exit_evaluation_deferred": (
+        "该标的退出评估延后等待事实同步，其他标的正常交易不受影响。"
+    ),
+    "live_candidate_expired": (
+        "候选超期已放弃（零 POST），避免以旧信号成交。"
+    ),
+    "live_order_command_terminal_mismatch": (
+        "订单终态已确认但执行命令未收敛，可能残留调度占用或无效预留。"
     ),
     "ops_monitor_failed": "监控自身可能无法继续发现新的异常。",
 }
@@ -265,6 +281,18 @@ _ALERT_ACTIONS = {
     "live_crash_log_archive_failed": (
         "检查 /var/log 目录写入权限、磁盘剩余空间及 Docker 日志输出。"
     ),
+    "live_local_fact_inconsistency": (
+        "系统已触发后台自愈重载或延后处理；核对标的持仓/委托事实，切勿清空已有事实。"
+    ),
+    "live_exit_evaluation_deferred": (
+        "系统保留待评估退出事件并在事实到齐后重新评估，检查该标的对账与行情进度。"
+    ),
+    "live_candidate_expired": (
+        "系统已放弃超期候选并等待下一个行情周期重新评估，检查行情与决策循环延迟。"
+    ),
+    "live_order_command_terminal_mismatch": (
+        "系统调度对账任务自动收敛终态；核对 exchange_orders 与 execution_commands 表记录。"
+    ),
     "live_heartbeat_stale": "主事件循环已失联；核对是否正在自动重启，若未自愈请人工排查阻塞或崩溃日志。",
     "ops_monitor_failed": "检查 cml-ops-monitor 自身运行日志与未捕获异常堆栈，必要时重启监控服务。",
 }
@@ -338,6 +366,9 @@ class LogSignals:
     dead_connection_tasks: tuple[str, ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
+    fact_inconsistencies: tuple[tuple[str, str, str], ...] = ()
+    deferred_exits: tuple[tuple[str, str, str], ...] = ()
+    expired_candidates: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +393,8 @@ class DatabaseState:
     latest_reconciliation_age_seconds: float | None = None
     unknown_order_count: int = 0
     oldest_unknown_order_age_seconds: float | None = None
+    terminal_state_mismatch_count: int = 0
+    oldest_terminal_mismatch_age_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,6 +717,8 @@ def evaluate_database_state(
     latest_market_delay_ms: float | None = None,
     unknown_order_count: int = 0,
     oldest_unknown_order_age_seconds: float | None = None,
+    terminal_state_mismatch_count: int = 0,
+    oldest_terminal_mismatch_age_seconds: float | None = None,
 ) -> tuple[Alert, ...]:
     """Return alerts for live liveness and PostgreSQL observability."""
 
@@ -797,16 +832,37 @@ def evaluate_database_state(
                 )
             )
     if unknown_order_count > 0:
+        severity = (
+            "critical"
+            if oldest_unknown_order_age_seconds is not None
+            and oldest_unknown_order_age_seconds >= 60.0
+            else "warning"
+        )
         alerts.append(
             Alert(
                 "live_unknown_orders",
-                "critical",
+                severity,
                 "Exchange order state is pending reconciliation",
                 {
                     "unknown_order_count": unknown_order_count,
                     "oldest_age_seconds": oldest_unknown_order_age_seconds,
                     "oldest_age_human": _human_seconds(
                         oldest_unknown_order_age_seconds
+                    ),
+                },
+            )
+        )
+    if terminal_state_mismatch_count > 0:
+        alerts.append(
+            Alert(
+                "live_order_command_terminal_mismatch",
+                "critical",
+                "Exchange order is terminal but execution command remains active",
+                {
+                    "mismatch_count": terminal_state_mismatch_count,
+                    "oldest_age_seconds": oldest_terminal_mismatch_age_seconds,
+                    "oldest_age_human": _human_seconds(
+                        oldest_terminal_mismatch_age_seconds
                     ),
                 },
             )
@@ -930,6 +986,18 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
             if right.rss_observed_at is not None
             else left.rss_observed_at
         ),
+        fact_inconsistencies=(
+            *left.fact_inconsistencies,
+            *right.fact_inconsistencies,
+        ),
+        deferred_exits=(
+            *left.deferred_exits,
+            *right.deferred_exits,
+        ),
+        expired_candidates=(
+            *left.expired_candidates,
+            *right.expired_candidates,
+        ),
     )
 
 
@@ -978,6 +1046,70 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 {"group_ids": signals.dead_connection_tasks},
             )
         )
+
+    fact_counts: dict[tuple[str, str], list[str]] = {}
+    for acc, sym, reason in signals.fact_inconsistencies:
+        fact_counts.setdefault((acc, sym), []).append(reason)
+    for (acc, sym), reasons in sorted(fact_counts.items()):
+        count = len(reasons)
+        severity = "critical" if count >= 3 else "warning"
+        scope_str = f":{acc}:{sym}" if acc else f":{sym}"
+        alerts.append(
+            Alert(
+                f"live_local_fact_inconsistency{scope_str}",
+                severity,
+                f"Local facts or projection for {sym} are inconsistent",
+                {
+                    "account_label": acc,
+                    "symbol": sym,
+                    "count": count,
+                    "reason": reasons[-1],
+                },
+            )
+        )
+
+    exit_counts: dict[tuple[str, str], list[str]] = {}
+    for acc, sym, reason in signals.deferred_exits:
+        exit_counts.setdefault((acc, sym), []).append(reason)
+    for (acc, sym), reasons in sorted(exit_counts.items()):
+        count = len(reasons)
+        if count >= 3:
+            severity = "critical" if count >= 10 else "warning"
+            scope_str = f":{acc}:{sym}" if acc else f":{sym}"
+            alerts.append(
+                Alert(
+                    f"live_exit_evaluation_deferred{scope_str}",
+                    severity,
+                    f"Exit evaluation for {sym} is deferred pending facts",
+                    {
+                        "account_label": acc,
+                        "symbol": sym,
+                        "count": count,
+                        "reason": reasons[-1],
+                    },
+                )
+            )
+
+    candidate_counts: dict[tuple[str, str], int] = {}
+    for acc, sym in signals.expired_candidates:
+        candidate_counts[(acc, sym)] = candidate_counts.get((acc, sym), 0) + 1
+    for (acc, sym), count in sorted(candidate_counts.items()):
+        if count >= 2:
+            severity = "critical" if count >= 5 else "warning"
+            scope_str = f":{acc}:{sym}" if acc else f":{sym}"
+            alerts.append(
+                Alert(
+                    f"live_candidate_expired{scope_str}",
+                    severity,
+                    f"Candidates for {sym} expired before execution",
+                    {
+                        "account_label": acc,
+                        "symbol": sym,
+                        "count": count,
+                    },
+                )
+            )
+
     return tuple(alerts)
 
 
@@ -1882,6 +2014,12 @@ class OpsMonitor:
                         oldest_unknown_order_age_seconds=(
                             database_state.oldest_unknown_order_age_seconds
                         ),
+                        terminal_state_mismatch_count=(
+                            database_state.terminal_state_mismatch_count
+                        ),
+                        oldest_terminal_mismatch_age_seconds=(
+                            database_state.oldest_terminal_mismatch_age_seconds
+                        ),
                     )
                     alerts.extend(
                         replace(
@@ -2442,6 +2580,9 @@ class OpsMonitor:
         dead_tasks: list[str] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
+        fact_inconsistencies: list[tuple[str, str, str]] = []
+        deferred_exits: list[tuple[str, str, str]] = []
+        expired_candidates: list[tuple[str, str]] = []
         for container_id in (market_id, live_id):
             if container_id is None:
                 continue
@@ -2484,6 +2625,33 @@ class OpsMonitor:
                     ):
                         latest_rss = value
                         latest_rss_at = _record_timestamp(record)
+                elif event in (
+                    "position_repair_blocked",
+                    "live_position_repair_failed",
+                    "live_order_repair_failed",
+                ):
+                    acc = str(record.get("account_label") or "")
+                    sym = str(record.get("symbol") or "")
+                    reason = str(record.get("reason") or event)
+                    if sym:
+                        fact_inconsistencies.append((acc, sym, reason))
+                elif event in (
+                    "live_exit_evaluation_deferred",
+                    "durable_decision_exit_deferred_until_book_ready",
+                    "live_exit_recovery_inspection_deferred",
+                ):
+                    acc = str(record.get("account_label") or "")
+                    sym = str(record.get("symbol") or "")
+                    reason = str(
+                        record.get("reason") or record.get("detail") or event
+                    )
+                    if sym:
+                        deferred_exits.append((acc, sym, reason))
+                elif event == "live_candidate_expired_before_execution":
+                    acc = str(record.get("account_label") or "")
+                    sym = str(record.get("symbol") or "")
+                    if sym:
+                        expired_candidates.append((acc, sym))
         return LogSignals(
             telemetry_persist_failures=telemetry_failures,
             legacy_order_identity_conflicts=legacy_order_identity_conflicts,
@@ -2491,6 +2659,9 @@ class OpsMonitor:
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
+            fact_inconsistencies=tuple(fact_inconsistencies),
+            deferred_exits=tuple(deferred_exits),
+            expired_candidates=tuple(expired_candidates),
         )
 
     def _database_state(
@@ -2635,6 +2806,22 @@ SELECT 'oldest_unknown_order_age' || E'\\t' || COALESCE(
 )
 FROM exchange_orders
 WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
+SELECT 'terminal_state_mismatch_count' || E'\\t' || count(*)::text
+FROM exchange_orders o
+JOIN execution_commands c ON o.client_order_id = c.client_order_id
+WHERE o.run_id = {run_id}
+  AND o.state IN ('canceled', 'filled')
+  AND c.status IN ('acknowledged', 'submitted')
+  AND c.requested_at < clock_timestamp() - interval '60 seconds';
+SELECT 'oldest_terminal_mismatch_age' || E'\\t' || COALESCE(
+  EXTRACT(EPOCH FROM (clock_timestamp() - min(c.requested_at)))::text, '-1'
+)
+FROM exchange_orders o
+JOIN execution_commands c ON o.client_order_id = c.client_order_id
+WHERE o.run_id = {run_id}
+  AND o.state IN ('canceled', 'filled')
+  AND c.status IN ('acknowledged', 'submitted')
+  AND c.requested_at < clock_timestamp() - interval '60 seconds';
 """
         output = self._runner.run(
             [
@@ -2665,6 +2852,12 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
         reconciliation_age = _parse_float(values.get("reconciliation_age"))
         oldest_unknown_order_age = _parse_float(
             values.get("oldest_unknown_order_age")
+        )
+        terminal_state_mismatch_count = (
+            _parse_int(values.get("terminal_state_mismatch_count")) or 0
+        )
+        oldest_terminal_mismatch_age = _parse_float(
+            values.get("oldest_terminal_mismatch_age")
         )
         return DatabaseState(
             latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
@@ -2713,6 +2906,13 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
                 None
                 if oldest_unknown_order_age is None or oldest_unknown_order_age < 0
                 else oldest_unknown_order_age
+            ),
+            terminal_state_mismatch_count=terminal_state_mismatch_count,
+            oldest_terminal_mismatch_age_seconds=(
+                None
+                if oldest_terminal_mismatch_age is None
+                or oldest_terminal_mismatch_age < 0
+                else oldest_terminal_mismatch_age
             ),
         )
 
@@ -3223,6 +3423,7 @@ LEFT JOIN (
         pending_resolutions = self._state.setdefault("pending_resolutions", {})
         resolved_alerts = self._state.setdefault("resolved_alerts", {})
         flap_counts = self._state.setdefault("flap_counts", {})
+        alert_occurrences = self._state.setdefault("alert_occurrences", {})
 
         if isinstance(pending_resolutions, dict):
             pending_resolutions.pop(alert.name, None)
@@ -3238,13 +3439,40 @@ LEFT JOIN (
         if alert.name not in active:
             active[alert.name] = now
 
+        if isinstance(alert_occurrences, dict):
+            alert_occurrences[alert.name] = (
+                int(alert_occurrences.get(alert.name, 0)) + 1
+            )
+        occurrence_count = (
+            int(alert_occurrences.get(alert.name, 1))
+            if isinstance(alert_occurrences, dict)
+            else 1
+        )
+
+        contexts = self._state.setdefault("active_alert_context", {})
+        previous_context = (
+            contexts.get(alert.name) if isinstance(contexts, dict) else None
+        )
+        previous_severity = (
+            previous_context.get("severity")
+            if isinstance(previous_context, Mapping)
+            else None
+        )
+        severity_rank = {"info": 1, "warning": 2, "critical": 3}
+        is_escalation = bool(
+            previous_severity
+            and severity_rank.get(alert.severity, 0)
+            > severity_rank.get(str(previous_severity), 0)
+        )
+
         previous_emitted = (
             cooldowns.get(alert.name) if isinstance(cooldowns, dict) else None
         )
-        if isinstance(previous_emitted, (int, float)) and (
-            now - previous_emitted < self._config.alert_cooldown_seconds
-        ):
-            return
+        if not is_escalation:
+            if isinstance(previous_emitted, (int, float)) and (
+                now - previous_emitted < self._config.alert_cooldown_seconds
+            ):
+                return
 
         last_resolved = (
             resolved_alerts.get(alert.name)
@@ -3262,22 +3490,34 @@ LEFT JOIN (
         if isinstance(cooldowns, dict):
             cooldowns[alert.name] = now
 
-        contexts = self._state.setdefault("active_alert_context", {})
-        if isinstance(contexts, dict):
-            contexts[alert.name] = {
-                "severity": alert.severity,
-                "summary": alert.summary,
-                "details": dict(alert.details),
-            }
+        active_start = active.get(alert.name, now)
+        active_duration = max(0.0, now - active_start)
+
         details = dict(alert.details)
+        details["occurrence_count"] = occurrence_count
+        details["active_duration_seconds"] = round(active_duration, 1)
+        details["active_duration_human"] = _human_seconds(active_duration)
+        if is_escalation:
+            details["escalated"] = True
+            details["escalated_from"] = previous_severity
+
         summary = alert.summary
-        if is_flapping:
+        if is_escalation:
+            summary = f"[ESCALATED] {alert.summary} (from {previous_severity})"
+        elif is_flapping:
             flaps = (
                 flap_counts.get(alert.name, 1) if isinstance(flap_counts, dict) else 1
             )
             details["flapping"] = True
             details["flap_count"] = flaps
             summary = f"[FLAPPING] {alert.summary} (flapped {flaps}x)"
+
+        if isinstance(contexts, dict):
+            contexts[alert.name] = {
+                "severity": alert.severity,
+                "summary": alert.summary,
+                "details": dict(alert.details),
+            }
 
         payload = {
             "event": "ops_alert",
@@ -3300,6 +3540,7 @@ LEFT JOIN (
         pending_alerts = self._state.setdefault("pending_alerts", {})
         pending_resolutions = self._state.setdefault("pending_resolutions", {})
         resolved_alerts = self._state.setdefault("resolved_alerts", {})
+        alert_occurrences = self._state.setdefault("alert_occurrences", {})
 
         if isinstance(pending_alerts, dict):
             for name in list(pending_alerts):
@@ -3333,15 +3574,23 @@ LEFT JOIN (
             )
             context = contexts.get(name) if isinstance(contexts, dict) else None
             context = context if isinstance(context, Mapping) else {}
+            details = dict(context.get("details", {}))
+            occurrence_count = (
+                alert_occurrences.pop(name, None)
+                if isinstance(alert_occurrences, dict)
+                else None
+            )
             payload = {
                 "event": "ops_alert_resolved",
                 "observed_at": datetime.fromtimestamp(now, UTC).isoformat(),
                 "alert_name": name,
                 "severity": context.get("severity", "critical"),
                 "summary": context.get("summary", ""),
-                "details": context.get("details", {}),
+                "details": details,
                 "duration_seconds": duration_seconds,
             }
+            if occurrence_count is not None:
+                payload["occurrence_count"] = occurrence_count
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             _deliver_notification(
                 self._config.webhook_url,
@@ -3770,33 +4019,40 @@ def _deliver_serverchan(
     sendkey: str,
     payload: Mapping[str, object],
 ) -> None:
-    try:
-        request = urllib.request.Request(
-            _serverchan_endpoint(sendkey),
-            data=urllib.parse.urlencode(
-                _serverchan_form(payload),
-                doseq=False,
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        if not isinstance(result, dict) or result.get("code") not in {0, "0"}:
-            raise RuntimeError("Server酱 returned a non-zero response")
-    except Exception as error:  # pragma: no cover - external endpoint
-        print(
-            json.dumps(
-                {
-                    "event": "ops_alert_delivery_failed",
-                    "error_type": type(error).__name__,
-                    "provider": "serverchan",
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
+    endpoint = _serverchan_endpoint(sendkey)
+    form_data = urllib.parse.urlencode(
+        _serverchan_form(payload),
+        doseq=False,
+    ).encode("utf-8")
+    for attempt in range(2):
+        try:
+            request = urllib.request.Request(
+                endpoint,
+                data=form_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if not isinstance(result, dict) or result.get("code") not in {0, "0"}:
+                raise RuntimeError("Server酱 returned a non-zero response")
+            return
+        except Exception as error:  # pragma: no cover - external endpoint
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            print(
+                json.dumps(
+                    {
+                        "event": "ops_alert_delivery_failed",
+                        "error_type": type(error).__name__,
+                        "provider": "serverchan",
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _serverchan_endpoint(sendkey: str) -> str:
@@ -3831,6 +4087,9 @@ def _service_scope(service: object) -> str | None:
 
 def _alert_scope(alert_name: str, details: Mapping[str, object]) -> str | None:
     account_label = details.get("account_label")
+    symbol = details.get("symbol")
+    if account_label and symbol:
+        return f"{account_label}/{symbol}"
     if account_label:
         return str(account_label)
     service_scope = _service_scope(details.get("service"))
@@ -4398,6 +4657,82 @@ def _format_alert_human_details(
         if workers is not None:
             lines.append(f"- **当前工作进程数**：`{workers}`（建议配置为 0 或 1）")
 
+    # 16. Local fact inconsistency
+    elif base_name == "live_local_fact_inconsistency":
+        acc = details.get("account_label")
+        sym = details.get("symbol")
+        reason = details.get("reason")
+        count = details.get("count")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if sym:
+            lines.append(f"- **异常标的**：`{sym}`")
+        if reason:
+            lines.append(f"- **异常原因**：`{reason}`")
+        if count:
+            lines.append(f"- **触发频次**：监控窗口内已触发 **{count}** 次")
+        lines.append(f"- **影响范围**：仅限 `{sym or '相关标的'}` 相关动作局部延后")
+        lines.append("- **已做处理**：保留已有事实，触发后台自愈重载")
+        lines.append("- **持续交易**：其他标的与账户交易正常进行")
+        lines.append("- **人工关注**：核对交易所真实持仓，切勿手动清空预留")
+
+    # 17. Deferred exit evaluation
+    elif base_name == "live_exit_evaluation_deferred":
+        acc = details.get("account_label")
+        sym = details.get("symbol")
+        reason = details.get("reason")
+        count = details.get("count")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if sym:
+            lines.append(f"- **延后标的**：`{sym}`")
+        if reason:
+            lines.append(f"- **延后原因**：`{reason}`")
+        if count:
+            lines.append(f"- **延后次数**：监控窗口内已延后 **{count}** 次")
+        lines.append("- **已做处理**：退出事件已安全保留，等待事实完备后重评")
+        lines.append("- **持续交易**：其他标的正常交易不受影响")
+        lines.append("- **人工关注**：关注该标的 Book 与行情推进，避免超期挂起")
+
+    # 18. Candidate expired before execution
+    elif base_name == "live_candidate_expired":
+        acc = details.get("account_label")
+        sym = details.get("symbol")
+        count = details.get("count")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if sym:
+            lines.append(f"- **超期标的**：`{sym}`")
+        if count:
+            lines.append(f"- **超期次数**：监控窗口内已超期 **{count}** 次")
+        lines.append("- **已做处理**：超期候选已安全放弃（零 POST），避免旧信号成交")
+        lines.append("- **持续交易**：策略在下一行情周期重新评估")
+        lines.append("- **人工关注**：排查行情接收及事件循环延迟")
+
+    # 19. Order vs command terminal state mismatch
+    elif base_name == "live_order_command_terminal_mismatch":
+        acc = details.get("account_label")
+        mismatch_cnt = details.get("mismatch_count")
+        oldest_age = details.get("oldest_age_seconds")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if mismatch_cnt:
+            lines.append(f"- **失步命令数**：共 **{mismatch_cnt}** 笔")
+        if isinstance(oldest_age, (int, float)):
+            lines.append(f"- **最长失步时间**：**{oldest_age:.0f} 秒**")
+        lines.append("- **已做处理**：调度单元对账任务进行终态收敛")
+        lines.append("- **持续交易**：其他订单与标的正常执行")
+        lines.append("- **人工关注**：核对订单与命令表的最新对账状态")
+
+    occ = details.get("occurrence_count")
+    dur = details.get("active_duration_human")
+    if isinstance(occ, int) and occ > 1:
+        dur_str = f"，持续 **{dur}**" if dur else ""
+        lines.append(f"- **累计统计**：异常已累计触发 **{occ}** 次{dur_str}")
+    if details.get("escalated"):
+        prev = details.get("escalated_from")
+        lines.append(f"- **级别升级**：告警级别已由 `{prev}` 升级至当前级别")
+
     return lines
 
 
@@ -4516,6 +4851,33 @@ def _alert_conclusion(
         return "数据库并行维护工作进程超过护栏，**高并发时可能争用交易资源**。"
     if base_name == "live_consistency_check_failed":
         return "跨账户一致性校验查询超时或失败，**多账户运行状态暂无法比对**。"
+    if base_name == "live_local_fact_inconsistency":
+        sym = details.get("symbol", "")
+        sym_str = f"（{sym}）" if sym else ""
+        return (
+            f"标的{sym_str}局部事实或投影不一致，系统已局部延后依赖动作，"
+            "**其他标的正常交易继续**。"
+        )
+    if base_name == "live_exit_evaluation_deferred":
+        sym = details.get("symbol", "")
+        sym_str = f"（{sym}）" if sym else ""
+        return (
+            f"标的{sym_str}退出评估暂时延后，**原退出事件已保留，其他标的正常交易**。"
+        )
+    if base_name == "live_candidate_expired":
+        sym = details.get("symbol", "")
+        sym_str = f"（{sym}）" if sym else ""
+        return (
+            f"候选指令执行前已超期并放弃{sym_str}（零 POST），"
+            "**下一周期重评，账户资金安全**。"
+        )
+    if base_name == "live_order_command_terminal_mismatch":
+        cnt = details.get("mismatch_count", 0)
+        cnt_str = f"（共 {cnt} 笔）" if cnt else ""
+        return (
+            f"订单已达终态但命令仍为活跃状态{cnt_str}，"
+            "**调度正在自动收敛，请关注对账进展**。"
+        )
     if base_name == "ops_monitor_failed":
         return "运维监控自身主循环发生未捕获异常，**请检查监控进程日志**。"
     return None
@@ -4552,16 +4914,27 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
                 body.append(f"- **影响**：{impact}")
         body.append(f"- **处置建议**：{_alert_action(alert_name, details)}")
         body.append(f"- **事件编号**：`{alert_name}`")
+        body.append(
+            "- **安全提醒**：通知仅用于异常可观测性，不改变交易决策，"
+            "请基于交易所及数据库真实状态核查。"
+        )
     else:
         title = _serverchan_title("恢复", scope, label)
+        occ = payload.get("occurrence_count") or details.get("occurrence_count")
         body = [
             f"## 🟢 [恢复] {scope + '：' if scope else ''}{label}",
             "- **恢复时间**："
             f"{_format_alert_time(payload.get('observed_at'))}（北京时间）",
             f"- **持续时间**：{_format_duration(payload.get('duration_seconds'))}",
-            "- **当前状态**：监控已恢复，后续将继续观察。",
-            f"- **原告警编号**：`{alert_name}`",
         ]
+        if isinstance(occ, int) and occ > 1:
+            body.append(f"- **累计频次**：故障期间共触发 **{occ}** 次")
+        body.extend(
+            [
+                "- **当前状态**：监控已恢复，后续将继续观察。",
+                f"- **原告警编号**：`{alert_name}`",
+            ]
+        )
     return {
         "title": " ".join(title.split()),
         "desp": "\n".join(body),

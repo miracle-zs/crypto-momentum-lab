@@ -26,7 +26,16 @@ The monitor alerts on:
 - cgroup memory-pressure counter advances, including current swap and peak
   values in the alert details;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
-  maintenance.
+  maintenance;
+- `live_local_fact_inconsistency`: local projection or position repair blocked/failed
+  (scoped to specific account and symbol, avoids global halt);
+- `live_exit_evaluation_deferred`: exit evaluation repeatedly deferred or waiting for sync;
+- `live_candidate_expired`: candidate signal expired before execution (zero exchange POST);
+- `live_order_command_terminal_mismatch`: exchange order reached terminal state (`CANCELED`/`FILLED`)
+  while execution command remains non-terminal (`ACKNOWLEDGED`);
+- `live_unknown_orders`: age-based severity escalation (warning when < 60s, critical when >= 60s,
+  bypassing cooldown on escalation). Recovery triggers automatically upon database state convergence,
+  emitting a single recovery notification with cumulative occurrence counts.
 
 To deliver the alert and recovery messages through Server酱, put the SendKey
 in `/etc/crypto-momentum-lab/ops-monitor.env` as `SERVERCHAN_SENDKEY`. The

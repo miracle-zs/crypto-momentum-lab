@@ -257,7 +257,7 @@ rtk proxy env \
 | 批次 | 状态 | 提交 / 回归 / 未覆盖项 |
 | --- | --- | --- |
 | P0 启动清理与阶段 | 已完成 | 修复 S14 (启动装配异常清理与异常保留) 与 S15 (session.run 运行期错误不再误判为启动重试)；单元测试回归 tests/unit/live_rollout/test_runtime_orchestrator_lifecycle.py 3 passed |
-| P1 通知与观测 | 待实施 | 复用 monitor；尚未验证实际 SendKey 配置与送达 |
+| P1 通知与观测 | 已完成 | 复用 monitor 扩展 4 类标的级可观测告警（局部事实不一致、平仓评估延后、候选超期、订单命令终态失步），实现 unknown orders 分级与严重升级绕过冷却、聚合单次恢复通知（带累计频次）与 Server酱 32 字符标题适配及零密钥泄露重试；交易核心协程零通知网络请求；单元测试回归 tests/unit/ops/test_cml_ops_monitor.py 78 passed |
 | P2 终态与恢复 | 待实施 | S06 已有表间不一致证据，传播缺口待复现 |
 | P3 局部准入 | 待实施 | 跨标的、多账户及风险上限回归待补 |
 | P4 RUNNING 与消费者 | 待实施 | 运行、部署、Dashboard、monitor 待一起迁移 |

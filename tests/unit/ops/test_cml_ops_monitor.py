@@ -21,6 +21,7 @@ from deploy.ops.cml_ops_monitor import (
     _alert_action,
     _alert_scope,
     _deliver_external_heartbeat,
+    _deliver_serverchan,
     _human_seconds,
     _is_within_start_grace,
     _merge_log_signals,
@@ -217,6 +218,9 @@ def test_merge_log_signals_keeps_every_field() -> None:
         legacy_order_identity_conflicts=4,
         exit_processing_degraded_symbols=("BTWUSDT",),
         dead_connection_tasks=("grp-b",),
+        fact_inconsistencies=(("primary", "BTCUSDT", "repair_blocked"),),
+        deferred_exits=(("primary", "ETHUSDT", "deferred_until_ready"),),
+        expired_candidates=(("primary", "SOLUSDT"),),
     )
 
     merged = _merge_log_signals(left, right)
@@ -227,6 +231,13 @@ def test_merge_log_signals_keeps_every_field() -> None:
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
     assert merged.latest_rss_bytes == 100
     assert merged.rss_observed_at is not None
+    assert merged.fact_inconsistencies == (
+        ("primary", "BTCUSDT", "repair_blocked"),
+    )
+    assert merged.deferred_exits == (
+        ("primary", "ETHUSDT", "deferred_until_ready"),
+    )
+    assert merged.expired_candidates == (("primary", "SOLUSDT"),)
 
     # Any field added to LogSignals must be merged above; keep this list honest.
     assert {f.name for f in dataclasses.fields(LogSignals)} == {
@@ -236,6 +247,9 @@ def test_merge_log_signals_keeps_every_field() -> None:
         "dead_connection_tasks",
         "latest_rss_bytes",
         "rss_observed_at",
+        "fact_inconsistencies",
+        "deferred_exits",
+        "expired_candidates",
     }
 
 
@@ -2423,3 +2437,381 @@ def test_all_alert_labels_fit_in_serverchan_title() -> None:
         assert len(title_rec) <= 32, (
             f"Alert {name} label '{label}' recovery title too long: {title_rec} ({len(title_rec)} chars)"
         )
+
+
+def test_evaluate_log_signals_fact_inconsistencies() -> None:
+    signals_warn = LogSignals(
+        fact_inconsistencies=(
+            ("primary", "BTCUSDT", "position_repair_blocked"),
+            ("primary", "BTCUSDT", "repair_rejected"),
+        )
+    )
+    alerts = evaluate_log_signals(signals_warn)
+    assert len(alerts) == 1
+    assert alerts[0].name == "live_local_fact_inconsistency:primary:BTCUSDT"
+    assert alerts[0].severity == "warning"
+    assert alerts[0].details["count"] == 2
+    assert alerts[0].details["symbol"] == "BTCUSDT"
+
+    signals_crit = LogSignals(
+        fact_inconsistencies=(
+            ("primary", "BTCUSDT", "position_repair_blocked"),
+            ("primary", "BTCUSDT", "repair_rejected"),
+            ("primary", "BTCUSDT", "live_position_repair_failed"),
+        )
+    )
+    alerts_crit = evaluate_log_signals(signals_crit)
+    assert len(alerts_crit) == 1
+    assert alerts_crit[0].severity == "critical"
+    assert alerts_crit[0].details["count"] == 3
+
+
+def test_evaluate_log_signals_deferred_exits() -> None:
+    signals_few = LogSignals(
+        deferred_exits=(
+            ("primary", "IMXUSDT", "sync_wait"),
+            ("primary", "IMXUSDT", "sync_wait"),
+        )
+    )
+    assert len(evaluate_log_signals(signals_few)) == 0
+
+    signals_warn = LogSignals(
+        deferred_exits=(("primary", "IMXUSDT", "sync_wait"),) * 3
+    )
+    alerts_warn = evaluate_log_signals(signals_warn)
+    assert len(alerts_warn) == 1
+    assert alerts_warn[0].name == "live_exit_evaluation_deferred:primary:IMXUSDT"
+    assert alerts_warn[0].severity == "warning"
+
+    signals_crit = LogSignals(
+        deferred_exits=(("primary", "IMXUSDT", "sync_wait"),) * 10
+    )
+    alerts_crit = evaluate_log_signals(signals_crit)
+    assert len(alerts_crit) == 1
+    assert alerts_crit[0].severity == "critical"
+
+
+def test_evaluate_log_signals_expired_candidates() -> None:
+    signals_one = LogSignals(
+        expired_candidates=(("primary", "MARSCOINUSDT"),)
+    )
+    assert len(evaluate_log_signals(signals_one)) == 0
+
+    signals_warn = LogSignals(
+        expired_candidates=(("primary", "MARSCOINUSDT"),) * 2
+    )
+    alerts_warn = evaluate_log_signals(signals_warn)
+    assert len(alerts_warn) == 1
+    assert alerts_warn[0].name == "live_candidate_expired:primary:MARSCOINUSDT"
+    assert alerts_warn[0].severity == "warning"
+
+    signals_crit = LogSignals(
+        expired_candidates=(("primary", "MARSCOINUSDT"),) * 5
+    )
+    alerts_crit = evaluate_log_signals(signals_crit)
+    assert len(alerts_crit) == 1
+    assert alerts_crit[0].severity == "critical"
+
+
+def test_evaluate_database_state_terminal_mismatch_and_unknown_orders() -> None:
+    alerts = evaluate_database_state(
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=5,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=5,
+        latest_market_progress_age_seconds=15,
+        latest_market_delay_ms=250,
+        unknown_order_count=1,
+        oldest_unknown_order_age_seconds=30,
+        terminal_state_mismatch_count=2,
+        oldest_terminal_mismatch_age_seconds=120,
+    )
+    alert_map = {a.name: a for a in alerts}
+    assert "live_unknown_orders" in alert_map
+    assert alert_map["live_unknown_orders"].severity == "warning"
+    assert "live_order_command_terminal_mismatch" in alert_map
+    assert alert_map["live_order_command_terminal_mismatch"].severity == "critical"
+    assert (
+        alert_map["live_order_command_terminal_mismatch"].details[
+            "mismatch_count"
+        ]
+        == 2
+    )
+
+    alerts_escalated = evaluate_database_state(
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=5,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=5,
+        latest_market_progress_age_seconds=15,
+        latest_market_delay_ms=250,
+        unknown_order_count=1,
+        oldest_unknown_order_age_seconds=75,
+        terminal_state_mismatch_count=0,
+    )
+    alert_map2 = {a.name: a for a in alerts_escalated}
+    assert alert_map2["live_unknown_orders"].severity == "critical"
+    assert "live_order_command_terminal_mismatch" not in alert_map2
+
+
+def test_severity_escalation_bypasses_cooldown_and_tracks_occurrences(
+    monkeypatch, tmp_path
+) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=1,
+            alert_cooldown_seconds=900.0,
+        ),
+    )
+
+    # 1. First warning emission
+    warn_alert = Alert(
+        "live_unknown_orders:primary",
+        "warning",
+        "unknown orders pending",
+        {"unknown_order_count": 1},
+    )
+    monitor._emit(warn_alert, now=100.0)
+    assert len(delivered) == 1
+    assert delivered[0]["severity"] == "warning"
+    assert delivered[0]["details"]["occurrence_count"] == 1
+
+    # 2. Second warning emission at t=200 (within 900s cooldown) - suppressed
+    monitor._emit(warn_alert, now=200.0)
+    assert len(delivered) == 1
+
+    # 3. Third emission at t=300: escalated to critical - bypasses cooldown!
+    crit_alert = Alert(
+        "live_unknown_orders:primary",
+        "critical",
+        "unknown orders pending timeout",
+        {"unknown_order_count": 1},
+    )
+    monitor._emit(crit_alert, now=300.0)
+    assert len(delivered) == 2
+    assert delivered[1]["severity"] == "critical"
+    assert "[ESCALATED]" in delivered[1]["summary"]
+    assert delivered[1]["details"]["escalated"] is True
+    assert delivered[1]["details"]["escalated_from"] == "warning"
+    assert delivered[1]["details"]["occurrence_count"] == 3
+    assert delivered[1]["details"]["active_duration_seconds"] == 200.0
+
+
+def test_single_recovery_notification_emitted_when_stable(
+    monkeypatch, tmp_path
+) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=2,
+            alert_cooldown_seconds=900.0,
+        ),
+    )
+
+    alert = Alert(
+        "live_order_command_terminal_mismatch:primary",
+        "critical",
+        "mismatch detected",
+        {"mismatch_count": 1},
+    )
+    monitor._emit(alert, now=100.0)
+    monitor._emit(alert, now=160.0)
+    assert len(delivered) == 1
+
+    # Cycle 1 clean: not yet resolved (requires 2 consecutive)
+    monitor._emit_resolutions(set(), now=220.0)
+    assert len(delivered) == 1
+
+    # Cycle 2 clean: threshold met, single recovery emitted
+    monitor._emit_resolutions(set(), now=280.0)
+    assert len(delivered) == 2
+    res_payload = delivered[1]
+    assert res_payload["event"] == "ops_alert_resolved"
+    assert res_payload["duration_seconds"] == 180.0
+    assert res_payload["occurrence_count"] == 2
+
+    # Cycle 3 clean: no second resolution notification
+    monitor._emit_resolutions(set(), now=340.0)
+    assert len(delivered) == 2
+
+
+def test_serverchan_formatting_new_alerts() -> None:
+    # 1. Fact inconsistency
+    form_fact = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_local_fact_inconsistency:primary:BTCUSDT",
+            "severity": "warning",
+            "summary": "Local facts inconsistent",
+            "observed_at": "2026-10-03T10:00:00+00:00",
+            "details": {
+                "account_label": "primary",
+                "symbol": "BTCUSDT",
+                "reason": "repair_blocked",
+                "count": 2,
+            },
+        }
+    )
+    assert "局部事实或投影不一致" in form_fact["title"]
+    assert "2026-10-03 18:00:00（北京时间）" in form_fact["desp"]
+    assert "BTCUSDT" in form_fact["desp"]
+    assert "已做处理" in form_fact["desp"]
+    assert "持续交易" in form_fact["desp"]
+    assert "安全提醒" in form_fact["desp"]
+
+    # 2. Deferred exit
+    form_exit = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_exit_evaluation_deferred:primary:ETHUSDT",
+            "severity": "warning",
+            "summary": "Exit deferred",
+            "observed_at": "2026-10-03T10:00:00+00:00",
+            "details": {
+                "account_label": "primary",
+                "symbol": "ETHUSDT",
+                "reason": "sync_wait",
+                "count": 4,
+            },
+        }
+    )
+    assert "平仓评估多次延后" in form_exit["title"]
+    assert "ETHUSDT" in form_exit["desp"]
+
+    # 3. Candidate expired
+    form_cand = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_candidate_expired:primary:SOLUSDT",
+            "severity": "warning",
+            "summary": "Candidate expired",
+            "observed_at": "2026-10-03T10:00:00+00:00",
+            "details": {
+                "account_label": "primary",
+                "symbol": "SOLUSDT",
+                "count": 3,
+            },
+        }
+    )
+    assert "候选执行前已超期" in form_cand["title"]
+    assert "零 POST" in form_cand["desp"]
+
+    # 4. Terminal mismatch
+    form_mismatch = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_order_command_terminal_mismatch:primary",
+            "severity": "critical",
+            "summary": "Terminal mismatch",
+            "observed_at": "2026-10-03T10:00:00+00:00",
+            "details": {
+                "account_label": "primary",
+                "mismatch_count": 1,
+                "oldest_age_seconds": 90.0,
+            },
+        }
+    )
+    assert "订单命令终态失步" in form_mismatch["title"]
+    assert "共 1 笔" in form_mismatch["desp"]
+    assert "90 秒" in form_mismatch["desp"]
+
+    # 5. Recovery with cumulative count
+    form_res = _serverchan_form(
+        {
+            "event": "ops_alert_resolved",
+            "alert_name": "live_order_command_terminal_mismatch:primary",
+            "severity": "critical",
+            "summary": "Terminal mismatch resolved",
+            "observed_at": "2026-10-03T10:15:00+00:00",
+            "duration_seconds": 900.0,
+            "occurrence_count": 5,
+            "details": {"account_label": "primary"},
+        }
+    )
+    assert "恢复" in form_res["title"]
+    assert "累计频次**：故障期间共触发 **5** 次" in form_res["desp"]
+
+
+def test_deliver_serverchan_bounded_retry_and_no_leak(
+    monkeypatch, capsys
+) -> None:
+    attempts: list[int] = []
+
+    class MockResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def read(self):
+            return b'{"code": 0, "message": "success"}'
+
+    def mock_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise urllib.error.URLError("connection reset")
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    _deliver_serverchan(
+        "SCT123456TestKeySecret",
+        {"event": "ops_alert", "summary": "test"},
+    )
+    assert len(attempts) == 2
+
+    # Ensure SendKey is not leaked
+    captured = capsys.readouterr()
+    assert "SCT123456TestKeySecret" not in captured.out
+    assert "SCT123456TestKeySecret" not in captured.err
+
+
+def test_trading_engine_zero_serverchan_calls() -> None:
+    """Ensure trading core does not import or make ServerChan network calls."""
+    import subprocess
+
+    cmd = ["git", "grep", "-i", "serverchan", "--", "src/crypto_momentum_lab/"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.stdout.strip() == "", (
+        f"Found ServerChan in trading src: {result.stdout}"
+    )
