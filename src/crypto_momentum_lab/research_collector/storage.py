@@ -407,15 +407,24 @@ class ParquetWindowSink:
                     continue
                 conflicting_rows += 1
                 dropped_keys.add(version_key)
-                log.warning(
-                    "research_collector_state_conflict_kept_existing",
-                    path=str(path),
-                    environment=key[0],
-                    symbol=key[1],
-                    bucket_start=key[2].isoformat(),
-                    kept_source_kind=existing.get("source_kind"),
-                    incoming_source_kind=row.get("source_kind"),
-                )
+                if conflicting_rows <= 3:
+                    log.warning(
+                        "research_collector_state_conflict_kept_existing",
+                        path=str(path),
+                        environment=key[0],
+                        symbol=key[1],
+                        bucket_start=key[2].isoformat(),
+                        kept_source_kind=existing.get("source_kind"),
+                        incoming_source_kind=row.get("source_kind"),
+                    )
+                elif conflicting_rows == 4:
+                    log.warning(
+                        "research_collector_state_conflicts_aggregated",
+                        path=str(path),
+                        environment=key[0],
+                        symbol=key[1],
+                        message="additional conflicting state rows aggregated for this append",
+                    )
                 continue
             rows[key] = row
             selected_rows += 1

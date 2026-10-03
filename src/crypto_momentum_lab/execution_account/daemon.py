@@ -959,7 +959,12 @@ class UserDataAccountSyncDaemon:
         if origin_event is not None and self._pipeline_recovery_origin_event is None:
             self._pipeline_recovery_origin_event = origin_event
         self._pipeline_recovery_event.set()
-        log.error(
+        log_fn = (
+            log.info
+            if reason == "account_config_update"
+            else log.error
+        )
+        log_fn(
             "binance_user_data_pipeline_recovery_requested",
             reason=reason,
             queue_size=(

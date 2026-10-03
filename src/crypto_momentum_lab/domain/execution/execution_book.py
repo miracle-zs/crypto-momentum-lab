@@ -707,7 +707,13 @@ class ExecutionBook:
             recovered = recover_durable_position(state)
             journal, book = recovered.journal, recovered.book
             for event, values in recovered.diagnostics:
-                log.warning(event, **values)
+                if (
+                    event == "execution_head_view_migrated"
+                    and not values.get("has_active_reservations")
+                ):
+                    log.info(event, **values)
+                else:
+                    log.warning(event, **values)
             self._head_revisions[canon] = recovered.head_revision
             if state.head is not None:
                 self._recovery_required_commands.update(

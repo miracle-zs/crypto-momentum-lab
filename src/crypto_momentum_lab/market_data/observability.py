@@ -57,13 +57,13 @@ async def monitor_market_data_health(
     previous_unrecovered_gap_count = 0
     previous_backpressure_wait_count = 0
     maximum_lag_seconds = 0.0
+    lag_samples: list[float] = []
     while True:
         await asyncio.sleep(max(0.0, next_sample_at - loop.time()))
         now = loop.time()
-        maximum_lag_seconds = max(
-            maximum_lag_seconds,
-            max(0.0, now - next_sample_at),
-        )
+        current_lag = max(0.0, now - next_sample_at)
+        lag_samples.append(current_lag)
+        maximum_lag_seconds = max(maximum_lag_seconds, current_lag)
         next_sample_at += sample_interval_seconds
         if next_sample_at <= now:
             next_sample_at = now + sample_interval_seconds
@@ -177,12 +177,18 @@ async def monitor_market_data_health(
             }
             for snapshot in getattr(connections, "connection_snapshots", ())
         )
+        lag_percentiles = _calculate_lag_percentiles(lag_samples)
+        lag_samples.clear()
         log.info(
             "market_data_health_snapshot",
             rss_bytes=current_rss_bytes(),
             **cgroup_memory_snapshot(),
             **tracemalloc_memory_snapshot(),
             event_loop_lag_ms=round(maximum_lag_seconds * 1000, 3),
+            event_loop_lag_p50_ms=lag_percentiles["p50"],
+            event_loop_lag_p95_ms=lag_percentiles["p95"],
+            event_loop_lag_p99_ms=lag_percentiles["p99"],
+            event_loop_lag_max_ms=lag_percentiles["max"],
             queue_events=capture.queue_events,
             queue_bytes=capture.queue_bytes,
             queue_max_events=getattr(capture, "queue_max_events", 0),
@@ -249,6 +255,10 @@ async def monitor_market_data_health(
                 "market_data_event_loop_lag",
                 level=lag_level,
                 lag_ms=round(maximum_lag_seconds * 1000, 3),
+                p50_ms=lag_percentiles["p50"],
+                p95_ms=lag_percentiles["p95"],
+                p99_ms=lag_percentiles["p99"],
+                max_ms=lag_percentiles["max"],
                 warning_threshold_ms=round(
                     event_loop_lag_warning_seconds * 1000,
                     3,
@@ -385,4 +395,22 @@ def _recovery_snapshot(snapshot: object | None) -> dict[str, int] | None:
             "missing_trade_count",
             "duplicate_trade_count",
         )
+    }
+
+
+def _calculate_lag_percentiles(samples: list[float]) -> dict[str, float]:
+    if not samples:
+        return {"p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
+    sorted_samples = sorted(samples)
+    n = len(sorted_samples)
+
+    def _percentile(p: float) -> float:
+        idx = int(round((n - 1) * p))
+        return sorted_samples[min(max(idx, 0), n - 1)]
+
+    return {
+        "p50": round(_percentile(0.50) * 1000, 3),
+        "p95": round(_percentile(0.95) * 1000, 3),
+        "p99": round(_percentile(0.99) * 1000, 3),
+        "max": round(sorted_samples[-1] * 1000, 3),
     }

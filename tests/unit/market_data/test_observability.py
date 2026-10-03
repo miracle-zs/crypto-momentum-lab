@@ -75,11 +75,30 @@ async def test_market_data_health_monitor_reports_runtime_signals(
     assert records[0]["queue_events"] == 7
     assert records[0]["received_message_rate"] > 0
     assert records[0]["event_loop_lag_ms"] is not None
+    assert records[0]["event_loop_lag_p50_ms"] is not None
+    assert records[0]["event_loop_lag_p95_ms"] is not None
+    assert records[0]["event_loop_lag_p99_ms"] is not None
+    assert records[0]["event_loop_lag_max_ms"] is not None
     assert records[0]["rss_bytes"] is not None
     assert records[0]["cgroup_memory_current_bytes"] == 1000
     assert records[0]["cgroup_memory_limit_bytes"] == 2000
     assert records[0]["tracemalloc_current_bytes"] == 123
     assert records[0]["tracemalloc_peak_bytes"] == 456
+
+
+def test_calculate_lag_percentiles() -> None:
+    assert observability._calculate_lag_percentiles([]) == {
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+    }
+    samples = [0.001 * i for i in range(1, 101)]
+    res = observability._calculate_lag_percentiles(samples)
+    assert res["p50"] == pytest.approx(50.5, abs=1.5)
+    assert res["p95"] == pytest.approx(95.0, abs=1.5)
+    assert res["p99"] == pytest.approx(99.0, abs=1.5)
+    assert res["max"] == 100.0
 
 
 @pytest.mark.asyncio

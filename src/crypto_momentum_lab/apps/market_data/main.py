@@ -1298,11 +1298,34 @@ async def build_market_data_runtime(
     if startup_timer is not None:
         startup_timer.mark("archive_retention_checked")
 
+    manifest_queue: asyncio.Queue[ArchiveManifest | None] = asyncio.Queue(maxsize=1024)
+
+    async def _manifest_worker() -> None:
+        while True:
+            item = await manifest_queue.get()
+            if item is None:
+                manifest_queue.task_done()
+                break
+            try:
+                await save_manifest(item)
+            except Exception:
+                log.exception("background_manifest_save_failed", path=str(item.path))
+            finally:
+                manifest_queue.task_done()
+
+    manifest_worker_task = asyncio.create_task(_manifest_worker())
+
+    async def async_save_manifest(manifest: ArchiveManifest) -> None:
+        try:
+            manifest_queue.put_nowait(manifest)
+        except asyncio.QueueFull:
+            await save_manifest(manifest)
+
     archive = ZstdJsonlArchive(
         root=archive_config.root,
         environment=runtime.environment,
         capture_version=capture_version,
-        manifest_sink=save_manifest,
+        manifest_sink=async_save_manifest,
         known_gap_count_provider=lambda key: quality.known_gap_count(
             connection_session_id=key.connection_session_id,
             stream=key.stream,
@@ -1469,6 +1492,8 @@ async def build_market_data_runtime(
             maintenance_session_factory=maintenance_sessions,
         )
     finally:
+        await manifest_queue.put(None)
+        await manifest_worker_task
         await rest_client.aclose()
         await market_engine.dispose()
         await observability_engine.dispose()
