@@ -380,11 +380,26 @@ class PostgresAccountJournalStore:
             session, scope=scope, as_of=as_of
         )
         if checkpoint is not None and not include_checkpoint_prefix:
+            # Retain the original of a queued snapshot if it was covered by
+            # the checkpoint, so suffix filtering cannot hide a divergent
+            # payload with the same natural identity. Decode only these
+            # identities rather than replaying every prefix observation.
+            late_snapshot_ids = {
+                row.event_id
+                for row in rows
+                if row.event_kind == "snapshot"
+                and row.occurred_at <= checkpoint.event_cut
+                and row.source_revision > checkpoint.source_revision
+            }
             rows = [
                 row
                 for row in rows
                 if row.occurred_at > checkpoint.event_cut
                 or row.source_revision > checkpoint.source_revision
+                or (
+                    row.event_kind == "snapshot"
+                    and row.event_id in late_snapshot_ids
+                )
             ]
         for row in rows:
             if _json_digest(row.payload) != row.payload_hash:

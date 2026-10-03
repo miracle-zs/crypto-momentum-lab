@@ -214,3 +214,33 @@ async def test_divergent_snapshot_identity_still_requires_recovery():
         for conflict in cut.facts.fact_conflicts
     )
     assert not PositionLedger(_key()).project(cut.facts).is_comparable
+
+
+async def test_snapshot_variant_of_checkpoint_prefix_still_requires_recovery():
+    checkpoint = _checkpoint()
+    at = checkpoint.event_cut - timedelta(seconds=1)
+    snapshot = _snapshot(_key(), at, "1", "10")
+    original = _row(
+        checkpoint,
+        "snapshot",
+        f"BOTH:{at.isoformat()}",
+        at,
+        PositionRecoveryCodec.encode_snapshot(snapshot),
+    )
+    original.source_revision = checkpoint.source_revision - 1
+    original.recorded_at = checkpoint.event_cut - timedelta(seconds=1)
+    changed = _row(
+        checkpoint,
+        "snapshot",
+        original.event_id,
+        at,
+        PositionRecoveryCodec.encode_snapshot(
+            replace(snapshot, position_amt=Decimal("3"))
+        ),
+    )
+    cut = await _restore(checkpoint, [original, changed])
+    assert any(
+        "different payloads" in conflict.details
+        for conflict in cut.facts.fact_conflicts
+    )
+    assert not PositionLedger(_key()).project(cut.facts).is_comparable
