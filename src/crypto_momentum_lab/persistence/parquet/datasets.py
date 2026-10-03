@@ -1,17 +1,20 @@
 import hashlib
 import json
 import os
-from collections.abc import Iterable
+import sys
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from crypto_momentum_lab.build_info import resolve_code_commit
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     NormalizedAggTrade,
@@ -21,6 +24,8 @@ from crypto_momentum_lab.domain.market.models import (
     NormalizedMarketEvent,
     NormalizedMarkPrice,
 )
+
+_DatasetRecord = TypeVar("_DatasetRecord")
 
 
 class DatasetName(StrEnum):
@@ -41,6 +46,9 @@ class DerivedDatasetManifest:
     first_event_at: datetime
     last_event_at: datetime
     created_at: datetime
+    producer_code_commit: str = "unknown"
+    python_version: str = "unknown"
+    pyarrow_version: str = "unknown"
 
 
 def market_event_row(event: NormalizedMarketEvent) -> dict[str, object]:
@@ -176,15 +184,14 @@ def write_market_events_dataset(
     events: Iterable[NormalizedMarketEvent],
     input_paths: tuple[Path, ...],
 ) -> tuple[DerivedDatasetManifest, ...]:
-    grouped: dict[Path, list[dict[str, object]]] = {}
+    grouped: dict[Path, list[NormalizedMarketEvent]] = {}
     for event in events:
-        grouped.setdefault(partition_for_market_event(event), []).append(
-            market_event_row(event)
-        )
+        grouped.setdefault(partition_for_market_event(event), []).append(event)
     return _write_grouped_rows(
         root=root,
         dataset_name=DatasetName.MARKET_EVENTS,
         grouped=grouped,
+        row_factory=market_event_row,
         input_paths=input_paths,
         event_time_key="event_at",
     )
@@ -196,15 +203,14 @@ def write_market_states_15s_dataset(
     states: Iterable[MarketState15s],
     input_paths: tuple[Path, ...],
 ) -> tuple[DerivedDatasetManifest, ...]:
-    grouped: dict[Path, list[dict[str, object]]] = {}
+    grouped: dict[Path, list[MarketState15s]] = {}
     for state in states:
-        grouped.setdefault(partition_for_market_state(state), []).append(
-            market_state_15s_row(state)
-        )
+        grouped.setdefault(partition_for_market_state(state), []).append(state)
     return _write_grouped_rows(
         root=root,
         dataset_name=DatasetName.MARKET_STATES_15S,
         grouped=grouped,
+        row_factory=market_state_15s_row,
         input_paths=input_paths,
         event_time_key="bucket_start",
     )
@@ -269,7 +275,8 @@ def _write_grouped_rows(
     *,
     root: Path,
     dataset_name: DatasetName,
-    grouped: dict[Path, list[dict[str, object]]],
+    grouped: dict[Path, list[_DatasetRecord]],
+    row_factory: Callable[[_DatasetRecord], dict[str, object]],
     input_paths: tuple[Path, ...],
     event_time_key: str,
 ) -> tuple[DerivedDatasetManifest, ...]:
@@ -277,19 +284,28 @@ def _write_grouped_rows(
         raise ValueError(f"{dataset_name.value} dataset has no rows")
     input_labels = tuple(path.as_posix() for path in input_paths)
     input_sha256 = _input_sha256(input_paths)
+    producer_code_commit = resolve_code_commit(required=False)
+    python_version = sys.version.split()[0]
+    pyarrow_version = pa.__version__
     manifests: list[DerivedDatasetManifest] = []
-    for partition, rows in sorted(grouped.items(), key=lambda item: item[0].as_posix()):
+    for partition in sorted(grouped, key=lambda item: item.as_posix()):
+        records = grouped.pop(partition)
         manifests.append(
             _write_partition_rows(
                 root=root,
                 dataset_name=dataset_name,
                 partition=partition,
-                rows=rows,
+                records=records,
+                row_factory=row_factory,
                 input_labels=input_labels,
                 input_sha256=input_sha256,
                 event_time_key=event_time_key,
+                producer_code_commit=producer_code_commit,
+                python_version=python_version,
+                pyarrow_version=pyarrow_version,
             )
         )
+        del records
     return tuple(manifests)
 
 
@@ -298,19 +314,26 @@ def _write_partition_rows(
     root: Path,
     dataset_name: DatasetName,
     partition: Path,
-    rows: list[dict[str, object]],
+    records: list[_DatasetRecord],
+    row_factory: Callable[[_DatasetRecord], dict[str, object]],
     input_labels: tuple[str, ...],
     input_sha256: str,
     event_time_key: str,
+    producer_code_commit: str,
+    python_version: str,
+    pyarrow_version: str,
 ) -> DerivedDatasetManifest:
     partition_dir = root / partition
     partition_dir.mkdir(parents=True, exist_ok=True)
     temporary_path = partition_dir / f".part-{uuid4()}.parquet.tmp"
-    table = pa.Table.from_pylist(_parquet_rows(rows))
-    pq.write_table(table, temporary_path)
-    output_sha256 = _sha256_file(temporary_path)
+    rows = [row_factory(record) for record in records]
+    row_count = len(rows)
     first_event_at = min(_row_datetime(row, event_time_key) for row in rows)
     last_event_at = max(_row_datetime(row, event_time_key) for row in rows)
+    table = pa.Table.from_pylist(_parquet_rows(rows))
+    rows.clear()
+    pq.write_table(table, temporary_path)
+    output_sha256 = _sha256_file(temporary_path)
     manifest_id = uuid5(
         NAMESPACE_URL,
         json.dumps(
@@ -320,9 +343,12 @@ def _write_partition_rows(
                 "input_paths": input_labels,
                 "input_sha256": input_sha256,
                 "output_sha256": output_sha256,
-                "row_count": len(rows),
+                "row_count": row_count,
                 "first_event_at": first_event_at.isoformat(),
                 "last_event_at": last_event_at.isoformat(),
+                "producer_code_commit": producer_code_commit,
+                "python_version": python_version,
+                "pyarrow_version": pyarrow_version,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -336,13 +362,16 @@ def _write_partition_rows(
         dataset_name=dataset_name,
         schema_version=1,
         relative_path=relative_path,
-        row_count=len(rows),
+        row_count=row_count,
         input_paths=input_labels,
         input_sha256=input_sha256,
         output_sha256=output_sha256,
         first_event_at=first_event_at,
         last_event_at=last_event_at,
         created_at=datetime.now(UTC),
+        producer_code_commit=producer_code_commit,
+        python_version=python_version,
+        pyarrow_version=pyarrow_version,
     )
     _write_manifest(root, manifest)
     return manifest
@@ -365,6 +394,9 @@ def _write_manifest(root: Path, manifest: DerivedDatasetManifest) -> None:
         "first_event_at": manifest.first_event_at.isoformat(),
         "last_event_at": manifest.last_event_at.isoformat(),
         "created_at": manifest.created_at.isoformat(),
+        "producer_code_commit": manifest.producer_code_commit,
+        "python_version": manifest.python_version,
+        "pyarrow_version": manifest.pyarrow_version,
     }
     temporary_path.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -401,6 +433,6 @@ def _row_datetime(row: dict[str, object], key: str) -> datetime:
 def _parquet_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     # Hive partition columns are supplied by the directory names. Writing the
     # same column inside the file makes pyarrow fail schema merging.
-    return [
-        {key: value for key, value in row.items() if key != "symbol"} for row in rows
-    ]
+    for row in rows:
+        row.pop("symbol", None)
+    return rows

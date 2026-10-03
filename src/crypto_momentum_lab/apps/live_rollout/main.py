@@ -3,10 +3,7 @@ import json
 import os
 import re
 import signal
-from collections.abc import (
-    Awaitable,
-    Callable,
-)
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -18,11 +15,23 @@ import structlog
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
+    _database_url as _database_url,
+    _execution_database_url as _execution_database_url,
+    _issue_one_shot_risk_control_command as _issue_one_shot_risk_control_command,
+    _load_or_save_risk_control_command as _load_or_save_risk_control_command,
+    _load_transition as _load_transition,
+    _market_database_url as _market_database_url,
+    _observability_database_url as _observability_database_url,
+    _publish_risk_control_event as _publish_risk_control_event,
+    _require_matching_risk_control_command as _require_matching_risk_control_command,
+    _resolve_database_url as _resolve_database_url,
+    _save_transition as _save_transition,
+)
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
     CredentialResolutionError,
     ResolvedBinanceCredentials,
-    resolve_database_url,
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
@@ -32,8 +41,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.live_rollout import (
     LiveOperatorApproval,
     LiveSessionState,
-    LiveSessionTransition,
-    RollbackCommand,
 )
 from crypto_momentum_lab.domain.live_rollout.authorization import (
     CANCEL_ALL_OPEN_ENTRIES_COMMAND,
@@ -46,25 +53,18 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
     TradingLeaseState,
 )
-from crypto_momentum_lab.domain.strategy import (
-    EntryType,
-)
-from crypto_momentum_lab.domain.strategy.position_exit import (
-    PositionExitMode,
-)
+from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
-    WebSocketRiskControlPublisher,
 )
 from crypto_momentum_lab.health.memory import configure_tracemalloc
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.missing_order_resolution import (
     resolve_missing_live_order as _resolve_missing_live_order,
 )
-from crypto_momentum_lab.live_rollout.plan_runner import (
-    run_live_plan as _run_live_plan,
-)
+from crypto_momentum_lab.live_rollout.plan_runner import run_live_plan as _run_live_plan
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_ENTRY_LIMIT_TTL_SECONDS,
@@ -75,36 +75,18 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_MARKET_WEBSOCKET_URL,
     _live_strategy_config_hash,
 )
-from crypto_momentum_lab.live_rollout.runtime_manifest import (
-    LiveRuntimeAccount,
-)
+from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.live_rollout.runtime_options import (
     LiveRunOptions,
     LiveRuntimeOptionsError,
-    resolve_live_runtime_config,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     parse_exchange_operations as _parse_runtime_exchange_operations,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_live_entry_positive_gainer_top_count as _resolve_runtime_top_count,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_live_profile_options as _resolve_runtime_profile_options,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
+    resolve_live_runtime_config,
     resolve_manifest_decimal_option as _resolve_runtime_manifest_decimal,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_manifest_operations as _resolve_runtime_manifest_operations,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_manifest_option as _resolve_runtime_manifest_option,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_account_for_cli as _runtime_options_manifest_account,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_strategy_config_hash as _runtime_options_manifest_hash,
 )
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
@@ -124,8 +106,6 @@ from crypto_momentum_lab.persistence.postgres.risk_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_account_state as _latest_account_state,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_risk_config as _latest_risk_config,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
@@ -2239,276 +2219,6 @@ def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
     )
 
 
-async def _load_transition(
-    database_url: str,
-    session_id: str,
-) -> LiveSessionTransition | None:
-    engine = create_execution_database_engine(database_url)
-    try:
-        return await PostgresLiveRolloutRepository(
-            async_sessionmaker(engine, expire_on_commit=False)
-        ).load_latest_transition(session_id)
-    finally:
-        await engine.dispose()
-
-
-async def _save_transition(
-    database_url: str,
-    session_id: str,
-    operator: str,
-    strategy_config_hash: str,
-    risk_config_hash: str,
-    state: LiveSessionState,
-    reason: str,
-    *,
-    strategy_scope: tuple[str, str, str] | None = None,
-) -> LiveSessionTransition:
-    now = datetime.now(tz=UTC)
-    transition = LiveSessionTransition(
-        transition_id=f"transition-{uuid4()}",
-        session_id=session_id,
-        state=state,
-        occurred_at=now,
-        operator=operator,
-        strategy_config_hash=strategy_config_hash,
-        risk_config_hash=risk_config_hash,
-        reason=reason,
-        details={},
-    )
-    engine = create_execution_database_engine(database_url)
-    try:
-        await PostgresLiveRolloutRepository(
-            async_sessionmaker(engine, expire_on_commit=False),
-            strategy_scope=strategy_scope,
-        ).save_transition(transition)
-    finally:
-        await engine.dispose()
-    return transition
-
-
-async def _publish_risk_control_event(
-    *,
-    url: str,
-    token: str | None,
-    event: RiskControlEvent,
-) -> RiskControlEvent:
-    publisher = WebSocketRiskControlPublisher(
-        url=url,
-        token=token or os.environ.get("CML_RISK_CONTROL_HUB_TOKEN") or None,
-    )
-    return await publisher.publish(event)
-
-
-def _issue_one_shot_risk_control_command(
-    *,
-    action: RiskControlAction,
-    command_type: str,
-    confirmation_text: str,
-    reason: str,
-    session_id: str,
-    operator: str,
-    idempotency_key: str,
-    confirmation: str,
-    account_label: str,
-    strategy: str,
-    risk_control_hub_url: str,
-    risk_control_hub_token: str | None,
-    database_url: str | None,
-) -> None:
-    if confirmation != confirmation_text:
-        raise typer.BadParameter(f"--confirmation must equal '{confirmation_text}'")
-    if not session_id.strip():
-        raise typer.BadParameter("--session-id must not be empty")
-    if not operator.strip():
-        raise typer.BadParameter("--operator must not be empty")
-    if not idempotency_key.strip():
-        raise typer.BadParameter("--idempotency-key must not be empty")
-    resolved_url = (
-        risk_control_hub_url.strip()
-        or os.environ.get("CML_RISK_CONTROL_HUB_URL", "").strip()
-    )
-    if not resolved_url:
-        raise typer.BadParameter(
-            "--risk-control-hub-url or CML_RISK_CONTROL_HUB_URL is required"
-        )
-
-    command = asyncio.run(
-        _load_or_save_risk_control_command(
-            database_url=_database_url(database_url),
-            command_type=command_type,
-            requested_by=operator,
-            confirmation_text=confirmation,
-            idempotency_key=idempotency_key,
-            account_label=account_label,
-            strategy_name=strategy,
-            session_id=session_id,
-        )
-    )
-    if command.status != "requested":
-        typer.echo(
-            json.dumps(
-                {
-                    "command_id": command.command_id,
-                    "status": command.status,
-                    "idempotency_key": command.idempotency_key,
-                },
-                sort_keys=True,
-            )
-        )
-        return
-
-    event = RiskControlEvent(
-        environment="live",
-        account_label=account_label,
-        strategy_name=strategy,
-        session_id=session_id,
-        action=action,
-        event_id=command.command_id,
-        command_id=command.command_id,
-        reason=reason,
-        issued_at=command.requested_at,
-        details={
-            "command_type": command_type,
-            "idempotency_key": command.idempotency_key,
-        },
-    )
-    try:
-        published = asyncio.run(
-            _publish_risk_control_event(
-                url=resolved_url,
-                token=risk_control_hub_token,
-                event=event,
-            )
-        )
-    except Exception as error:
-        typer.echo(
-            json.dumps(
-                {
-                    "command_id": command.command_id,
-                    "status": "requested",
-                    "publish_error": type(error).__name__,
-                    "retry_with_same_idempotency_key": True,
-                },
-                sort_keys=True,
-            )
-        )
-        raise typer.Exit(code=1) from error
-    typer.echo(
-        json.dumps(
-            {
-                "action": action.value,
-                "command_id": command.command_id,
-                "sequence": published.sequence,
-                "status": "published",
-                "stream_epoch": published.stream_epoch,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-async def _load_or_save_risk_control_command(
-    *,
-    database_url: str,
-    command_type: str,
-    requested_by: str,
-    confirmation_text: str,
-    idempotency_key: str,
-    account_label: str,
-    strategy_name: str,
-    session_id: str,
-) -> RollbackCommand:
-    now = datetime.now(tz=UTC)
-    engine = create_execution_database_engine(database_url)
-    repository = PostgresLiveRolloutRepository(
-        async_sessionmaker(engine, expire_on_commit=False)
-    )
-    try:
-        existing = await repository.load_command_by_idempotency(idempotency_key)
-        if existing is not None:
-            _require_matching_risk_control_command(
-                existing,
-                command_type=command_type,
-                account_label=account_label,
-                strategy_name=strategy_name,
-                session_id=session_id,
-            )
-            return existing
-        command = RollbackCommand(
-            command_id=f"command-{uuid4()}",
-            command_type=command_type,
-            requested_by=requested_by,
-            confirmation_text=confirmation_text,
-            requested_at=now,
-            idempotency_key=idempotency_key,
-            account_label=account_label,
-            strategy_name=strategy_name,
-            session_id=session_id,
-            status="requested",
-            completed_at=None,
-            failure_reason=None,
-        )
-        if await repository.save_command(command):
-            return command
-        existing = await repository.load_command_by_idempotency(idempotency_key)
-        if existing is None:
-            raise RuntimeError("risk-control command insert was not observable")
-        _require_matching_risk_control_command(
-            existing,
-            command_type=command_type,
-            account_label=account_label,
-            strategy_name=strategy_name,
-            session_id=session_id,
-        )
-        return existing
-    finally:
-        await engine.dispose()
-
-
-def _require_matching_risk_control_command(
-    command: RollbackCommand,
-    *,
-    command_type: str,
-    account_label: str,
-    strategy_name: str,
-    session_id: str,
-) -> None:
-    if (
-        command.command_type != command_type
-        or command.account_label != account_label
-        or command.strategy_name != strategy_name
-        or command.session_id != session_id
-    ):
-        raise ValueError(
-            "idempotency key is already bound to a different risk-control command"
-        )
-
-
-def _execution_database_url(value: str | None) -> str:
-    return _resolve_database_url(value, "CML_EXECUTION_DATABASE_URL")
-
-
-def _market_database_url(value: str | None) -> str:
-    return _resolve_database_url(value, "CML_MARKET_DATABASE_URL")
-
-
-def _observability_database_url(value: str | None) -> str:
-    return _resolve_database_url(value, "CML_OBSERVABILITY_DATABASE_URL")
-
-
-def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
-    resolved = resolve_database_url(
-        value,
-        plane_env_var,
-        "CML_DATABASE_URL",
-    )
-    if not resolved:
-        raise typer.BadParameter(
-            f"--database-url or {plane_env_var} or CML_DATABASE_URL is required"
-        )
-    return resolved
-
-
 def _resolve_live_cli_credentials(
     *,
     api_key_env: str | None,
@@ -2525,8 +2235,3 @@ def _resolve_live_cli_credentials(
     except CredentialResolutionError as error:
         raise typer.BadParameter(str(error)) from error
 
-
-def _database_url(value: str | None) -> str:
-    """Resolve the execution plane for legacy live CLI commands."""
-
-    return _execution_database_url(value)
