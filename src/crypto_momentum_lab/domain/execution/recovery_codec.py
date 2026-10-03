@@ -24,7 +24,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExternalReductionFact,
     FactCoverageInterval,
     FactCoverageStatus,
-    PositionCheckpoint,
     PositionDiscrepancy,
     PositionEpisode,
     PositionHealthStatus,
@@ -44,7 +43,7 @@ from crypto_momentum_lab.domain.execution.snapshot_encoding import (
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 
-ACCOUNT_FACTS_SCHEMA_VERSION = 2
+ACCOUNT_FACTS_SCHEMA_VERSION = 3
 
 
 class PositionRecoveryCodec:
@@ -764,80 +763,6 @@ class PositionRecoveryCodec:
         )
 
     @classmethod
-    def encode_legacy_checkpoint(
-        cls, checkpoint: PositionCheckpoint
-    ) -> dict[str, object]:
-        return {
-            "checkpoint_id": checkpoint.checkpoint_id,
-            "key": cls.encode_position_key(checkpoint.key),
-            "event_cut": _datetime(checkpoint.event_cut),
-            "net_quantity": _decimal(checkpoint.net_quantity),
-            "entry_price": _decimal(checkpoint.entry_price),
-            "active_episode_id": checkpoint.active_episode_id,
-            "active_batches": [
-                cls.encode_batch(item) for item in checkpoint.active_batches
-            ],
-            "coverage_start": (
-                _datetime(checkpoint.coverage_start)
-                if checkpoint.coverage_start is not None
-                else None
-            ),
-            "coverage_end": (
-                _datetime(checkpoint.coverage_end)
-                if checkpoint.coverage_end is not None
-                else None
-            ),
-            "facts_hash": checkpoint.facts_hash,
-        }
-
-    @classmethod
-    def decode_legacy_checkpoint(cls, value: object) -> PositionCheckpoint:
-        data = _mapping(value, "legacy_checkpoint")
-        _require_keys(
-            data,
-            {
-                "checkpoint_id",
-                "key",
-                "event_cut",
-                "net_quantity",
-                "entry_price",
-                "active_episode_id",
-                "active_batches",
-                "coverage_start",
-                "coverage_end",
-                "facts_hash",
-            },
-            "legacy checkpoint",
-        )
-        active_episode = data.get("active_episode_id")
-        coverage_start = data.get("coverage_start")
-        coverage_end = data.get("coverage_end")
-        if active_episode is not None and not isinstance(active_episode, str):
-            raise RecoverySchemaError("active_episode_id must be a string or null")
-        return PositionCheckpoint(
-            checkpoint_id=_string(data, "checkpoint_id"),
-            key=cls.decode_position_key(data.get("key")),
-            event_cut=_datetime_value(data, "event_cut"),
-            net_quantity=_decimal_value(data, "net_quantity"),
-            entry_price=_decimal_value(data, "entry_price"),
-            active_episode_id=(active_episode),
-            active_batches=tuple(
-                cls.decode_batch(item) for item in _array(data, "active_batches")
-            ),
-            coverage_start=(
-                _datetime_value({"value": coverage_start}, "value")
-                if coverage_start is not None
-                else None
-            ),
-            coverage_end=(
-                _datetime_value({"value": coverage_end}, "value")
-                if coverage_end is not None
-                else None
-            ),
-            facts_hash=_string(data, "facts_hash"),
-        )
-
-    @classmethod
     def encode_conflict(cls, conflict: AccountFactConflict) -> dict[str, object]:
         return {
             "event_kind": conflict.event_kind,
@@ -879,11 +804,6 @@ class PositionRecoveryCodec:
             "coverage": (
                 cls.encode_coverage(facts.coverage)
                 if facts.coverage is not None
-                else None
-            ),
-            "checkpoint": (
-                cls.encode_legacy_checkpoint(facts.checkpoint)
-                if facts.checkpoint is not None
                 else None
             ),
             "has_synthetic_fills": facts.has_synthetic_fills,
@@ -936,7 +856,6 @@ class PositionRecoveryCodec:
                 "snapshots",
                 "exit_boundaries",
                 "coverage",
-                "checkpoint",
                 "has_synthetic_fills",
                 "conflicting_fills",
                 "has_late_events",
@@ -958,7 +877,6 @@ class PositionRecoveryCodec:
         if type(has_late_events) is not bool:
             raise RecoverySchemaError("has_late_events must be a boolean")
         coverage = data.get("coverage")
-        checkpoint = data.get("checkpoint")
         scope = data.get("stream_scope")
         recovery = data.get("recovery_checkpoint")
         cursor = data.get("fill_cursor_provenance")
@@ -976,11 +894,6 @@ class PositionRecoveryCodec:
                 cls.decode_boundary(item) for item in _array(data, "exit_boundaries")
             ),
             coverage=cls.decode_coverage(coverage) if coverage is not None else None,
-            checkpoint=(
-                cls.decode_legacy_checkpoint(checkpoint)
-                if checkpoint is not None
-                else None
-            ),
             has_synthetic_fills=has_synthetic_fills,
             conflicting_fills=tuple(
                 cls.decode_fill(item) for item in _array(data, "conflicting_fills")

@@ -65,6 +65,7 @@ async def test_scheduled_flatten_cancels_recovery_before_using_current_position(
         quantity=Decimal("1.25"),
         opened_at=datetime(2026, 7, 3, 23, 20, tzinfo=UTC),
         recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_exit_started_at=recovery_plan.created_at,
         recovery_order_created_at=recovery_plan.created_at,
         recovery_order_plan=recovery_plan,
     )
@@ -91,18 +92,8 @@ async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
         open_price=Decimal("100"),
         close_price=Decimal("101"),
     )
-    loader = FakeCandleLoader((candle,))
     manager = LiveExitManager(
         config=_config(PositionExitMode.CANDLE_15M),
-        candle_loader=loader,
-    )
-    state = replace(
-        _state(),
-        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
-        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
-        last_ask_price=Decimal("101"),
-        mark_price=Decimal("101"),
-        close_price=Decimal("101"),
     )
     position = replace(
         _long_position(),
@@ -110,14 +101,13 @@ async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
         position_side=FuturesPositionSide.SHORT,
     )
 
-    first = await manager.requests_for_state(state, (position,))
-    second = await manager.requests_for_state(state, (position,))
+    first = await manager.requests_for_closed_candle(candle, (position,))
+    second = await manager.requests_for_closed_candle(candle, (position,))
 
     assert len(first) == 1
     assert first[0].candidate.reason == "candle_15m_bullish"
     assert len(second) == 1
     assert second[0].candidate.candidate_id == first[0].candidate.candidate_id
-    assert loader.calls == 2
 
 
 async def test_live_candle_exit_ignores_the_entry_candle() -> None:
@@ -130,7 +120,6 @@ async def test_live_candle_exit_ignores_the_entry_candle() -> None:
     )
     manager = LiveExitManager(
         config=_config(PositionExitMode.CANDLE_15M),
-        candle_loader=FakeCandleLoader((entry_candle,)),
     )
     state = replace(
         _state(),
@@ -141,7 +130,9 @@ async def test_live_candle_exit_ignores_the_entry_candle() -> None:
         close_price=Decimal("99"),
     )
 
-    requests = await manager.requests_for_state(state, (_long_position(),))
+    requests = await manager.requests_for_closed_candle(
+        entry_candle, (_long_position(),), latest_quote=_quote(state)
+    )
 
     assert requests == ()
 
@@ -160,7 +151,6 @@ async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
         ),
-        candle_loader=FakeCandleLoader((candle,)),
     )
     state = replace(
         _state(),
@@ -171,7 +161,9 @@ async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
         close_price=Decimal("99"),
     )
 
-    requests = await manager.requests_for_state(state, (_long_position(),))
+    requests = await manager.requests_for_closed_candle(
+        candle, (_long_position(),), latest_quote=_quote(state)
+    )
 
     assert len(requests) == 1
     recovery = requests[0]
@@ -194,7 +186,6 @@ async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
         ),
-        candle_loader=FakeCandleLoader((candle,)),
     )
     state = replace(
         _state(),
@@ -205,7 +196,9 @@ async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
         close_price=Decimal("101"),
     )
 
-    requests = await manager.requests_for_state(state, (_long_position(),))
+    requests = await manager.requests_for_closed_candle(
+        candle, (_long_position(),), latest_quote=_quote(state)
+    )
 
     assert len(requests) == 1
     direct = requests[0]
@@ -229,7 +222,6 @@ async def test_b1_uses_lower_decision_threshold_and_keeps_recovery_target() -> N
             candle_grace_decision_profit_pct=Decimal("0.001"),
             candle_grace_profit_pct=Decimal("0.0088"),
         ),
-        candle_loader=FakeCandleLoader((candle,)),
     )
     state = replace(
         _state(),
@@ -240,7 +232,9 @@ async def test_b1_uses_lower_decision_threshold_and_keeps_recovery_target() -> N
         close_price=Decimal("100.20"),
     )
 
-    requests = await manager.requests_for_state(state, (_long_position(),))
+    requests = await manager.requests_for_closed_candle(
+        candle, (_long_position(),), latest_quote=_quote(state)
+    )
 
     assert len(requests) == 1
     direct = requests[0]
@@ -269,11 +263,11 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
         ),
-        candle_loader=FakeCandleLoader(()),
     )
     position = replace(
         _long_position(),
         recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_exit_started_at=recovery_plan.created_at,
         recovery_order_created_at=recovery_plan.created_at,
         recovery_order_plan=recovery_plan,
     )
@@ -314,6 +308,7 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     position = replace(
         _long_position(),
         recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_exit_started_at=created_at,
         recovery_order_created_at=created_at,
         recovery_order_plan=recovery_plan,
     )
@@ -396,6 +391,7 @@ async def test_stale_recovery_limit_does_not_block_a_new_position_episode() -> N
         quantity=Decimal("2.00"),
         opened_at=datetime(2026, 7, 4, 0, 20, tzinfo=UTC),
         recovery_order_client_id="stale-recovery",
+        recovery_exit_started_at=recovery_created_at,
         recovery_order_created_at=recovery_created_at,
         recovery_order_plan=OrderExecutionPlan(
             intent_id="recovery-intent",
@@ -460,6 +456,7 @@ async def test_stale_recovery_rollover_splits_quantities() -> None:
         quantity=Decimal("4.864"),
         opened_at=datetime(2026, 7, 4, 0, 20, tzinfo=UTC),
         recovery_order_client_id="stale-recovery",
+        recovery_exit_started_at=recovery_created_at,
         recovery_order_created_at=recovery_created_at,
         recovery_order_plan=OrderExecutionPlan(
             intent_id="recovery-intent",
@@ -587,17 +584,6 @@ async def test_closed_candle_path_ignores_the_entry_candle() -> None:
     assert requests == ()
 
 
-class FakeCandleLoader:
-    def __init__(self, candles: tuple[ClosedCandle15m, ...]) -> None:
-        self._candles = candles
-        self.calls = 0
-
-    async def load_closed_candles(self, **kwargs) -> tuple[ClosedCandle15m, ...]:
-        del kwargs
-        self.calls += 1
-        return self._candles
-
-
 async def test_exit_identity_includes_quantity() -> None:
     """Different exit quantities must not derive the same order identity.
 
@@ -716,12 +702,29 @@ async def test_live_exit_manager_uses_exit_allocator(
 async def test_reallocated_exit_has_distinct_command_identity():
     manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
     position = replace(_long_position(), projection_version="pv_before")
+
     def build(position):
         return manager._build_order_request(
-            state=_state(), position=position, reason="candle_15m_close",
-            trigger_at=_state().bucket_end, reference_price=Decimal("99"),
+            state=_state(),
+            position=position,
+            reason="candle_15m_close",
+            trigger_at=_state().bucket_end,
+            reference_price=Decimal("99"),
         )
+
     original = build(position)
     refreshed = build(replace(position, projection_version="pv_after"))
     assert original.candidate.candidate_id != refreshed.candidate.candidate_id
     assert build(position).candidate.candidate_id == original.candidate.candidate_id
+
+
+def _quote(state):
+    return RealtimeMarketQuote(
+        exchange=state.exchange,
+        environment=state.environment,
+        symbol=state.symbol,
+        event_at=state.bucket_end,
+        received_at=state.bucket_end,
+        bid_price=state.last_bid_price,
+        ask_price=state.last_ask_price,
+    )

@@ -981,6 +981,18 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         """Return the number of symbols confirmed for the entry mode."""
         return len(self._configured_margin_type_by_symbol)
 
+    def is_entry_leverage_configured(self, symbol: str) -> bool:
+        """Return whether entry leverage has been confirmed for symbol."""
+        if self._entry_leverage is None:
+            return True
+        return symbol in self._configured_leverage_by_symbol
+
+    def is_entry_margin_type_configured(self, symbol: str) -> bool:
+        """Return whether entry margin mode has been confirmed for symbol."""
+        if self._entry_margin_type is None:
+            return True
+        return symbol in self._configured_margin_type_by_symbol
+
     async def warm_entry_leverage(self, symbols: Iterable[str]) -> None:
         """Confirm entry leverage before the live market loop can submit."""
 
@@ -1150,6 +1162,12 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 on_request_started=_notify_request_started,
                 on_response_received=_notify_response_received,
             )
+        except ValueError as exc:
+            # Pre-submission guards wrap their errors as OrderPreSubmissionError.
+            # A decode failure escaping the order POST cannot prove rejection.
+            raise ExchangeSubmissionTimeoutError(
+                "Binance order submit returned an unreadable response; outcome unknown"
+            ) from exc
         except httpx.TimeoutException as exc:
             raise ExchangeSubmissionTimeoutError(
                 "Binance order submit timed out"
@@ -1164,20 +1182,30 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "Binance order submit returned an unknown server outcome"
                 ) from exc
             raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
-        snapshot = order_snapshot_from_response(
-            rest_require_mapping(payload),
-            observed_at=self._now(),
-            entry_leverage=entry_leverage,
-        )
-        if snapshot.executed_quantity > Decimal("0") and (
-            snapshot.average_price is None or snapshot.average_price <= Decimal("0")
-        ):
-            snapshot = await self._resolve_filled_order_snapshot_with_retry(
-                plan=plan,
-                initial_snapshot=snapshot,
+        try:
+            snapshot = order_snapshot_from_response(
+                rest_require_mapping(payload),
+                observed_at=self._now(),
                 entry_leverage=entry_leverage,
             )
-        return snapshot
+            if snapshot.executed_quantity > Decimal("0") and (
+                snapshot.average_price is None or snapshot.average_price <= Decimal("0")
+            ):
+                snapshot = await self._resolve_filled_order_snapshot_with_retry(
+                    plan=plan,
+                    initial_snapshot=snapshot,
+                    entry_leverage=entry_leverage,
+                )
+            return snapshot
+        except (ValueError, TypeError, KeyError) as parse_exc:
+            log.warning(
+                "binance_order_submit_response_parse_error",
+                client_order_id=plan.client_order_id,
+                error=str(parse_exc),
+            )
+            raise ExchangeSubmissionTimeoutError(
+                f"Binance order submitted but response parsing failed: {parse_exc}"
+            ) from parse_exc
 
     async def _resolve_filled_order_snapshot_with_retry(
         self,

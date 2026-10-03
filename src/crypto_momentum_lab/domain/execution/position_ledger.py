@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account.models import (
@@ -916,7 +916,8 @@ class PositionLedger:
                 # clock window cannot prove that a quantity mismatch is real.
                 health_status = (
                     PositionHealthStatus.CATCHING_UP
-                    if facts.prefix_facts_complete else PositionHealthStatus.INCOMPLETE
+                    if facts.prefix_facts_complete
+                    else PositionHealthStatus.INCOMPLETE
                 )
                 is_comparable = False
                 reconciliation_gap = Decimal("0")
@@ -1083,13 +1084,6 @@ class PositionLedger:
             health_status = PositionHealthStatus.INCOMPLETE
             is_comparable = False
             diagnostics.append(f"Recovery checkpoint rejected: {checkpoint_error}")
-
-        if facts.checkpoint is not None and checkpoint is None:
-            health_status = PositionHealthStatus.INCOMPLETE
-            is_comparable = False
-            diagnostics.append(
-                "Legacy quantity checkpoint is not a replayable recovery checkpoint"
-            )
 
         if has_synthetic_fills or (
             checkpoint is not None and checkpoint.has_synthetic_fills
@@ -1500,11 +1494,6 @@ def _facts_at_cut(
             b for b in facts.exit_boundaries if b.submitted_at <= cut
         ),
         coverage=selected_coverage,
-        checkpoint=(
-            facts.checkpoint
-            if facts.checkpoint is not None and facts.checkpoint.event_cut <= cut
-            else None
-        ),
         has_synthetic_fills=(
             has_synthetic_fills
             if has_synthetic_fills is not None
@@ -1560,12 +1549,6 @@ def checkpoint_suffix_facts(
             boundary
             for boundary in facts.exit_boundaries
             if boundary.submitted_at > parent_event_cut
-        ),
-        checkpoint=(
-            facts.checkpoint
-            if facts.checkpoint is not None
-            and facts.checkpoint.event_cut > parent_event_cut
-            else None
         ),
         conflicting_fills=tuple(
             fill for fill in facts.conflicting_fills if fill.trade_at > parent_event_cut

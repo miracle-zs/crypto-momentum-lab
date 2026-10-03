@@ -10,13 +10,9 @@ from crypto_momentum_lab.domain.strategy.entry_policy import (
     UniverseRankingEntry,
     UniverseRankingSnapshot,
 )
-from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
-    EntryPolicyComparison,
-    EntryPolicyComparisonRequest,
-    EntryPolicyComparisonSummary,
-    compare_entry_candidate,
-    compare_entry_policy_request,
-    summarize_entry_policy_comparisons,
+from crypto_momentum_lab.domain.strategy.entry_policy_evaluation import (
+    CandidatePolicyDecision,
+    evaluate_entry_candidate,
     universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.domain.strategy.models import (
@@ -65,9 +61,8 @@ __all__ = [
     "EntryEligibilityDecision",
     "EntryEligibilityPolicy",
     "EntryGateResult",
-    "EntryPolicyComparison",
-    "EntryPolicyComparisonRequest",
-    "EntryPolicyComparisonSummary",
+    "CandidatePolicyDecision",
+    "evaluate_entry_candidate",
     "EquityFractionSizingModel",
     "FixedNotionalSizingModel",
     "IncompatibleCheckpointError",
@@ -90,14 +85,11 @@ __all__ = [
     "SymbolLotRules",
     "UniverseRankingEntry",
     "UniverseRankingSnapshot",
-    "compare_entry_candidate",
-    "compare_entry_policy_request",
     "default_symbol_lot_rules",
     "deterministic_candidate_id",
     "deterministic_config_hash",
     "deterministic_signal_id",
     "position_exit_reason",
     "quantize_lot_quantity",
-    "summarize_entry_policy_comparisons",
     "universe_snapshot_for_symbols",
 ]

@@ -253,7 +253,7 @@ async def test_filter_invokes_on_decision_result_callback() -> None:
         "orderflow_impulse",
         target_notional=Decimal("500"),
         fact_provider=lambda state: frozen,
-        on_decision_result=results_captured.append,
+        on_decision_result=lambda result, _input: results_captured.append(result),
         trace_recorder=traces_captured.append,
         effective_policy=effective_policy,
     )
@@ -324,10 +324,10 @@ async def test_filter_invokes_on_decision_result_callback() -> None:
     assert replay["reproduced"] is True
 
     # A callback's own TypeError is a real callback failure. It must not be
-    # mistaken for the legacy one-argument callback signature and invoked twice.
+    # retried after it has already run.
     callback_calls = []
 
-    def broken_callback(result, decision_input=None):
+    def broken_callback(result, decision_input):
         callback_calls.append((result, decision_input))
         raise TypeError("callback implementation failed")
 
@@ -406,7 +406,7 @@ def test_filter_evaluates_open_position_exit_when_candidates_empty() -> None:
         "orderflow_impulse",
         target_notional=Decimal("500"),
         fact_provider=lambda state: frozen,
-        on_decision_result=results_captured.append,
+        on_decision_result=lambda result, _input: results_captured.append(result),
     )
 
     # Empty candidates decision (clock tick only)
@@ -607,5 +607,3 @@ def test_filter_rejects_catching_up_position_with_other_diagnostics() -> None:
     assert len(out.candidates) == 0
     assert len(out.rejections) == 1
     assert out.rejections[0].details["raw_reason"] == "position_health_catching_up"
-
-

@@ -57,30 +57,6 @@ class LiveCashFlowAdjustment:
     amount: Decimal
     cash_flow_type: str = "deposit"
 
-    def to_fact(
-        self,
-        reason: str = "legacy_env_config",
-        approval_ref: str = "legacy_operator",
-        asset: str = "USDT",
-    ) -> CashFlowFact:
-        import hashlib
-
-        h = hashlib.sha256(
-            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}:{asset}".encode()
-        ).hexdigest()
-        return CashFlowFact(
-            correction_id=f"cf_leg_{h[:16]}",
-            account_label=self.account_label,
-            amount=self.amount,
-            cash_flow_type=self.cash_flow_type,
-            effective_at=self.effective_at,
-            reason=reason,
-            approval_ref=approval_ref,
-            evidence_hash=h,
-            asset=asset,
-            source="legacy_env_config",
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class CashFlowFact:

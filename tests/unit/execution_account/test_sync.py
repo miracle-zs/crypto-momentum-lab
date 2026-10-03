@@ -77,7 +77,7 @@ class FakeClient:
 
     incomplete_fill_symbols: frozenset[str] = frozenset()
 
-    async def fetch_positions(self):
+    async def fetch_positions(self, *, include_flat=False):
         return ()
 
     async def fetch_open_orders(self):
@@ -91,6 +91,22 @@ class FakeClient:
         start_time_by_symbol=None,
     ):
         return ()
+
+    async def fetch_fills_with_provenance(
+        self, symbol, *, start_time_ms, checked_through, max_pages_per_window=10
+    ):
+        from crypto_momentum_lab.domain.account.models import AccountFillPageScan
+
+        return (), AccountFillPageScan(
+            symbol=symbol,
+            load_id=f"scan-{symbol}",
+            scan_origin_start_time_ms=start_time_ms,
+            next_from_id=0,
+            page_count=1,
+            page_exhausted=False,
+            truncated=True,
+            checked_through=checked_through,
+        )
 
     async def aclose(self) -> None:
         return None
@@ -498,7 +514,7 @@ async def test_sync_skips_zero_snapshot_fill_scan_with_empty_time_range() -> Non
             super().__init__()
             self.provenance_calls = []
 
-        async def fetch_positions(self):
+        async def fetch_positions(self, *, include_flat=False):
             return (flat_position,)
 
         async def fetch_fills_with_provenance(
@@ -730,7 +746,7 @@ class NewPositionClient(CursorClient):
         super().__init__(responses=responses)
         self.positions = list(positions)
 
-    async def fetch_positions(self):
+    async def fetch_positions(self, *, include_flat=False):
         return self.positions.pop(0)
 
 
@@ -1032,7 +1048,7 @@ async def test_reconciliation_position_count_ignores_zero_positions() -> None:
     repository = FakeRepository()
 
     class ZeroPositionClient(FakeClient):
-        async def fetch_positions(self):
+        async def fetch_positions(self, *, include_flat=False):
             return (
                 replace(
                     _position(),
@@ -1079,7 +1095,7 @@ async def test_reconciliation_run_records_full_state_when_history_is_sparse() ->
                 (btc_flat, eth_open),
             ]
 
-        async def fetch_positions(self):
+        async def fetch_positions(self, *, include_flat=False):
             return self.position_sets.pop(0)
 
     repository = FakeRepository()
@@ -1118,7 +1134,7 @@ async def test_tracked_flat_symbol_uses_prior_explicit_rest_zero_for_proof():
         cut = start
         calls = []
 
-        async def fetch_positions(self):
+        async def fetch_positions(self, *, include_flat=False):
             position = AccountPositionSnapshot(
                 "live",
                 "primary",
@@ -1207,7 +1223,7 @@ async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history():
                 ),
             )
 
-        async def fetch_positions(self):
+        async def fetch_positions(self, *, include_flat=False):
             self.started.set()
             await self.release.wait()
             return ()

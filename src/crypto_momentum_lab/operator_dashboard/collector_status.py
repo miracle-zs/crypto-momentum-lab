@@ -182,6 +182,8 @@ def _load_checkpoint(path: Path, *, environment: str) -> CollectorCheckpoint | N
         environment=environment,
         stream_id=_optional_string(payload.get("stream_id")),
         last_sequence=_optional_int(payload.get("last_sequence")),
+        accepted_sequence=_optional_int(payload["accepted_sequence"]),
+        materialized_sequence=_optional_int(payload["materialized_sequence"]),
         last_bucket_start=_optional_datetime(payload.get("last_bucket_start")),
         last_symbol=_optional_string(payload.get("last_symbol")),
         schema_version=schema_version,

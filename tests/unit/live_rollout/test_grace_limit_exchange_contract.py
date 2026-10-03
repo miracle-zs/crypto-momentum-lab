@@ -29,7 +29,7 @@ from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager, LiveExitOrderRequest
 from tests.fixtures.live_market import _state
-from tests.unit.live_rollout.test_exits import FakeCandleLoader, _config, _long_position
+from tests.unit.live_rollout.test_exits import _config, _long_position
 
 
 @pytest.mark.parametrize("planner", ("command", "intent"))
@@ -47,7 +47,6 @@ async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> N
             candle_grace_bars=8,
             candle_grace_profit_pct=Decimal("0.0088"),
         ),
-        candle_loader=FakeCandleLoader((candle,)),
     )
     state = replace(
         _state(),
@@ -58,7 +57,7 @@ async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> N
         close_price=Decimal("99"),
     )
     position = _long_position()
-    requests = await manager.requests_for_state(state, (position,))
+    requests = await manager.requests_for_closed_candle(candle, (position,))
     assert len(requests) == 1
     request = requests[0]
     assert isinstance(request, LiveExitOrderRequest)

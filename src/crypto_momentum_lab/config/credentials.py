@@ -10,11 +10,6 @@ from crypto_momentum_lab.config.models import (
     BinanceCredentialRole,
 )
 
-LEGACY_BINANCE_CREDENTIAL_REF = BinanceCredentialRef(
-    api_key_env="BINANCE_API_KEY",
-    api_secret_env="BINANCE_API_SECRET",
-)
-
 _DEFAULT_ROLE_ENV_NAMES: dict[BinanceCredentialRole, tuple[str, str]] = {
     BinanceCredentialRole.READ: (
         "BINANCE_READ_API_KEY",
@@ -77,8 +72,6 @@ def resolve_binance_credentials(
     role: BinanceCredentialRole,
     *,
     environ: Mapping[str, str] | None = None,
-    legacy_ref: BinanceCredentialRef | None = None,
-    allow_legacy_fallback: bool = False,
 ) -> ResolvedBinanceCredentials:
     """Resolve one role's credentials from an injected environment mapping.
 
@@ -94,26 +87,7 @@ def resolve_binance_credentials(
     if not missing:
         return _resolved_from_reference(role, reference, values)
 
-    # A partially configured role must fail closed instead of silently mixing
-    # one role-specific value with a legacy value from another source.
-    if len(missing) != 2 or not allow_legacy_fallback or legacy_ref is None:
-        _raise_missing(role, reference, missing)
-
-    # The guard above proves the optional fallback reference is present; keep a
-    # local non-optional binding so the invariant is clear for type checkers.
-    fallback_ref = legacy_ref
-    legacy_missing = _missing_names(fallback_ref, values)
-    if legacy_missing:
-        primary_names = ", ".join((reference.api_key_env, reference.api_secret_env))
-        legacy_names = ", ".join(
-            (fallback_ref.api_key_env, fallback_ref.api_secret_env)
-        )
-        raise CredentialResolutionError(
-            f"{role.value} credential variables are missing or blank: "
-            f"{primary_names}; legacy fallback variables are missing or blank: "
-            f"{legacy_names}"
-        )
-    return _resolved_from_reference(role, fallback_ref, values)
+    _raise_missing(role, reference, missing)
 
 
 def credential_config_for_role(
@@ -157,9 +131,8 @@ def resolve_role_credentials(
     api_key_env: str | None = None,
     api_secret_env: str | None = None,
     environ: Mapping[str, str] | None = None,
-    allow_legacy_fallback: bool = False,
 ) -> ResolvedBinanceCredentials:
-    """Resolve one conventional role, with an explicit legacy fallback.
+    """Resolve credentials for one role using its configured environment names.
 
     This is the composition-root seam used by long-running services.  Callers
     may override both names for a secret store, but a partial override is
@@ -179,8 +152,6 @@ def resolve_role_credentials(
         config,
         role,
         environ=environ,
-        legacy_ref=LEGACY_BINANCE_CREDENTIAL_REF,
-        allow_legacy_fallback=allow_legacy_fallback,
     )
 
 

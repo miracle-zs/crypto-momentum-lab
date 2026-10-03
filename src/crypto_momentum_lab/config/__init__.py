@@ -1,5 +1,4 @@
 from crypto_momentum_lab.config.credentials import (
-    LEGACY_BINANCE_CREDENTIAL_REF,
     CredentialResolutionError,
     ResolvedBinanceCredentials,
     credential_config_for_role,
@@ -21,7 +20,6 @@ __all__ = [
     "BinanceCredentialRef",
     "BinanceCredentialRole",
     "CredentialResolutionError",
-    "LEGACY_BINANCE_CREDENTIAL_REF",
     "RuntimeConfig",
     "ResolvedBinanceCredentials",
     "UniverseConfig",

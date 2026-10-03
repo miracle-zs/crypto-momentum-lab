@@ -113,7 +113,7 @@ class LiveExitReceiptRecovery:
                 return pending("durable_order_identity_mismatch")
             if row is not None:
                 # An already submitted order owns its durable identity. Never
-                # recalculate a legacy receipt under the new submission rule.
+                # recalculate the receipt under a different submission rule.
                 expected_id = row.client_order_id
         # Pending exits share one short-lived account cut. Re-fetching all
         # positions/orders per command can exhaust the private API budget.
@@ -141,26 +141,17 @@ class LiveExitReceiptRecovery:
         ]
         if (
             len(matching) != 1
-            or (matching[0].position_amt != 0
-                and command.reason not in self._obsolete_exit_reasons)
+            or (
+                matching[0].position_amt != 0
+                and command.reason not in self._obsolete_exit_reasons
+            )
             or not 0 <= (checked_at - matching[0].observed_at).total_seconds() <= 180
         ):
             return pending("explicit_fresh_exchange_flat_cut_required")
         if any(order.symbol == key.symbol for order in self._open_orders):
             return pending("exchange_open_order_requires_recovery")
-        # Legacy internal command names were persisted as exchange identities.
-        # An invalid ID cannot produce an exchange receipt. A recorded rejection
-        # with no exchange ID, plus the fresh flat/no-order cut above, is terminal.
         if re.fullmatch(r"[.A-Z:/a-z0-9_-]{1,36}", expected_id) is None:
-            if (
-                row is not None
-                and row.state == ExchangeOrderState.REJECTED.value
-                and row.exchange_order_id is None
-            ):
-                return ExitRecoveryDisposition(
-                    "SUPERSEDED", "rejected_invalid_identity_explicit_position_flat"
-                )
-            return pending("invalid_legacy_order_identity_requires_recovery")
+            return pending("invalid_order_identity")
         try:
             order = await self._exchange.query_order_by_client_id(
                 key.symbol, expected_id

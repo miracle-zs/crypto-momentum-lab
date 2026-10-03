@@ -24,6 +24,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderEventRow,
     ExchangeOrderRow,
     ExecutionCommandRow,
+    LiveExposureClaimRow,
     OrderIntentExecutionRow,
 )
 
@@ -71,7 +72,34 @@ class PostgresOrderReadRepository:
                     )
                 )
             ).all()
-        return tuple(_persisted_order(row) for row in rows)
+            market_intent_ids = [r.intent_id for r in rows if r.price is None]
+            claim_notionals: dict[str, Decimal] = {}
+            if market_intent_ids:
+                try:
+                    claim_rows = (
+                        await session.execute(
+                            select(
+                                LiveExposureClaimRow.intent_id,
+                                LiveExposureClaimRow.notional,
+                            ).where(
+                                LiveExposureClaimRow.intent_id.in_(market_intent_ids)
+                            )
+                        )
+                    ).all()
+                    claim_notionals = {
+                        order_id: notional for order_id, notional in claim_rows
+                    }
+                except Exception:
+                    pass
+        return tuple(
+            _persisted_order(
+                row,
+                reference_price=(claim_notionals[row.intent_id] / row.quantity)
+                if (row.intent_id in claim_notionals and row.quantity > 0)
+                else None,
+            )
+            for row in rows
+        )
 
     async def load_order(
         self,
@@ -85,7 +113,21 @@ class PostgresOrderReadRepository:
             )
             if row is None:
                 return None
-            order = _persisted_order(row)
+            ref_price: Decimal | None = None
+            if row.price is None and row.intent_id is not None:
+                try:
+                    claims = (
+                        await session.scalars(
+                            select(LiveExposureClaimRow.notional).where(
+                                LiveExposureClaimRow.intent_id == row.intent_id
+                            )
+                        )
+                    ).all()
+                    if claims and row.quantity > 0:
+                        ref_price = claims[0] / row.quantity
+                except Exception:
+                    pass
+            order = _persisted_order(row, reference_price=ref_price)
             receipt = None
             if order.state.terminal:
                 quantity = order.executed_quantity
@@ -181,7 +223,10 @@ class PostgresOrderReadRepository:
                                 Decimal(0),
                             )
                             if traded_quantity == quantity:
-                                settlement_fills = tuple(account_fill_from_row(fill) for fill in matching_fills)
+                                settlement_fills = tuple(
+                                    account_fill_from_row(fill)
+                                    for fill in matching_fills
+                                )
                                 if average is None:
                                     average = traded_quote / quantity
                 if average is not None:
@@ -196,7 +241,10 @@ class PostgresOrderReadRepository:
             return replace(order, terminal_receipt=receipt)
 
 
-def _persisted_order(row: ExchangeOrderRow) -> order_read_models.PersistedExchangeOrder:
+def _persisted_order(
+    row: ExchangeOrderRow,
+    reference_price: Decimal | None = None,
+) -> order_read_models.PersistedExchangeOrder:
     return order_read_models.PersistedExchangeOrder(
         plan=OrderExecutionPlan(
             intent_id=row.intent_id,
@@ -213,6 +261,7 @@ def _persisted_order(row: ExchangeOrderRow) -> order_read_models.PersistedExchan
             quantized=True,
             time_in_force=row.time_in_force,
             expires_at=row.expires_at,
+            reference_price=reference_price,
         ),
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,

@@ -15,18 +15,7 @@ from crypto_momentum_lab.live_rollout.exits import (
 )
 
 
-class _FailingCandleLoader:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def load_closed_candles(self, **kwargs):
-        del kwargs
-        self.calls += 1
-        raise AssertionError("realtime quote path must not load candles")
-
-
 async def test_requests_for_quote_returns_empty_tuple() -> None:
-    loader = _FailingCandleLoader()
     manager = LiveExitManager(
         config=LiveExitConfig(
             run_id="run-1",
@@ -37,7 +26,6 @@ async def test_requests_for_quote_returns_empty_tuple() -> None:
                 mode=PositionExitMode.CANDLE_15M,
             ),
         ),
-        candle_loader=loader,
     )
     opened_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
     quote = RealtimeMarketQuote(
@@ -61,11 +49,9 @@ async def test_requests_for_quote_returns_empty_tuple() -> None:
     requests = await manager.requests_for_quote(quote, (position,))
 
     assert requests == ()
-    assert loader.calls == 0
 
 
 async def test_candle_exit_mode_ignores_realtime_quotes() -> None:
-    loader = _FailingCandleLoader()
     manager = LiveExitManager(
         config=LiveExitConfig(
             run_id="run-1",
@@ -76,7 +62,6 @@ async def test_candle_exit_mode_ignores_realtime_quotes() -> None:
                 mode=PositionExitMode.CANDLE_15M,
             ),
         ),
-        candle_loader=loader,
     )
     opened_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
     position = ManagedLivePosition(
@@ -117,4 +102,3 @@ async def test_candle_exit_mode_ignores_realtime_quotes() -> None:
 
     assert take_profit_requests == ()
     assert stop_loss_requests == ()
-    assert loader.calls == 0

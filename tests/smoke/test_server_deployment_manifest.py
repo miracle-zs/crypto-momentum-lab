@@ -309,7 +309,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         assert execution["command"] == manifest["x-execution-account-command"]
         assert "--account-label" not in execution["command"]
         assert f"account-{account_number}" in strategy["command"]
-        assert "--entry-policy-enforce" in strategy["command"]
+        assert "--entry-policy-enforce" not in strategy["command"]
         for option in (
             "--entry-positive-gainer-top-count",
             "--impulse-window-buckets",

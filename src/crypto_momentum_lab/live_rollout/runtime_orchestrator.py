@@ -42,7 +42,10 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
-from crypto_momentum_lab.domain.live_rollout import LiveSessionState
+from crypto_momentum_lab.domain.live_rollout import (
+    LiveOperatorApproval,
+    LiveSessionState,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.operational.runtime_metadata import (
@@ -348,8 +351,6 @@ async def run_live_daemon(
     require_price_above_ema10 = config.strategy.require_price_above_ema10
     entry_order_type = config.strategy.entry_order_type
     entry_limit_ttl_seconds = config.strategy.entry_limit_ttl_seconds
-    entry_policy_compare_only = config.strategy.entry_policy_compare_only
-    entry_policy_enforce = config.strategy.entry_policy_enforce
 
     hedge_mode = config.execution.hedge_mode
     exit_mode = config.execution.exit_mode
@@ -481,16 +482,10 @@ async def run_live_daemon(
         shadow_repository = persistence.repositories.shadow_repository
         live_repository = persistence.repositories.live_repository
         risk_repository = persistence.repositories.risk_repository
-        heartbeat_live_repository = (
-            persistence.repositories.heartbeat_live_repository
-        )
-        heartbeat_risk_repository = (
-            persistence.repositories.heartbeat_risk_repository
-        )
+        heartbeat_live_repository = persistence.repositories.heartbeat_live_repository
+        heartbeat_risk_repository = persistence.repositories.heartbeat_risk_repository
         order_repository = persistence.repositories.order_repository
-        order_adoption_repository = (
-            persistence.repositories.order_adoption_repository
-        )
+        order_adoption_repository = persistence.repositories.order_adoption_repository
         order_read_repository = persistence.repositories.order_read_repository
         order_event_repository = persistence.repositories.order_event_repository
         submission_repository = persistence.repositories.submission_repository
@@ -525,10 +520,10 @@ async def run_live_daemon(
             hedge_mode=hedge_mode,
             request_exit_recovery=lambda: (
                 order_reconciliation.request_exit_recovery()
-                if order_reconciliation is not None else None
+                if order_reconciliation is not None
+                else None
             ),
         )
-        ownership_registry.register("decision_fact_source", fact_source.drain)
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
             account_label=account_label,
@@ -639,7 +634,8 @@ async def run_live_daemon(
             telemetry=telemetry,
             request_recovery=lambda: (
                 order_reconciliation.request_order_recovery()
-                if order_reconciliation is not None else None
+                if order_reconciliation is not None
+                else None
             ),
         )
 
@@ -801,7 +797,8 @@ async def run_live_daemon(
             res = await execution_coordinator.prepare_and_execute(
                 plan,
                 preparation=OrderSubmissionPreparation(
-                    intent=intent, evaluation=evaluation,
+                    intent=intent,
+                    evaluation=evaluation,
                     environment="live" if active_lease is not None else None,
                     account_label=account_label,
                     strategy_name=strategy_name,
@@ -844,13 +841,12 @@ async def run_live_daemon(
             repository=order_adoption_repository,
             run_id=session_id,
         )
+
         async def recover_decision_exits() -> bool:
             if daemon is not None and await daemon.recover_requested_exits():
                 exit_channel_runtime.note_account_facts_changed()
             pending = await fact_source.recover_pending_exits(limit=5)
-            return pending or (
-                daemon is not None and daemon.has_pending_exit_recovery
-            )
+            return pending or (daemon is not None and daemon.has_pending_exit_recovery)
 
         order_reconciliation = LiveOrderReconciliation(
             order_repository=order_read_repository,
@@ -928,7 +924,6 @@ async def run_live_daemon(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
-            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -1142,9 +1137,7 @@ async def run_live_daemon(
             uow=PostgresPositionRepairUnitOfWork(
                 execution_factory, strategy_name=strategy_name
             ),
-            context_is_current=(
-                lambda context: context_provider.is_current(context)
-            ),
+            context_is_current=(lambda context: context_provider.is_current(context)),
             invalidate_context=invalidate_repaired_context,
             request_recovery=order_reconciliation.request_position_recovery,
         )
@@ -1163,8 +1156,11 @@ async def run_live_daemon(
             request_position_repair=position_repair.request,
         )
         context_provider.set_execution_book(execution_book)
+        if startup_warmup_symbols:
+            await context_provider.warm_symbol_rules(startup_warmup_symbols, now)
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
+
         def request_unknown_exit(order: PersistedExchangeOrder) -> bool:
             if daemon is None:
                 return False
@@ -1202,6 +1198,8 @@ async def run_live_daemon(
         daemon = LiveStrategyDaemon(
             request_exit_recovery=order_reconciliation.request_exit_recovery,
             cached_context_provider=lambda: context_provider.cached_context,
+            is_symbol_warmed=lambda s: entry_runtime.is_symbol_warmed(s) and context_provider.is_symbol_rules_warmed(s),
+            on_unwarmed_symbol=entry_runtime.trigger_symbol_warmup,
             strategy=strategy,
             risk_gateway=RiskGateway(
                 limits=FixedLiveLimits(
@@ -1235,8 +1233,6 @@ async def run_live_daemon(
                 entry_filter_context_loader=entry_filter_context_loader,
                 entry_universe_context_provider=(entry_universe_context_provider),
                 entry_universe_snapshot_provider=(entry_universe_snapshot_provider),
-                entry_policy_compare_only=entry_policy_compare_only,
-                entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
@@ -1275,7 +1271,6 @@ async def run_live_daemon(
                     candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
                     candle_grace_profit_pct=candle_grace_profit_pct,
                 ),
-                candle_loader=None,
             ),
             exit_recovery_client=client,
             cancel_unfilled_entry_orders=entry_order_canceller.cancel,

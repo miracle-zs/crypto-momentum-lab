@@ -116,9 +116,7 @@ def plan_order_execution(
         price = price_units * rules.tick_size
 
     position_side = (
-        command.position_key.position_side
-        if hedge_mode
-        else FuturesPositionSide.BOTH
+        command.position_key.position_side if hedge_mode else FuturesPositionSide.BOTH
     )
 
     client_order_id = command.client_order_id(run_id)
@@ -194,6 +192,7 @@ def plan_order_execution(
         batch_quantities=batch_quantities,
         strategy_name=getattr(command, "strategy_name", None),
         strategy_version=getattr(command, "strategy_version", None),
+        reference_price=reference_price,
     )
 
     return TradeExecutionPlanResult(

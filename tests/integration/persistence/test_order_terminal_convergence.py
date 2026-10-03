@@ -118,9 +118,14 @@ async def test_canceled_order_in_new_epoch_converges_outbox_and_durable_command(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = "s06-" + uuid4().hex[:10]
-    book, commands, reservations, uow, order_events, order_reads = await _setup_book_and_repos(
-        factory, account
-    )
+    (
+        book,
+        commands,
+        reservations,
+        uow,
+        order_events,
+        order_reads,
+    ) = await _setup_book_and_repos(factory, account)
 
     scope = ExecutionScope("live", account, "BTCUSDT", FuturesPositionSide.LONG)
     pos_key = scope.to_position_key()
@@ -130,7 +135,10 @@ async def test_canceled_order_in_new_epoch_converges_outbox_and_durable_command(
 
     # 1. Establish stream epoch 1 and empty position head
     book.register_active_stream(
-        environment="live", account_label=account, stream_id="ws-stream", stream_epoch=stream_epoch_1
+        environment="live",
+        account_label=account,
+        stream_id="ws-stream",
+        stream_epoch=stream_epoch_1,
     )
     await book.observe(
         ExecutionEvidence(
@@ -208,7 +216,10 @@ async def test_canceled_order_in_new_epoch_converges_outbox_and_durable_command(
 
     # 3. Simulate stream epoch change (e.g. WebSocket reconnection)
     book.register_active_stream(
-        environment="live", account_label=account, stream_id="ws-stream", stream_epoch=stream_epoch_2
+        environment="live",
+        account_label=account,
+        stream_id="ws-stream",
+        stream_epoch=stream_epoch_2,
     )
 
     # 4. Order is CANCELED on exchange (0 fills)
@@ -264,16 +275,23 @@ async def test_canceled_order_in_new_epoch_converges_outbox_and_durable_command(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_path", ["account_event", "restart_receipt"])
 async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
     async_database_url: str,
+    recovery_path: str,
 ):
     """When persisted order is terminal but outbox is unresolved, reconcile_account_event converges it."""
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = "recon-" + uuid4().hex[:10]
-    book, commands, reservations, uow, order_events, order_reads = await _setup_book_and_repos(
-        factory, account
-    )
+    (
+        book,
+        commands,
+        reservations,
+        uow,
+        order_events,
+        order_reads,
+    ) = await _setup_book_and_repos(factory, account)
 
     scope = ExecutionScope("live", account, "ETHUSDT", FuturesPositionSide.LONG)
     pos_key = scope.to_position_key()
@@ -281,7 +299,10 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
     intent_id = "intent-" + cmd_id
 
     book.register_active_stream(
-        environment="live", account_label=account, stream_id="ws-stream", stream_epoch="1"
+        environment="live",
+        account_label=account,
+        stream_id="ws-stream",
+        stream_epoch="1",
     )
     await book.observe(
         ExecutionEvidence(
@@ -348,6 +369,30 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
         )
     book.coordinator.register_reservation(res)
     book.register_prepared_command(command, scope, [res.reservation_id])
+    await book.observe(
+        ExecutionEvidence(
+            evidence_id="durable-before-crash-" + account,
+            scope=scope,
+            stream_id="ws-stream",
+            stream_epoch="1",
+            observed_at=NOW,
+            snapshot=AccountPositionSnapshot(
+                environment="live",
+                account_label=account,
+                symbol="ETHUSDT",
+                position_side="LONG",
+                position_amt=Decimal("0"),
+                entry_price=Decimal("0"),
+                mark_price=Decimal("2000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("0"),
+                leverage=2,
+                margin_type="cross",
+                observed_at=NOW,
+                raw_payload={"include_flat": True},
+            ),
+        )
+    )
     await book.mark_acknowledged(cmd_id, external_order_id="ex-eth-1")
 
     # Persist the order as canceled in exchange_orders table
@@ -386,6 +431,29 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
                     executed_quantity=Decimal("0"),
                 )
             )
+
+    if recovery_path == "restart_receipt":
+        # Crash cut: the order event commits, but Book has not accepted it.
+        await order_events.append_order_event(
+            ExchangeOrderEvent(
+                event_id="durable-cancel-" + cmd_id,
+                client_order_id=cmd_id,
+                state=ExchangeOrderState.CANCELED,
+                exchange_order_id="ex-eth-1",
+                occurred_at=NOW + timedelta(seconds=10),
+                details={"executed_quantity": "0"},
+            )
+        )
+        assert book.get_outbox(cmd_id).state is DispatchState.ACKNOWLEDGED
+        # A fresh Book restores durable pending commands and reservations.
+        (
+            book,
+            commands,
+            reservations,
+            uow,
+            order_events,
+            order_reads,
+        ) = await _setup_book_and_repos(factory, account)
 
     class DummyBackend:
         async def apply_observed_snapshot(self, plan, snapshot):
@@ -430,8 +498,26 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
             "T": int((NOW + timedelta(seconds=10)).timestamp() * 1000),
         }
 
-    # First event: Outbox is ACKNOWLEDGED, so reconcile_account_event must NOT drop it
-    await reconciliation.reconcile_account_event(MockUpdateEvent())
+    if recovery_path == "restart_receipt":
+        from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
+            recover_restored_commands,
+        )
+
+        async def no_network_query(_plan):
+            pytest.fail(
+                "durable terminal receipt must recover without a new exchange request"
+            )
+
+        for _ in range(2):
+            assert not await recover_restored_commands(
+                book=book,
+                coordinator=coordinator,
+                orders=order_reads,
+                reconcile_order=no_network_query,
+            )
+    else:
+        # A repeat WS event also repairs the unaccepted Book observation.
+        await reconciliation.reconcile_account_event(MockUpdateEvent())
 
     # Outbox in book must now be TERMINAL
     assert book.get_outbox(cmd_id).state == DispatchState.TERMINAL
@@ -458,14 +544,22 @@ async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_b
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = "s03-" + uuid4().hex[:10]
-    book, commands, reservations, uow, order_events, order_reads = await _setup_book_and_repos(
-        factory, account
-    )
+    (
+        book,
+        commands,
+        reservations,
+        uow,
+        order_events,
+        order_reads,
+    ) = await _setup_book_and_repos(factory, account)
 
     scope = ExecutionScope("live", account, "SOLUSDT", FuturesPositionSide.LONG)
     pos_key = scope.to_position_key()
     book.register_active_stream(
-        environment="live", account_label=account, stream_id="ws-stream", stream_epoch="1"
+        environment="live",
+        account_label=account,
+        stream_id="ws-stream",
+        stream_epoch="1",
     )
 
     # Establish durable position head with a fill so ExecutionBookHeadRow is persisted
@@ -564,9 +658,14 @@ async def test_partial_fill_then_cancel_preserves_executed_exposure_claim(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = "s07-" + uuid4().hex[:10]
-    book, commands, reservations, uow, order_events, order_reads = await _setup_book_and_repos(
-        factory, account
-    )
+    (
+        book,
+        commands,
+        reservations,
+        uow,
+        order_events,
+        order_reads,
+    ) = await _setup_book_and_repos(factory, account)
 
     cmd_id = "partial-cancel-" + account
     intent_id = "intent-" + cmd_id
@@ -681,6 +780,58 @@ async def test_partial_fill_then_cancel_preserves_executed_exposure_claim(
         ).one()
         assert claim_row.active is True
         # Notional scaled: (1 / 2) * 120000 = 60000
+        assert claim_row.notional == Decimal("60000")
+
+    # Re-apply a second terminal event with a different event ID (e.g. from REST reconciliation)
+    cancel_ev_duplicate = ExchangeOrderEvent(
+        event_id="ev-cancel-rest-" + cmd_id,
+        client_order_id=cmd_id,
+        state=ExchangeOrderState.CANCELED,
+        occurred_at=NOW + timedelta(seconds=35),
+        exchange_order_id="ex-part-1",
+        details={
+            "executed_quantity": "1",
+            "cumulative_quote_quantity": "60000",
+            "average_price": "60000",
+        },
+    )
+    appended_dup = await order_events.append_order_event(cancel_ev_duplicate)
+    assert appended_dup is True
+
+    async with factory() as session:
+        claim_row = (
+            await session.scalars(
+                select(LiveExposureClaimRow).where(
+                    LiveExposureClaimRow.intent_id == intent_id
+                )
+            )
+        ).one()
+        assert claim_row.active is True
+        # Must remain 60000 stably, NOT halved repeatedly to 30000!
+        assert claim_row.notional == Decimal("60000")
+
+    # Now simulate a late terminal event where payload omitted executed_quantity (e.g. empty details)
+    cancel_ev_empty_details = ExchangeOrderEvent(
+        event_id="ev-cancel-late-nodata-" + cmd_id,
+        client_order_id=cmd_id,
+        state=ExchangeOrderState.CANCELED,
+        occurred_at=NOW + timedelta(seconds=40),
+        exchange_order_id="ex-part-1",
+        details={},
+    )
+    appended_late = await order_events.append_order_event(cancel_ev_empty_details)
+    assert appended_late is True
+
+    async with factory() as session:
+        claim_row = (
+            await session.scalars(
+                select(LiveExposureClaimRow).where(
+                    LiveExposureClaimRow.intent_id == intent_id
+                )
+            )
+        ).one()
+        # Must NOT be deactivated to active=False by late event missing quantity!
+        assert claim_row.active is True
         assert claim_row.notional == Decimal("60000")
 
     await engine.dispose()

@@ -31,7 +31,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExitEpisodeReservationRow,
     LiveExposureClaimRow,
     LiveSessionTransitionRow,
-    OrderIntentClaimRow,
     OrderIntentExecutionRow,
     RiskHaltRow,
     TradingLeaseRow,
@@ -51,7 +50,9 @@ def _serialize_candidate_intent(intent: OrderIntentCandidate) -> dict[str, objec
         "strategy_version": intent.strategy_version,
         "config_hash": intent.config_hash,
         "symbol": intent.symbol,
-        "side": intent.side.value if hasattr(intent.side, "value") else str(intent.side),
+        "side": intent.side.value
+        if hasattr(intent.side, "value")
+        else str(intent.side),
         "entry_type": (
             intent.entry_type.value
             if hasattr(intent.entry_type, "value")
@@ -154,12 +155,60 @@ class PostgresOrderSubmissionRepository:
         exposure_notional: Decimal | None = None,
         baseline_observed_at: datetime | None = None,
     ) -> PreparedOrderSubmission | None:
-        """Grant one durable submission; existing orders must be reconciled.
+        """Grant one durable submission; existing orders must be reconciled."""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    return await self.prepare_submission_in_session(
+                        session,
+                        intent=intent,
+                        evaluation=evaluation,
+                        plan=plan,
+                        prepared_at=prepared_at,
+                        environment=environment,
+                        account_label=account_label,
+                        strategy_name=strategy_name,
+                        required_lease_owner=required_lease_owner,
+                        required_lease_id=required_lease_id,
+                        required_code_generation=required_code_generation,
+                        required_session_id=required_session_id,
+                        max_open_positions=max_open_positions,
+                        max_daily_loss=max_daily_loss,
+                        max_gross_exposure=max_gross_exposure,
+                        current_daily_pnl=current_daily_pnl,
+                        current_gross_exposure=current_gross_exposure,
+                        open_position_symbols=open_position_symbols,
+                        exposure_notional=exposure_notional,
+                        baseline_observed_at=baseline_observed_at,
+                    )
+        except _SubmissionAlreadyPrepared:
+            return None
 
-        A client ID is never reusable, including after a terminal outcome or
-        process restart. The unique insert arbitrates concurrent exit lanes.
-        """
-
+    async def prepare_submission_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        intent: OrderIntentCandidate,
+        evaluation: RiskEvaluation,
+        plan: OrderExecutionPlan,
+        prepared_at: datetime,
+        environment: str | None = None,
+        account_label: str | None = None,
+        strategy_name: str | None = None,
+        required_lease_owner: str | None = None,
+        required_lease_id: str | None = None,
+        required_code_generation: str | None = None,
+        required_session_id: str | None = None,
+        max_open_positions: int | None = None,
+        max_daily_loss: Decimal | None = None,
+        max_gross_exposure: Decimal | None = None,
+        current_daily_pnl: Decimal | None = None,
+        current_gross_exposure: Decimal | None = None,
+        open_position_symbols: frozenset[str] | None = None,
+        exposure_notional: Decimal | None = None,
+        baseline_observed_at: datetime | None = None,
+    ) -> PreparedOrderSubmission | None:
+        """Grant one durable submission within an active session."""
         if evaluation.decision is not RiskDecision.APPROVED:
             raise ValueError("risk evaluation must approve the intent")
         if evaluation.candidate_id != intent.candidate_id:
@@ -221,392 +270,364 @@ class PostgresOrderSubmissionRepository:
             "exchange_order_id": submitting_event.exchange_order_id,
             "details": jsonable(submitting_event.details),
         }
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    fencing_fields = (
-                        environment,
-                        account_label,
-                        strategy_name,
-                        required_lease_owner,
-                        required_lease_id,
-                        required_code_generation,
+        fencing_fields = (
+                environment,
+                account_label,
+                strategy_name,
+                required_lease_owner,
+                required_lease_id,
+                required_code_generation,
+            )
+        if any(value is not None for value in fencing_fields):
+            if not all(value is not None for value in fencing_fields):
+                raise ValueError(
+                    "live submission fencing fields must be "
+                    "provided together"
+                )
+            active_lease = await session.scalar(
+                select(TradingLeaseRow)
+                .where(
+                    TradingLeaseRow.environment == environment,
+                    TradingLeaseRow.account_label == account_label,
+                    TradingLeaseRow.state == "active",
+                    TradingLeaseRow.expires_at > prepared_at,
+                )
+                .with_for_update()
+            )
+            if (
+                active_lease is None
+                or active_lease.owner != required_lease_owner
+                or active_lease.lease_id != required_lease_id
+                or active_lease.strategy_name != strategy_name
+                or active_lease.code_generation != required_code_generation
+            ):
+                raise OrderPreSubmissionError(
+                    "live lease/version fencing check failed"
+                )
+            active_halt = await session.scalar(
+                select(RiskHaltRow.halt_id)
+                .where(
+                    RiskHaltRow.environment == environment,
+                    RiskHaltRow.account_label == account_label,
+                    RiskHaltRow.active.is_(True),
+                )
+                .with_for_update(read=True)
+            )
+            if active_halt is not None:
+                raise OrderPreSubmissionError("active risk halt")
+            if required_session_id is not None:
+                latest_session_state = await session.scalar(
+                    select(LiveSessionTransitionRow.state)
+                    .where(
+                        LiveSessionTransitionRow.session_id
+                        == required_session_id,
                     )
-                    if any(value is not None for value in fencing_fields):
-                        if not all(value is not None for value in fencing_fields):
-                            raise ValueError(
-                                "live submission fencing fields must be "
-                                "provided together"
-                            )
-                        active_lease = await session.scalar(
-                            select(TradingLeaseRow)
-                            .where(
-                                TradingLeaseRow.environment == environment,
-                                TradingLeaseRow.account_label == account_label,
-                                TradingLeaseRow.state == "active",
-                                TradingLeaseRow.expires_at > prepared_at,
-                            )
-                            .with_for_update()
-                        )
-                        if (
-                            active_lease is None
-                            or active_lease.owner != required_lease_owner
-                            or active_lease.lease_id != required_lease_id
-                            or active_lease.strategy_name != strategy_name
-                            or active_lease.code_generation != required_code_generation
-                        ):
-                            raise OrderPreSubmissionError(
-                                "live lease/version fencing check failed"
-                            )
-                        active_halt = await session.scalar(
-                            select(RiskHaltRow.halt_id)
-                            .where(
-                                RiskHaltRow.environment == environment,
-                                RiskHaltRow.account_label == account_label,
-                                RiskHaltRow.active.is_(True),
-                            )
-                            .with_for_update(read=True)
-                        )
-                        if active_halt is not None:
-                            raise OrderPreSubmissionError("active risk halt")
-                        if required_session_id is not None:
-                            latest_session_state = await session.scalar(
-                                select(LiveSessionTransitionRow.state)
-                                .where(
-                                    LiveSessionTransitionRow.session_id
-                                    == required_session_id,
-                                )
-                                .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                                .limit(1)
-                            )
-                            if latest_session_state is None:
-                                raise OrderPreSubmissionError(
-                                    "live session control state is missing"
-                                )
-                            if latest_session_state in {
-                                "draining",
-                                "halted",
-                                "reconciling",
-                                "completed",
-                            }:
-                                raise OrderPreSubmissionError(
-                                    "live session entries are disabled"
-                                )
+                    .order_by(LiveSessionTransitionRow.occurred_at.desc())
+                    .limit(1)
+                )
+                if latest_session_state is None:
+                    raise OrderPreSubmissionError(
+                        "live session control state is missing"
+                    )
+                if latest_session_state in {
+                    "draining",
+                    "halted",
+                    "reconciling",
+                    "completed",
+                }:
+                    raise OrderPreSubmissionError(
+                        "live session entries are disabled"
+                    )
 
-                    exposure_fields = (
-                        max_open_positions,
-                        max_daily_loss,
-                        max_gross_exposure,
-                        current_daily_pnl,
-                        current_gross_exposure,
-                        open_position_symbols,
-                        exposure_notional,
+        exposure_fields = (
+            max_open_positions,
+            max_daily_loss,
+            max_gross_exposure,
+            current_daily_pnl,
+            current_gross_exposure,
+            open_position_symbols,
+            exposure_notional,
+        )
+        if any(value is not None for value in exposure_fields):
+            if plan.reduce_only:
+                raise ValueError(
+                    "exposure claim fields are only valid for entries"
+                )
+            if exposure_notional is None:
+                ref_price = plan.price or getattr(
+                    plan, "reference_price", None
+                )
+                if (
+                    ref_price is not None
+                    and ref_price > 0
+                    and plan.quantity > 0
+                ):
+                    exposure_notional = plan.quantity * ref_price
+                elif intent is not None and getattr(
+                    intent, "desired_notional", None
+                ):
+                    exposure_notional = intent.desired_notional
+            if not all(
+                value is not None
+                for value in (
+                    environment,
+                    account_label,
+                    strategy_name,
+                    current_daily_pnl,
+                    current_gross_exposure,
+                    open_position_symbols,
+                    exposure_notional,
+                )
+            ):
+                raise ValueError(
+                    "live exposure claim baseline must be provided together"
+                )
+            assert current_daily_pnl is not None
+            assert current_gross_exposure is not None
+            assert open_position_symbols is not None
+            if exposure_notional is None or exposure_notional <= 0:
+                raise ValueError("exposure_notional must be positive")
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {
+                    "lock_key": (
+                        "live-exposure:"
+                        f"{environment}:{account_label}:{strategy_name}"
                     )
-                    if any(value is not None for value in exposure_fields):
-                        if plan.reduce_only:
-                            raise ValueError(
-                                "exposure claim fields are only valid for entries"
-                            )
-                        if not all(
-                            value is not None
-                            for value in (
-                                environment,
-                                account_label,
-                                strategy_name,
-                                current_daily_pnl,
-                                current_gross_exposure,
-                                open_position_symbols,
-                                exposure_notional,
-                            )
-                        ):
-                            raise ValueError(
-                                "live exposure claim baseline must be provided together"
-                            )
-                        assert current_daily_pnl is not None
-                        assert current_gross_exposure is not None
-                        assert open_position_symbols is not None
-                        if exposure_notional is None or exposure_notional <= 0:
-                            raise ValueError("exposure_notional must be positive")
-                        await session.execute(
-                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                            {
-                                "lock_key": (
-                                    "live-exposure:"
-                                    f"{environment}:{account_label}:{strategy_name}"
-                                )
-                            },
-                        )
-                        if (
-                            max_daily_loss is not None
-                            and current_daily_pnl <= -max_daily_loss
-                        ):
-                            raise OrderPreSubmissionError("max daily loss reached")
-                        claims_result = (
-                            await session.execute(
-                                select(LiveExposureClaimRow, ExchangeOrderRow)
-                                .outerjoin(
-                                    ExchangeOrderRow,
-                                    ExchangeOrderRow.intent_id
-                                    == LiveExposureClaimRow.intent_id,
-                                )
-                                .where(
-                                    LiveExposureClaimRow.environment == environment,
-                                    LiveExposureClaimRow.account_label
-                                    == account_label,
-                                    LiveExposureClaimRow.strategy_name
-                                    == strategy_name,
-                                    LiveExposureClaimRow.active.is_(True),
-                                    LiveExposureClaimRow.intent_id
-                                    != intent.candidate_id,
-                                )
-                                .with_for_update(of=LiveExposureClaimRow)
-                            )
-                        ).all()
-                        for claim_row, order_row in claims_result:
-                            if order_row is not None:
-                                executed_qty = (
-                                    order_row.executed_quantity
-                                    if order_row.executed_quantity is not None
-                                    else Decimal("0")
-                                )
-                                terminal_states = (
-                                    ExchangeOrderState.FILLED.value,
-                                    ExchangeOrderState.CANCELED.value,
-                                    ExchangeOrderState.EXPIRED.value,
-                                    ExchangeOrderState.REJECTED.value,
-                                )
-                                if (
-                                    order_row.state in terminal_states
-                                    and executed_qty <= Decimal("0")
-                                ):
-                                    claim_row.active = False
-                                    claim_row.updated_at = prepared_at
-                                elif (
-                                    order_row.state == ExchangeOrderState.FILLED.value
-                                    or (
-                                        executed_qty > Decimal("0")
-                                        and order_row.state in terminal_states
-                                    )
-                                ):
-                                    is_covered = (
-                                        claim_row.symbol in open_position_symbols
-                                        and (
-                                            baseline_observed_at is None
-                                            or baseline_observed_at
-                                            >= order_row.updated_at
-                                        )
-                                    )
-                                    if is_covered:
-                                        claim_row.active = False
-                                        claim_row.updated_at = prepared_at
-                        active_claims = [c for c, _ in claims_result if c.active]
-                        active_claim_sum = sum(
-                            (c.notional for c in active_claims),
-                            Decimal("0"),
-                        )
-                        active_claim_symbols = {c.symbol for c in active_claims}
-                        if (
-                            max_open_positions is not None
-                            and len(
-                                set(open_position_symbols)
-                                | active_claim_symbols
-                                | {plan.symbol}
-                            )
-                            > max_open_positions
-                        ):
-                            raise OrderPreSubmissionError("max open positions reached")
-                        if (
-                            max_gross_exposure is not None
-                            and current_gross_exposure
-                            + active_claim_sum
-                            + exposure_notional
-                            > max_gross_exposure
-                        ):
-                            raise OrderPreSubmissionError("max gross exposure reached")
-                    await session.execute(
-                        insert(OrderIntentExecutionRow)
-                        .values(intent_values)
-                        .on_conflict_do_nothing()
+                },
+            )
+            if (
+                max_daily_loss is not None
+                and current_daily_pnl <= -max_daily_loss
+            ):
+                raise OrderPreSubmissionError("max daily loss reached")
+            claims_result = (
+                await session.execute(
+                    select(LiveExposureClaimRow, ExchangeOrderRow)
+                    .outerjoin(
+                        ExchangeOrderRow,
+                        ExchangeOrderRow.intent_id
+                        == LiveExposureClaimRow.intent_id,
                     )
-                    episode_key = _exit_episode_key(intent)
+                    .where(
+                        LiveExposureClaimRow.environment == environment,
+                        LiveExposureClaimRow.account_label == account_label,
+                        LiveExposureClaimRow.strategy_name == strategy_name,
+                        LiveExposureClaimRow.active.is_(True),
+                        LiveExposureClaimRow.intent_id
+                        != intent.candidate_id,
+                    )
+                    .with_for_update(of=LiveExposureClaimRow)
+                )
+            ).all()
+            for claim_row, order_row in claims_result:
+                if order_row is not None:
+                    executed_qty = (
+                        order_row.executed_quantity
+                        if order_row.executed_quantity is not None
+                        else Decimal("0")
+                    )
+                    terminal_states = (
+                        ExchangeOrderState.FILLED.value,
+                        ExchangeOrderState.CANCELED.value,
+                        ExchangeOrderState.EXPIRED.value,
+                        ExchangeOrderState.REJECTED.value,
+                    )
                     if (
-                        plan.reduce_only
-                        and episode_key is not None
-                        and environment is not None
-                        and account_label is not None
-                        and strategy_name is not None
+                        order_row.state in terminal_states
+                        and executed_qty <= Decimal("0")
                     ):
-                        await session.execute(
-                            insert(ExitEpisodeReservationRow)
-                            .values(
-                                environment=environment,
-                                account_label=account_label,
-                                strategy_name=strategy_name,
-                                symbol=plan.symbol,
-                                position_side=plan.position_side.value,
-                                episode_key=episode_key,
-                                intent_id=plan.intent_id,
-                                client_order_id=plan.client_order_id,
-                                active=True,
-                                state=ExchangeOrderState.SUBMITTING.value,
-                                created_at=prepared_at,
-                                updated_at=prepared_at,
-                            )
-                            .on_conflict_do_nothing()
+                        claim_row.active = False
+                        claim_row.updated_at = prepared_at
+                    elif (
+                        order_row.state == ExchangeOrderState.FILLED.value
+                        or (
+                            executed_qty > Decimal("0")
+                            and order_row.state in terminal_states
                         )
-                        reservation = await session.scalar(
-                            select(ExitEpisodeReservationRow)
-                            .where(
-                                ExitEpisodeReservationRow.environment == environment,
-                                ExitEpisodeReservationRow.account_label
-                                == account_label,
-                                ExitEpisodeReservationRow.strategy_name
-                                == strategy_name,
-                                ExitEpisodeReservationRow.symbol == plan.symbol,
-                                ExitEpisodeReservationRow.position_side
-                                == plan.position_side.value,
-                                ExitEpisodeReservationRow.episode_key == episode_key,
-                            )
-                            .with_for_update()
-                        )
-                        if reservation is None:
-                            raise RuntimeError("exit episode reservation disappeared")
-                        if reservation.active and (
-                            reservation.intent_id != plan.intent_id
-                            or reservation.client_order_id != plan.client_order_id
-                        ):
-                            raise _SubmissionAlreadyPrepared
-                        if not reservation.active:
-                            await session.execute(
-                                update(ExitEpisodeReservationRow)
-                                .where(
-                                    ExitEpisodeReservationRow.environment
-                                    == environment,
-                                    ExitEpisodeReservationRow.account_label
-                                    == account_label,
-                                    ExitEpisodeReservationRow.strategy_name
-                                    == strategy_name,
-                                    ExitEpisodeReservationRow.symbol == plan.symbol,
-                                    ExitEpisodeReservationRow.position_side
-                                    == plan.position_side.value,
-                                    ExitEpisodeReservationRow.episode_key
-                                    == episode_key,
-                                )
-                                .values(
-                                    intent_id=plan.intent_id,
-                                    client_order_id=plan.client_order_id,
-                                    active=True,
-                                    state=ExchangeOrderState.SUBMITTING.value,
-                                    updated_at=prepared_at,
-                                )
-                            )
-                    if not plan.reduce_only and any(
-                        value is not None for value in exposure_fields
                     ):
-                        await session.execute(
-                            insert(LiveExposureClaimRow)
-                            .values(
-                                intent_id=plan.intent_id,
-                                environment=environment,
-                                account_label=account_label,
-                                strategy_name=strategy_name,
-                                symbol=plan.symbol,
-                                position_side=plan.position_side.value,
-                                notional=exposure_notional,
-                                active=True,
-                                created_at=prepared_at,
-                                updated_at=prepared_at,
-                            )
-                            .on_conflict_do_nothing()
-                        )
-                    inserted_order = await session.scalar(
-                        insert(ExchangeOrderRow)
-                        .values(order_values)
-                        .on_conflict_do_nothing()
-                        .returning(ExchangeOrderRow.client_order_id)
-                    )
-                    if inserted_order is None:
-                        existing_order = await session.scalar(
-                            select(ExchangeOrderRow).where(
-                                ExchangeOrderRow.client_order_id == plan.client_order_id
+                        is_covered = (
+                            claim_row.symbol in open_position_symbols
+                            and (
+                                baseline_observed_at is None
+                                or baseline_observed_at
+                                >= order_row.updated_at
                             )
                         )
-                        if existing_order is None:
-                            raise RuntimeError(
-                                "client order ID conflict could not be reconciled"
-                            )
-                        if not _same_order_identity(
-                            existing_order,
-                            order_values,
-                        ):
-                            if _same_active_reduce_only_intent(
-                                existing_order,
-                                order_values,
-                            ):
-                                # Repricing or switching the fallback order
-                                # type must not duplicate an active protective
-                                # order. Keep the durable exchange order and
-                                # let the caller retry after it reaches a
-                                # terminal state.
-                                raise _SubmissionAlreadyPrepared
-                            raise ValueError(
-                                "client order ID is already bound to a different order"
-                            )
-                        # A restarted or concurrent worker already owns the
-                        # same order. Roll back any new intent atomically.
-                        raise _SubmissionAlreadyPrepared
-                    await session.execute(
-                        insert(ExchangeOrderEventRow)
-                        .values(event_values)
-                        .on_conflict_do_nothing()
+                        if is_covered:
+                            claim_row.active = False
+                            claim_row.updated_at = prepared_at
+            active_claims = [c for c, _ in claims_result if c.active]
+            active_claim_sum = sum(
+                (c.notional for c in active_claims),
+                Decimal("0"),
+            )
+            active_claim_symbols = {c.symbol for c in active_claims}
+            if (
+                max_open_positions is not None
+                and len(
+                    set(open_position_symbols)
+                    | active_claim_symbols
+                    | {plan.symbol}
+                )
+                > max_open_positions
+            ):
+                raise OrderPreSubmissionError("max open positions reached")
+            if (
+                max_gross_exposure is not None
+                and current_gross_exposure
+                + active_claim_sum
+                + exposure_notional
+                > max_gross_exposure
+            ):
+                raise OrderPreSubmissionError("max gross exposure reached")
+        await session.execute(
+            insert(OrderIntentExecutionRow)
+            .values(intent_values)
+            .on_conflict_do_nothing()
+        )
+        episode_key = _exit_episode_key(intent)
+        if (
+            plan.reduce_only
+            and episode_key is not None
+            and environment is not None
+            and account_label is not None
+            and strategy_name is not None
+        ):
+            await session.execute(
+                insert(ExitEpisodeReservationRow)
+                .values(
+                    environment=environment,
+                    account_label=account_label,
+                    strategy_name=strategy_name,
+                    symbol=plan.symbol,
+                    position_side=plan.position_side.value,
+                    episode_key=episode_key,
+                    intent_id=plan.intent_id,
+                    client_order_id=plan.client_order_id,
+                    active=True,
+                    state=ExchangeOrderState.SUBMITTING.value,
+                    created_at=prepared_at,
+                    updated_at=prepared_at,
+                )
+                .on_conflict_do_nothing()
+            )
+            reservation = await session.scalar(
+                select(ExitEpisodeReservationRow)
+                .where(
+                    ExitEpisodeReservationRow.environment == environment,
+                    ExitEpisodeReservationRow.account_label
+                    == account_label,
+                    ExitEpisodeReservationRow.strategy_name
+                    == strategy_name,
+                    ExitEpisodeReservationRow.symbol == plan.symbol,
+                    ExitEpisodeReservationRow.position_side
+                    == plan.position_side.value,
+                    ExitEpisodeReservationRow.episode_key == episode_key,
+                )
+                .with_for_update()
+            )
+            if reservation is None:
+                raise RuntimeError("exit episode reservation disappeared")
+            if reservation.active and (
+                reservation.intent_id != plan.intent_id
+                or reservation.client_order_id != plan.client_order_id
+            ):
+                raise _SubmissionAlreadyPrepared
+            if not reservation.active:
+                await session.execute(
+                    update(ExitEpisodeReservationRow)
+                    .where(
+                        ExitEpisodeReservationRow.environment
+                        == environment,
+                        ExitEpisodeReservationRow.account_label
+                        == account_label,
+                        ExitEpisodeReservationRow.strategy_name
+                        == strategy_name,
+                        ExitEpisodeReservationRow.symbol == plan.symbol,
+                        ExitEpisodeReservationRow.position_side
+                        == plan.position_side.value,
+                        ExitEpisodeReservationRow.episode_key
+                        == episode_key,
                     )
-                    await session.execute(
-                        update(OrderIntentExecutionRow)
-                        .where(OrderIntentExecutionRow.intent_id == plan.intent_id)
-                        .values(state=ExchangeOrderState.SUBMITTING.value)
+                    .values(
+                        intent_id=plan.intent_id,
+                        client_order_id=plan.client_order_id,
+                        active=True,
+                        state=ExchangeOrderState.SUBMITTING.value,
+                        updated_at=prepared_at,
                     )
-        except _SubmissionAlreadyPrepared:
-            return None
+                )
+        if not plan.reduce_only and any(
+            value is not None for value in exposure_fields
+        ):
+            await session.execute(
+                insert(LiveExposureClaimRow)
+                .values(
+                    intent_id=plan.intent_id,
+                    environment=environment,
+                    account_label=account_label,
+                    strategy_name=strategy_name,
+                    symbol=plan.symbol,
+                    position_side=plan.position_side.value,
+                    notional=exposure_notional,
+                    active=True,
+                    created_at=prepared_at,
+                    updated_at=prepared_at,
+                )
+                .on_conflict_do_nothing()
+            )
+        inserted_order = await session.scalar(
+            insert(ExchangeOrderRow)
+            .values(order_values)
+            .on_conflict_do_nothing()
+            .returning(ExchangeOrderRow.client_order_id)
+        )
+        if inserted_order is None:
+            existing_order = await session.scalar(
+                select(ExchangeOrderRow).where(
+                    ExchangeOrderRow.client_order_id == plan.client_order_id
+                )
+            )
+            if existing_order is None:
+                raise RuntimeError(
+                    "client order ID conflict could not be reconciled"
+                )
+            if not _same_order_identity(
+                existing_order,
+                order_values,
+            ):
+                if _same_active_reduce_only_intent(
+                    existing_order,
+                    order_values,
+                ):
+                    # Repricing or switching the fallback order
+                    # type must not duplicate an active protective
+                    # order. Keep the durable exchange order and
+                    # let the caller retry after it reaches a
+                    # terminal state.
+                    raise _SubmissionAlreadyPrepared
+                raise ValueError(
+                    "client order ID is already bound to a different order"
+                )
+            # A restarted or concurrent worker already owns the
+            # same order. Roll back any new intent atomically.
+            raise _SubmissionAlreadyPrepared
+        await session.execute(
+            insert(ExchangeOrderEventRow)
+            .values(event_values)
+            .on_conflict_do_nothing()
+        )
+        await session.execute(
+            update(OrderIntentExecutionRow)
+            .where(OrderIntentExecutionRow.intent_id == plan.intent_id)
+            .values(state=ExchangeOrderState.SUBMITTING.value)
+        )
         return PreparedOrderSubmission(
             plan=plan,
             submitting_event=submitting_event,
         )
 
-    async def claim_intent(
-        self,
-        intent_id: str,
-        worker_id: str,
-        claimed_at: datetime,
-        expires_at: datetime,
-    ) -> bool:
-        if expires_at <= claimed_at:
-            raise ValueError("claim expiration must be after claim time")
-        async with self._session_factory() as session:
-            async with session.begin():
-                await session.execute(
-                    delete(OrderIntentClaimRow).where(
-                        OrderIntentClaimRow.intent_id == intent_id,
-                        OrderIntentClaimRow.expires_at <= claimed_at,
-                    )
-                )
-                claimed = await session.scalar(
-                    insert(OrderIntentClaimRow)
-                    .values(
-                        intent_id=intent_id,
-                        worker_id=worker_id,
-                        claimed_at=claimed_at,
-                        expires_at=expires_at,
-                    )
-                    .on_conflict_do_nothing()
-                    .returning(OrderIntentClaimRow.intent_id)
-                )
-                if claimed is not None:
-                    await session.execute(
-                        update(OrderIntentExecutionRow)
-                        .where(OrderIntentExecutionRow.intent_id == intent_id)
-                        .values(state=ExchangeOrderState.CLAIMED.value)
-                    )
-        return claimed is not None
 
 
 def _exit_episode_key(intent: OrderIntentCandidate) -> str | None:

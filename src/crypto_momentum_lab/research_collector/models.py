@@ -50,19 +50,14 @@ def require_utc(value: datetime, name: str) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class CollectorCheckpoint:
-    """The last live batch known to be durably covered by Parquet.
-
-    ``last_sequence`` is a Hub cursor (matching ``materialized_sequence`` for
-    backward compatibility), while ``accepted_sequence`` tracks the latest
-    contiguous journal-fsynced batch.
-    """
+    """Explicit accepted and materialized cursors for the current journal."""
 
     environment: str
     stream_id: str | None = None
     last_sequence: int | None = None
     last_bucket_start: datetime | None = None
     last_symbol: str | None = None
-    schema_version: int = 1
+    schema_version: int = 2
     updated_at: datetime | None = None
     accepted_sequence: int | None = None
     materialized_sequence: int | None = None
@@ -72,22 +67,12 @@ class CollectorCheckpoint:
             raise ValueError("environment must not be empty")
         if self.stream_id is not None and not self.stream_id.strip():
             raise ValueError("stream_id must not be empty when present")
-        if self.schema_version <= 0:
-            raise ValueError("schema_version must be positive")
-
-        mat_seq = self.materialized_sequence
-        last_seq = self.last_sequence
-        if mat_seq is None and last_seq is not None:
-            mat_seq = last_seq
-            object.__setattr__(self, "materialized_sequence", mat_seq)
-        elif mat_seq is not None and last_seq is None:
-            last_seq = mat_seq
-            object.__setattr__(self, "last_sequence", last_seq)
-
-        acc_seq = self.accepted_sequence
-        if acc_seq is None and mat_seq is not None:
-            acc_seq = mat_seq
-            object.__setattr__(self, "accepted_sequence", acc_seq)
+        if self.schema_version != 2:
+            raise ValueError("unsupported collector checkpoint schema version")
+        if self.last_sequence != self.materialized_sequence:
+            raise ValueError("last_sequence must equal materialized_sequence")
+        if self.materialized_sequence is not None and self.accepted_sequence is None:
+            raise ValueError("materialized cursor requires accepted_sequence")
 
         if self.last_sequence is not None and self.last_sequence < 0:
             raise ValueError("last_sequence must not be negative")

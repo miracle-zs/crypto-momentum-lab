@@ -58,7 +58,9 @@ async def test_publisher_closes_only_buckets_behind_watermark() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
@@ -73,7 +75,9 @@ async def test_set_expected_symbols_drops_last_state_for_removed_symbols() -> No
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
 
@@ -96,7 +100,9 @@ async def test_publisher_materializes_empty_bucket_for_expected_quiet_symbol() -
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
 
@@ -118,7 +124,9 @@ async def test_quiet_symbol_fills_when_global_watermark_advances() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
 
@@ -141,7 +149,9 @@ def test_expected_symbols_reports_real_entries_only() -> None:
 
     publisher = ClosedMarketStatePublisher(
         repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     # The first call is the startup baseline: nothing "just entered".
@@ -177,7 +187,9 @@ async def test_realtime_batch_announces_pending_entry_symbols_once() -> None:
 
     publisher = ClosedMarketStatePublisher(
         repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
         realtime_state_sink=realtime_sink,
     )
 
@@ -202,7 +214,9 @@ async def test_late_event_for_closed_bucket_is_rejected() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
@@ -217,7 +231,9 @@ async def test_late_event_for_previously_unseen_bucket_is_rejected() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
@@ -232,7 +248,9 @@ async def test_late_recovered_trade_marks_durable_bucket_incomplete() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
@@ -253,7 +271,9 @@ async def test_gap_persistence_is_ordered_after_pending_state_insert() -> None:
     repository = OrderedRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     await publisher.start()
     await publisher.observe(fixture_trade(0, price="100", sequence=1))
@@ -281,7 +301,9 @@ async def test_publisher_carries_the_latest_book_quote_into_later_states() -> No
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
 
     await publisher.observe(fixture_book_ticker(0, sequence=1))
@@ -303,7 +325,9 @@ async def test_publisher_keeps_only_latest_book_quote_per_state_bucket() -> None
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     first = fixture_book_ticker(0, sequence=1)
     latest = replace(
@@ -443,7 +467,9 @@ async def test_publisher_fails_closed_after_permanent_durable_write_error() -> N
 
     publisher = ClosedMarketStatePublisher(
         repository=FailingRepository(),
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=1),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=1, durable_closure_delay_seconds=1
+        ),
     )
     await publisher.start()
     try:
@@ -499,7 +525,9 @@ async def test_publisher_marks_gap_buckets_incomplete() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     start = datetime(2026, 7, 3, 0, 0, 2, tzinfo=UTC)
     await publisher.mark_incomplete(
@@ -596,7 +624,9 @@ async def test_through_bucket_gating_and_invalidation() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     publisher.set_expected_symbols(["BTCUSDT", "ETHUSDT"])
     base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
@@ -636,12 +666,15 @@ async def test_through_bucket_gating_and_invalidation() -> None:
     assert publisher._last_materialized_empty_buckets_through is None
 
 
-
-async def test_materializing_many_buckets_looks_up_predecessor_once_per_symbol() -> None:
+async def test_materializing_many_buckets_looks_up_predecessor_once_per_symbol() -> (
+    None
+):
     """Filling B buckets must not rescan the bucket table once per bucket."""
     publisher = ClosedMarketStatePublisher(
         repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+        ),
     )
     base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
     symbols = ["BTCUSDT", "ETHUSDT"]
@@ -682,7 +715,9 @@ async def test_one_jump_fill_matches_bucket_by_bucket_fill() -> None:
     async def filled(step: int):
         publisher = ClosedMarketStatePublisher(
             repository=FakeRuntimeStateRepository(),
-            config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+            config=ClosedMarketStatePublisherConfig(
+                realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
+            ),
         )
         publisher.set_expected_symbols(["BTCUSDT"])
         # Real ingest path so the predecessor state and the per-bucket book

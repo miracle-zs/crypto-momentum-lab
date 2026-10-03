@@ -343,34 +343,18 @@ class ResearchStateCollector:
             )
         self._checkpoint = checkpoint
         self._active_stream_id = checkpoint.stream_id
-        self._last_seen_sequence = (
-            checkpoint.accepted_sequence
-            if checkpoint.accepted_sequence is not None
-            else checkpoint.last_sequence
-        )
+        self._last_seen_sequence = checkpoint.accepted_sequence
         self._last_persisted_bucket = checkpoint.last_bucket_start
         self._last_persisted_symbol = checkpoint.last_symbol
         self._journal.set_active_stream_id(self._active_stream_id)
         self._journal.set_cursors(
-            accepted_sequence=checkpoint.accepted_sequence
-            if checkpoint.accepted_sequence is not None
-            else checkpoint.last_sequence,
-            materialized_sequence=checkpoint.materialized_sequence
-            if checkpoint.materialized_sequence is not None
-            else checkpoint.last_sequence,
+            accepted_sequence=checkpoint.accepted_sequence,
+            materialized_sequence=checkpoint.materialized_sequence,
             last_materialized_bucket=checkpoint.last_bucket_start,
             last_materialized_symbol=checkpoint.last_symbol,
         )
 
-        legacy_spool = (
-            self._spool.root / "pending"
-            if self._spool is not None
-            else self._config.root / "spool" / "pending"
-        )
-        recovered = await asyncio.to_thread(
-            self._journal.recover,
-            legacy_spool_root=legacy_spool,
-        )
+        recovered = await asyncio.to_thread(self._journal.recover)
         self._materializer.stage_records(recovered)
 
         hub_records = [

@@ -25,6 +25,8 @@ _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 15.0
+
+
 def _live_strategy_config(
     profile: LiveOrderFlowImpulseProfile,
 ) -> dict[str, object]:
@@ -44,22 +46,14 @@ def _live_strategy_config(
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
         "order_flow_impulse": event_config,
-        "order_flow_impulse_impulse_window_buckets": (
-            profile.impulse_window_buckets
-        ),
-        "order_flow_impulse_confirmation_buckets": (
-            profile.confirmation_buckets
-        ),
+        "order_flow_impulse_impulse_window_buckets": (profile.impulse_window_buckets),
+        "order_flow_impulse_confirmation_buckets": (profile.confirmation_buckets),
         "order_flow_impulse_min_return_pct": profile.min_return_pct,
         "order_flow_impulse_min_aggressive_imbalance": (
             profile.min_aggressive_imbalance
         ),
-        "order_flow_impulse_min_notional_intensity": (
-            profile.min_notional_intensity
-        ),
-        "order_flow_impulse_min_notional_5m_vs_30m": (
-            profile.min_notional_5m_vs_30m
-        ),
+        "order_flow_impulse_min_notional_intensity": (profile.min_notional_intensity),
+        "order_flow_impulse_min_notional_5m_vs_30m": (profile.min_notional_5m_vs_30m),
         "cooldown_buckets": profile.cooldown_buckets,
     }
 
@@ -71,7 +65,6 @@ def _live_strategy_config_hash(
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
-    entry_policy_enforce: bool = False,
     entry_order_type: EntryType = _LIVE_ENTRY_ORDER_TYPE,
     entry_limit_ttl_seconds: int = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> str:
@@ -82,8 +75,6 @@ def _live_strategy_config_hash(
         raise ValueError("entry_positive_gainer_top_count must be positive")
     if not isinstance(entry_order_type, EntryType):
         raise TypeError("entry_order_type must be an EntryType")
-    if not isinstance(entry_policy_enforce, bool):
-        raise TypeError("entry_policy_enforce must be a bool")
     if entry_limit_ttl_seconds < 601:
         raise ValueError("entry_limit_ttl_seconds must be at least 601")
     return deterministic_config_hash(
@@ -93,10 +84,10 @@ def _live_strategy_config_hash(
                 config=_live_strategy_config(profile),
             ),
             "entry_filter": {
+                "entry_policy_mode": "enforce",
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,
-                "entry_policy_enforce": entry_policy_enforce,
             },
             "entry_execution": {
                 "order_type": entry_order_type.value,
@@ -145,8 +136,6 @@ class LiveRuntimeStrategy:
     require_price_above_ema10: bool
     entry_order_type: EntryType
     entry_limit_ttl_seconds: int
-    entry_policy_compare_only: bool
-    entry_policy_enforce: bool
 
 
 @dataclass(frozen=True, slots=True)

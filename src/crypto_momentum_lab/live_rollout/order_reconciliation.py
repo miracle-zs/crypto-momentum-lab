@@ -54,6 +54,8 @@ class LiveOrderReconciliation:
     state_machine: OrderExecutionPort
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
+    max_order_lookups_per_pass: int = 32
+    family_timeout_seconds: float = 30.0
     on_unknown_order: Callable[[str], None] | None = None
     recover_exits: Callable[[], Awaitable[bool]] | None = None
     recover_commands: Callable[[OrderRecoveryLookup], Awaitable[bool]] | None = None
@@ -73,10 +75,13 @@ class LiveOrderReconciliation:
     _running_tasks: set[RecoveryTask] = field(
         default_factory=set, init=False, repr=False
     )
+    _last_lookup_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
+        if self.max_order_lookups_per_pass <= 0 or self.family_timeout_seconds <= 0:
+            raise ValueError("recovery lookup and time budgets must be positive")
 
     def request_recovery(self) -> None:
         """Discover all recovery families at startup or explicit full repair."""
@@ -135,9 +140,13 @@ class LiveOrderReconciliation:
                 ):
                     is_outbox_terminal = False
 
-            if is_outbox_terminal and persisted.state.terminal and (
-                snapshot is None
-                or snapshot.executed_quantity <= persisted.executed_quantity
+            if (
+                is_outbox_terminal
+                and persisted.state.terminal
+                and (
+                    snapshot is None
+                    or snapshot.executed_quantity <= persisted.executed_quantity
+                )
             ):
                 log.info(
                     "live_account_event_duplicate_terminal_order",
@@ -197,15 +206,10 @@ class LiveOrderReconciliation:
         runs = self._requested_runs | {self.run_id}
         self._requested_runs.clear()
         pending = False
-        looked_up: set[str] = set()
+        plans: dict[str, OrderExecutionPlan] = {}
 
         async def reconcile_once(plan: OrderExecutionPlan) -> None:
-            if plan.client_order_id in looked_up:
-                return
-            await self.state_machine.reconcile_order(plan)
-            # Only a successful observation consumes this pass's lookup. A
-            # later pass gets a fresh budget while uncertainty remains.
-            looked_up.add(plan.client_order_id)
+            plans.setdefault(plan.client_order_id, plan)
 
         try:
             if self.recover_commands is not None:
@@ -229,6 +233,19 @@ class LiveOrderReconciliation:
                     pending = True
                     self._requested_runs.add(run_id)
                     await reconcile_once(order.plan)
+            ordered = list(plans.values())
+            ids = list(plans)
+            if self._last_lookup_id in ids:
+                start = ids.index(self._last_lookup_id) + 1
+                ordered = ordered[start:] + ordered[:start]
+            for plan in ordered[: self.max_order_lookups_per_pass]:
+                # Move the cursor before I/O so a failing order cannot starve
+                # the remaining commands on the next requested pass.
+                self._last_lookup_id = plan.client_order_id
+                await self.state_machine.reconcile_order(plan)
+            if len(ordered) > self.max_order_lookups_per_pass:
+                self._requested_runs.update(runs)
+                pending = True
         except BaseException:
             self._requested_runs.update(runs)
             raise
@@ -265,13 +282,19 @@ class LiveOrderReconciliation:
                     self._retry_at.pop(task, None)
                     try:
                         pending = False
-                        if task == "positions" and self.repair_positions is not None:
-                            pending = await self.repair_positions()
-                        elif task == "orders":
-                            pending = await self.reconcile_all()
-                        elif task == "exits" and self.recover_exits is not None:
-                            pending = await self.recover_exits()
+                        async with asyncio.timeout(self.family_timeout_seconds):
+                            if (
+                                task == "positions"
+                                and self.repair_positions is not None
+                            ):
+                                pending = await self.repair_positions()
+                            elif task == "orders":
+                                pending = await self.reconcile_all()
+                            elif task == "exits" and self.recover_exits is not None:
+                                pending = await self.recover_exits()
                     except asyncio.CancelledError:
+                        self._requested_tasks.update(self._running_tasks)
+                        self._requested.set()
                         raise
                     except Exception:
                         pending = True

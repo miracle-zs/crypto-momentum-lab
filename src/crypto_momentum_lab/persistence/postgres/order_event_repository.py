@@ -27,6 +27,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
     ExitEpisodeReservationRow,
     LiveExposureClaimRow,
+    OrderIntentExecutionRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
@@ -187,10 +188,26 @@ class PostgresOrderEventRepository:
                                     )
                                 )
                             else:
-                                executed_qty = (
-                                    _event_executed_quantity(event) or Decimal("0")
+                                order_row = await session.scalar(
+                                    select(ExchangeOrderRow).where(
+                                        ExchangeOrderRow.client_order_id
+                                        == event.client_order_id
+                                    )
                                 )
-                                if executed_qty <= Decimal("0"):
+                                event_qty = _event_executed_quantity(event)
+                                cumulative_executed_qty = (
+                                    order_row.executed_quantity
+                                    if order_row is not None
+                                    and order_row.executed_quantity is not None
+                                    else Decimal("0")
+                                )
+                                if (
+                                    event_qty is not None
+                                    and event_qty > cumulative_executed_qty
+                                ):
+                                    cumulative_executed_qty = event_qty
+
+                                if cumulative_executed_qty <= Decimal("0"):
                                     await session.execute(
                                         update(LiveExposureClaimRow)
                                         .where(
@@ -204,12 +221,6 @@ class PostgresOrderEventRepository:
                                         )
                                     )
                                 else:
-                                    order_row = await session.scalar(
-                                        select(ExchangeOrderRow).where(
-                                            ExchangeOrderRow.client_order_id
-                                            == event.client_order_id
-                                        )
-                                    )
                                     order_qty = (
                                         order_row.quantity
                                         if order_row is not None
@@ -223,10 +234,30 @@ class PostgresOrderEventRepository:
                                             LiveExposureClaimRow.active.is_(True),
                                         )
                                     )
-                                    if claim_row is not None and order_qty > Decimal("0"):
-                                        claim_row.notional = (
-                                            executed_qty / order_qty
-                                        ) * claim_row.notional
+                                    if (
+                                        claim_row is not None
+                                        and order_row is not None
+                                        and order_qty > Decimal("0")
+                                    ):
+                                        planned_notional = (
+                                            await _resolve_order_planned_notional(
+                                                session, order_row, order_intent_id
+                                            )
+                                        )
+                                        if (
+                                            planned_notional is not None
+                                            and planned_notional > Decimal("0")
+                                        ):
+                                            claim_row.notional = (
+                                                cumulative_executed_qty / order_qty
+                                            ) * planned_notional
+                                        elif (
+                                            order_row.price is not None
+                                            and order_row.price > Decimal("0")
+                                        ):
+                                            claim_row.notional = (
+                                                cumulative_executed_qty * order_row.price
+                                            )
                                         claim_row.updated_at = event.occurred_at
                                     else:
                                         await session.execute(
@@ -242,6 +273,7 @@ class PostgresOrderEventRepository:
                                             )
                                         )
         return inserted is not None
+
 
     async def save_fill(self, fill: ExchangeOrderFill) -> bool:
         async with self._session_factory() as session:
@@ -263,6 +295,35 @@ class PostgresOrderEventRepository:
                     .returning(ExchangeFillRow.fill_id)
                 )
         return inserted is not None
+
+
+async def _resolve_order_planned_notional(
+    session: AsyncSession,
+    order_row: ExchangeOrderRow,
+    order_intent_id: str,
+) -> Decimal | None:
+    if (
+        order_row.price is not None
+        and order_row.price > Decimal("0")
+        and order_row.quantity is not None
+        and order_row.quantity > Decimal("0")
+    ):
+        return order_row.quantity * order_row.price
+    intent_row = await session.scalar(
+        select(OrderIntentExecutionRow).where(
+            OrderIntentExecutionRow.intent_id == order_intent_id
+        )
+    )
+    if intent_row is not None and isinstance(intent_row.details, dict):
+        raw = intent_row.details.get("desired_notional")
+        if raw is not None:
+            try:
+                notional = Decimal(str(raw))
+                if notional > Decimal("0"):
+                    return notional
+            except (ArithmeticError, ValueError):
+                pass
+    return None
 
 
 def _event_executed_quantity(event: ExchangeOrderEvent) -> Decimal | None:

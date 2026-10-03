@@ -1716,11 +1716,9 @@ print(
   }
 
   collect_active_live_pairs
-  # market-data discovers every account whose latest ready PostgreSQL
-  # reconciliation still has positions. The optional
-  # CML_LIVE_POSITION_ACCOUNT_LABEL and CML_LIVE_POSITION_ACCOUNT_LABELS
-  # remain startup hints for compatibility, so a running account no longer
-  # requires a manually maintained label list before an update can proceed.
+  # market-data discovers accounts whose latest ready PostgreSQL reconciliation
+  # still has positions. CML_LIVE_POSITION_ACCOUNT_LABELS supplements discovery
+  # with explicitly configured accounts.
 
 fi
 

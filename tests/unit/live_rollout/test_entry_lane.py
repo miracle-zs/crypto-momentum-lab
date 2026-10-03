@@ -200,7 +200,7 @@ async def test_entry_lane_rejects_when_progress_lagging() -> None:
     assert outcome.submitted_order_count == 0
 
 
-async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is_true() -> (
+async def test_entry_lane_enforces_concurrency_with_current_entry_policy() -> (
     None
 ):
     executed: list[str] = []
@@ -234,7 +234,6 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
         config=EntryLaneConfig(
             run_id="run-1",
             max_concurrency_per_symbol=2,
-            entry_policy_enforce=True,
             entry_universe_snapshot_provider=lambda **kwargs: snapshot,
         ),
         clock=lambda: NOW,
@@ -273,10 +272,20 @@ async def test_readiness_provider_error_is_propagated_without_another_call():
     async def execute(*args, **kwargs):
         pytest.fail("must not submit without readiness")
 
-    lane = EntryExecutionLane(config=EntryLaneConfig(run_id="run-1", readiness_provider=readiness),
-        clock=lambda: NOW, entry_enabled=lambda: True, entry_enabled_reason=lambda: "ready",
-        execute_candidate=execute, invalidate_context=lambda: None)
+    lane = EntryExecutionLane(
+        config=EntryLaneConfig(run_id="run-1", readiness_provider=readiness),
+        clock=lambda: NOW,
+        entry_enabled=lambda: True,
+        entry_enabled_reason=lambda: "ready",
+        execute_candidate=execute,
+        invalidate_context=lambda: None,
+    )
     with pytest.raises(TypeError, match="bad readiness fact"):
-        await lane.process(decision=_decision(_intent()), state=_state(),
-            context=cast(LiveDaemonRuntimeContext, object()), gate_reasons=(), recorded_at=NOW)
+        await lane.process(
+            decision=_decision(_intent()),
+            state=_state(),
+            context=cast(LiveDaemonRuntimeContext, object()),
+            gate_reasons=(),
+            recorded_at=NOW,
+        )
     assert calls == [_intent().symbol]

@@ -86,6 +86,10 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
     FuturesPositionSide,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderPreSubmissionError,
+    OrderProjectionConflictError,
+)
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
     ExecutionEvidenceIdentity,
@@ -213,11 +217,13 @@ def _execution_head_payload(
             for reservation in book.get_active_reservations(key)
         ),
         "external_recovery_ids": sorted(
-            identity for identity, position in book._external_recovery_positions.items()
+            identity
+            for identity, position in book._external_recovery_positions.items()
             if position == key
         ),
         "recovery_command_ids": sorted(
-            identity for identity in book._recovery_required_commands
+            identity
+            for identity in book._recovery_required_commands
             if identity in book._outbox_by_command_id
             and book._outbox_by_command_id[identity].scope.to_position_key() == key
         ),
@@ -267,6 +273,7 @@ class ExecutionReceipt:
 @dataclass(frozen=True, slots=True)
 class Accepted:
     receipt: ExecutionReceipt
+    extra: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +336,7 @@ class ExecutionBook:
         self._books: dict[str, PositionBook] = books_by_key or {}
         self._journals: dict[str, AccountJournal] = journals_by_key or {}
         # Default coordinator owns memory only. Durable/async restoration is
-        # explicitly awaited by restore; legacy sync assembly is outside Book.
+        # explicitly awaited by restore.
         self._coordinator = coordinator or ExecutionCoordinator()
         self._reservation_repo = reservation_repository
         self._command_repo = command_repository
@@ -344,7 +351,7 @@ class ExecutionBook:
         self._journal_revisions: dict[str, int] = {}
         self._last_sequences: dict[str, int] = {}
         self._recovery_adoption_scope: AccountFactStreamScope | None = None
-        self._global_mutation_lock = asyncio.Lock()
+        self._process_mutation_lock = asyncio.Lock()
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
         self._seen_evidence_ids: set[str] = set()
@@ -375,9 +382,7 @@ class ExecutionBook:
         """Register an authoritative account fact stream as active for this book."""
         if not stream_id or not stream_epoch:
             return
-        self._active_streams.add(
-            (environment, account_label, stream_id, stream_epoch)
-        )
+        self._active_streams.add((environment, account_label, stream_id, stream_epoch))
         self._latest_active_streams[(environment, account_label)] = (
             stream_id,
             stream_epoch,
@@ -401,7 +406,10 @@ class ExecutionBook:
         return None
 
     async def repair_position(
-        self, request: PositionRepairRequest, *, uow: PositionRepairUnitOfWork,
+        self,
+        request: PositionRepairRequest,
+        *,
+        uow: PositionRepairUnitOfWork,
         is_current: Callable[[], bool] | None = None,
     ) -> PublishedPositionRepair:
         """Serialize fact load, durable repair commit and publication with observe.
@@ -415,7 +423,9 @@ class ExecutionBook:
                     async with uow.transaction(request.key) as tx:
                         loaded = await tx.load_repair_facts(request)
                         if is_current is not None and not is_current():
-                            raise PositionRepairBlocked("repair context advanced during fact load")
+                            raise PositionRepairBlocked(
+                                "repair context advanced during fact load"
+                            )
                         repair = build_position_repair(request, loaded)
                         receipt = await tx.persist_repair(repair)
                     break
@@ -424,13 +434,19 @@ class ExecutionBook:
                         raise
             try:
                 view = await self._reload_position(
-                    request.key, expected_scope=request.scope,
+                    request.key,
+                    expected_scope=request.scope,
                     expected_quantity=request.expected_quantity,
                 )
-                if (view is None or view.stream_scope != receipt.scope
+                if (
+                    view is None
+                    or view.stream_scope != receipt.scope
                     or view.total_quantity != request.expected_quantity
-                    or not view.is_ready_for_trade):
-                    raise PositionRepairBlocked("durable repair committed but Book reload is not ready")
+                    or not view.is_ready_for_trade
+                ):
+                    raise PositionRepairBlocked(
+                        "durable repair committed but Book reload is not ready"
+                    )
             except Exception:
                 # Commit succeeded; admission must remain sealed until restore
                 # if the committed projection cannot be published.
@@ -438,14 +454,54 @@ class ExecutionBook:
                 raise
             return PublishedPositionRepair(receipt, view, repair.new_facts)
 
+    async def reconcile_reservation_divergence(
+        self,
+        key: PositionKey,
+        *,
+        as_of: datetime | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Attempt to reconcile reservation divergence for a position.
+
+        If force=True, acknowledges the current reservations and clears the recovery gate.
+        Otherwise, reloads the position from durable storage to verify whether actual
+        active reservations now match the head expectation.
+        """
+        async with self._mutation_lock(key):
+            canon = key.canonical_id
+            divergence_identity = f"reservation_divergence:{canon}"
+            if divergence_identity not in self._recovery_required_commands:
+                return True
+            if force:
+                self._recovery_required_commands.discard(divergence_identity)
+                self._external_recovery_positions.pop(divergence_identity, None)
+                self._head_expected_reservation_ids.pop(canon, None)
+                return True
+            view = await self._reload_position(key, as_of=as_of)
+            if view is None:
+                return False
+            expected_ids = self._head_expected_reservation_ids.get(canon, set())
+            actual_ids = {r.reservation_id for r in self.get_active_reservations(key)}
+            if actual_ids == expected_ids:
+                self._recovery_required_commands.discard(divergence_identity)
+                self._external_recovery_positions.pop(divergence_identity, None)
+                self._head_expected_reservation_ids.pop(canon, None)
+                return True
+            return False
+
     async def reload_position(
-        self, key: PositionKey, *, as_of: datetime | None = None,
+        self,
+        key: PositionKey,
+        *,
+        as_of: datetime | None = None,
         expected_scope: AccountFactStreamScope | None = None,
         expected_quantity: Decimal | None = None,
     ) -> PositionView | None:
         async with self._mutation_lock(key):
             return await self._reload_position(
-                key, as_of=as_of, expected_scope=expected_scope,
+                key,
+                as_of=as_of,
+                expected_scope=expected_scope,
                 expected_quantity=expected_quantity,
             )
 
@@ -463,7 +519,8 @@ class ExecutionBook:
         as_of = as_of or datetime.now(UTC)
         canon = key.canonical_id
         target_state = await self._execution_unit_of_work.load_position(
-            key, as_of=as_of,
+            key,
+            as_of=as_of,
         )
         if target_state is None:
             return None
@@ -492,9 +549,21 @@ class ExecutionBook:
                 payload.get("projection_digest", "")
             )
             active_res = payload.get("active_reservation_ids", [])
-            self._head_expected_reservation_ids[canon] = (
+            expected_res_set = (
                 set(active_res) if isinstance(active_res, list) else set()
             )
+            self._head_expected_reservation_ids[canon] = expected_res_set
+            divergence_identity = f"reservation_divergence:{canon}"
+            actual_res_ids = {
+                r.reservation_id for r in self.get_active_reservations(key)
+            }
+            if (
+                actual_res_ids == expected_res_set
+                and divergence_identity in self._recovery_required_commands
+            ):
+                self._recovery_required_commands.discard(divergence_identity)
+                self._external_recovery_positions.pop(divergence_identity, None)
+                self._head_expected_reservation_ids.pop(canon, None)
             last_sequence = payload.get("last_sequence")
             if isinstance(last_sequence, int) and last_sequence >= 0:
                 self._last_sequences[canon] = last_sequence
@@ -515,12 +584,8 @@ class ExecutionBook:
         )
         for watermark in target_state.watermarks:
             watermark_key = self._order_watermark_key(key, watermark.order_id)
-            self._order_cumulative_fills[watermark_key] = (
-                watermark.cumulative_quantity
-            )
-            self._order_cumulative_quotes[watermark_key] = (
-                watermark.cumulative_quote
-            )
+            self._order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
+            self._order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
         return book.get_view()
 
     @property
@@ -537,8 +602,15 @@ class ExecutionBook:
         return self._execution_unit_of_work is not None
 
     def _mutation_lock(self, key: PositionKey) -> asyncio.Lock:
+        """Process-local mutation lock for this ExecutionBook instance.
+
+        Each live account runs in its own dedicated strategy process; this
+        asyncio lock serializes concurrent coroutines within this account's
+        process. Cross-process concurrency is safely coordinated via PostgreSQL
+        advisory locks in the ExecutionUnitOfWork.
+        """
         del key
-        return self._global_mutation_lock
+        return self._process_mutation_lock
 
     def _staged_copy(self, key: PositionKey | None = None) -> ExecutionBook:
         """Copy published domain state before entering a durable transaction."""
@@ -591,8 +663,9 @@ class ExecutionBook:
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
         candidate._coordinator = self._coordinator.copy_for_transaction()
         candidate._reservation_repo = None
+        candidate._command_repo = None
         candidate._active_transaction = None
-        candidate._global_mutation_lock = self._global_mutation_lock
+        candidate._process_mutation_lock = self._process_mutation_lock
         return candidate
 
     def _publish_candidate(self, candidate: ExecutionBook) -> None:
@@ -736,9 +809,8 @@ class ExecutionBook:
             recovered = recover_durable_position(state)
             journal, book = recovered.journal, recovered.book
             for event, values in recovered.diagnostics:
-                if (
-                    event == "execution_head_view_migrated"
-                    and not values.get("has_active_reservations")
+                if event == "execution_head_view_migrated" and not values.get(
+                    "has_active_reservations"
                 ):
                     log.info(event, **values)
                 else:
@@ -748,11 +820,15 @@ class ExecutionBook:
                 self._recovery_required_commands.update(
                     state.head.state_payload.get("recovery_command_ids", ())
                 )
-                for identity in state.head.state_payload.get("external_recovery_ids", ()):
+                for identity in state.head.state_payload.get(
+                    "external_recovery_ids", ()
+                ):
                     self._external_recovery_positions[identity] = key
                     self._recovery_required_commands.add(identity)
                 self._head_projection_digests[canon] = recovered.projection_digest
-                self._head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
+                self._head_expected_reservation_ids[canon] = set(
+                    recovered.reservation_ids
+                )
                 if recovered.last_sequence is not None:
                     self._last_sequences[canon] = recovered.last_sequence
 
@@ -767,8 +843,12 @@ class ExecutionBook:
             )
             for watermark in state.watermarks:
                 watermark_key = self._order_watermark_key(key, watermark.order_id)
-                self._order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
-                self._order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
+                self._order_cumulative_fills[watermark_key] = (
+                    watermark.cumulative_quantity
+                )
+                self._order_cumulative_quotes[watermark_key] = (
+                    watermark.cumulative_quote
+                )
 
     async def restore(
         self,
@@ -911,7 +991,10 @@ class ExecutionBook:
                 for command_id, reservation_ids in self._command_reservations.items():
                     entry = self._outbox_by_command_id[command_id]
                     for reservation_id in reservation_ids:
-                        if self._coordinator.get_reservation(reservation_id) is not None:
+                        if (
+                            self._coordinator.get_reservation(reservation_id)
+                            is not None
+                        ):
                             continue
                         reservation = await self._reservation_repo.load_reservation(
                             reservation_id
@@ -922,10 +1005,13 @@ class ExecutionBook:
                             reservation.command_id != command_id
                             or reservation.position_key != entry.scope.to_position_key()
                         ):
-                            raise ValueError("restored command reservation scope mismatch")
+                            raise ValueError(
+                                "restored command reservation scope mismatch"
+                            )
                         self._coordinator.register_reservation(reservation)
             except Exception as err:
                 raise RuntimeError("Failed to restore command reservations") from err
+        diverged_canons: set[str] = set()
         for canon, expected_ids in self._head_expected_reservation_ids.items():
             journal = self._journals.get(canon)
             if journal is None:
@@ -944,7 +1030,15 @@ class ExecutionBook:
                     expected_ids=sorted(expected_ids),
                     actual_ids=sorted(actual_ids),
                 )
-        self._head_expected_reservation_ids.clear()
+                diverged_canons.add(canon)
+                divergence_identity = f"reservation_divergence:{canon}"
+                self._external_recovery_positions[divergence_identity] = (
+                    journal.position_key
+                )
+                self._recovery_required_commands.add(divergence_identity)
+        for canon in tuple(self._head_expected_reservation_ids):
+            if canon not in diverged_canons:
+                self._head_expected_reservation_ids.pop(canon, None)
         self._persistence_failed = False
         if self._execution_unit_of_work is not None:
             for command_id in deferred_unknown_commands:
@@ -1003,9 +1097,12 @@ class ExecutionBook:
         return active
 
     def _command_order_id(self, key: PositionKey, order_id: str) -> str:
-        matches = [entry.command_id for entry in self._outbox_by_command_id.values()
-                   if entry.scope.to_position_key() == key
-                   and order_id in (entry.command_id, entry.external_order_id)]
+        matches = [
+            entry.command_id
+            for entry in self._outbox_by_command_id.values()
+            if entry.scope.to_position_key() == key
+            and order_id in (entry.command_id, entry.external_order_id)
+        ]
         if len(matches) > 1:
             raise ValueError("exchange order identity belongs to multiple commands")
         return matches[0] if matches else order_id
@@ -1066,13 +1163,10 @@ class ExecutionBook:
             )
         ):
             current_book = self._books.get(canon)
-            is_flat = (
-                current_book is None
-                or (
-                    current_book.get_view().total_quantity == Decimal("0")
-                    and not current_book.get_view().batches
-                    and not current_book.get_view().unallocated_quantity
-                )
+            is_flat = current_book is None or (
+                current_book.get_view().total_quantity == Decimal("0")
+                and not current_book.get_view().batches
+                and not current_book.get_view().unallocated_quantity
             )
             has_no_reservations = not bool(self.get_active_reservations(key))
             has_no_commands = not any(
@@ -1080,27 +1174,19 @@ class ExecutionBook:
                 for cmd in self._outbox_by_command_id.values()
             )
             is_known_active_stream = (
-                (
-                    scope.environment,
-                    scope.account_label,
-                    stream_id,
-                    stream_epoch,
-                )
-                in self._active_streams
-                or any(
-                    s.account_label == scope.account_label
-                    and s.environment == scope.environment
-                    and s.stream_id == stream_id
-                    and s.stream_epoch == stream_epoch
-                    for s in self._stream_scopes.values()
-                )
-            )
-            is_legacy_stream = (
-                source_scope is not None
-                and source_scope.stream_id == "legacy-postgres-account"
+                scope.environment,
+                scope.account_label,
+                stream_id,
+                stream_epoch,
+            ) in self._active_streams or any(
+                s.account_label == scope.account_label
+                and s.environment == scope.environment
+                and s.stream_id == stream_id
+                and s.stream_epoch == stream_epoch
+                for s in self._stream_scopes.values()
             )
             if (
-                (is_flat or is_legacy_stream)
+                is_flat
                 and has_no_reservations
                 and has_no_commands
                 and is_known_active_stream
@@ -1118,7 +1204,9 @@ class ExecutionBook:
                     canon not in self._journals
                     or self._journals[canon].stream_scope != target_scope
                 ):
-                    self._journals[canon] = AccountJournal(key, stream_scope=target_scope)
+                    self._journals[canon] = AccountJournal(
+                        key, stream_scope=target_scope
+                    )
                     self._books[canon] = PositionBook(self._journals[canon])
                     self._journal_revisions[canon] = 0
                     self._last_sequences.pop(canon, None)
@@ -1142,17 +1230,22 @@ class ExecutionBook:
             return replace(
                 view,
                 reservations=self.get_active_reservations(key),
-                pending_command_ids=tuple(sorted(
-                    entry.command_id for entry in entries
-                    if self.command_requires_recovery(entry.command_id)
-                )),
-                active_entry_command_ids=tuple(sorted(
-                    entry.command_id for entry in entries
-                    if entry.command.command_type == TradeCommandType.ENTRY
-                    and entry.state not in {
-                        DispatchState.REJECTED, DispatchState.TERMINAL
-                    }
-                )),
+                pending_command_ids=tuple(
+                    sorted(
+                        entry.command_id
+                        for entry in entries
+                        if self.command_requires_recovery(entry.command_id)
+                    )
+                ),
+                active_entry_command_ids=tuple(
+                    sorted(
+                        entry.command_id
+                        for entry in entries
+                        if entry.command.command_type == TradeCommandType.ENTRY
+                        and entry.state
+                        not in {DispatchState.REJECTED, DispatchState.TERMINAL}
+                    )
+                ),
             )
         current_view = book.get_view(requirement=requirement, now=now)
         if (
@@ -1252,23 +1345,45 @@ class ExecutionBook:
                 continue
             source = self._stream_scopes.get(key.canonical_id)
             if stream_id is not None and (
-                source is None or source.stream_id != stream_id or source.stream_epoch != stream_epoch
+                source is None
+                or source.stream_id != stream_id
+                or source.stream_epoch != stream_epoch
             ):
                 continue
-            scopes.append(ExecutionScope(
-                environment=key.environment, account_label=key.account_label,
-                symbol=key.symbol, position_side=key.position_side,
-            ))
+            scopes.append(
+                ExecutionScope(
+                    environment=key.environment,
+                    account_label=key.account_label,
+                    symbol=key.symbol,
+                    position_side=key.position_side,
+                )
+            )
         scopes.sort(key=lambda scope: (scope.symbol, scope.position_side.value))
-        return tuple([
-            await self.read(scope, event_cut=event_cut, stream_id=stream_id, stream_epoch=stream_epoch)
-            for scope in scopes
-        ])
+        return tuple(
+            [
+                await self.read(
+                    scope,
+                    event_cut=event_cut,
+                    stream_id=stream_id,
+                    stream_epoch=stream_epoch,
+                )
+                for scope in scopes
+            ]
+        )
 
-    async def act(self, request: ExecutionRequest) -> ExecutionActResult:
+    async def act(
+        self,
+        request: ExecutionRequest,
+        *,
+        in_transaction: Callable[[ExecutionTransactionPort], Awaitable[object]] | None = None,
+    ) -> ExecutionActResult:
         """Accept a command atomically when backed by the durable UoW."""
         if self._execution_unit_of_work is None:
-            return await self._act_mutating(request)
+            res = await self._act_mutating(request)
+            if isinstance(res, Accepted) and in_transaction is not None:
+                extra_res = await in_transaction(None)
+                res = replace(res, extra=extra_res)
+            return res
         key = request.scope.to_position_key()
         canon = key.canonical_id
         async with self._mutation_lock(key):
@@ -1286,7 +1401,10 @@ class ExecutionBook:
                 )
             candidate = self._staged_copy(key=key)
             try:
-                async with self._execution_unit_of_work.transaction(key) as tx:
+                account_scope = f"{key.environment}:{key.account_label}:{request.strategy_name}"
+                async with self._execution_unit_of_work.transaction(
+                    key, account_scope=account_scope
+                ) as tx:
                     head = await tx.load_head(key)
                     adopting_epoch = False
                     current_view = candidate._ensure_book(key).get_view()
@@ -1325,7 +1443,10 @@ class ExecutionBook:
                                 return Blocked(
                                     reason="Position projection is stale; reload durable facts"
                                 )
-                            if current_view.projection_version != head.projection_version:
+                            if (
+                                current_view.projection_version
+                                != head.projection_version
+                            ):
                                 return Blocked(
                                     reason=(
                                         "Position projection differs from its durable head; "
@@ -1347,6 +1468,9 @@ class ExecutionBook:
                             batch_quantities=batch_capacities,
                             proven_position_quantity=current_view.total_quantity,
                         )
+                    if in_transaction is not None:
+                        extra_res = await in_transaction(tx)
+                        result = replace(result, extra=extra_res)
                     facts = candidate._ensure_journal(key).read_cut()
                     head_payload = _execution_head_payload(
                         candidate, key, facts.compute_facts_hash()
@@ -1370,6 +1494,8 @@ class ExecutionBook:
                 candidate._active_transaction = None
                 self._publish_candidate(candidate)
                 return result
+            except (OrderPreSubmissionError, OrderProjectionConflictError):
+                raise
             except Exception as err:
                 self._persistence_failed = True
                 log.error(
@@ -1396,9 +1522,12 @@ class ExecutionBook:
             )
         key = request.scope.to_position_key()
         blocking_recoveries = {
-            identity for identity in self._recovery_required_commands
-            if (request.action == TradeCommandType.ENTRY
-                and identity not in self._external_recovery_positions)
+            identity
+            for identity in self._recovery_required_commands
+            if (
+                request.action == TradeCommandType.ENTRY
+                and identity not in self._external_recovery_positions
+            )
             or self._recovery_blocks_position(identity, key)
         }
         if blocking_recoveries:
@@ -1407,17 +1536,18 @@ class ExecutionBook:
                 diagnostics=tuple(sorted(blocking_recoveries)),
             )
         dispatch_recoveries = {
-            identity for identity in self._dispatch_reconciliation_required_commands
-            if (request.action == TradeCommandType.ENTRY
-                and identity not in self._external_recovery_positions)
+            identity
+            for identity in self._dispatch_reconciliation_required_commands
+            if (
+                request.action == TradeCommandType.ENTRY
+                and identity not in self._external_recovery_positions
+            )
             or self._recovery_blocks_position(identity, key)
         }
         if dispatch_recoveries:
             return ExecutionRecoveryPending(
                 reason="Execution command reconciliation is required",
-                diagnostics=tuple(
-                    sorted(dispatch_recoveries)
-                ),
+                diagnostics=tuple(sorted(dispatch_recoveries)),
             )
         key = request.scope.to_position_key()
         book = self._ensure_book(key)
@@ -1970,6 +2100,11 @@ class ExecutionBook:
             return entry
         if plan.requires_reconciliation:
             self._dispatch_reconciliation_required_commands.add(command_id)
+        elif target in (DispatchState.REJECTED, DispatchState.TERMINAL):
+            self._dispatch_reconciliation_required_commands.discard(command_id)
+            self._recovery_required_commands.discard(command_id)
+            if entry.external_order_id:
+                self._recovery_required_commands.discard(entry.external_order_id)
         try:
             await self._persist_transition(entry, plan.updated)
         except Exception:
@@ -2060,7 +2195,8 @@ class ExecutionBook:
         """Atomically accept source evidence and publish its projection."""
         if self._execution_unit_of_work is None:
             result = await observe_evidence_group(
-                evidence, observe_one=self._observe_mutating,
+                evidence,
+                observe_one=self._observe_mutating,
                 forget_identity=self._seen_evidence_ids.discard,
             )
             # Without a durable transaction there is nothing to persist, so the
@@ -2098,13 +2234,10 @@ class ExecutionBook:
             # transaction. This eliminates thousands of redundant staged copies
             # and transactions on every snapshot cycle.
             current_book = self._books.get(canon)
-            is_local_flat = (
-                current_book is None
-                or (
-                    current_book.get_view().total_quantity == Decimal("0")
-                    and not current_book.get_view().batches
-                    and not current_book.get_view().unallocated_quantity
-                )
+            is_local_flat = current_book is None or (
+                current_book.get_view().total_quantity == Decimal("0")
+                and not current_book.get_view().batches
+                and not current_book.get_view().unallocated_quantity
             )
             is_evidence_flat = (
                 evidence.snapshot is not None
@@ -2117,12 +2250,8 @@ class ExecutionBook:
                 for cmd in self._outbox_by_command_id.values()
             )
             current_scope = self._stream_scopes.get(canon)
-            is_legacy_stream = (
-                current_scope is not None
-                and current_scope.stream_id == "legacy-postgres-account"
-            )
             is_truly_flat = (
-                (is_local_flat or is_legacy_stream)
+                is_local_flat
                 and is_evidence_flat
                 and has_no_reservations
                 and has_no_commands
@@ -2262,7 +2391,10 @@ class ExecutionBook:
                                     )
                         else:
                             current_view = candidate._ensure_book(key).get_view()
-                            if current_view.projection_version != head.projection_version:
+                            if (
+                                current_view.projection_version
+                                != head.projection_version
+                            ):
                                 reloaded = await candidate._reload_position(key)
                                 if (
                                     reloaded is None
@@ -2392,7 +2524,9 @@ class ExecutionBook:
                             stream_epoch=scope.stream_epoch,
                             evidence=ExecutionEvidenceIdentity(
                                 evidence_id=evidence.evidence_id,
-                                payload_digest=digest_json_payload(_canonical_evidence_payload(evidence)),
+                                payload_digest=digest_json_payload(
+                                    _canonical_evidence_payload(evidence)
+                                ),
                                 accepted_at=evidence.observed_at,
                                 sequence=evidence.sequence,
                             ),
@@ -2734,30 +2868,51 @@ class ExecutionBook:
             event = evidence.order_event
             entry = self._outbox_by_command_id.get(event.client_order_id)
             if entry is not None and event.exchange_order_id is not None:
-                if entry.scope.to_position_key() != key or entry.external_order_id not in (
-                    None, event.exchange_order_id,
+                if (
+                    entry.scope.to_position_key() != key
+                    or entry.external_order_id
+                    not in (
+                        None,
+                        event.exchange_order_id,
+                    )
                 ):
-                    return EvidenceConflict(evidence.evidence_id, "exchange order identity mismatch")
+                    return EvidenceConflict(
+                        evidence.evidence_id, "exchange order identity mismatch"
+                    )
                 owner = self._command_order_id(key, event.exchange_order_id)
                 if owner not in (event.exchange_order_id, entry.command_id):
-                    return EvidenceConflict(evidence.evidence_id, "exchange order already bound")
+                    return EvidenceConflict(
+                        evidence.evidence_id, "exchange order already bound"
+                    )
                 if entry.external_order_id is None:
                     bound = replace(entry, external_order_id=event.exchange_order_id)
                     await self._persist_transition(entry, bound)
                     watermark_key = self._order_watermark_key(key, entry.command_id)
                     trade_delta = account_trade_delta(
                         entry.command_id,
-                        previous_quantity=self._order_cumulative_fills.get(watermark_key, Decimal("0")),
-                        previous_quote=self._order_cumulative_quotes.get(watermark_key, Decimal("0")),
+                        previous_quantity=self._order_cumulative_fills.get(
+                            watermark_key, Decimal("0")
+                        ),
+                        previous_quote=self._order_cumulative_quotes.get(
+                            watermark_key, Decimal("0")
+                        ),
                         account_fills=journal.read_cut().fills,
-                        order_ids=frozenset({entry.command_id, event.exchange_order_id}),
+                        order_ids=frozenset(
+                            {entry.command_id, event.exchange_order_id}
+                        ),
                     )
                     if trade_delta.watermark is not None:
                         quantity, quote = trade_delta.watermark
                         if entry.command.reduce_only:
-                            consumed, needs_recovery, diagnostic = await self._settle_reservation_quantity(
-                                entry.command_id, trade_delta.quantity,
-                                reported_quantity=quantity, key=key,
+                            (
+                                consumed,
+                                needs_recovery,
+                                diagnostic,
+                            ) = await self._settle_reservation_quantity(
+                                entry.command_id,
+                                trade_delta.quantity,
+                                reported_quantity=quantity,
+                                key=key,
                             )
                             consumed_qty += consumed
                             settlement_recovery_required = needs_recovery
@@ -2776,7 +2931,11 @@ class ExecutionBook:
             trade_id = fill.trade_id
             order_id = self._command_order_id(key, fill.order_id)
             existing_trade = next(
-                (prior for prior in journal.read_cut().fills if prior.trade_id == trade_id),
+                (
+                    prior
+                    for prior in journal.read_cut().fills
+                    if prior.trade_id == trade_id
+                ),
                 None,
             )
             watermark_key = self._order_watermark_key(key, order_id)
@@ -2825,11 +2984,7 @@ class ExecutionBook:
                 elif not is_cumulative:
                     self._seen_trade_ids.add(trade_id)
 
-            if (
-                not is_cumulative
-                and is_new_trade
-                and not adopted_prefix_trade
-            ):
+            if not is_cumulative and is_new_trade and not adopted_prefix_trade:
                 watermark_key = self._order_watermark_key(key, order_id)
                 previous_quantity = self._order_cumulative_fills.get(
                     watermark_key, Decimal("0")
@@ -2855,7 +3010,9 @@ class ExecutionBook:
             if is_exit_fill(
                 fill,
                 position_side=key.position_side,
-                episode_side=active_episode.side if active_episode is not None else None,
+                episode_side=active_episode.side
+                if active_episode is not None
+                else None,
                 has_active_reservations=bool(
                     self._find_active_reservations_for_command(order_id)
                 ),
@@ -2882,13 +3039,16 @@ class ExecutionBook:
 
         try:
             settlement_facts = settlement_trade_facts(
-                journal.read_cut().fills, evidence.settlement_fills,
+                journal.read_cut().fills,
+                evidence.settlement_fills,
             )
         except ValueError as error:
             return EvidenceConflict(evidence.evidence_id, str(error))
         report = evidence.cumulative_order
         if report is not None:
-            report = replace(report, order_id=self._command_order_id(key, report.order_id))
+            report = replace(
+                report, order_id=self._command_order_id(key, report.order_id)
+            )
             watermark_key = self._order_watermark_key(key, report.order_id)
             previous_quantity = self._order_cumulative_fills.get(
                 watermark_key, Decimal("0")
@@ -2961,7 +3121,8 @@ class ExecutionBook:
                 await self._persist_transition(outbox, event_plan.updated)
                 if event_plan.release_reason is not None:
                     released_qty += await self._release_command_reservations(
-                        cmd_id, reason=event_plan.release_reason,
+                        cmd_id,
+                        reason=event_plan.release_reason,
                     )
                 if event_plan.pending_trade_diagnostic is not None:
                     # Keep admission closed while real position facts lag, but
@@ -2981,7 +3142,8 @@ class ExecutionBook:
             self._order_cumulative_fills[watermark_key] = cumulative_qty
             self._order_cumulative_quotes[watermark_key] = cumulative_quote
             publication = plan_watermark_publication(
-                evidence, outbox_by_command_id=self._outbox_by_command_id,
+                evidence,
+                outbox_by_command_id=self._outbox_by_command_id,
             )
             if publication.outbox is not None:
                 await self._persist_outbox_state(publication.outbox)
@@ -2996,11 +3158,14 @@ class ExecutionBook:
             )
 
         recovery_commands = self._recovery_required_commands | {
-            entry.command_id for entry in self._outbox_by_command_id.values()
+            entry.command_id
+            for entry in self._outbox_by_command_id.values()
             if entry.scope.to_position_key() == key
-            and (entry.external_order_id in self._recovery_required_commands
-                 or f"external:{self._order_watermark_key(key, entry.external_order_id)}"
-                 in self._recovery_required_commands)
+            and (
+                entry.external_order_id in self._recovery_required_commands
+                or f"external:{self._order_watermark_key(key, entry.external_order_id)}"
+                in self._recovery_required_commands
+            )
         }
         for command_id in recovery_commands:
             pending = self._outbox_by_command_id.get(command_id)
@@ -3031,15 +3196,22 @@ class ExecutionBook:
         # its position-scoped quarantine only from complete real facts and a
         # subsequent matching account cut, never merely from an order receipt.
         facts = journal.read_cut()
-        latest_snapshot = max(facts.snapshots, key=lambda s: s.observed_at, default=None)
+        latest_snapshot = max(
+            facts.snapshots, key=lambda s: s.observed_at, default=None
+        )
         latest_trade_at = max((f.trade_at for f in facts.fills), default=None)
         coverage = updated_view.coverage
-        if (updated_view.is_ready_for_trade and not self.get_active_reservations(key)
-            and latest_snapshot is not None and latest_trade_at is not None
+        if (
+            updated_view.is_ready_for_trade
+            and not self.get_active_reservations(key)
+            and latest_snapshot is not None
+            and latest_trade_at is not None
             and latest_snapshot.observed_at >= latest_trade_at
             and abs(latest_snapshot.position_amt) == updated_view.total_quantity
-            and coverage is not None and coverage.is_authoritative
-            and coverage.end_at >= latest_trade_at):
+            and coverage is not None
+            and coverage.is_authoritative
+            and coverage.end_at >= latest_trade_at
+        ):
             for identity, position in tuple(self._external_recovery_positions.items()):
                 if position == key:
                     self._external_recovery_positions.pop(identity)

@@ -275,10 +275,10 @@ class OrderExecutionStateMachine:
                 None,
                 plan=plan,
             )
-        except ExchangeSubmissionTimeoutError:
+        except ExchangeSubmissionTimeoutError as exc:
             query_result = await self._query_order_with_retry(
                 plan,
-                not_found_reason="submit_timeout_order_not_found",
+                not_found_reason=str(exc) or "submit_timeout_order_not_found",
             )
             if query_result.snapshot is None:
                 await self._append_event(
@@ -286,6 +286,7 @@ class OrderExecutionStateMachine:
                     ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                     details={
                         "reason": query_result.reason
+                        or str(exc)
                         or "submit_timeout_order_not_found",
                         "reconciliation_attempts": query_result.attempts,
                     },

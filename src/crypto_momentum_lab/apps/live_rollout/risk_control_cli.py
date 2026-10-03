@@ -125,7 +125,7 @@ def _issue_one_shot_risk_control_command(
 
     command = asyncio.run(
         _load_or_save_risk_control_command(
-            database_url=_database_url(database_url),
+            database_url=_execution_database_url(database_url),
             command_type=command_type,
             requested_by=operator,
             confirmation_text=confirmation,
@@ -298,9 +298,3 @@ def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
             f"--database-url or {plane_env_var} or CML_DATABASE_URL is required"
         )
     return resolved
-
-
-def _database_url(value: str | None) -> str:
-    """Resolve the execution plane for legacy live CLI commands."""
-
-    return _execution_database_url(value)

@@ -41,7 +41,9 @@ from tests.unit.execution.test_terminal_settlement import (
 @pytest.mark.asyncio
 @pytest.mark.parametrize("priced_receipt", [True, False])
 @pytest.mark.parametrize("trade_in_current_cut", [True, False])
-async def test_historical_account_trades_settle_without_replaying_position_prefix(priced_receipt, trade_in_current_cut):
+async def test_historical_account_trades_settle_without_replaying_position_prefix(
+    priced_receipt, trade_in_current_cut
+):
     """A new epoch can have a flat checkpoint with no old order trades in its cut."""
     from crypto_momentum_lab.persistence.postgres.order_read_repository import (
         PostgresOrderReadRepository,
@@ -51,27 +53,49 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
     book._persistence_failed = False
     await book.observe(evidence("current-epoch-no-historical-trades"))
     command = TradeCommand(
-        "legacy", SCOPE.to_position_key(), TradeCommandType.ENTRY,
-        StrategySide.LONG, EntryType.MARKET, Decimal(1), created_at=NOW,
+        "legacy",
+        SCOPE.to_position_key(),
+        TradeCommandType.ENTRY,
+        StrategySide.LONG,
+        EntryType.MARKET,
+        Decimal(1),
+        created_at=NOW,
     )
     book.register_prepared_command(command, SCOPE)
     await book.mark_unknown("legacy", "restored dispatch")
     order = SimpleNamespace(
-        intent_id="intent", run_id="old-session", client_order_id="legacy",
-        exchange_order_id="111", symbol="BTCUSDT", side="BUY",
-        order_type="MARKET", quantity=Decimal(1), price=None, reduce_only=False,
-        position_side="LONG", state="filled", created_at=NOW, updated_at=NOW,
-        time_in_force=None, expires_at=None, executed_quantity=Decimal(1),
+        intent_id="intent",
+        run_id="old-session",
+        client_order_id="legacy",
+        exchange_order_id="111",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal(1),
+        price=None,
+        reduce_only=False,
+        position_side="LONG",
+        state="filled",
+        created_at=NOW,
+        updated_at=NOW,
+        time_in_force=None,
+        expires_at=None,
+        executed_quantity=Decimal(1),
     )
     historical_fill = replace(fill("historical-trade", "1", entry=True), order_id="111")
     if trade_in_current_cut:
         await book.observe(evidence("same-trade-in-current-cut", fill=historical_fill))
     session = AsyncMock()
     session.__aenter__.return_value = session
-    session.scalar.side_effect = [order, {
-        "environment": "live", "account_label": "primary",
-        "symbol": "BTCUSDT", "position_side": "LONG",
-    }]
+    session.scalar.side_effect = [
+        order,
+        {
+            "environment": "live",
+            "account_label": "primary",
+            "symbol": "BTCUSDT",
+            "position_side": "LONG",
+        },
+    ]
 
     async def rows(query):
         sql = str(query)
@@ -79,9 +103,14 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
         if "FROM account_fill_events" in sql:
             values = [historical_fill]
         elif "FROM exchange_order_events" in sql and priced_receipt:
-            values = [SimpleNamespace(details={
-                "executed_quantity": "1", "average_price": "100",
-            })]
+            values = [
+                SimpleNamespace(
+                    details={
+                        "executed_quantity": "1",
+                        "average_price": "100",
+                    }
+                )
+            ]
         return Mock(all=Mock(return_value=values))
 
     session.scalars.side_effect = rows
@@ -92,12 +121,16 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
             raise AssertionError(f"unexpected exchange operation: {name}")
 
     coordinator = OrderExecutionCoordinator(
-        backend=NoExchangeCalls(), account_label="primary", environment="live",
+        backend=NoExchangeCalls(),
+        account_label="primary",
+        environment="live",
         execution_book=book,
     )
     try:
         assert not await recover_restored_commands(
-            book=book, coordinator=coordinator, orders=orders,
+            book=book,
+            coordinator=coordinator,
+            orders=orders,
             reconcile_order=coordinator.reconcile_order,
         )
         assert not book.command_requires_recovery("legacy")
@@ -105,7 +138,10 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
         # Historical settlement proof must not recreate this closed position.
         assert (await book.read(SCOPE)).total_quantity == int(trade_in_current_cut)
         expected_fills = (historical_fill,) if trade_in_current_cut else ()
-        assert book._journals[SCOPE.to_position_key().canonical_id].read_cut().fills == expected_fills
+        assert (
+            book._journals[SCOPE.to_position_key().canonical_id].read_cut().fills
+            == expected_fills
+        )
     finally:
         await coordinator.aclose()
 
@@ -184,7 +220,9 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
         await runtime.reconcile_all(include_confirmed=True)
         assert book.command_requires_recovery("legacy")
         runtime.recover_commands = lambda reconcile_order: recover_restored_commands(
-            book=book, coordinator=coordinator, orders=orders,
+            book=book,
+            coordinator=coordinator,
+            orders=orders,
             reconcile_order=reconcile_order,
         )
         assert not await runtime.reconcile_all(include_confirmed=True)
@@ -256,28 +294,46 @@ async def test_restored_completed_exit_reservation_can_prove_terminal_settlement
             return ()
 
     reservation = PositionReservation(
-        reservation_id="closed-reservation", command_id="exit",
-        position_key=SCOPE.to_position_key(), batch_id="closed-batch",
-        reserved_quantity=Decimal("2"), consumed_quantity=Decimal("2"),
+        reservation_id="closed-reservation",
+        command_id="exit",
+        position_key=SCOPE.to_position_key(),
+        batch_id="closed-batch",
+        reserved_quantity=Decimal("2"),
+        consumed_quantity=Decimal("2"),
         created_at=NOW,
     )
     commands = AsyncMock()
-    commands.load_active_execution_commands.return_value = [{
-        "command_id": "exit", "client_order_id": "exit", "command": "exit",
-        "status": "terminal", "requested_at": NOW,
-        "details": {
-            "scope": {"environment": "live", "account_label": "primary",
-                      "symbol": "BTCUSDT", "position_side": "LONG"},
-            "side": "long", "order_type": "market", "quantity": "2",
-            "reduce_only": True, "reservations": [reservation.reservation_id],
-            "request_id": "exit", "attempt_count": 1, "external_order_id": "111",
-        },
-    }]
+    commands.load_active_execution_commands.return_value = [
+        {
+            "command_id": "exit",
+            "client_order_id": "exit",
+            "command": "exit",
+            "status": "terminal",
+            "requested_at": NOW,
+            "details": {
+                "scope": {
+                    "environment": "live",
+                    "account_label": "primary",
+                    "symbol": "BTCUSDT",
+                    "position_side": "LONG",
+                },
+                "side": "long",
+                "order_type": "market",
+                "quantity": "2",
+                "reduce_only": True,
+                "reservations": [reservation.reservation_id],
+                "request_id": "exit",
+                "attempt_count": 1,
+                "external_order_id": "111",
+            },
+        }
+    ]
     reservations = AsyncMock()
     reservations.load_active_reservations.return_value = ()
     reservations.load_reservation.return_value = reservation
     book = ExecutionBook(
-        execution_unit_of_work=RestoreUnitOfWork(), command_repository=commands,
+        execution_unit_of_work=RestoreUnitOfWork(),
+        command_repository=commands,
         reservation_repository=reservations,
     )
     await book.restore(account_label="primary")
@@ -289,20 +345,132 @@ async def test_restored_completed_exit_reservation_can_prove_terminal_settlement
     book._recovery_required_commands.add("exit")
     assert not book.get_active_reservations()
     plan = OrderExecutionPlan(
-        "intent", "old-session", "exit", "BTCUSDT", "SELL", "MARKET",
-        Decimal("2"), None, True, NOW, position_side=SCOPE.position_side,
+        "intent",
+        "old-session",
+        "exit",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("2"),
+        None,
+        True,
+        NOW,
+        position_side=SCOPE.position_side,
     )
     coordinator = OrderExecutionCoordinator(
-        backend=object(), account_label="primary", environment="live",
+        backend=object(),
+        account_label="primary",
+        environment="live",
         execution_book=book,
     )
     try:
-        await coordinator.observe_recovered_receipt(plan, PersistedOrderReceipt(
-            "exit", ExchangeOrderState.FILLED, "111", Decimal("2"), Decimal("100"),
-            (replace(fill("real-close", "2"), order_id="111"),),
-        ))
+        await coordinator.observe_recovered_receipt(
+            plan,
+            PersistedOrderReceipt(
+                "exit",
+                ExchangeOrderState.FILLED,
+                "111",
+                Decimal("2"),
+                Decimal("100"),
+                (replace(fill("real-close", "2"), order_id="111"),),
+            ),
+        )
         assert not book.command_requires_recovery("exit")
         assert (await book.read(SCOPE)).total_quantity == 0
         reservations.update_reservation.assert_not_awaited()
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recover_restored_commands_rejects_prepared_unsubmitted_command() -> None:
+    """A prepared command with no persistent order record must be rejected rather than looping forever."""
+    book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
+    book._persistence_failed = False
+    await book.observe(evidence("prepared-unsubmitted-stream"))
+    command = TradeCommand(
+        "prep-unsubmitted",
+        SCOPE.to_position_key(),
+        TradeCommandType.ENTRY,
+        StrategySide.LONG,
+        EntryType.MARKET,
+        Decimal(1),
+        created_at=NOW,
+    )
+    book.register_prepared_command(command, SCOPE)
+
+    class EmptyOrders:
+        async def load_order(self, client_order_id: str) -> None:
+            return None
+
+    coordinator = OrderExecutionCoordinator(
+        backend=object(),
+        account_label="primary",
+        environment="live",
+        execution_book=book,
+    )
+    try:
+        reconcile_mock = AsyncMock()
+        pending = await recover_restored_commands(
+            book=book,
+            coordinator=coordinator,
+            orders=EmptyOrders(),
+            reconcile_order=reconcile_mock,
+        )
+        assert not pending
+        reconcile_mock.assert_not_awaited()
+        outbox = book.get_outbox("prep-unsubmitted")
+        assert outbox is not None
+        assert outbox.state == DispatchState.REJECTED
+        assert not book.command_requires_recovery("prep-unsubmitted")
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recover_restored_commands_reconciles_unknown_without_order_record() -> (
+    None
+):
+    """An unknown/dispatching command without a persistent order record synthesizes plan and queries exchange."""
+    book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
+    book._persistence_failed = False
+    await book.observe(evidence("unknown-dispatch-stream"))
+    command = TradeCommand(
+        "unknown-cmd",
+        SCOPE.to_position_key(),
+        TradeCommandType.ENTRY,
+        StrategySide.LONG,
+        EntryType.MARKET,
+        Decimal(1),
+        created_at=NOW,
+    )
+    book.register_prepared_command(command, SCOPE)
+    await book.mark_unknown("unknown-cmd", "crashed during dispatch")
+
+    class EmptyOrders:
+        async def load_order(self, client_order_id: str) -> None:
+            return None
+
+    coordinator = OrderExecutionCoordinator(
+        backend=object(),
+        account_label="primary",
+        environment="live",
+        execution_book=book,
+    )
+    try:
+        reconcile_mock = AsyncMock()
+        await recover_restored_commands(
+            book=book,
+            coordinator=coordinator,
+            orders=EmptyOrders(),
+            reconcile_order=reconcile_mock,
+        )
+        reconcile_mock.assert_awaited_once()
+        synthesized_plan = reconcile_mock.await_args.args[0]
+        assert synthesized_plan.client_order_id == "unknown-cmd"
+        assert synthesized_plan.symbol == SCOPE.symbol
+        assert synthesized_plan.side == "BUY"
+        assert synthesized_plan.quantity == Decimal(1)
+        assert synthesized_plan.quantized is True
     finally:
         await coordinator.aclose()

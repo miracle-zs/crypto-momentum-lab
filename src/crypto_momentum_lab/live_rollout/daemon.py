@@ -194,6 +194,8 @@ class LiveStrategyDaemon:
         on_checkpoint_saved: Callable[[], None] | None = None,
         cached_context_provider: Callable[[], LiveDaemonRuntimeContext | None] | None = None,
         request_exit_recovery: Callable[[], None] = lambda: None,
+        is_symbol_warmed: Callable[[str], bool] | None = None,
+        on_unwarmed_symbol: Callable[[str], None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -204,6 +206,8 @@ class LiveStrategyDaemon:
             state_machine=self._state_machine,
             scheduled_risk_window=config.scheduled_risk_window,
             clock=self._clock,
+            is_symbol_warmed=is_symbol_warmed,
+            on_unwarmed_symbol=on_unwarmed_symbol,
         )
         self._context_provider = context_provider
         self._cached_context_provider = cached_context_provider or (

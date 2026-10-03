@@ -2,9 +2,9 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -60,10 +60,6 @@ class StrategyRunIdentity:
     code_commit: str
     created_at: datetime
     source_paths: tuple[str, ...]
-    config_hash_aliases: tuple[str, ...] = field(
-        default_factory=tuple,
-        compare=False,
-    )
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -77,8 +73,6 @@ class StrategyRunIdentity:
             raise ValueError("source_paths must not be empty")
         for source_path in self.source_paths:
             _require_non_empty(source_path, "source_path")
-        for config_hash_alias in self.config_hash_aliases:
-            _require_non_empty(config_hash_alias, "config_hash_alias")
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,25 +265,9 @@ class StrategyDecision:
                 raise ValueError("candidate must match source signal identity")
 
 
-def deterministic_config_hash(
-    config: object,
-    *,
-    preserve_disabled_orderflow_volume: bool = False,
-) -> str:
-    """Hash a configuration with an optional historical volume-field view.
-
-    A zero order-flow volume threshold is behaviorally disabled.  The default
-    canonical form omits that field so six-dimensional and seven-dimensional
-    configurations with volume filtering disabled share a hash.  Callers that
-    need to recognize runs created during the seven-dimensional rollout can
-    request the historical form that retains the zero-valued field.
-    """
-
-    normalized = _normalize_json_value(
-        config,
-        canonical_decimals=True,
-        omit_disabled_orderflow_volume=not preserve_disabled_orderflow_volume,
-    )
+def deterministic_config_hash(config: object) -> str:
+    """Hash the complete current configuration using canonical decimals."""
+    normalized = _normalize_json_value(config, canonical_decimals=True)
     encoded = json.dumps(
         normalized,
         allow_nan=False,
@@ -337,7 +315,6 @@ def _normalize_json_value(
     value: object,
     *,
     canonical_decimals: bool = False,
-    omit_disabled_orderflow_volume: bool = False,
 ) -> JsonValue:
     if isinstance(value, StrEnum):
         return value.value
@@ -357,23 +334,15 @@ def _normalize_json_value(
         return _normalize_json_value(
             asdict(cast(Any, value)),
             canonical_decimals=canonical_decimals,
-            omit_disabled_orderflow_volume=omit_disabled_orderflow_volume,
         )
     if isinstance(value, Mapping):
         normalized: dict[str, JsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("JSON object keys must be strings")
-            if (
-                canonical_decimals
-                and omit_disabled_orderflow_volume
-                and _is_disabled_orderflow_volume_dimension(key, item)
-            ):
-                continue
             normalized[key] = _normalize_json_value(
                 item,
                 canonical_decimals=canonical_decimals,
-                omit_disabled_orderflow_volume=omit_disabled_orderflow_volume,
             )
         return normalized
     if isinstance(value, list | tuple):
@@ -381,32 +350,10 @@ def _normalize_json_value(
             _normalize_json_value(
                 item,
                 canonical_decimals=canonical_decimals,
-                omit_disabled_orderflow_volume=omit_disabled_orderflow_volume,
             )
             for item in value
         ]
     raise TypeError(f"Unsupported JSON value: {type(value).__name__}")
-
-
-def _is_disabled_orderflow_volume_dimension(key: str, value: object) -> bool:
-    """Keep the zero-valued seventh order-flow dimension hash-compatible.
-
-    The volume ratio was added after six-dimensional paper runs already
-    existed.  A zero threshold deliberately preserves the old behavior, so
-    including that no-op field in the canonical hash would create a false
-    configuration change during a restart.
-    """
-
-    if key != "min_notional_5m_vs_30m" or isinstance(value, bool):
-        return False
-    if isinstance(value, Decimal | int | float):
-        return value == 0
-    if isinstance(value, str):
-        try:
-            return Decimal(value.strip()) == 0
-        except InvalidOperation:
-            return False
-    return False
 
 
 def _ensure_json_normalizable(value: object, field_name: str) -> None:

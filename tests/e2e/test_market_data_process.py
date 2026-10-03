@@ -79,9 +79,7 @@ async def test_market_data_runtime_archives_and_updates_subscriptions(
 
     manifest_symbols = await _manifest_symbols(async_database_url)
     assert {"BTCUSDT", "ETHUSDT"}.issubset(manifest_symbols)
-    assert await capture_repository.latest_process_state() is (
-        MarketDataState.STOPPED
-    )
+    assert await capture_repository.latest_process_state() is (MarketDataState.STOPPED)
     assert _control_event_index(
         fake_binance_server.control_events,
         method="SUBSCRIBE",
@@ -107,6 +105,7 @@ def _write_config(
         "\n".join(
             [
                 "top_count: 20",
+                "loser_target_count: 20",
                 "activation_minute: 1",
                 "",
             ]

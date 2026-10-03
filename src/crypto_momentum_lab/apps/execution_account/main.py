@@ -156,13 +156,6 @@ def sync_once_command(
         str | None,
         typer.Option("--api-secret-env"),
     ] = None,
-    allow_legacy_credential_fallback: Annotated[
-        bool,
-        typer.Option(
-            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
-        ),
-    ] = False,
     expected_multi_assets_mode: Annotated[
         bool,
         typer.Option("--expected-multi-assets-mode/--single-asset-mode"),
@@ -206,7 +199,6 @@ def sync_once_command(
         role=BinanceCredentialRole.READ,
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
-        allow_legacy_fallback=allow_legacy_credential_fallback,
     )
     resolved_account_label = _resolve_account_label(account_label)
     log.info(
@@ -259,13 +251,6 @@ def sync_command(
         str | None,
         typer.Option("--api-secret-env"),
     ] = None,
-    allow_legacy_credential_fallback: Annotated[
-        bool,
-        typer.Option(
-            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
-        ),
-    ] = False,
     expected_multi_assets_mode: Annotated[
         bool,
         typer.Option("--expected-multi-assets-mode/--single-asset-mode"),
@@ -401,7 +386,6 @@ def sync_command(
         role=BinanceCredentialRole.READ,
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
-        allow_legacy_fallback=allow_legacy_credential_fallback,
     )
     resolved_account_label = _resolve_account_label(account_label)
     log.info(
@@ -712,8 +696,7 @@ async def sync_continuously(
             daemon = UserDataAccountSyncDaemon(
                 service=service,
                 stream=stream,
-                config=UserDataAccountSyncConfig(
-                ),
+                config=UserDataAccountSyncConfig(),
                 on_error=_handle_sync_error,
                 on_event_applied=publish_account_event,
                 on_snapshot=publish_account_snapshot,
@@ -803,14 +786,12 @@ def _resolve_cli_credentials(
     role: BinanceCredentialRole,
     api_key_env: str | None,
     api_secret_env: str | None,
-    allow_legacy_fallback: bool,
 ) -> ResolvedBinanceCredentials:
     try:
         return resolve_role_credentials(
             role,
             api_key_env=api_key_env,
             api_secret_env=api_secret_env,
-            allow_legacy_fallback=allow_legacy_fallback,
         )
     except CredentialResolutionError as error:
         raise typer.BadParameter(str(error)) from error

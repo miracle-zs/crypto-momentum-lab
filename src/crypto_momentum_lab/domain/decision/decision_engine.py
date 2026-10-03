@@ -17,7 +17,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from inspect import signature
 from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
@@ -437,9 +436,8 @@ def decide(
     frame = decision_input.frame
     if frame is None:
         clock_event = decision_input.clock_event
-        scope_to_use = (
-            getattr(decision_input.market_ref, "scope", None)
-            or getattr(decision_input.position_view.key, "environment", None)
+        scope_to_use = getattr(decision_input.market_ref, "scope", None) or getattr(
+            decision_input.position_view.key, "environment", None
         )
         if not scope_to_use:
             raise ValueError("Decision frame requires an explicit environment/scope")
@@ -549,7 +547,9 @@ def build_decision_input(
     """
     effective_scope = scope or getattr(state, "environment", None)
     if not effective_scope:
-        raise ValueError("Decision input assembly requires an explicit environment/scope")
+        raise ValueError(
+            "Decision input assembly requires an explicit environment/scope"
+        )
     effective_source_epoch = source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
 
     if market_ref is None:
@@ -851,28 +851,6 @@ def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, An
     }
 
 
-build_decision_trace = decision_trace_from_result
-
-
-def _invoke_decision_callback(
-    callback: Callable[..., Any],
-    result: DecisionResult,
-    decision_input: DecisionInput,
-) -> None:
-    """Adapt the supported one/two-argument callback forms without retrying it."""
-    try:
-        callback_signature = signature(callback)
-    except (TypeError, ValueError):
-        callback(result, decision_input)
-        return
-    try:
-        callback_signature.bind(result, decision_input)
-    except TypeError:
-        callback(result)
-    else:
-        callback(result, decision_input)
-
-
 def map_decision_rejection_reason(raw_reason: str | None) -> str:
     """Canonical rejection reason label shared by live and paper runners."""
     if raw_reason == "cooldown_active":
@@ -889,7 +867,7 @@ def create_authoritative_decision_filter(
     target_notional: Decimal | None = None,
     fact_provider: Callable[[MarketState15s], FrozenDecisionInputs | None]
     | None = None,
-    on_decision_result: Callable[..., None] | None = None,
+    on_decision_result: Callable[[DecisionResult, DecisionInput], None] | None = None,
     trace_recorder: Callable[[DecisionTrace], None] | None = None,
     effective_policy: EffectivePolicy | None = None,
     clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
@@ -913,20 +891,14 @@ def create_authoritative_decision_filter(
 
     def _clock_sequence(state: MarketState15s) -> int:
         sequence = (
-            1
-            if clock_sequence_provider is None
-            else clock_sequence_provider(state)
+            1 if clock_sequence_provider is None else clock_sequence_provider(state)
         )
         if sequence <= 0:
             raise ValueError("decision clock sequence must be positive")
         return sequence
 
     def _source_epoch(state: MarketState15s) -> str:
-        epoch = (
-            None
-            if source_epoch_provider is None
-            else source_epoch_provider(state)
-        )
+        epoch = None if source_epoch_provider is None else source_epoch_provider(state)
         env = getattr(state, "environment", None)
         if not env:
             raise ValueError("MarketState15s requires an explicit environment")
@@ -969,7 +941,9 @@ def create_authoritative_decision_filter(
                 ):
                     scope_to_use = getattr(state, "environment", None)
                     if not scope_to_use:
-                        raise ValueError("MarketState15s requires an explicit environment")
+                        raise ValueError(
+                            "MarketState15s requires an explicit environment"
+                        )
                     policy = (
                         replace(
                             effective_policy,
@@ -993,7 +967,7 @@ def create_authoritative_decision_filter(
                     )
                     dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
                     if trace_recorder is not None:
-                        trace = build_decision_trace(
+                        trace = decision_trace_from_result(
                             dec_res,
                             dec_input,
                             strategy_name=strategy_name,
@@ -1003,8 +977,7 @@ def create_authoritative_decision_filter(
                         )
                         trace_recorder(trace)
                     if on_decision_result is not None:
-                        _invoke_decision_callback(
-                            on_decision_result,
+                        on_decision_result(
                             dec_res,
                             dec_input,
                         )
@@ -1084,7 +1057,7 @@ def create_authoritative_decision_filter(
             # Shared starting PolicyState — never a fresh empty state.
             dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
             if trace_recorder is not None:
-                trace = build_decision_trace(
+                trace = decision_trace_from_result(
                     dec_res,
                     dec_input,
                     strategy_name=strategy_name,
@@ -1095,8 +1068,7 @@ def create_authoritative_decision_filter(
                 )
                 trace_recorder(trace)
             if on_decision_result is not None:
-                _invoke_decision_callback(
-                    on_decision_result,
+                on_decision_result(
                     dec_res,
                     dec_input,
                 )
@@ -1156,9 +1128,7 @@ def create_authoritative_async_decision_filter(
     effective_policy: EffectivePolicy | None = None,
     clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
     source_epoch_provider: Callable[[MarketState15s], str] | None = None,
-) -> Callable[
-    [StrategyDecision, MarketState15s], Awaitable[StrategyDecision]
-]:
+) -> Callable[[StrategyDecision, MarketState15s], Awaitable[StrategyDecision]]:
     """Build the live filter that waits for each durable decision commit.
 
     The synchronous filter remains the API for paper and research callers.
@@ -1212,7 +1182,11 @@ def create_authoritative_async_decision_filter(
                 "decision trace and result callbacks produced different counts"
             )
         for trace, (result, decision_input) in zip(traces, observations, strict=True):
-            await durable_decision_commit(trace, result, decision_input)
+            receipt = await durable_decision_commit(trace, result, decision_input)
+            if getattr(receipt, "is_replay", False):
+                # The original decision already owns its effects. Durable exit
+                # commands resume through outbox recovery, never this replay.
+                return replace(filtered, candidates=())
         return filtered
 
     async def _filter(

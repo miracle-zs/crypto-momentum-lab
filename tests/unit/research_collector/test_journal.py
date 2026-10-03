@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
 from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal
 from crypto_momentum_lab.research_collector.models import (
@@ -230,55 +229,6 @@ def test_journal_commit_materialization_and_advances_sequence(
     assert len(journal.pending_records()) == 0
     assert journal.materialized_sequence == 2
     assert journal.pending_bytes == 0
-
-
-def test_journal_recovery_cleans_tmp_and_reads_legacy_spool(
-    tmp_path: Path,
-) -> None:
-    journal_dir = tmp_path / "journal"
-    legacy_spool_dir = tmp_path / "spool" / "pending" / "hub"
-    legacy_spool_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Write an unfinished tmp file in journal
-    tmp_file = journal_dir / "pending" / "hub" / ".part.12345.tmp"
-    tmp_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file.write_text("partial data", encoding="utf-8")
-
-    # 2. Write a legacy spool file (schema_version 1)
-    state = fixture_state("BTCUSDT", 0)
-    legacy_record = {
-        "schema_version": 1,
-        "source_kind": "hub",
-        "sequence": 5,
-        "stream_id": "legacy-stream",
-        "published_at": state.bucket_end.isoformat(),
-        "environment": "research",
-        "states": [market_state_to_payload(state)],
-        "selection": {"observed_at": state.bucket_start.isoformat(), "symbols": []},
-    }
-    import json
-
-    (legacy_spool_dir / "legacy.json").write_text(
-        json.dumps(legacy_record), encoding="utf-8"
-    )
-
-    # 3. Recover journal
-    journal = ArchiveJournal(
-        journal_dir,
-        environment="research",
-        max_bytes=1024 * 1024,
-    )
-    recovered = journal.recover(legacy_spool_root=tmp_path / "spool" / "pending")
-
-    # Verify tmp file was deleted
-    assert not tmp_file.exists()
-
-    # Verify legacy record was cleanly recovered
-    assert len(recovered) == 1
-    assert recovered[0].receipt.sequence == 5
-    assert recovered[0].receipt.stream_id == "legacy-stream"
-    assert journal.accepted_sequence == 5
-    assert journal.pending_bytes > 0
 
 
 def test_postgres_backfill_batches_have_unique_record_ids_and_selective_commit(

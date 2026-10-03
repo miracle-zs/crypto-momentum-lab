@@ -13,21 +13,28 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution.evidence_digest import (
-    legacy_trade_payload_digest,
-    trade_payload_digest,
-)
+from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict as _DecisionCommitConflict,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState as _DurableExecutionPositionState,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionEvidenceIdentity as _ExecutionEvidenceIdentity,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionHeadSnapshot as _ExecutionHeadSnapshot,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionTradeIdentity as _ExecutionTradeIdentity,
+)
+from crypto_momentum_lab.domain.execution.ports import (
     ExecutionWatermark as _ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
     AccountFacts,
+    AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
 )
@@ -95,8 +102,10 @@ class ExecutionTransaction:
             )
         )
         fact_checkpoint = facts.recovery_checkpoint
-        if checkpoint is not None and fact_checkpoint is not None and (
-            checkpoint != fact_checkpoint
+        if (
+            checkpoint is not None
+            and fact_checkpoint is not None
+            and (checkpoint != fact_checkpoint)
         ):
             raise _DecisionCommitConflict(
                 "checkpoint argument differs from checkpoint embedded in facts"
@@ -243,15 +252,14 @@ class ExecutionTransaction:
                 or existing.quantity != trade.quantity
                 or existing.price != trade.price
                 or existing.side != trade.side
-                or (
-                    existing.payload_digest != trade.payload_digest
-                    and not await self._verified_legacy_trade_replay(
-                        key, existing, trade
-                    )
-                )
+                or existing.payload_digest != trade.payload_digest
             ):
                 raise _DecisionCommitConflict(
                     f"trade {trade.trade_id} conflicts with its durable identity"
+                )
+            if not await self._stored_trade_fact_is_valid(key, existing, trade):
+                raise _DecisionCommitConflict(
+                    f"trade {trade.trade_id} has no intact durable source fact"
                 )
             return False
         self.session.add(
@@ -268,14 +276,12 @@ class ExecutionTransaction:
         )
         return True
 
-    async def _verified_legacy_trade_replay(
+    async def _stored_trade_fact_is_valid(
         self,
         key: PositionKey,
         existing: ExecutionTradeIdentityRow,
         trade: _ExecutionTradeIdentity,
     ) -> bool:
-        # Do not rewrite immutable historical identities. Accept a new digest
-        # only when a hash-verified original fact proves all business fields.
         rows = (
             await self.session.scalars(
                 select(PositionFactJournalEventRow).where(
@@ -291,28 +297,25 @@ class ExecutionTransaction:
                 )
             )
         ).all()
+        if not rows:
+            return False
         for row in rows:
             raw = json.dumps(
                 row.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode()
             if hashlib.sha256(raw).hexdigest() != row.payload_hash:
-                continue
+                return False
             fill = PositionRecoveryCodec.decode_fill(row.payload)
             if (
                 fill.environment != key.environment
                 or fill.account_label != key.account_label
                 or fill.symbol != key.symbol
-                or fill.raw_position_side != key.position_side.value
                 or fill.trade_id != trade.trade_id
                 or fill.trade_at != row.occurred_at
+                or trade_payload_digest(fill) != trade.payload_digest
             ):
-                continue
-            if (
-                legacy_trade_payload_digest(fill) == existing.payload_digest
-                and trade_payload_digest(fill) == trade.payload_digest
-            ):
-                return True
-        return False
+                return False
+        return True
 
     async def persist_watermark(
         self,
@@ -569,19 +572,30 @@ class AsyncPostgresExecutionUnitOfWork:
             )
 
     async def load_position(
-        self, key: PositionKey, *, as_of: datetime,
+        self,
+        key: PositionKey,
+        *,
+        as_of: datetime,
     ) -> _DurableExecutionPositionState | None:
         states = await self._load_position_states(
-            environment=key.environment, account_label=key.account_label,
-            as_of=as_of, key=key,
+            environment=key.environment,
+            account_label=key.account_label,
+            as_of=as_of,
+            key=key,
         )
         return states[0] if states else None
 
     async def load_positions(
-        self, *, environment: str, account_label: str, as_of: datetime,
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        as_of: datetime,
     ) -> tuple[_DurableExecutionPositionState, ...]:
         return await self._load_position_states(
-            environment=environment, account_label=account_label, as_of=as_of,
+            environment=environment,
+            account_label=account_label,
+            as_of=as_of,
         )
 
     async def _load_position_states(
@@ -724,6 +738,8 @@ class AsyncPostgresExecutionUnitOfWork:
     async def transaction(
         self,
         key: PositionKey,
+        *,
+        account_scope: str | None = None,
     ) -> AsyncIterator[ExecutionTransaction]:
         async with self._session_factory() as session:
             async with session.begin():
@@ -733,6 +749,11 @@ class AsyncPostgresExecutionUnitOfWork:
                         "durable execution commits require PostgreSQL transactions"
                     )
                 await session.execute(text("SET LOCAL synchronous_commit = ON"))
+                if account_scope:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": f"live-exposure:{account_scope}"},
+                    )
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
                     {"lock_key": f"execution_position:{key.canonical_id}"},
@@ -748,6 +769,5 @@ class AsyncPostgresExecutionUnitOfWork:
 from crypto_momentum_lab.persistence.postgres.decision_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
 )
-
 
 __all__ = ["AsyncPostgresDecisionUnitOfWork"]

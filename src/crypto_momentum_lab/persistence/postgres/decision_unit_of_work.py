@@ -32,11 +32,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.market.revision_models import (
-    DecisionTrace,
-    MarketRevisionRef,
-    MarketVisibilityMode,
-)
 from crypto_momentum_lab.domain.operational.retention_models import ConsumerDependency
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
@@ -49,7 +44,6 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     DecisionTraceRow,
-    MarketRevisionRefRow,
 )
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
@@ -274,8 +268,7 @@ class AsyncPostgresDecisionUnitOfWork:
                 command_key.environment != environment
                 or command_key.account_label != trace.account_label
                 or command_key.symbol != position_data.get("symbol")
-                or command_key.position_side.value
-                != position_data.get("position_side")
+                or command_key.position_side.value != position_data.get("position_side")
             ):
                 raise _DecisionCommitConflict(
                     "accepted exit scope does not match the decision input"
@@ -352,8 +345,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         expected_exit
                         and existing_exit is not None
                         and (
-                            existing_exit.command_id
-                            != commit.accepted_exit.command_id
+                            existing_exit.command_id != commit.accepted_exit.command_id
                             or existing_exit.command_payload
                             != _trade_command_payload(commit.accepted_exit)
                         )
@@ -369,9 +361,7 @@ class AsyncPostgresDecisionUnitOfWork:
                         next_state_digest=next_digest,
                         policy_revision=prior_commit.policy_revision,
                         durable_at=durable_at,
-                        pending_exit_id=(
-                            trace.decision_id if expected_exit else None
-                        ),
+                        pending_exit_id=(trace.decision_id if expected_exit else None),
                         is_replay=True,
                     )
 
@@ -410,9 +400,7 @@ class AsyncPostgresDecisionUnitOfWork:
                     "policy_revision": new_revision,
                     "policy_version": commit.next_policy_state.policy_version,
                     "state_digest": next_digest,
-                    "state_payload": serialize_policy_state(
-                        commit.next_policy_state
-                    ),
+                    "state_payload": serialize_policy_state(commit.next_policy_state),
                     "last_decision_id": trace.decision_id,
                     "updated_at": now,
                 }
@@ -479,18 +467,13 @@ class AsyncPostgresDecisionUnitOfWork:
             last_decision_id=row.last_decision_id,
         )
 
-    async def load_or_import_policy_state(
+    async def load_policy_state_for_startup(
         self,
         policy_key: str,
         strategy_name: str,
         account_label: str,
     ) -> commit_models.DurablePolicySnapshot | None:
-        """Load the durable head or import a fully verifiable legacy trace.
-
-        A missing head is fresh only when no trace exists for this exact policy.
-        The legacy trace id becomes the bootstrap provenance in
-        ``last_decision_id``; incomplete or inconsistent state is rejected.
-        """
+        """Load current durable state; refuse trace-only state recovery."""
         if (
             not policy_key.strip()
             or not strategy_name.strip()
@@ -540,241 +523,9 @@ class AsyncPostgresDecisionUnitOfWork:
                 )
                 if trace is None:
                     return None
-                payload = trace.trace_payload
-                if (
-                    not isinstance(payload, dict)
-                    or payload.get("trace_schema_version") != 1
-                    or not isinstance(payload.get("input_hash"), str)
-                    or not payload.get("input_hash")
-                    or not isinstance(payload.get("frame_digest"), str)
-                    or not payload.get("frame_digest")
-                ):
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} is incomplete"
-                    )
-
-                expected_state_fields = {
-                    "serialization_version",
-                    "policy_version",
-                    "cooldown_until",
-                    "anchor_prices",
-                    "active_intent_ids",
-                    "custom_state",
-                    "signal_memory",
-                    "warmup_status",
-                    "grace_until",
-                    "holding_deadline",
-                    "sizing_state",
-                }
-
-                def decode_legacy_state(field_name: str) -> PolicyState:
-                    serialized = payload.get(field_name)
-                    if (
-                        not isinstance(serialized, dict)
-                        or set(serialized) != expected_state_fields
-                        or serialized.get("serialization_version") != 1
-                        or type(serialized.get("policy_version")) is not int
-                        or serialized.get("policy_version", 0) < 1
-                        or any(
-                            not isinstance(serialized.get(name), dict)
-                            for name in (
-                                "cooldown_until",
-                                "anchor_prices",
-                                "active_intent_ids",
-                                "custom_state",
-                                "signal_memory",
-                                "warmup_status",
-                                "grace_until",
-                                "holding_deadline",
-                                "sizing_state",
-                            )
-                        )
-                    ):
-                        raise _DecisionCommitConflict(
-                            f"legacy decision trace {trace.decision_id} has an "
-                            f"incomplete {field_name}"
-                        )
-                    try:
-                        state = _policy_state_from_payload(serialized)
-                    except (TypeError, ValueError) as err:
-                        raise _DecisionCommitConflict(
-                            f"legacy decision trace {trace.decision_id} has an "
-                            f"invalid {field_name}"
-                        ) from err
-                    if serialize_policy_state(state) != serialized:
-                        raise _DecisionCommitConflict(
-                            f"legacy decision trace {trace.decision_id} has a "
-                            f"non-canonical {field_name}"
-                        )
-                    return state
-
-                prior_state = decode_legacy_state("prior_policy_state")
-                next_state = decode_legacy_state("next_policy_state")
-                prior_digest = compute_policy_state_digest(prior_state)
-                next_digest = compute_policy_state_digest(next_state)
-                frame = payload.get("decision_frame")
-                if (
-                    not isinstance(frame, dict)
-                    or frame.get("policy_state_digest") != prior_digest
-                    or payload.get("frame_digest")
-                    != trace.trace_payload.get("frame_digest")
-                ):
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} does not bind "
-                        "its prior policy state"
-                    )
-                revision_ids = trace.evaluated_revision_ids
-                if (
-                    not isinstance(revision_ids, list)
-                    or not revision_ids
-                    or any(
-                        not isinstance(value, str) or not value
-                        for value in revision_ids
-                    )
-                    or len(revision_ids) != len(set(revision_ids))
-                ):
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} has invalid "
-                        "market revision references"
-                    )
-                refs = (
-                    await session.scalars(
-                        select(MarketRevisionRefRow).where(
-                            MarketRevisionRefRow.revision_id.in_(revision_ids)
-                        )
-                    )
-                ).all()
-                if {row.revision_id for row in refs} != set(revision_ids) or any(
-                    not isinstance(row.payload, dict)
-                    or row.payload.get("reference_only") is True
-                for row in refs
-                ):
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} has missing or "
-                        "incomplete market facts"
-                    )
-
-                ref_by_id = {row.revision_id: row for row in refs}
-                try:
-                    domain_trace = DecisionTrace(
-                        decision_id=trace.decision_id,
-                        strategy_name=trace.strategy_name,
-                        account_label=trace.account_label,
-                        decision_time=trace.decision_time,
-                        evaluated_market_refs=tuple(
-                            MarketRevisionRef(
-                                scope=ref_by_id[revision_id].scope,
-                                symbol=ref_by_id[revision_id].symbol,
-                                interval=ref_by_id[revision_id].interval,
-                                bucket_start=ref_by_id[revision_id].bucket_start,
-                                bucket_end=ref_by_id[revision_id].bucket_end,
-                                revision_id=ref_by_id[revision_id].revision_id,
-                                content_hash=ref_by_id[revision_id].content_hash,
-                                published_at=ref_by_id[revision_id].published_at,
-                                source_epoch=ref_by_id[revision_id].source_epoch,
-                                visibility_mode=MarketVisibilityMode(
-                                    ref_by_id[revision_id].visibility_mode
-                                ),
-                            )
-                            for revision_id in revision_ids
-                        ),
-                        intent_produced=trace.intent_produced,
-                        intent_id=trace.intent_id,
-                        rejection_reason=trace.rejection_reason,
-                        input_hash=str(payload["input_hash"]),
-                        frame_digest=str(payload["frame_digest"]),
-                        trace_payload=dict(payload),
-                    )
-                    frame_evidence = payload.get("decision_frame")
-                    position_context = payload.get("decision_context")
-                    position_view = (
-                        position_context.get("position_view")
-                        if isinstance(position_context, dict)
-                        else None
-                    )
-                    position_key = (
-                        position_view.get("position_key")
-                        if isinstance(position_view, dict)
-                        else None
-                    )
-                    clock_event = payload.get("clock_event")
-                    if (
-                        not isinstance(frame_evidence, dict)
-                        or frame_evidence.get("market_revision_ids") != revision_ids
-                        or not isinstance(position_key, dict)
-                        or position_key.get("account_label") != account_label
-                        or position_key.get("environment")
-                        != policy_key.split("/", maxsplit=1)[0]
-                        or not isinstance(clock_event, dict)
-                        or clock_event.get("timestamp")
-                        != trace.decision_time.astimezone(UTC).isoformat()
-                    ):
-                        raise _DecisionCommitConflict(
-                            f"legacy decision trace {trace.decision_id} has an "
-                            "inconsistent decision scope or clock"
-                        )
-                    from crypto_momentum_lab.domain.decision.trace_audit import (
-                        verify_decision_trace,
-                    )
-
-                    audit = verify_decision_trace(
-                        domain_trace,
-                        decision_id=trace.decision_id,
-                    )
-                except _DecisionCommitConflict:
-                    raise
-                except Exception as err:
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} could not be "
-                        "fully reconstructed"
-                    ) from err
-                if (
-                    not isinstance(audit, dict)
-                    or audit.get("status") != "VERIFIED_REPRODUCIBLE"
-                    or audit.get("reproduced") is not True
-                    or audit.get("strategy_name") != strategy_name
-                    or audit.get("account_label") != account_label
-                ):
-                    detail = (
-                        audit.get("error")
-                        if isinstance(audit, dict)
-                        else "invalid audit result"
-                    )
-                    raise _DecisionCommitConflict(
-                        f"legacy decision trace {trace.decision_id} failed strict "
-                        f"replay verification: {detail}"
-                    )
-
-                imported_at = datetime.now(UTC)
-                state_row = DurablePolicyStateRow(
-                    policy_key=policy_key,
-                    policy_revision=1,
-                    policy_version=next_state.policy_version,
-                    state_digest=next_digest,
-                    state_payload=serialize_policy_state(next_state),
-                    last_decision_id=trace.decision_id,
-                    updated_at=imported_at,
+                raise _DecisionCommitConflict(
+                    f"decision trace {trace.decision_id} has no durable policy head"
                 )
-                session.add(state_row)
-                return commit_models.DurablePolicySnapshot(
-                    state=next_state,
-                    state_digest=next_digest,
-                    revision=1,
-                    last_decision_id=trace.decision_id,
-                )
-
-    async def restore_or_import_policy_state(
-        self,
-        policy_key: str,
-        strategy_name: str,
-        account_label: str,
-    ) -> commit_models.DurablePolicySnapshot | None:
-        """Compatibility alias for startup policy recovery callers."""
-        return await self.load_or_import_policy_state(
-            policy_key,
-            strategy_name,
-            account_label,
-        )
 
     async def load_pending_exits(
         self, policy_key: str | None = None
@@ -786,18 +537,14 @@ class AsyncPostgresDecisionUnitOfWork:
             if policy_key is not None:
                 query = query.where(DurableDecisionExitRow.policy_key == policy_key)
             rows = (
-                await session.scalars(
-                    query.order_by(DurableDecisionExitRow.created_at)
-                )
+                await session.scalars(query.order_by(DurableDecisionExitRow.created_at))
             ).all()
         return tuple(
             (row.decision_id, _trade_command_from_payload(row.command_payload))
             for row in rows
         )
 
-    async def mark_exit_dispatched(
-        self, decision_id: str, command_id: str
-    ) -> bool:
+    async def mark_exit_dispatched(self, decision_id: str, command_id: str) -> bool:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
@@ -883,22 +630,36 @@ class AsyncPostgresDecisionUnitOfWork:
 
 
 def _policy_state_from_payload(payload: dict[str, Any]) -> PolicyState:
-    cooldown = payload.get("cooldown_until_by_symbol") or payload.get(
-        "cooldown_until", {}
+    expected_fields = {
+        "serialization_version",
+        "policy_version",
+        "cooldown_until",
+        "anchor_prices",
+        "active_intent_ids",
+        "custom_state",
+        "signal_memory",
+        "warmup_status",
+        "grace_until",
+        "holding_deadline",
+        "sizing_state",
+    }
+    from crypto_momentum_lab.domain.decision.policy_transition import (
+        POLICY_STATE_SERIALIZATION_VERSION,
     )
-    anchors = payload.get("anchor_prices_by_symbol") or payload.get(
-        "anchor_prices", {}
-    )
-    intents = payload.get("active_intent_ids_by_symbol") or payload.get(
-        "active_intent_ids", {}
-    )
-    grace = payload.get("grace_until_by_symbol") or payload.get("grace_until", {})
-    deadlines = payload.get("holding_deadline_by_symbol") or payload.get(
-        "holding_deadline", {}
-    )
-    sizing = payload.get("sizing_state_by_symbol") or payload.get("sizing_state", {})
+
+    if (
+        set(payload) != expected_fields
+        or payload["serialization_version"] != POLICY_STATE_SERIALIZATION_VERSION
+    ):
+        raise _DecisionCommitConflict("stored policy state uses an unsupported schema")
+    cooldown = payload["cooldown_until"]
+    anchors = payload["anchor_prices"]
+    intents = payload["active_intent_ids"]
+    grace = payload["grace_until"]
+    deadlines = payload["holding_deadline"]
+    sizing = payload["sizing_state"]
     return PolicyState(
-        policy_version=int(payload.get("policy_version", 1)),
+        policy_version=int(payload["policy_version"]),
         cooldown_until_by_symbol={
             key: datetime.fromisoformat(value) if isinstance(value, str) else value
             for key, value in cooldown.items()
@@ -907,9 +668,9 @@ def _policy_state_from_payload(payload: dict[str, Any]) -> PolicyState:
             key: Decimal(str(value)) for key, value in anchors.items()
         },
         active_intent_ids_by_symbol=dict(intents),
-        custom_state=dict(payload.get("custom_state", {})),
-        signal_memory=dict(payload.get("signal_memory", {})),
-        warmup_status=dict(payload.get("warmup_status", {})),
+        custom_state=dict(payload["custom_state"]),
+        signal_memory=dict(payload["signal_memory"]),
+        warmup_status=dict(payload["warmup_status"]),
         grace_until_by_symbol={
             key: datetime.fromisoformat(value) if isinstance(value, str) else value
             for key, value in grace.items()
@@ -920,5 +681,6 @@ def _policy_state_from_payload(payload: dict[str, Any]) -> PolicyState:
         },
         sizing_state_by_symbol=dict(sizing),
     )
+
 
 __all__ = ["AsyncPostgresDecisionUnitOfWork"]

@@ -124,22 +124,6 @@ async def test_missing_lease_blocks_before_intent_or_order_write():
     assert transaction.__aexit__.await_args.args[0] is OrderPreSubmissionError
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("won", [False, True])
-async def test_claim_updates_intent_only_for_winning_worker(won):
-    repository, session, transaction, _ = database(["candidate-1" if won else None])
-    assert (
-        await repository.claim_intent(
-            "candidate-1",
-            "worker",
-            NOW,
-            NOW + timedelta(minutes=1),
-        )
-        is won
-    )
-    assert session.execute.await_count == (2 if won else 1)
-    transaction.__aexit__.assert_awaited_once_with(None, None, None)
-
 
 @pytest.mark.asyncio
 async def test_rejected_risk_evaluation_does_not_open_transaction():

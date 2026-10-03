@@ -29,7 +29,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     JournalFactDelta,
-    PositionCheckpoint,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
@@ -46,7 +45,6 @@ class AccountFactEnvelope:
     snapshot: AccountPositionSnapshot | None = None
     boundary: ExitOrderSubmissionFact | None = None
     coverage: FactCoverageInterval | None = None
-    checkpoint: PositionCheckpoint | None = None
     recovery_checkpoint: PositionRecoveryCheckpoint | None = None
     conflict: AccountFactConflict | None = None
     fill_load_provenance: AccountFillLoadProvenance | None = None
@@ -72,7 +70,6 @@ class AccountJournal:
         self._snapshots: list[AccountPositionSnapshot] = []
         self._boundaries: list[ExitOrderSubmissionFact] = []
         self._coverage: FactCoverageInterval | None = None
-        self._checkpoint: PositionCheckpoint | None = None
         self._recovery_checkpoint: PositionRecoveryCheckpoint | None = None
         self._high_watermark_trade_at: datetime | None = None
         self._has_late_events: bool = False
@@ -271,17 +268,6 @@ class AccountJournal:
             self._cached_facts_none = None
             self._revision += 1
 
-    def set_checkpoint(self, checkpoint: PositionCheckpoint) -> None:
-        if checkpoint.key.canonical_id != self._position_key.canonical_id:
-            raise ValueError(
-                f"Checkpoint key {checkpoint.key.canonical_id} does not "
-                f"match {self._position_key.canonical_id}"
-            )
-        self._checkpoint = checkpoint
-        self._update_latest_event_at(checkpoint.event_cut)
-        self._cached_facts_none = None
-        self._revision += 1
-
     def set_recovery_checkpoint(
         self,
         checkpoint: PositionRecoveryCheckpoint,
@@ -456,7 +442,6 @@ class AccountJournal:
         journal._snapshots = list(cut.facts.snapshots)
         journal._boundaries = list(cut.facts.exit_boundaries)
         journal._coverage = cut.facts.coverage
-        journal._checkpoint = cut.facts.checkpoint
         journal._recovery_checkpoint = cut.checkpoint
         journal._fact_conflicts = list(cut.facts.fact_conflicts)
         journal._fact_conflicts = list(
@@ -493,8 +478,6 @@ class AccountJournal:
         ]
         if journal._recovery_checkpoint is not None:
             timestamps.append(journal._recovery_checkpoint.event_cut)
-        if journal._checkpoint is not None:
-            timestamps.append(journal._checkpoint.event_cut)
         if journal._coverage is not None and journal._coverage.end_at is not None:
             timestamps.append(journal._coverage.end_at)
         journal._latest_event_at = max(timestamps, default=None)
@@ -510,8 +493,6 @@ class AccountJournal:
             self.record_boundary(envelope.boundary)
         if envelope.coverage is not None:
             self.set_coverage(envelope.coverage)
-        if envelope.checkpoint is not None:
-            self.set_checkpoint(envelope.checkpoint)
         if envelope.recovery_checkpoint is not None:
             self.set_recovery_checkpoint(envelope.recovery_checkpoint)
         if envelope.conflict is not None:
@@ -571,7 +552,6 @@ class AccountJournal:
             conflicts = tuple(self._conflicts)
             fact_conflicts = tuple(self._fact_conflicts)
             recovery_checkpoint = self._recovery_checkpoint
-            checkpoint = self._checkpoint
             cursor_provenance = self._fill_cursor_provenance
             fill_load_provenance = self._fill_load_provenance
         else:
@@ -588,11 +568,6 @@ class AccountJournal:
                 self._recovery_checkpoint
                 if self._recovery_checkpoint is not None
                 and self._recovery_checkpoint.event_cut <= cut
-                else None
-            )
-            checkpoint = (
-                self._checkpoint
-                if self._checkpoint is not None and self._checkpoint.event_cut <= cut
                 else None
             )
             cursor_provenance = (
@@ -666,7 +641,6 @@ class AccountJournal:
             snapshots=snapshots,
             exit_boundaries=boundaries,
             coverage=coverage,
-            checkpoint=checkpoint,
             has_synthetic_fills=has_synthetic_fills,
             conflicting_fills=conflicts,
             has_late_events=has_late_events,

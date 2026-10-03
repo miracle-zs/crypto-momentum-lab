@@ -82,14 +82,7 @@ async def load_order_identity_metadata(
     account_label: str,
     since: datetime | None = None,
 ) -> OrderIdentityMetadata:
-    """Load the event/fill evidence needed to split legacy order attempts.
-
-    ``exchange_orders`` is keyed by client order ID, but older execution paths
-    reused that ID for more than one exchange order.  The event journal keeps
-    the exchange identities, and account fills provide the authoritative
-    quantity for each identity.  Runtime position reconstruction must use both
-    before it decides where an exit boundary belongs.
-    """
+    """Load exchange identity evidence and authoritative account fills."""
 
     client_order_ids = tuple(
         sorted({order.client_order_id for order in orders if order.client_order_id})

@@ -184,7 +184,11 @@ class _FakeAsyncSession:
     ) -> None:
         for values in cls._insert_values(statement):
             row = row_type(**values)
-            identity = row.decision_id if isinstance(row, DecisionTraceRow) else row.revision_id
+            identity = (
+                row.decision_id
+                if isinstance(row, DecisionTraceRow)
+                else row.revision_id
+            )
             rows_by_id.setdefault(identity, row)
 
     @staticmethod
@@ -333,7 +337,10 @@ async def test_postgres_decision_trace_repository_load() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
+@pytest.mark.parametrize("is_replay", [False, True])
+async def test_async_decision_filter_awaits_durable_commit_callback(
+    is_replay: bool,
+) -> None:
 
     state = _make_market_state()
     key = PositionKey(
@@ -343,14 +350,6 @@ async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
         position_side=FuturesPositionSide.BOTH,
     )
     opened_at = datetime(2026, 9, 25, 6, 0, tzinfo=UTC)
-    batch = PositionLedgerBatch(
-        batch_id="b_01",
-        episode_id="ep_01",
-        quantity=Decimal("1.0"),
-        original_quantity=Decimal("1.0"),
-        entry_price=Decimal("100.00"),
-        opened_at=opened_at,
-    )
     view = PositionView(
         key=key,
         projection_version="pv1",
@@ -364,7 +363,7 @@ async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
             status=FactCoverageStatus.CONFIRMED,
         ),
         active_episode=None,
-        batches=(batch,),
+        batches=(),
         unallocated_quantity=Decimal("0"),
         reconciliation_gap=Decimal("0"),
         health_status=PositionHealthStatus.READY,
@@ -380,14 +379,21 @@ async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
     commits: list[tuple[DecisionTrace, object, object]] = []
     callback_finished = False
 
-    async def provide_facts(_state: MarketState15s, _side: object) -> FrozenDecisionInputs:
+    async def provide_facts(
+        _state: MarketState15s, _side: object
+    ) -> FrozenDecisionInputs:
         return frozen
 
-    async def durable_commit(trace: DecisionTrace, result: object, inp: object) -> None:
+    async def durable_commit(
+        trace: DecisionTrace, result: object, inp: object
+    ) -> object:
+        from types import SimpleNamespace
+
         nonlocal callback_finished
         await asyncio.sleep(0)
         commits.append((trace, result, inp))
         callback_finished = True
+        return SimpleNamespace(is_replay=is_replay)
 
     filt = create_authoritative_async_decision_filter(
         "orderflow_impulse",
@@ -436,18 +442,20 @@ async def test_async_decision_filter_awaits_durable_commit_callback() -> None:
         features={},
     )
     dec = StrategyDecision(signals=(signal,), candidates=(candidate,), rejections=())
-    await filt(dec, state)
+    out = await filt(dec, state)
 
     assert len(commits) == 1
     assert callback_finished
+    assert bool(out.candidates) is not is_replay
     trace = commits[0][0]
     assert trace.account_label == "primary"
     assert trace.strategy_name == "orderflow_impulse"
     assert "market_state" in trace.trace_payload
     assert "policy_parameters" in trace.trace_payload
     assert "prior_policy_state" in trace.trace_payload
-    assert "output_exit_command" in trace.trace_payload
-
+    assert (
+        trace.trace_payload["input_candidate"]["candidate_id"] == candidate.candidate_id
+    )
 
 
 @pytest.mark.asyncio
@@ -727,9 +735,11 @@ async def test_decision_trace_repository_blocks_conflicting_overwrite() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decision_trace_accepts_existing_market_revision_with_canonical_and_authoritative_payload() -> None:
+async def test_decision_trace_accepts_existing_market_revision_with_canonical_and_authoritative_payload() -> (
+    None
+):
     """Decision traces must not conflict with market revisions previously persisted by the market feed.
-    
+
     The market feed saves authoritative MarketRevisionRefRows with is_canonical=True,
     detailed exchange payload, and source watermark lineage. When a strategy executes
     and persists its DecisionTrace referencing that market revision, it must accept
@@ -756,7 +766,11 @@ async def test_decision_trace_accepts_existing_market_revision_with_canonical_an
         source_epoch="seq_5284",
         visibility_mode="decision_visible",
         is_canonical=True,  # Promoted by canonical promoter
-        payload={"spread": "0.0000010", "symbol": "XPINUSDT", "exchange": "binance-usdm"},
+        payload={
+            "spread": "0.0000010",
+            "symbol": "XPINUSDT",
+            "exchange": "binance-usdm",
+        },
         lineage={"source_watermark_at": "2026-09-28T14:02:30.006000+00:00"},
     )
 
@@ -825,4 +839,3 @@ async def test_decision_trace_accepts_existing_market_revision_with_canonical_an
     )
     with pytest.raises(ValueError, match="Immutable audit conflict: MarketRevisionRef"):
         await repo.save_decision_traces([conflicting_trace])
-

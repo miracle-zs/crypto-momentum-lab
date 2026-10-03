@@ -780,6 +780,81 @@ async def test_cancel_fallback_waits_for_fresh_context_without_submitting():
     assert submission.calls == []
 
 
+async def test_grace_cancel_rebuilds_fallback_from_latest_position_after_context_invalidation():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.domain.strategy import StrategySide
+    from crypto_momentum_lab.live_rollout.exits import (
+        LiveExitCancellationRequest,
+        ManagedLivePosition,
+    )
+
+    is_current = [True]
+    old_position = ManagedLivePosition(
+        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
+        Decimal("1.0"), Decimal("100"), NOW,
+        batch_id="batch-1", projection_version="old",
+    )
+    fresh_position = replace(old_position, quantity=Decimal("0.6"), projection_version="new")
+    fresh_context = SimpleNamespace(
+        pending_position_symbols=frozenset(),
+        unmanaged_position_symbols=frozenset(),
+        managed_positions=(fresh_position,),
+    )
+    submission = RecordingSubmission(_acknowledged_result())
+    processor = _processor(submission, context_is_current=lambda _: is_current[0])
+    processor._context_provider = AsyncMock(return_value=fresh_context)
+    processor._apply_context = lambda _: None
+    processor._state_machine = SimpleNamespace(cancel_order=AsyncMock(
+        side_effect=lambda _plan: (
+            is_current.__setitem__(0, False)
+            or OrderExecutionResult("recovery", ExchangeOrderState.CANCELED, None)
+        )
+    ))
+    candidate = replace(
+        _intent(),
+        candidate_id="old-fallback",
+        reduce_only=True,
+        desired_notional=Decimal("100"),
+        features={
+            "quantity": "1.0",
+            "reference_price": "100",
+            "exit_allocations": [{"batch_id": "batch-1", "quantity": "1.0"}],
+        },
+    )
+    cancel_plan = OrderExecutionPlan(
+        "recovery", "run-1", "recovery", "BTCUSDT", "SELL", "LIMIT",
+        Decimal("1.0"), Decimal("99"), True, NOW,
+        position_side=FuturesPositionSide.LONG,
+    )
+    request = LiveExitCancellationRequest(
+        cancel_plan=cancel_plan,
+        fallback_candidate=candidate,
+        fallback_quantity=Decimal("1.0"),
+    )
+
+    result = await processor.process_requests(
+        (request,), state=_state(), context=SimpleNamespace(
+            pending_position_symbols=frozenset(),
+            unmanaged_position_symbols=frozenset(),
+            managed_positions=(old_position,),
+        ),
+    )
+
+    assert result == (1, 1, None)
+    assert processor._context_provider.await_count == 1
+    submitted_candidate, submitted_quantity, _ = submission.calls[0]
+    assert submitted_quantity == Decimal("0.6")
+    assert submitted_candidate.features["quantity"] == "0.6"
+    assert submitted_candidate.features["exit_allocations"] == [
+        {"batch_id": "batch-1", "quantity": "0.6"}
+    ]
+
+
 async def test_stale_candle_context_is_not_acknowledged_as_evaluated():
     from unittest.mock import AsyncMock
 

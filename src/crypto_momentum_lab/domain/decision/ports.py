@@ -21,7 +21,7 @@ from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 
 
 class DecisionUnitOfWorkPort(Protocol):
-    async def load_or_import_policy_state(
+    async def load_policy_state_for_startup(
         self,
         policy_key: str,
         strategy_name: str,

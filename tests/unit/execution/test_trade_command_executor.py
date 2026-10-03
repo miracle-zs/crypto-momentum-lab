@@ -212,3 +212,30 @@ def test_trade_command_executor_limit_sell_price_rounding_up() -> None:
     assert result.plan.side == "SELL"
     # tick_size 0.10: 50123.41 ROUND_UP -> 50123.50
     assert result.plan.price == Decimal("50123.50")
+    assert result.plan.reference_price == Decimal("50000")
+
+
+def test_plan_order_execution_preserves_reference_price_for_market_order() -> None:
+    cmd = TradeCommand(
+        command_id="cmd-market-ref",
+        position_key=PositionKey(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.BOTH,
+        ),
+        command_type=TradeCommandType.ENTRY,
+        side=StrategySide.LONG,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("0.05"),
+        limit_price=None,
+    )
+    result = plan_order_execution(
+        cmd,
+        RULES,
+        run_id="run-1",
+        reference_price=Decimal("65432.10"),
+    )
+    assert result.plan is not None
+    assert result.plan.price is None
+    assert result.plan.reference_price == Decimal("65432.10")

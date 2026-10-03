@@ -32,8 +32,7 @@ class FixtureMarketData:
             for symbol in self.symbols
         )
         self.price_values = {
-            symbol: Decimal(80 + index)
-            for index, symbol in enumerate(self.symbols)
+            symbol: Decimal(80 + index) for index, symbol in enumerate(self.symbols)
         }
 
     async def fetch_active_usdt_perpetuals(
@@ -80,6 +79,7 @@ def build_fixture_service(
         market_data=market_data,
         repository=repository,
         config=UniverseConfig(
+            loser_target_count=20,
             top_count=20,
             activation_minute=1,
         ),

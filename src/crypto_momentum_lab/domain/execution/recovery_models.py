@@ -67,7 +67,7 @@ class PositionRecoveryCheckpoint:
             object.__setattr__(self, "checkpoint_id", f"prc_{uuid4().hex}")
         if type(self.schema_version) is not int:
             raise RecoverySchemaError("checkpoint schema version must be an integer")
-        if self.schema_version not in {2, POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION}:
+        if self.schema_version != POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION:
             raise RecoverySchemaError(
                 f"unsupported position recovery checkpoint schema {self.schema_version}"
             )
@@ -224,16 +224,12 @@ class PositionRecoveryCheckpoint:
                 raise RecoverySchemaError(
                     "parent checkpoint cut must precede new checkpoint cut"
                 )
-            if self.schema_version >= 3 and self.parent_stream_scope is None:
+            if self.parent_stream_scope is None:
                 raise RecoverySchemaError("checkpoint parent stream scope is missing")
-            parent_scope = self.parent_stream_scope or self.stream_scope
+            parent_scope = self.parent_stream_scope
             if not parent_scope.matches(self.key):
                 raise RecoverySchemaError(
                     "parent checkpoint stream scope has a different position key"
-                )
-            if self.schema_version == 2 and self.parent_stream_scope is not None:
-                raise RecoverySchemaError(
-                    "legacy checkpoint schema cannot declare parent stream scope"
                 )
             for name, digest in (
                 ("parent_facts_hash", self.parent_facts_hash),

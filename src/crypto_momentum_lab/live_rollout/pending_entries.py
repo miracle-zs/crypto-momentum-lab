@@ -96,9 +96,15 @@ class LivePendingEntryRegistry:
                 Decimal("0"),
                 plan.quantity - executed_quantity,
             )
-            if remaining_quantity <= 0 or plan.price is None:
+            if remaining_quantity <= 0:
                 continue
-            reserved_notional += remaining_quantity * plan.price
+            effective_price = (
+                plan.price
+                if plan.price is not None
+                else getattr(plan, "reference_price", None)
+            )
+            if effective_price is not None and effective_price > 0:
+                reserved_notional += remaining_quantity * effective_price
             reserved_symbols.add(plan.symbol)
         return reserved_notional, frozenset(reserved_symbols)
 

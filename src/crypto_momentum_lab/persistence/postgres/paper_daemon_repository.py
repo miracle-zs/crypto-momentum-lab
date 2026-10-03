@@ -26,7 +26,6 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperEntryFilterConfig,
     PaperExitConfig,
-    PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     ReplayExecutionConfig,
@@ -339,27 +338,8 @@ class PostgresPaperDaemonRepository:
                     )
                 }
                 actual = {key: getattr(existing, key) for key in expected}
-                if _normalize_paper_run_for_compare(
-                    actual
-                ) != _normalize_paper_run_for_compare(expected):
-                    upgrade_values = _legacy_paper_run_upgrade_values(
-                        actual=actual,
-                        expected=expected,
-                        compatible_config_hashes=(
-                            identity.config_hash,
-                            *identity.config_hash_aliases,
-                        ),
-                    )
-                    if upgrade_values is None:
-                        raise ValueError("paper live run conflict")
-                    existing.code_commit = cast(
-                        str,
-                        upgrade_values["code_commit"],
-                    )
-                    existing.execution_config = cast(
-                        dict[str, object],
-                        upgrade_values["execution_config"],
-                    )
+                if _normalize_for_compare(actual) != _normalize_for_compare(expected):
+                    raise ValueError("paper live run conflict")
         self._portfolio_stats.pop(identity.run_id, None)
 
     async def load_pending_candidates(
@@ -1101,80 +1081,6 @@ def _normalize_for_compare(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_normalize_for_compare(item) for item in value]
     return value
-
-
-def _normalize_paper_run_for_compare(
-    value: dict[str, object],
-) -> dict[str, object]:
-    normalized = cast(dict[str, object], _normalize_for_compare(value))
-    execution_config = normalized.get("execution_config")
-    if not isinstance(execution_config, dict):
-        return normalized
-    portfolio = execution_config.get("portfolio")
-    if isinstance(portfolio, dict):
-        portfolio.setdefault("exit_mode", PaperExitMode.CANDLE_15M.value)
-    return normalized
-
-
-def _legacy_paper_run_upgrade_values(
-    *,
-    actual: dict[str, object],
-    expected: dict[str, object],
-    compatible_config_hashes: tuple[str, ...] = (),
-) -> dict[str, object] | None:
-    """Return safe in-place upgrades for compatible paper runs."""
-    normalized_actual = _normalize_paper_run_for_compare(actual)
-    normalized_expected = _normalize_paper_run_for_compare(expected)
-    if normalized_actual.get("config_hash") != normalized_expected.get("config_hash"):
-        if normalized_actual.get("config_hash") not in compatible_config_hashes:
-            return None
-        normalized_actual = dict(normalized_actual)
-        normalized_actual["config_hash"] = normalized_expected.get("config_hash")
-    actual_without_commit = {
-        key: value for key, value in normalized_actual.items() if key != "code_commit"
-    }
-    expected_without_commit = {
-        key: value for key, value in normalized_expected.items() if key != "code_commit"
-    }
-    if actual_without_commit == expected_without_commit:
-        return {
-            "code_commit": expected["code_commit"],
-            "execution_config": expected["execution_config"],
-        }
-
-    actual_execution = normalized_actual.get("execution_config")
-    expected_execution = normalized_expected.get("execution_config")
-    if not isinstance(actual_execution, dict) or not isinstance(
-        expected_execution, dict
-    ):
-        return None
-
-    upgraded_execution = dict(actual_execution)
-    for section, field_names in _NEW_EXECUTION_FIELDS.items():
-        actual_section = actual_execution.get(section)
-        expected_section = expected_execution.get(section)
-        if not isinstance(expected_section, dict):
-            return None
-        if actual_section is not None and not isinstance(actual_section, dict):
-            return None
-        upgraded_section = {} if actual_section is None else dict(actual_section)
-        for field_name in field_names:
-            if field_name in upgraded_section:
-                continue
-            if field_name not in expected_section:
-                return None
-            upgraded_section[field_name] = expected_section[field_name]
-        upgraded_execution[section] = upgraded_section
-
-    upgraded_actual = dict(normalized_actual)
-    upgraded_actual["code_commit"] = normalized_expected.get("code_commit")
-    upgraded_actual["execution_config"] = upgraded_execution
-    if upgraded_actual != normalized_expected:
-        return None
-    return {
-        "code_commit": expected["code_commit"],
-        "execution_config": expected["execution_config"],
-    }
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

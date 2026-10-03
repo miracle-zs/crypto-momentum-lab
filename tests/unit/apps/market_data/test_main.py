@@ -161,38 +161,10 @@ def test_parse_paper_exit_run_ids_normalizes_csv() -> None:
     )
 
 
-def test_parse_live_position_account_label_normalizes_optional_value() -> None:
-    assert main.parse_live_position_account_label(" primary ") == "primary"
-    assert main.parse_live_position_account_label("  ") is None
-
-
 def test_parse_live_position_account_labels_supports_multiple_accounts() -> None:
     assert main.parse_live_position_account_labels(
         " primary, account-2,primary "
     ) == frozenset({"primary", "account-2"})
-
-
-def test_parse_live_position_account_labels_falls_back_to_legacy_single_label(
-    monkeypatch,
-) -> None:
-    monkeypatch.delenv("CML_LIVE_POSITION_ACCOUNT_LABELS", raising=False)
-    monkeypatch.setenv("CML_LIVE_POSITION_ACCOUNT_LABEL", " primary ")
-
-    assert main.parse_live_position_account_labels() == frozenset({"primary"})
-
-
-def test_parse_live_position_account_labels_merges_legacy_single_label(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("CML_LIVE_POSITION_ACCOUNT_LABEL", " primary ")
-    monkeypatch.setenv(
-        "CML_LIVE_POSITION_ACCOUNT_LABELS",
-        "account-2, account-3",
-    )
-
-    assert main.parse_live_position_account_labels() == frozenset(
-        {"primary", "account-2", "account-3"}
-    )
 
 
 def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:

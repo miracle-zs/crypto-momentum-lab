@@ -13,7 +13,6 @@ from typer.testing import CliRunner
 from crypto_momentum_lab.apps.live_rollout import main
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
-
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
@@ -130,7 +129,7 @@ accounts:
       entry_positive_gainer_top_count: 17
       require_price_above_ema5: true
       require_price_above_ema10: false
-      entry_policy_mode: compare_only
+      entry_policy_mode: enforce
       entry_order_type: limit
       entry_limit_ttl_seconds: 1200
     execution_config:
@@ -227,8 +226,6 @@ accounts:
     assert config.strategy.entry_positive_gainer_top_count == 17
     assert config.strategy.require_price_above_ema5 is True
     assert config.strategy.require_price_above_ema10 is False
-    assert config.strategy.entry_policy_compare_only is True
-    assert config.strategy.entry_policy_enforce is False
     assert config.strategy.entry_order_type is main.EntryType.LIMIT
     assert config.strategy.entry_limit_ttl_seconds == 1200
     assert config.execution.hedge_mode is True
@@ -523,23 +520,6 @@ def test_live_run_exposes_operation_aware_telemetry_option() -> None:
     assert "--persist-exchan" in result.stdout
 
 
-def test_live_run_rejects_conflicting_entry_policy_modes() -> None:
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--entry-policy-compare-only",
-            "--entry-policy-enforce",
-            "--i-understand-this-places-real-orders",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "mutually exclusive" in result.output
-
-
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
@@ -618,7 +598,6 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
         arguments.extend(["--persist-exchange-operations", option_value])
     arguments.extend(
         [
-            "--entry-policy-compare-only",
             "--i-understand-this-places-real-orders",
         ]
     )
@@ -628,11 +607,10 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
     config = captured["config"]
     assert isinstance(config, runtime_config.LiveRuntimeConfig)
     assert config.lifecycle.persist_exchange_operations == expected
-    assert config.strategy.entry_policy_compare_only is True
     assert config.strategy.entry_positive_gainer_top_count == 25
 
 
-def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
+def test_live_run_uses_current_entry_policy_without_a_mode_flag(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     async def fake_run_live_daemon(
@@ -667,7 +645,6 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
             "run",
             "--database-url",
             "postgresql+asyncpg://unused",
-            "--entry-policy-enforce",
             "--i-understand-this-places-real-orders",
         ],
     )
@@ -675,7 +652,6 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
     assert result.exit_code == 0
     config = captured["config"]
     assert isinstance(config, runtime_config.LiveRuntimeConfig)
-    assert config.strategy.entry_policy_enforce is True
 
 
 def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
@@ -783,28 +759,6 @@ def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) 
     config = captured["config"]
     assert isinstance(config, runtime_config.LiveRuntimeConfig)
     assert config.lifecycle.acknowledge_missing_shadow_preflight is True
-
-
-def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
-    monkeypatch.delenv("BINANCE_TRADE_API_KEY", raising=False)
-    monkeypatch.delenv("BINANCE_TRADE_API_SECRET", raising=False)
-    monkeypatch.setenv("BINANCE_API_KEY", "legacy-key")
-    monkeypatch.setenv("BINANCE_API_SECRET", "legacy-secret")
-
-    with pytest.raises(BadParameter, match="BINANCE_TRADE_API_KEY"):
-        main._resolve_live_cli_credentials(
-            api_key_env=None,
-            api_secret_env=None,
-            allow_legacy_fallback=False,
-        )
-
-    resolved = main._resolve_live_cli_credentials(
-        api_key_env=None,
-        api_secret_env=None,
-        allow_legacy_fallback=True,
-    )
-    assert resolved.api_key == "legacy-key"
-    assert resolved.api_key_env == "BINANCE_API_KEY"
 
 
 def test_resolve_missing_order_requires_exact_confirmation() -> None:
@@ -1304,17 +1258,7 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
         require_price_above_ema5=False,
         require_price_above_ema10=False,
     )
-    enforced = main._live_strategy_config_hash(
-        "orderflow_impulse",
-        profile=_TEST_PROFILE,
-        entry_positive_gainer_top_count=None,
-        entry_policy_enforce=True,
-        require_price_above_ema5=False,
-        require_price_above_ema10=False,
-    )
-
     assert filtered != unfiltered
-    assert enforced != unfiltered
 
 
 def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None:
@@ -1359,7 +1303,7 @@ def test_preflight_runtime_strategy_config_reads_live_lane_environment(
     assert config.profile.impulse_window_buckets == 4
     assert config.entry_positive_gainer_top_count == 10
     assert config.entry_policy_mode == "enforce"
-    assert config.entry_policy_enforce is True
+    assert config.entry_policy_mode == "enforce"
 
 
 def test_preflight_runtime_strategy_config_rejects_unknown_policy_mode(

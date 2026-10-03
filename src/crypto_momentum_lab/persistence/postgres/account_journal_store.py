@@ -675,15 +675,6 @@ def _fact_event_specs(
                 codec.encode_coverage(coverage),
             )
         )
-    if facts.checkpoint is not None:
-        specs.append(
-            (
-                "legacy_checkpoint",
-                facts.checkpoint.checkpoint_id,
-                facts.checkpoint.event_cut,
-                codec.encode_legacy_checkpoint(facts.checkpoint),
-            )
-        )
     for conflict in facts.fact_conflicts:
         specs.append(
             (
@@ -943,12 +934,11 @@ def _facts_from_rows(
         snapshots=snapshots,
         exit_boundaries=boundaries,
         coverage=coverage,
-        checkpoint=legacy_checkpoint,
         has_synthetic_fills=synthetic_flag,
         conflicting_fills=fill_conflicts,
         has_late_events=late_flag or bool(late_fills),
         stream_scope=scope,
-        recovery_checkpoint=checkpoint,
+        recovery_checkpoint=checkpoint or legacy_checkpoint,
         fact_conflicts=tuple([*domain_conflicts, *conflicts]),
         integrity_issues=tuple(dict.fromkeys(issues)),
         late_fills=late_fills,
@@ -1044,8 +1034,6 @@ def _max_fact_time(facts: AccountFacts) -> datetime | None:
     ]
     if facts.coverage is not None:
         values.append(facts.coverage.evidence_observed_at or facts.coverage.end_at)
-    if facts.checkpoint is not None:
-        values.append(facts.checkpoint.event_cut)
     if facts.fill_cursor_provenance is not None:
         values.append(facts.fill_cursor_provenance.last_checked_at)
     if facts.fill_load_provenance is not None:

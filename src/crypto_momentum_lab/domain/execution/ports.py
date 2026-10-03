@@ -98,6 +98,9 @@ class ExecutionTransactionPort(Protocol):
         checkpoint_id: str,
     ) -> PositionRecoveryCheckpoint | None: ...
 
+    @property
+    def session(self) -> object | None: ...
+
     async def save_reservations(
         self,
         reservations: Sequence[PositionReservation],
@@ -194,4 +197,6 @@ class ExecutionUnitOfWorkPort(Protocol):
     def transaction(
         self,
         key: PositionKey,
+        *,
+        account_scope: str | None = None,
     ) -> AsyncContextManager[ExecutionTransactionPort]: ...

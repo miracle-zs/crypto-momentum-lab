@@ -601,8 +601,8 @@ class CheckpointStore:
                 "schema_version",
             ),
             updated_at=_optional_datetime(payload.get("updated_at")),
-            accepted_sequence=_optional_int(payload.get("accepted_sequence")),
-            materialized_sequence=_optional_int(payload.get("materialized_sequence")),
+            accepted_sequence=_optional_int(payload["accepted_sequence"]),
+            materialized_sequence=_optional_int(payload["materialized_sequence"]),
         )
 
     def save(self, checkpoint: CollectorCheckpoint) -> None:

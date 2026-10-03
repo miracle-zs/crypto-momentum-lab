@@ -263,7 +263,7 @@ class LiveDecisionFactSource:
         """Restore the newest durable policy head before decision admission."""
         if self._decision_uow is None:
             raise RuntimeError("live decision persistence UoW is required")
-        snapshot = await self._decision_uow.load_or_import_policy_state(
+        snapshot = await self._decision_uow.load_policy_state_for_startup(
             self._policy_key,
             strategy_name=self._strategy_name,
             account_label=self._account_label,
@@ -483,8 +483,9 @@ class LiveDecisionFactSource:
             total_qty = (
                 getattr(view, "total_quantity", None) if view is not None else None
             )
-            if (command.reason in self._obsolete_exit_reasons
-                or (total_qty is not None and total_qty <= Decimal("0"))):
+            if command.reason in self._obsolete_exit_reasons or (
+                total_qty is not None and total_qty <= Decimal("0")
+            ):
                 recovery = self._exit_recovery_handler
                 if recovery is None:
                     continue
@@ -658,10 +659,6 @@ class LiveDecisionFactSource:
                 decision_id=decision_id,
                 command_id=command.command_id,
             )
-
-    async def drain(self, timeout_seconds: float = 5.0) -> None:
-        """Compatibility lifecycle hook; all decision commits are inline."""
-        del timeout_seconds
 
 
 def _decision_dependencies(trace: DecisionTrace) -> tuple[ConsumerDependency, ...]:

@@ -35,9 +35,6 @@ def relevant_recovery_head() -> ColumnElement[bool]:
         )
     )
     return or_(
-        # Legacy account facts predate journal trade identities/checkpoints.
-        # Keep these heads in the scan set until source proof adopts the epoch.
-        head.stream_id == "legacy-postgres-account",
         has_trade,
         has_position,
         head.state_payload["recovery_checkpoint"]["checkpoint_id"].astext.is_not(None),

@@ -67,7 +67,10 @@ def test_trading_lease_requires_expiration_after_acquisition() -> None:
         )
 
 
-def _risk_config(max_order_notional: Decimal | None) -> RiskConfigSnapshot:
+def _risk_config(
+    max_order_notional: Decimal | None,
+    allow_reduce_only_while_draining: bool = True,
+) -> RiskConfigSnapshot:
     return RiskConfigSnapshot(
         environment="live",
         account_label="primary",
@@ -77,6 +80,6 @@ def _risk_config(max_order_notional: Decimal | None) -> RiskConfigSnapshot:
         max_open_positions=1,
         max_market_state_age_seconds=30,
         max_account_state_age_seconds=30,
-        allow_reduce_only_while_draining=True,
+        allow_reduce_only_while_draining=allow_reduce_only_while_draining,
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )

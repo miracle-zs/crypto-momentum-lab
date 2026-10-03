@@ -21,12 +21,6 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionRequest,
     StaleView,
 )
-from crypto_momentum_lab.domain.execution.legacy_command_repository import (
-    LegacyCommandRepositoryAdapter,
-)
-from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
-    assemble_legacy_execution_book,
-)
 from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -158,69 +152,6 @@ async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> No
 
 
 @pytest.mark.asyncio
-async def test_legacy_stream_scope_smoothly_adopts_active_epoch_when_exchange_is_flat() -> (
-    None
-):
-    from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.observation_models import (
-        Applied,
-    )
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFactStreamScope,
-    )
-
-    class NoTransaction:
-        def transaction(self, key):
-            raise AssertionError("legacy snapshot stream adoption opened a transaction")
-
-    book = ExecutionBook(execution_unit_of_work=NoTransaction())
-    book._persistence_failed = False
-    key = _scope().to_position_key()
-    book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
-        key, stream_id="legacy-postgres-account", stream_epoch="unversioned"
-    )
-
-    flat_snap = AccountPositionSnapshot(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        position_side="LONG",
-        position_amt=Decimal("0"),
-        entry_price=Decimal("0"),
-        mark_price=Decimal("65000"),
-        unrealized_pnl=Decimal("0"),
-        notional=Decimal("0"),
-        leverage=None,
-        margin_type=None,
-        observed_at=_dt(10, 0),
-        raw_payload={},
-    )
-    result = await book.observe(
-        ExecutionEvidence(
-            evidence_id="new-epoch-flat-from-legacy",
-            scope=_scope(),
-            observed_at=_dt(10, 0),
-            stream_id="account_event_hub",
-            stream_epoch="active-epoch",
-            sequence=1,
-            snapshot=flat_snap,
-        )
-    )
-    assert isinstance(result, Applied)
-    assert book._stream_scopes[key.canonical_id].stream_id == "account_event_hub"
-    assert book._stream_scopes[key.canonical_id].stream_epoch == "active-epoch"
-
-    # Reading with active stream must succeed
-    view = await book.read(
-        _scope(),
-        stream_id="account_event_hub",
-        stream_epoch="active-epoch",
-    )
-    assert view.total_quantity == Decimal("0")
-    assert view.stream_scope.stream_epoch == "active-epoch"
-
-
-@pytest.mark.asyncio
 async def test_flat_position_act_when_head_is_none() -> None:
     from contextlib import asynccontextmanager
 
@@ -252,7 +183,7 @@ async def test_flat_position_act_when_head_is_none() -> None:
             self.tx = FakeTx()
 
         @asynccontextmanager
-        async def transaction(self, key):
+        async def transaction(self, key, account_scope=None):
             yield self.tx
 
     uow = FakeUow()
@@ -334,7 +265,7 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
             self.tx = FakeTx()
 
         @asynccontextmanager
-        async def transaction(self, key):
+        async def transaction(self, key, account_scope=None):
             yield self.tx
 
     uow = FakeUow()
@@ -418,7 +349,7 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
             self.tx = None
 
         @asynccontextmanager
-        async def transaction(self, key):
+        async def transaction(self, key, account_scope=None):
             yield self.tx
 
     uow = FakeUow()
@@ -517,7 +448,7 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
             self.tx = FakeTx()
 
         @asynccontextmanager
-        async def transaction(self, key):
+        async def transaction(self, key, account_scope=None):
             yield self.tx
 
     uow = FakeUow()
@@ -591,7 +522,7 @@ async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
 
     class FakeUow:
         @asynccontextmanager
-        async def transaction(self, key):
+        async def transaction(self, key, account_scope=None):
             yield FakeTx()
 
     uow = FakeUow()
@@ -827,9 +758,7 @@ async def test_execution_book_fails_closed_when_acceptance_persistence_fails() -
         async def upsert_execution_command(self, **kwargs: object) -> None:
             raise RuntimeError("database unavailable")
 
-    book = ExecutionBook(
-        command_repository=LegacyCommandRepositoryAdapter(FailingCommandRepository())
-    )
+    book = ExecutionBook(command_repository=FailingCommandRepository())
     scope = _scope()
     t0 = _dt(10, 0)
     flat = AccountPositionSnapshot(
@@ -893,9 +822,7 @@ async def test_execution_book_persists_reservation_link_with_first_outbox_write(
             self.writes.append(kwargs)
 
     command_repo = RecordingCommandRepository()
-    book = ExecutionBook(
-        command_repository=LegacyCommandRepositoryAdapter(command_repo)
-    )
+    book = ExecutionBook(command_repository=command_repo)
     scope = _scope()
     t0 = _dt(10, 0)
     fill = AccountFillEvent(
@@ -988,9 +915,7 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
         async def load_execution_order_watermarks(self, **kwargs: object):
             return ()
 
-    book = ExecutionBook(
-        command_repository=LegacyCommandRepositoryAdapter(LegacyCommandRepository())
-    )
+    book = ExecutionBook(command_repository=LegacyCommandRepository())
 
     with pytest.raises(RuntimeError, match="restore active execution commands"):
         await book.restore(account_label="primary")
@@ -1216,14 +1141,12 @@ async def test_duplicate_trade_id_does_not_consume_twice() -> None:
 async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     from copy import deepcopy
 
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
-        InMemoryPositionReservationRepository,
-    )
     from crypto_momentum_lab.domain.execution.trade_command import (
         PositionReservation,
         TradeCommand,
     )
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+    from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
 
     class PersistedCommandRepository:
         def __init__(self) -> None:
@@ -1307,10 +1230,10 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
         reserved_quantity=Decimal("10"),
         created_at=_dt(10, 0),
     )
-    reservation_repo.save_reservation(reservation)
+    await reservation_repo.save_reservation(reservation)
 
-    first_book = assemble_legacy_execution_book(
-        command_repository=LegacyCommandRepositoryAdapter(command_repo),
+    first_book = ExecutionBook(
+        command_repository=command_repo,
         reservation_repository=reservation_repo,
     )
     first_book.coordinator.register_reservation(reservation)
@@ -1377,8 +1300,8 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     assert isinstance(first_result, Applied)
     assert first_result.consumed_quantity == Decimal("3")
 
-    restored_book = assemble_legacy_execution_book(
-        command_repository=LegacyCommandRepositoryAdapter(command_repo),
+    restored_book = ExecutionBook(
+        command_repository=command_repo,
         reservation_repository=reservation_repo,
     )
     await restored_book.restore(account_label="primary")
@@ -1409,9 +1332,7 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
     active_details = invalid_command_repo.rows[order_command.command_id]["details"]
     assert isinstance(active_details, dict)
     active_details["cumulative_filled_quote"] = "0"
-    invalid_book = ExecutionBook(
-        command_repository=LegacyCommandRepositoryAdapter(invalid_command_repo)
-    )
+    invalid_book = ExecutionBook(command_repository=invalid_command_repo)
     with pytest.raises(RuntimeError, match="cumulative fill watermarks"):
         await invalid_book.restore(account_label="primary")
 
@@ -1428,14 +1349,12 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
 async def test_restored_dispatch_latch_requires_durable_resolution(
     resolution_state: ExchangeOrderState,
 ) -> None:
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
-        InMemoryPositionReservationRepository,
-    )
     from crypto_momentum_lab.domain.execution.trade_command import (
         PositionReservation,
         TradeCommand,
     )
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+    from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
 
     class CommandRepository:
         def __init__(self) -> None:
@@ -1518,9 +1437,9 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
         reserved_quantity=Decimal("1"),
         created_at=_dt(10, 0),
     )
-    reservation_repo.save_reservation(reservation)
-    first_book = assemble_legacy_execution_book(
-        command_repository=LegacyCommandRepositoryAdapter(command_repo),
+    await reservation_repo.save_reservation(reservation)
+    first_book = ExecutionBook(
+        command_repository=command_repo,
         reservation_repository=reservation_repo,
     )
     first_book.coordinator.register_reservation(reservation)
@@ -1530,8 +1449,8 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     await first_book._persist_outbox_state(prepared)
     await first_book.mark_dispatching(command_id)
 
-    book = assemble_legacy_execution_book(
-        command_repository=LegacyCommandRepositoryAdapter(command_repo),
+    book = ExecutionBook(
+        command_repository=command_repo,
         reservation_repository=reservation_repo,
     )
     await book.restore(account_label="primary")
@@ -2584,7 +2503,8 @@ async def test_position_reads_reject_incomplete_account_stream(
                 stream_epoch=stream_epoch,
             )
     assert (
-        await book.list_position_views(environment="live", account_label="primary") == ()
+        await book.list_position_views(environment="live", account_label="primary")
+        == ()
     )
 
 
@@ -2615,7 +2535,9 @@ def test_active_reservation_query_preserves_order_and_scope(query) -> None:
         )
     owner = book if query == "book" else book.coordinator
     assert [r.reservation_id for r in owner.get_active_reservations()] == [
-        "a", "b", "z"
+        "a",
+        "b",
+        "z",
     ]
     assert [r.reservation_id for r in owner.get_active_reservations(btc)] == ["z", "a"]
     assert [r.reservation_id for r in owner.get_active_reservations(eth)] == ["b"]
@@ -2624,7 +2546,8 @@ def test_active_reservation_query_preserves_order_and_scope(query) -> None:
 
 
 @pytest.mark.parametrize(
-    ("policy_version", "schema_version"), [("policy-custom", "v1"), ("v1", "schema-custom")]
+    ("policy_version", "schema_version"),
+    [("policy-custom", "v1"), ("v1", "schema-custom")],
 )
 def test_historical_view_preserves_configuration_and_current_state(
     policy_version, schema_version
@@ -2668,7 +2591,8 @@ def test_historical_view_preserves_configuration_and_current_state(
     assert historical.policy_version == policy_version
     assert historical.schema_version == schema_version
     assert (historical.policy_version, historical.schema_version) != (
-        default.policy_version, default.schema_version
+        default.policy_version,
+        default.schema_version,
     )
     assert historical.projection_version != "live-token"
     assert book.get_view(now=cut.as_of) == before
@@ -2761,7 +2685,9 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_position", [True, False])
 @pytest.mark.parametrize("dispatch_state", list(DispatchState))
-async def test_outbox_scope_controls_flat_stream_fast_path(same_position, dispatch_state) -> None:
+async def test_outbox_scope_controls_flat_stream_fast_path(
+    same_position, dispatch_state
+) -> None:
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.observation_models import (
         Applied,
@@ -2785,18 +2711,30 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position, dispat
     from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
-    command_scope = _scope() if same_position else ExecutionScope(
-        environment="live", account_label="other-account", symbol="BTCUSDT",
-        position_side=FuturesPositionSide.LONG,
+    command_scope = (
+        _scope()
+        if same_position
+        else ExecutionScope(
+            environment="live",
+            account_label="other-account",
+            symbol="BTCUSDT",
+            position_side=FuturesPositionSide.LONG,
+        )
     )
     command = TradeCommand(
-        command_id="pending-command", position_key=command_scope.to_position_key(),
-        command_type=TradeCommandType.ENTRY, side=StrategySide.LONG,
-        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
+        command_id="pending-command",
+        position_key=command_scope.to_position_key(),
+        command_type=TradeCommandType.ENTRY,
+        side=StrategySide.LONG,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("1"),
     )
     book._outbox_by_command_id[command.command_id] = OutboxEntry(
-        command_id=command.command_id, request_id="request", scope=command_scope,
-        command=command, state=dispatch_state,
+        command_id=command.command_id,
+        request_id="request",
+        scope=command_scope,
+        command=command,
+        state=dispatch_state,
     )
 
     def reject_copy(*, key):
@@ -2853,7 +2791,9 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position, dispat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command_location", ["same", "other-account", "other-side"])
 @pytest.mark.parametrize("dispatch_state", list(DispatchState))
-async def test_outbox_scope_controls_cross_stream_read(command_location, dispatch_state) -> None:
+async def test_outbox_scope_controls_cross_stream_read(
+    command_location, dispatch_state
+) -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -2873,23 +2813,43 @@ async def test_outbox_scope_controls_cross_stream_read(command_location, dispatc
     from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
-    command_scope = _scope() if command_location == "same" else ExecutionScope(
-        environment="live", account_label=("other-account" if command_location == "other-account" else "primary"), symbol="BTCUSDT",
-        position_side=(FuturesPositionSide.LONG if command_location == "other-account" else FuturesPositionSide.SHORT),
+    command_scope = (
+        _scope()
+        if command_location == "same"
+        else ExecutionScope(
+            environment="live",
+            account_label=(
+                "other-account" if command_location == "other-account" else "primary"
+            ),
+            symbol="BTCUSDT",
+            position_side=(
+                FuturesPositionSide.LONG
+                if command_location == "other-account"
+                else FuturesPositionSide.SHORT
+            ),
+        )
     )
     command = TradeCommand(
-        command_id="pending-command", position_key=command_scope.to_position_key(),
-        command_type=TradeCommandType.ENTRY, side=StrategySide.LONG,
-        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
+        command_id="pending-command",
+        position_key=command_scope.to_position_key(),
+        command_type=TradeCommandType.ENTRY,
+        side=StrategySide.LONG,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("1"),
     )
     book._outbox_by_command_id[command.command_id] = OutboxEntry(
-        command_id=command.command_id, request_id="request", scope=command_scope,
-        command=command, state=dispatch_state,
+        command_id=command.command_id,
+        request_id="request",
+        scope=command_scope,
+        command=command,
+        state=dispatch_state,
     )
 
     book.register_active_stream(
-        environment="live", account_label="primary",
-        stream_id="account_event_hub", stream_epoch="new-epoch",
+        environment="live",
+        account_label="primary",
+        stream_id="account_event_hub",
+        stream_epoch="new-epoch",
     )
     if command_location == "same":
         with pytest.raises(ValueError, match="does not match the restored position"):
@@ -2916,17 +2876,31 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
 
     repository = AsyncMock()
     details = {
-        "scope": {"environment": "live", "account_label": "primary",
-                  "symbol": "BTCUSDT", "position_side": "LONG"},
-        "side": "long", "order_type": "market", "quantity": "1",
-        "reduce_only": False, "reservations": [], "request_id": "request",
-        "attempt_count": 0, field: 123,
+        "scope": {
+            "environment": "live",
+            "account_label": "primary",
+            "symbol": "BTCUSDT",
+            "position_side": "LONG",
+        },
+        "side": "long",
+        "order_type": "market",
+        "quantity": "1",
+        "reduce_only": False,
+        "reservations": [],
+        "request_id": "request",
+        "attempt_count": 0,
+        field: 123,
     }
-    repository.load_active_execution_commands.return_value = [{
-        "command_id": "unparseable-command", "client_order_id": "unparseable-command",
-        "command": "entry", "status": "prepared", "requested_at": _dt(10, 0),
-        "details": details,
-    }]
+    repository.load_active_execution_commands.return_value = [
+        {
+            "command_id": "unparseable-command",
+            "client_order_id": "unparseable-command",
+            "command": "entry",
+            "status": "prepared",
+            "requested_at": _dt(10, 0),
+            "details": details,
+        }
+    ]
     from copy import deepcopy
 
     first_valid = deepcopy(repository.load_active_execution_commands.return_value[0])
@@ -2937,7 +2911,9 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     first_valid["status"] = "unknown"
     repository.load_active_execution_commands.return_value.insert(0, first_valid)
     book = ExecutionBook(command_repository=repository)
-    with pytest.raises(RuntimeError, match="restore active execution commands") as error:
+    with pytest.raises(
+        RuntimeError, match="restore active execution commands"
+    ) as error:
         await book.restore(account_label="primary")
     assert field in str(error.value.__cause__)
     assert "unparseable-command" in str(error.value.__cause__)
@@ -2950,10 +2926,15 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     repository.load_execution_order_watermarks.assert_not_awaited()
 
     request = ExecutionRequest(
-        request_id="blocked-during-restore", scope=_scope(),
-        strategy_name="trend", strategy_version="1", run_id="run",
-        decision_ref="decision", expected_view_token="unused",
-        action=TradeCommandType.ENTRY, requested_quantity=Decimal("1"),
+        request_id="blocked-during-restore",
+        scope=_scope(),
+        strategy_name="trend",
+        strategy_version="1",
+        run_id="run",
+        decision_ref="decision",
+        expected_view_token="unused",
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1"),
     )
     result = await book.act(request)
     assert isinstance(result, Blocked)
@@ -2974,7 +2955,9 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     assert entry.command.requested_quantity == Decimal("1")
     first = book.get_outbox("first-valid-command")
     assert first is not None and first.state is DispatchState.UNKNOWN
-    assert book._command_reservations[first.command_id] == ["reservation-before-failure"]
+    assert book._command_reservations[first.command_id] == [
+        "reservation-before-failure"
+    ]
     assert book._dispatch_reconciliation_required_commands == {first.command_id}
     repository.load_seen_event_ids.assert_awaited_once()
     repository.load_seen_fill_trade_ids.assert_awaited_once()
@@ -2992,13 +2975,24 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
 
     repository = AsyncMock()
     row = {
-        "command_id": "duplicate", "client_order_id": "duplicate",
-        "command": "entry", "status": status, "requested_at": _dt(10, 0),
+        "command_id": "duplicate",
+        "client_order_id": "duplicate",
+        "command": "entry",
+        "status": status,
+        "requested_at": _dt(10, 0),
         "details": {
-            "scope": {"environment": "live", "account_label": "primary",
-                      "symbol": "BTCUSDT", "position_side": "LONG"},
-            "side": "long", "order_type": "market", "quantity": "1",
-            "reduce_only": False, "reservations": [], "request_id": "request",
+            "scope": {
+                "environment": "live",
+                "account_label": "primary",
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+            },
+            "side": "long",
+            "order_type": "market",
+            "quantity": "1",
+            "reduce_only": False,
+            "reservations": [],
+            "request_id": "request",
             "attempt_count": 0,
         },
     }
@@ -3011,7 +3005,9 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
     repository.load_execution_order_watermarks.return_value = ()
     book = ExecutionBook(command_repository=repository)
     if conflicting:
-        with pytest.raises(RuntimeError, match="restore active execution commands") as error:
+        with pytest.raises(
+            RuntimeError, match="restore active execution commands"
+        ) as error:
             await book.restore(account_label="primary")
         assert "conflicting rows" in str(error.value.__cause__)
         assert book._persistence_failed is True
@@ -3030,3 +3026,154 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
         else:
             assert entry.state is DispatchState.PREPARED
             repository.upsert_execution_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_active_reservations_divergence_blocks_submission_and_provides_recovery() -> (
+    None
+):
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFacts,
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="stream", stream_epoch="epoch"
+    )
+    facts = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(),
+        prefix_facts_complete=True,
+    )
+    cut = DurableJournalCut(
+        scope=scope,
+        as_of=datetime.now(UTC),
+        facts=facts,
+        checkpoint=None,
+        revision=1,
+    )
+    payload_with_active_res = {
+        "schema_version": 1,
+        "position_key": {
+            "environment": key.environment,
+            "account_label": key.account_label,
+            "symbol": key.symbol,
+            "position_side": key.position_side.value,
+        },
+        "stream_scope": {
+            "stream_id": scope.stream_id,
+            "stream_epoch": scope.stream_epoch,
+        },
+        "facts_hash": "diverged-hash",
+        "projection_digest": "diverged-proj-digest",
+        "view_digest": "diverged-view-digest",
+        "recovery_checkpoint": "diverged-checkpoint",
+        "journal_revision": 1,
+        "active_reservation_ids": ["res-1", "res-2"],
+    }
+    head = ExecutionHeadSnapshot(
+        stream_id=scope.stream_id,
+        stream_epoch=scope.stream_epoch,
+        revision=1,
+        projection_version="pv_test",
+        state_payload=payload_with_active_res,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=head,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    from contextlib import asynccontextmanager
+
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        ExecutionRecoveryPending,
+    )
+
+    class StubUow:
+        async def load_positions(self, **kwargs):
+            return (state,)
+
+        async def load_position(self, load_key, **kwargs):
+            return state
+
+        async def load_head(self, load_key, **kwargs):
+            return head
+
+        @asynccontextmanager
+        async def transaction(self, key, account_scope=None):
+            yield self
+
+    reservation = PositionReservation(
+        reservation_id="res-1",
+        command_id="cmd-1",
+        position_key=key,
+        batch_id="batch-1",
+        reserved_quantity=Decimal("1"),
+        consumed_quantity=Decimal("0"),
+        created_at=datetime.now(UTC),
+    )
+
+    commands = AsyncMock()
+    commands.load_active_execution_commands.return_value = []
+    reservations = AsyncMock()
+    reservations.load_active_reservations.return_value = [reservation]
+
+    book = ExecutionBook(
+        execution_unit_of_work=StubUow(),
+        command_repository=commands,
+        reservation_repository=reservations,
+    )
+
+    await book.restore(account_label="primary")
+
+    # Divergence was detected: expected ["res-1", "res-2"] but only ["res-1"] was active
+    # Invariant 1: Existing reservation must NOT be wiped ("不清空占用")
+    active_res = book.get_active_reservations(key)
+    assert len(active_res) == 1
+    assert active_res[0].reservation_id == "res-1"
+
+    # Invariant 2: Order submission on diverged position must be blocked
+    request = ExecutionRequest(
+        request_id="test-req",
+        scope=ExecutionScope(
+            environment=key.environment,
+            account_label=key.account_label,
+            symbol=key.symbol,
+            position_side=key.position_side,
+        ),
+        strategy_name="trend",
+        strategy_version="1",
+        run_id="run-1",
+        decision_ref="decision-1",
+        expected_view_token="pv_test",
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1"),
+    )
+    result = await book.act(request)
+    assert isinstance(result, ExecutionRecoveryPending)
+    assert f"reservation_divergence:{key.canonical_id}" in result.diagnostics
+
+    # Invariant 3: Provide recovery entry point (reconcile_reservation_divergence)
+    reconciled = await book.reconcile_reservation_divergence(key, force=True)
+    assert reconciled is True
+    # Still preserves the active reservation
+    assert len(book.get_active_reservations(key)) == 1
+
+    # Once reconciled, new order submission is unblocked
+    result2 = await book.act(request)
+    assert not isinstance(result2, ExecutionRecoveryPending)

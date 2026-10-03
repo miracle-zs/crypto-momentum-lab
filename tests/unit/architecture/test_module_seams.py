@@ -457,7 +457,6 @@ importlib.import_module(sys.argv[1])
         "crypto_momentum_lab.execution_account.snapshot_changes",
         "crypto_momentum_lab.execution_account.sync_models",
         "crypto_momentum_lab.execution_account.sync_ports",
-        "crypto_momentum_lab.execution_account.client_compat",
         "crypto_momentum_lab.execution_account.fill_progress",
         "crypto_momentum_lab.execution_account.balance_history",
         "crypto_momentum_lab.execution_account.position_history",
@@ -608,13 +607,16 @@ importlib.import_module(sys.argv[1])
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("module", [
-    "crypto_momentum_lab.strategies.registry",
-    "crypto_momentum_lab.market_data.candle_source",
-    "crypto_momentum_lab.live_rollout.runtime_config",
-    "crypto_momentum_lab.live_rollout.entry_cache",
-    "crypto_momentum_lab.live_rollout.runtime_orchestrator",
-])
+@pytest.mark.parametrize(
+    "module",
+    [
+        "crypto_momentum_lab.strategies.registry",
+        "crypto_momentum_lab.market_data.candle_source",
+        "crypto_momentum_lab.live_rollout.runtime_config",
+        "crypto_momentum_lab.live_rollout.entry_cache",
+        "crypto_momentum_lab.live_rollout.runtime_orchestrator",
+    ],
+)
 def test_live_shared_facilities_do_not_import_strategy_runner(module):
     script = """
 import importlib
@@ -627,6 +629,10 @@ class RunnerGuard(MetaPathFinder):
 sys.meta_path.insert(0, RunnerGuard())
 importlib.import_module(sys.argv[1])
 """
-    result = subprocess.run([sys.executable, "-c", script, module],
-                            capture_output=True, text=True, timeout=15)
+    result = subprocess.run(
+        [sys.executable, "-c", script, module],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
     assert result.returncode == 0, result.stderr

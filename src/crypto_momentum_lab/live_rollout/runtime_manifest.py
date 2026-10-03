@@ -55,10 +55,6 @@ class LiveRuntimeStrategyInputs:
     entry_order_type: EntryType
     entry_limit_ttl_seconds: int
 
-    @property
-    def entry_policy_enforce(self) -> bool:
-        return self.entry_policy_mode == "enforce"
-
 
 @dataclass(frozen=True, slots=True)
 class LiveRuntimeExecutionInputs:
@@ -287,7 +283,6 @@ def _computed_strategy_config_hash(
             entry_positive_gainer_top_count=(inputs.entry_positive_gainer_top_count),
             require_price_above_ema5=inputs.require_price_above_ema5,
             require_price_above_ema10=inputs.require_price_above_ema10,
-            entry_policy_enforce=inputs.entry_policy_enforce,
             entry_order_type=inputs.entry_order_type,
             entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
         )
@@ -343,10 +338,8 @@ def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
             config.get("entry_policy_mode"),
             f"{field}.entry_policy_mode",
         ).lower()
-        if policy_mode not in {"legacy", "compare_only", "enforce"}:
-            raise RuntimeManifestError(
-                f"{field}.entry_policy_mode must be legacy, compare_only, or enforce"
-            )
+        if policy_mode != "enforce":
+            raise RuntimeManifestError(f"{field}.entry_policy_mode must be enforce")
         order_type = EntryType(
             _text(config.get("entry_order_type"), f"{field}.entry_order_type").lower()
         )

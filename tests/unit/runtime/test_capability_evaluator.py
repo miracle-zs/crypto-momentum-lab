@@ -51,7 +51,6 @@ def _make_evidence(**kwargs) -> CapabilityEvidence:
         "is_lease_active": True,
         "is_emergency_authorized": False,
         "is_universe_ready": True,
-        "is_collector_healthy": True,
     }
     defaults.update(kwargs)
     return CapabilityEvidence(**defaults)
@@ -71,7 +70,6 @@ def test_reconcile_always_allowed() -> None:
         is_approval_valid=False,
         is_lease_active=False,
         is_universe_ready=False,
-        is_collector_healthy=False,
         observed_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -93,7 +91,6 @@ def test_cancel_never_blocked_by_stale_market_or_batch_conflict() -> None:
         unresolved_inflight_orders_count=2,
         is_approval_valid=False,
         is_lease_active=True,
-        is_collector_healthy=False,
         observed_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -320,10 +317,10 @@ def test_capability_evidence_fail_closed_on_missing_fields() -> None:
         )
 
 
-def test_enter_not_blocked_when_collector_unhealthy() -> None:
+def test_enter_does_not_require_collector_health() -> None:
     evaluator = CapabilityEvaluator()
     plan = _make_plan()
-    ev = _make_evidence(is_collector_healthy=False)
+    ev = _make_evidence()
     dec = evaluator.evaluate(SystemAction.ENTER, ev, plan)
     assert dec.allowed is True
     assert dec.reason == "entry_prerequisites_satisfied"

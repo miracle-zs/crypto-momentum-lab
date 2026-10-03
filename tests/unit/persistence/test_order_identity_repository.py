@@ -71,9 +71,6 @@ async def test_order_identity_adapter_detaches_events_and_complete_fill_values()
 
 @pytest.mark.parametrize("details", [None, ["malformed"], {"unrelated": "value"}])
 def test_malformed_identity_details_remain_missing_fill_evidence(details):
-    from crypto_momentum_lab.live_rollout.order_identity import (
-        _legacy_order_identity_is_reconstructible,
-    )
     from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
         order_identity_event,
     )
@@ -86,4 +83,4 @@ def test_malformed_identity_details_remain_missing_fill_evidence(details):
         details=details,
     )
     observation = order_identity_event(event)
-    assert not _legacy_order_identity_is_reconstructible((observation,), {})
+    assert observation.details == (details if isinstance(details, dict) else {})

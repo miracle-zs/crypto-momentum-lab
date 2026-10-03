@@ -258,3 +258,32 @@ def test_schedule_reopen_does_not_release_active_risk_block():
     gate.set_risk_control_entry_blocked(False, reason="risk_clear")
     assert gate.entry_enabled
     assert state_machine.calls[-1] == "unblock"
+
+
+def test_unwarmed_symbol_blocks_entry_and_triggers_initialization() -> None:
+    warmed_symbols = {"BTCUSDT"}
+    unwarmed_triggered: list[str] = []
+
+    gate = LiveEntryControlGate(
+        run_id="run-1",
+        state_machine=_StateMachine(),
+        is_symbol_warmed=lambda s: s in warmed_symbols,
+        on_unwarmed_symbol=lambda s: unwarmed_triggered.append(s),
+    )
+    gate.set_entry_enabled(True, reason="ready")
+
+    # Warmed symbol is allowed
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
+    assert unwarmed_triggered == []
+
+    # Unwarmed symbol is blocked and triggers background initialization
+    assert gate.is_symbol_entry_allowed("SOLUSDT") == (
+        False,
+        "symbol_not_prewarmed:SOLUSDT",
+    )
+    assert unwarmed_triggered == ["SOLUSDT"]
+
+    # Once warmed, symbol becomes allowed
+    warmed_symbols.add("SOLUSDT")
+    assert gate.is_symbol_entry_allowed("SOLUSDT") == (True, "entry_allowed")
+

@@ -104,13 +104,9 @@ class ClosedMarketStatePublisherConfig:
         durable_closure_delay_seconds: float = 3.0,
         persistence_queue_size: int = 128,
         persistence_retry_seconds: float = 1.0,
-        closure_delay_seconds: float | None = None,
     ) -> None:
         # Existing research fixtures still pass one delay.  Treat it as both
         # clocks so those callers retain their original semantics.
-        if closure_delay_seconds is not None:
-            realtime_closure_delay_seconds = closure_delay_seconds
-            durable_closure_delay_seconds = closure_delay_seconds
         object.__setattr__(
             self,
             "realtime_closure_delay_seconds",
@@ -143,11 +139,6 @@ class ClosedMarketStatePublisherConfig:
             raise ValueError("persistence_queue_size must be positive")
         if self.persistence_retry_seconds <= 0:
             raise ValueError("persistence_retry_seconds must be positive")
-
-    @property
-    def closure_delay_seconds(self) -> float:
-        """Compatibility alias for the realtime clock."""
-        return self.realtime_closure_delay_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,10 +776,9 @@ class ClosedMarketStatePublisher:
             symbol_key,
             before_bucket=next_bucket,
         )
-        initial_quote = (
-            self._durable_latest_quotes.get(symbol_key)
-            or self._realtime_latest_quotes.get(symbol_key)
-        )
+        initial_quote = self._durable_latest_quotes.get(
+            symbol_key
+        ) or self._realtime_latest_quotes.get(symbol_key)
         while next_bucket <= through_bucket:
             key = (symbol_key[0], symbol_key[1], next_bucket)
             accumulator = self._accumulators_by_bucket.get(key)

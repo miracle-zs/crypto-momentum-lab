@@ -184,135 +184,6 @@ def _evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("complete", [True, False])
-async def test_flat_legacy_head_requires_source_scan_before_epoch_adoption(
-    async_database_url, complete
-):
-    from crypto_momentum_lab.domain.account.models import (
-        AccountFillLoadScan,
-        AccountFillPageScan,
-    )
-    from crypto_momentum_lab.execution_account.fill_scan_plan import plan_fill_scan
-    from crypto_momentum_lab.execution_account.orders.coordinator import (
-        OrderExecutionCoordinator,
-    )
-    from crypto_momentum_lab.persistence.postgres.fill_recovery_sources import (
-        load_fill_recovery_sources,
-    )
-
-    engine = create_async_database_engine(async_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    account = f"legacy-anchor-{uuid4().hex[:12]}"
-    key = PositionKey("live", account, "CVXUSDT", "LONG")
-    scope = ExecutionScope("live", account, key.symbol, key.position_side)
-    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
-    baseline = _snapshot(key, start, "0", "0")
-    target = _snapshot(key, start + timedelta(minutes=1), "0", "0")
-    try:
-        from dataclasses import replace
-
-        legacy_scope = AccountFactStreamScope.for_position_key(
-            key, stream_id="legacy-postgres-account", stream_epoch="unversioned"
-        )
-        proof = _coverage(
-            legacy_scope,
-            load_id="legacy-incomplete",
-            scan_origin=start,
-            anchor_id=stable_snapshot_anchor_id(baseline),
-            anchor_cut=start,
-            anchor_kind="zero_snapshot",
-            checked_through=start,
-        )
-        proof = replace(
-            proof,
-            page_exhausted=False,
-            not_truncated=False,
-            load_provenance=replace(
-                proof.load_provenance, page_exhausted=False, truncated=True
-            ),
-        )
-        book = _book(factory)
-        await book.restore(account_label=account)
-        assert isinstance(
-            await book.observe(
-                ExecutionEvidence(
-                    "legacy-flat",
-                    scope,
-                    start,
-                    snapshot=baseline,
-                    coverage_evidence=proof,
-                    fill_load_provenance=proof.load_provenance,
-                    stream_id=legacy_scope.stream_id,
-                    stream_epoch=legacy_scope.stream_epoch,
-                    sequence=1,
-                )
-            ),
-            Applied,
-        )
-        # Legacy heads have neither modern trade identities nor a verified
-        # checkpoint. Being flat must not exclude them from source recovery.
-        sources = await load_fill_recovery_sources(
-            factory, environment="live", account_label=account
-        )
-        anchor = sources[(key.symbol, key.position_side.value)]
-        assert anchor is not None and anchor.zero_snapshot == baseline
-        planned = plan_fill_scan(target, anchor)
-        assert planned is not None
-        scan = AccountFillLoadScan(
-            "live",
-            account,
-            key.symbol,
-            key.position_side.value,
-            AccountFillPageScan(
-                key.symbol,
-                "legacy-source-repair",
-                planned.start_time_ms,
-                None,
-                1,
-                complete,
-                not complete,
-                target.observed_at,
-            ),
-            target.observed_at,
-            planned.source_anchor_id,
-            planned.source_anchor_event_cut,
-            planned.source_anchor_kind,
-            planned.source_stream_id,
-            planned.source_stream_epoch,
-            source_anchor_snapshot=planned.source_anchor_snapshot,
-        )
-        coordinator = OrderExecutionCoordinator(
-            backend=object(),
-            environment="live",
-            account_label=account,
-            execution_book=book,
-        )
-        await coordinator.observe_account_snapshot(
-            target,
-            fill_load_scans=(scan,),
-            stream_id="hub",
-            stream_epoch="new",
-            sequence=1,
-        )
-        checkpoint = await book.load_recovery_checkpoint(
-            AccountFactStreamScope.for_position_key(
-                key, stream_id="hub", stream_epoch="new"
-            )
-        )
-        if not complete:
-            assert checkpoint is None
-            return
-        assert checkpoint is not None and checkpoint.coverage.is_authoritative
-        restarted = _book(factory)
-        await restarted.restore(account_label=account)
-        assert (
-            await restarted.read(scope, stream_id="hub", stream_epoch="new")
-        ).total_quantity == 0
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_nonzero_checkpoint_adoption_survives_restart_and_carries_batches(
     async_database_url: str,
 ) -> None:
@@ -1057,7 +928,9 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
 @pytest.mark.asyncio
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("anchor_integrity", ["valid", "bad_hash", "wrong_scope"])
-@pytest.mark.parametrize("trade_integrity", ["valid", "changed_fee", "bad_fact_hash"])
+@pytest.mark.parametrize(
+    "trade_integrity", ["valid", "changed_fee", "bad_fact_hash", "old_digest"]
+)
 async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
     async_database_url, complete, anchor_integrity, trade_integrity
 ):
@@ -1106,12 +979,12 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
             )
         # Existing deployments hashed transport payloads as part of identity.
         # Keep that historical row intact while replaying the same REST trade.
-        from dataclasses import asdict, replace
+        from dataclasses import replace
 
         from sqlalchemy import update
 
         from crypto_momentum_lab.domain.execution.evidence_digest import (
-            digest_json_payload,
+            trade_payload_digest,
         )
         from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
             ExecutionTradeIdentityRow,
@@ -1124,7 +997,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
                     ExecutionTradeIdentityRow.account_label == account,
                     ExecutionTradeIdentityRow.trade_id == entry.trade_id,
                 )
-                .values(payload_digest=digest_json_payload(asdict(entry)))
+                .values(payload_digest=trade_payload_digest(entry))
             )
         rest_entry = replace(
             entry,
@@ -1133,6 +1006,16 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
             fee=Decimal("0.000000000000000000"),
             raw_payload={"positionSide": "LONG", "source": "rest_user_trades"},
         )
+        if trade_integrity == "old_digest":
+            async with factory() as session, session.begin():
+                await session.execute(
+                    update(ExecutionTradeIdentityRow)
+                    .where(
+                        ExecutionTradeIdentityRow.account_label == account,
+                        ExecutionTradeIdentityRow.trade_id == entry.trade_id,
+                    )
+                    .values(payload_digest="old-format-digest")
+                )
         if trade_integrity == "changed_fee":
             rest_entry = replace(rest_entry, fee=Decimal("0.2"))
         elif trade_integrity == "bad_fact_hash":

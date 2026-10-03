@@ -1,9 +1,9 @@
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-import hashlib
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -95,6 +95,7 @@ class OrderExecutionPlan:
     batch_quantities: Mapping[str, Decimal] | None = None
     strategy_name: str | None = None
     strategy_version: str | None = None
+    reference_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -110,6 +111,8 @@ class OrderExecutionPlan:
             raise ValueError("quantity must be positive")
         if self.price is not None and self.price <= 0:
             raise ValueError("price must be positive when present")
+        if self.reference_price is not None and self.reference_price <= 0:
+            raise ValueError("reference_price must be positive when present")
         if not isinstance(self.position_side, FuturesPositionSide):
             object.__setattr__(
                 self,

@@ -68,8 +68,6 @@ def _options(**overrides: object) -> LiveRunOptions:
         "candle_grace_decision_profit_pct": None,
         "candle_grace_profit_pct": None,
         "base_url": "https://fapi.binance.com",
-        "entry_policy_compare_only": None,
-        "entry_policy_enforce": None,
         "acknowledge_missing_shadow_preflight": False,
         "persist_exchange_operations": None,
     }

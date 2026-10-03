@@ -109,3 +109,44 @@ def test_enabled_pool_requires_explicit_snapshot_reader():
             entry_leverage=7,
             margin_type="ISOLATED",
         )
+
+
+@pytest.mark.asyncio
+async def test_entry_runtime_is_symbol_warmed_and_trigger_warmup() -> None:
+    class WarmedFakeClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.warmed_leverage = set()
+            self.warmed_margin = set()
+
+        def is_entry_leverage_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_leverage
+
+        def is_entry_margin_type_configured(self, symbol: str) -> bool:
+            return symbol in self.warmed_margin
+
+        async def warm_entry_margin_type(self, symbols) -> None:
+            self.warmed_margin.update(symbols)
+
+        async def warm_entry_leverage(self, symbols) -> None:
+            self.warmed_leverage.update(symbols)
+
+    client = WarmedFakeClient()
+    runtime = LiveEntryRuntime(
+        universe_reader=None,
+        client=client,
+        ema_provider=None,
+        positive_gainer_top_count=None,
+        entry_leverage=5,
+        margin_type="ISOLATED",
+    )
+
+    assert runtime.is_symbol_warmed("BTCUSDT") is False
+
+    runtime.trigger_symbol_warmup("BTCUSDT")
+    # Allow background task to execute
+    import asyncio
+    await asyncio.sleep(0.01)
+
+    assert runtime.is_symbol_warmed("BTCUSDT") is True
+

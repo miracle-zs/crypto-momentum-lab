@@ -83,7 +83,9 @@ class FakeService:
             snapshot=snapshot,
         )
 
-    async def publish_user_data_heartbeat(self, *, observed_at, state=None):
+    async def publish_user_data_heartbeat(
+        self, *, observed_at, state=None, reason=None
+    ):
         self.heartbeats.append(observed_at)
         self.heartbeat_states.append(state)
 
@@ -219,7 +221,9 @@ async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
             super().__init__(snapshot)
             self.call_count = 0
 
-        async def publish_user_data_heartbeat(self, *, observed_at, state=None):
+        async def publish_user_data_heartbeat(
+            self, *, observed_at, state=None, reason=None
+        ):
             self.call_count += 1
             raise TypeError("internal implementation error")
 
@@ -239,26 +243,6 @@ async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
 
     # Must only be called once, not retried as a signature mismatch
     assert service.call_count == 1
-
-
-async def test_publish_heartbeat_backward_compatible_with_old_signature() -> None:
-    calls = []
-
-    class OldSignatureService(FakeService):
-        async def publish_user_data_heartbeat(self, *, observed_at):
-            calls.append(observed_at)
-
-    service = OldSignatureService(_snapshot())
-    daemon = UserDataAccountSyncDaemon(
-        service=service,
-        stream=BlockingStream(),
-        config=UserDataAccountSyncConfig(),
-    )
-    daemon._state = _snapshot()
-    daemon._accept_events = True
-
-    await daemon._publish_heartbeat()
-    assert len(calls) == 1
 
 
 async def test_healthy_ws_persists_events_without_rest_polling() -> None:

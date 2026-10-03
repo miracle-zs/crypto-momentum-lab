@@ -45,7 +45,6 @@ class CapabilityEvidence:
     is_lease_active: bool
     is_emergency_authorized: bool
     is_universe_ready: bool
-    is_collector_healthy: bool
     scope: ExecutionScope | None = None
     plan_hash: str | None = None
     runtime_generation: str | None = None

@@ -11,7 +11,7 @@ import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import UniverseRankingSnapshot
-from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
+from crypto_momentum_lab.domain.strategy.entry_policy_evaluation import (
     universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.domain.universe.ports import UniverseSnapshotReader
@@ -81,6 +81,7 @@ class LiveEntryRuntime:
         self._entry_filter_cache: LiveEntryFilterCache | None = None
         self._entry_symbol_cache: LiveEntrySymbolCache | None = None
         self._last_entry_universe_symbols: frozenset[str] = frozenset()
+        self._warming_symbols: set[str] = set()
         if self._universe_repository is not None:
             universe_loader = self._load_entry_universe_data
             if ema_provider is not None:
@@ -100,6 +101,41 @@ class LiveEntryRuntime:
                         prefetch_concurrency=1,
                     ),
                 )
+
+    def is_symbol_warmed(self, symbol: str) -> bool:
+        """Return whether symbol has completed exchange leverage and margin warmup."""
+        client = self._client
+        if hasattr(client, "is_entry_leverage_configured") and not client.is_entry_leverage_configured(symbol):
+            return False
+        if hasattr(client, "is_entry_margin_type_configured") and not client.is_entry_margin_type_configured(symbol):
+            return False
+        return True
+
+    def trigger_symbol_warmup(self, symbol: str) -> None:
+        """Initialize symbol in background if not yet warmed."""
+        if symbol in self._warming_symbols:
+            return
+        self._warming_symbols.add(symbol)
+        task = asyncio.create_task(
+            self._warm_symbol_background(symbol),
+            name=f"live-symbol-warmup:{symbol}",
+        )
+        def _done(_: asyncio.Task[None]) -> None:
+            self._warming_symbols.discard(symbol)
+        task.add_done_callback(_done)
+
+    async def _warm_symbol_background(self, symbol: str) -> None:
+        try:
+            if self._margin_type is not None:
+                await self._client.warm_entry_margin_type([symbol])
+            if self._entry_leverage is not None:
+                await self._client.warm_entry_leverage([symbol])
+        except Exception as error:
+            log.warning(
+                "live_entry_symbol_background_warmup_failed",
+                symbol=symbol,
+                error_type=type(error).__name__,
+            )
 
     @property
     def entry_filter_cache_required(self) -> bool:

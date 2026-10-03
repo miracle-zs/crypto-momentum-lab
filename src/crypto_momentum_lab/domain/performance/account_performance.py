@@ -31,7 +31,7 @@ class AccountPerformanceCalculator:
         cls,
         cut: AccountEquityCut,
     ) -> tuple[bool, str, str]:
-        """Resolves certification and proof from coverage receipt or legacy facts."""
+        """Resolve certification from an explicit coverage receipt."""
         if cut.coverage_receipt is not None:
             if not cut.coverage_receipt.is_gapless or cut.coverage_receipt.gaps:
                 details = cut.coverage_receipt.details
@@ -66,11 +66,7 @@ class AccountPerformanceCalculator:
                     details_str,
                 )
             return False, "uncertified", "uncertified_zero_cash_flow_facts"
-        if cut.has_unknown_cash_flows:
-            return False, "uncertified", "unknown_cash_flows_present"
-        if cut.cash_flows:
-            return True, "confirmed", f"audited_records_count_{len(cut.cash_flows)}"
-        return False, "uncertified", "uncertified_zero_cash_flow_facts"
+        return False, "uncertified", "missing_cash_flow_coverage_receipt"
 
     @classmethod
     def calculate(

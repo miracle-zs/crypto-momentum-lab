@@ -2207,3 +2207,36 @@ async def test_context_reads_request_repair_without_database_or_book_writes():
     provider._execution_book.reload_position.assert_not_awaited()
     assert result.unmanaged_position_symbols == frozenset({"BTCUSDT"})
     assert requests == [result]
+
+
+@pytest.mark.asyncio
+async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._cached_rules = {}
+    provider._cached_rules_at = {}
+    provider._sessions = None
+    provider._market_sessions = None
+
+    rule = SymbolTradingRules(
+        symbol="BTCUSDT",
+        min_quantity=Decimal("0.001"),
+        max_quantity=Decimal("1000"),
+        step_size=Decimal("0.001"),
+        min_notional=Decimal("5"),
+        tick_size=Decimal("0.1"),
+    )
+
+    async def fake_load_trading_rules(sessions, symbols):
+        return {s: rule for s in symbols}
+
+    import crypto_momentum_lab.live_rollout.postgres_runtime as pr
+    monkeypatch.setattr(pr, "_load_trading_rules", fake_load_trading_rules)
+
+    assert not provider.is_symbol_rules_warmed("BTCUSDT")
+
+    await provider.warm_symbol_rules(["BTCUSDT"], NOW)
+
+    assert provider.is_symbol_rules_warmed("BTCUSDT")
+    assert provider._cached_rules["BTCUSDT"] == rule
+    assert provider._cached_rules_at["BTCUSDT"] == NOW
+

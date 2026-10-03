@@ -16,16 +16,33 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _database_url as _database_url,
     _execution_database_url as _execution_database_url,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _issue_one_shot_risk_control_command as _issue_one_shot_risk_control_command,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _load_or_save_risk_control_command as _load_or_save_risk_control_command,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _load_transition as _load_transition,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _market_database_url as _market_database_url,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _observability_database_url as _observability_database_url,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _publish_risk_control_event as _publish_risk_control_event,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _require_matching_risk_control_command as _require_matching_risk_control_command,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _resolve_database_url as _resolve_database_url,
+)
+from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _save_transition as _save_transition,
 )
 from crypto_momentum_lab.config import (
@@ -80,14 +97,30 @@ from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
 from crypto_momentum_lab.live_rollout.runtime_options import (
     LiveRunOptions,
     LiveRuntimeOptionsError,
-    parse_exchange_operations as _parse_runtime_exchange_operations,
-    resolve_live_entry_positive_gainer_top_count as _resolve_runtime_top_count,
-    resolve_live_profile_options as _resolve_runtime_profile_options,
     resolve_live_runtime_config,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
+    parse_exchange_operations as _parse_runtime_exchange_operations,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
+    resolve_live_entry_positive_gainer_top_count as _resolve_runtime_top_count,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
+    resolve_live_profile_options as _resolve_runtime_profile_options,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_manifest_decimal_option as _resolve_runtime_manifest_decimal,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_manifest_operations as _resolve_runtime_manifest_operations,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_manifest_option as _resolve_runtime_manifest_option,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_account_for_cli as _runtime_options_manifest_account,
+)
+from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_strategy_config_hash as _runtime_options_manifest_hash,
 )
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
@@ -107,6 +140,8 @@ from crypto_momentum_lab.persistence.postgres.risk_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_account_state as _latest_account_state,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_risk_config as _latest_risk_config,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
@@ -120,7 +155,7 @@ log = structlog.get_logger()
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RENEW_LEASE_CONFIRMATION = "RENEW LIVE RISK LEASE"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
-_LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
+_LIVE_ENTRY_POLICY_MODES = frozenset({"enforce"})
 # These two columns are retained by the existing risk-config schema for paper
 # and shadow sessions. Live execution no longer enforces state-age limits; the
 # large compatibility value makes that explicit without a destructive schema
@@ -185,10 +220,6 @@ class _PreflightRuntimeStrategyConfig:
     entry_order_type: EntryType
     entry_limit_ttl_seconds: int
 
-    @property
-    def entry_policy_enforce(self) -> bool:
-        return self.entry_policy_mode == "enforce"
-
 
 @app.callback()
 def live_rollout_app() -> None:
@@ -246,13 +277,6 @@ def strategy_config_hash_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
-    entry_policy_enforce: Annotated[
-        bool,
-        typer.Option(
-            "--entry-policy-enforce/--no-entry-policy-enforce",
-            help="Use the shared Policy for real entry eligibility decisions.",
-        ),
-    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -289,7 +313,6 @@ def strategy_config_hash_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
-            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -377,13 +400,6 @@ def prepare_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
-    entry_policy_enforce: Annotated[
-        bool,
-        typer.Option(
-            "--entry-policy-enforce/--no-entry-policy-enforce",
-            help="Use the shared Policy for real entry eligibility decisions.",
-        ),
-    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -464,7 +480,6 @@ def prepare_command(
         )
         entry_price_above_ema5 = strategy_inputs.require_price_above_ema5
         entry_price_above_ema10 = strategy_inputs.require_price_above_ema10
-        entry_policy_enforce = strategy_inputs.entry_policy_enforce
         entry_order_type = strategy_inputs.entry_order_type
         entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
     strategy_config_hash = _live_strategy_config_hash(
@@ -473,7 +488,6 @@ def prepare_command(
         entry_positive_gainer_top_count=entry_positive_gainer_top_count,
         require_price_above_ema5=entry_price_above_ema5,
         require_price_above_ema10=entry_price_above_ema10,
-        entry_policy_enforce=entry_policy_enforce,
         entry_order_type=entry_order_type,
         entry_limit_ttl_seconds=entry_limit_ttl_seconds,
     )
@@ -487,7 +501,7 @@ def prepare_command(
         )
     payload = asyncio.run(
         _prepare_live_risk_gates(
-            database_url=_database_url(database_url),
+            database_url=_execution_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             lease_owner=lease_owner,
@@ -513,7 +527,6 @@ def prepare_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
-            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -553,7 +566,7 @@ def renew_lease_command(
     )
     payload = asyncio.run(
         _renew_live_lease(
-            database_url=_database_url(database_url),
+            database_url=_execution_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             lease_owner=lease_owner,
@@ -611,7 +624,7 @@ def approve_command(
         raise typer.BadParameter(
             "--strategy-config-hash does not match the configured Live runtime hash"
         )
-    resolved_database_url = _database_url(database_url)
+    resolved_database_url = _execution_database_url(database_url)
     latest_risk_hash = asyncio.run(
         _latest_risk_config_hash(resolved_database_url, account_label)
     )
@@ -667,7 +680,7 @@ def approve_runtime_command(
 ) -> None:
     """Record approval values derived from the running account environment."""
 
-    resolved_database_url = _database_url(database_url)
+    resolved_database_url = _execution_database_url(database_url)
     strategy_config_hash = _validate_hex_hash(
         _runtime_strategy_config_hash(strategy),
         "runtime strategy config hash",
@@ -759,7 +772,7 @@ def refresh_approval_runtime_command(
 ) -> None:
     """Refresh an active approval while preserving its operator limits."""
 
-    resolved_database_url = _database_url(database_url)
+    resolved_database_url = _execution_database_url(database_url)
     now = datetime.now(tz=UTC)
     current_approval = asyncio.run(
         _load_active_approval(
@@ -972,7 +985,7 @@ def preflight_command(
             raise typer.BadParameter("--expected-migration-revision must not be empty")
     payload = asyncio.run(
         _preflight_summary(
-            _database_url(database_url),
+            _execution_database_url(database_url),
             account_label,
             strategy,
             expected_git_commit=expected_git_commit,
@@ -1015,7 +1028,7 @@ def approval_precheck_command(
         raise typer.BadParameter("--expected-migration-revision must not be empty")
     payload = asyncio.run(
         _approval_binding_summary(
-            _database_url(database_url),
+            _execution_database_url(database_url),
             account_label,
             strategy,
             expected_git_commit=expected_git_commit,
@@ -1059,7 +1072,7 @@ def resolve_missing_order_command(
         raise typer.BadParameter(f"{api_key_env} and {api_secret_env} are required")
     payload = asyncio.run(
         _resolve_missing_live_order(
-            database_url=_database_url(database_url),
+            database_url=_execution_database_url(database_url),
             account_label=account_label,
             client_order_id=client_order_id,
             operator=operator,
@@ -1120,7 +1133,7 @@ def submit_plan_command(
     plan = _load_plan(order_plan_json)
     result = asyncio.run(
         _run_live_plan(
-            database_url=_database_url(database_url),
+            database_url=_execution_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             session_id=session_id,
@@ -1313,13 +1326,6 @@ def run_command(
             help="Override the trade credential secret environment variable.",
         ),
     ] = None,
-    allow_legacy_credential_fallback: Annotated[
-        bool,
-        typer.Option(
-            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
-        ),
-    ] = False,
     entry_leverage: Annotated[
         int | None, typer.Option("--entry-leverage", min=1, max=125)
     ] = None,
@@ -1328,23 +1334,6 @@ def run_command(
         typer.Option(
             "--margin-type",
             help="Entry margin mode: CROSSED or ISOLATED.",
-        ),
-    ] = None,
-    entry_policy_compare_only: Annotated[
-        bool | None,
-        typer.Option(
-            "--entry-policy-compare-only/--no-entry-policy-compare-only",
-            help=(
-                "Record legacy-vs-Policy entry differences without changing "
-                "order decisions."
-            ),
-        ),
-    ] = None,
-    entry_policy_enforce: Annotated[
-        bool | None,
-        typer.Option(
-            "--entry-policy-enforce/--no-entry-policy-enforce",
-            help="Use the shared Policy for real entry eligibility decisions.",
         ),
     ] = None,
     acknowledge_missing_shadow_preflight: Annotated[
@@ -1379,18 +1368,12 @@ def run_command(
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
 ) -> None:
-    if entry_policy_compare_only and entry_policy_enforce:
-        raise typer.BadParameter(
-            "--entry-policy-compare-only and "
-            "--entry-policy-enforce are mutually exclusive"
-        )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
     configure_tracemalloc()
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
-        allow_legacy_fallback=allow_legacy_credential_fallback,
     )
     log.info(
         "binance_credentials_resolved",
@@ -1447,8 +1430,6 @@ def run_command(
                 candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
                 candle_grace_profit_pct=candle_grace_profit_pct,
                 base_url=base_url,
-                entry_policy_compare_only=entry_policy_compare_only,
-                entry_policy_enforce=entry_policy_enforce,
                 acknowledge_missing_shadow_preflight=(
                     acknowledge_missing_shadow_preflight
                 ),
@@ -1476,7 +1457,7 @@ def status_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(_load_transition(_database_url(database_url), session_id))
+    transition = asyncio.run(_load_transition(_execution_database_url(database_url), session_id))
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -1512,7 +1493,7 @@ def disable_new_entries_command(
     )
     transition = asyncio.run(
         _save_transition(
-            _database_url(database_url),
+            _execution_database_url(database_url),
             session_id,
             operator,
             strategy_config_hash,
@@ -1644,7 +1625,7 @@ def report_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(_load_transition(_database_url(database_url), session_id))
+    transition = asyncio.run(_load_transition(_execution_database_url(database_url), session_id))
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -1711,7 +1692,6 @@ def _runtime_strategy_config_hash(strategy_name: str) -> str:
         entry_positive_gainer_top_count=runtime_config.entry_positive_gainer_top_count,
         require_price_above_ema5=runtime_config.require_price_above_ema5,
         require_price_above_ema10=runtime_config.require_price_above_ema10,
-        entry_policy_enforce=runtime_config.entry_policy_enforce,
         entry_order_type=runtime_config.entry_order_type,
         entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
     )
@@ -1818,7 +1798,6 @@ async def _prepare_live_risk_gates(
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
-    entry_policy_enforce: bool,
     entry_order_type: EntryType,
     entry_limit_ttl_seconds: int,
 ) -> dict[str, str]:
@@ -1865,7 +1844,6 @@ async def _prepare_live_risk_gates(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
-            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         ),
@@ -2075,7 +2053,6 @@ async def _preflight_summary(
             ),
             require_price_above_ema5=runtime_config.require_price_above_ema5,
             require_price_above_ema10=runtime_config.require_price_above_ema10,
-            entry_policy_enforce=runtime_config.entry_policy_enforce,
             entry_order_type=runtime_config.entry_order_type,
             entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
         )
@@ -2228,14 +2205,12 @@ def _resolve_live_cli_credentials(
     *,
     api_key_env: str | None,
     api_secret_env: str | None,
-    allow_legacy_fallback: bool,
 ) -> ResolvedBinanceCredentials:
     try:
         return resolve_role_credentials(
             BinanceCredentialRole.TRADE,
             api_key_env=api_key_env,
             api_secret_env=api_secret_env,
-            allow_legacy_fallback=allow_legacy_fallback,
         )
     except CredentialResolutionError as error:
         raise typer.BadParameter(str(error)) from error

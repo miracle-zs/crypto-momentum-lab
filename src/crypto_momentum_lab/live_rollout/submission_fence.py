@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from dataclasses import dataclass
 from typing import Protocol
 
 from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
@@ -18,6 +19,19 @@ from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     SystemAction,
 )
 from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
+
+
+@dataclass(frozen=True, slots=True)
+class StaticFenceIdentity:
+    environment: str
+    account_label: str
+    strategy_name: str
+    lease_owner: str
+    code_generation: str
+    plan_hash: str | None = None
+    runtime_generation: str | None = None
+    fencing_epoch: int | None = None
+    declared_schema_compatibility: str | None = None
 
 
 class LiveRiskStateReader(Protocol):
@@ -77,6 +91,17 @@ class LiveSubmissionFence:
         self._strategy_name = strategy_name
         self._lease_owner = lease_owner
         self._code_generation = code_generation
+        self._static_identity = StaticFenceIdentity(
+            environment=environment,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            lease_owner=lease_owner,
+            code_generation=code_generation,
+            plan_hash=runtime_plan.plan_hash if runtime_plan else None,
+            runtime_generation=runtime_plan.runtime_generation if runtime_plan else None,
+            fencing_epoch=runtime_plan.fencing_epoch if runtime_plan else None,
+            declared_schema_compatibility=runtime_plan.declared_schema_compatibility if runtime_plan else None,
+        )
         self._active_lease = active_lease
         self._entry_enabled = entry_enabled
         self._is_draining = is_draining
@@ -142,7 +167,6 @@ class LiveSubmissionFence:
                         is_lease_active=True,
                         is_emergency_authorized=False,
                         is_universe_ready=False,
-                        is_collector_healthy=True,
                         plan_hash=self._runtime_plan.plan_hash,
                         runtime_generation=self._runtime_plan.runtime_generation,
                         fencing_epoch=self._runtime_plan.fencing_epoch,
@@ -211,7 +235,6 @@ class LiveSubmissionFence:
                     is_lease_active=True,
                     is_emergency_authorized=False,
                     is_universe_ready=False,
-                    is_collector_healthy=True,
                     plan_hash=self._runtime_plan.plan_hash,
                     runtime_generation=self._runtime_plan.runtime_generation,
                     fencing_epoch=self._runtime_plan.fencing_epoch,

@@ -40,6 +40,7 @@ def build_service(
         market_data=market_data,
         repository=repository,
         config=UniverseConfig(
+            loser_target_count=20,
             top_count=20,
             activation_minute=1,
         ),
@@ -90,6 +91,7 @@ async def test_refresh_persists_top_bottom_and_fetches_only_missing_opens(
         market_data=fake_market_data,
         repository=fake_repository,
         config=UniverseConfig(
+            loser_target_count=1,
             top_count=1,
             activation_minute=1,
         ),
@@ -98,12 +100,8 @@ async def test_refresh_persists_top_bottom_and_fetches_only_missing_opens(
 
     snapshot = await service.refresh(observed_at=observed_at)
 
-    assert snapshot.ranking.target_symbols == frozenset(
-        {"AAAUSDT", "BBBUSDT"}
-    )
-    assert fake_market_data.requested_open_symbols == frozenset(
-        {"BBBUSDT", "CCCUSDT"}
-    )
+    assert snapshot.ranking.target_symbols == frozenset({"AAAUSDT", "BBBUSDT"})
+    assert fake_market_data.requested_open_symbols == frozenset({"BBBUSDT", "CCCUSDT"})
     assert fake_repository.saved_snapshot == snapshot
 
 
@@ -155,9 +153,7 @@ async def test_missing_price_is_recorded_as_exclusion(
 
     snapshot = await service.refresh(observed_at=at)
 
-    assert snapshot.ranking.exclusions == {
-        "BTCUSDT": "missing_current_price"
-    }
+    assert snapshot.ranking.exclusions == {"BTCUSDT": "missing_current_price"}
 
 
 async def test_forced_symbol_outside_ranking_remains_monitored(
@@ -174,9 +170,7 @@ async def test_forced_symbol_outside_ranking_remains_monitored(
 
     snapshot = await service.refresh(observed_at=at)
     forced = next(
-        item
-        for item in snapshot.memberships
-        if item.symbol == "DELISTEDUSDT"
+        item for item in snapshot.memberships if item.symbol == "DELISTEDUSDT"
     )
 
     assert forced.status is MembershipStatus.FORCED

@@ -100,8 +100,6 @@ class LiveRunOptions:
     candle_grace_decision_profit_pct: str | None
     candle_grace_profit_pct: str | None
     base_url: str
-    entry_policy_compare_only: bool | None
-    entry_policy_enforce: bool | None
     acknowledge_missing_shadow_preflight: bool
     persist_exchange_operations: str | None
     target_notional: str | None = None
@@ -140,7 +138,6 @@ def runtime_manifest_strategy_config_hash(account: LiveRuntimeAccount) -> str:
             entry_positive_gainer_top_count=(inputs.entry_positive_gainer_top_count),
             require_price_above_ema5=inputs.require_price_above_ema5,
             require_price_above_ema10=inputs.require_price_above_ema10,
-            entry_policy_enforce=inputs.entry_policy_enforce,
             entry_order_type=inputs.entry_order_type,
             entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
         )
@@ -333,8 +330,6 @@ def resolve_live_runtime_config(
     entry_price_above_ema10: bool
     entry_order_type = options.entry_order_type
     entry_limit_ttl_seconds = options.entry_limit_ttl_seconds
-    entry_policy_compare_only = options.entry_policy_compare_only
-    entry_policy_enforce = options.entry_policy_enforce
     hedge_mode = options.hedge_mode
     exit_mode = options.exit_mode
     entry_long_only = options.entry_long_only
@@ -371,12 +366,6 @@ def resolve_live_runtime_config(
             _LIVE_ENTRY_LIMIT_TTL_SECONDS
             if entry_limit_ttl_seconds is None
             else entry_limit_ttl_seconds
-        )
-        entry_policy_compare_only = (
-            False if entry_policy_compare_only is None else entry_policy_compare_only
-        )
-        entry_policy_enforce = (
-            False if entry_policy_enforce is None else entry_policy_enforce
         )
         entry_leverage = 1 if options.entry_leverage is None else options.entry_leverage
         margin_type = "CROSSED" if options.margin_type is None else options.margin_type
@@ -432,8 +421,6 @@ def resolve_live_runtime_config(
         )
         entry_price_above_ema5 = strategy_inputs.require_price_above_ema5
         entry_price_above_ema10 = strategy_inputs.require_price_above_ema10
-        entry_policy_compare_only = strategy_inputs.entry_policy_mode == "compare_only"
-        entry_policy_enforce = strategy_inputs.entry_policy_enforce
         entry_order_type = strategy_inputs.entry_order_type
         entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
         execution_inputs = manifest_account.execution_inputs
@@ -545,8 +532,6 @@ def resolve_live_runtime_config(
         or profile is None
         or entry_order_type is None
         or entry_limit_ttl_seconds is None
-        or entry_policy_compare_only is None
-        or entry_policy_enforce is None
         or hedge_mode is None
         or exit_mode is None
         or entry_long_only is None
@@ -615,8 +600,6 @@ def resolve_live_runtime_config(
             require_price_above_ema10=entry_price_above_ema10,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
-            entry_policy_compare_only=entry_policy_compare_only,
-            entry_policy_enforce=entry_policy_enforce,
         ),
         execution=LiveRuntimeExecution(
             target_notional=target_notional_decimal,

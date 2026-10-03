@@ -119,6 +119,7 @@ def test_build_position_batches_primary_ledger() -> None:
         matching_orders=[order],  # type: ignore[arg-type]
         fill_times={"e_1": t0},
         fill_prices={"e_1": Decimal("60000")},
+        account_fills=(_trade(order),),
     )
     assert len(batches) == 1
     assert batches[0].quantity == Decimal("10")
@@ -162,6 +163,7 @@ def test_build_position_batches_short_position() -> None:
         matching_orders=[order],  # type: ignore[arg-type]
         fill_times={"e_short_1": t0},
         fill_prices={"e_short_1": Decimal("60000")},
+        account_fills=(_trade(order),),
     )
     assert len(batches) == 1
     assert batches[0].quantity == Decimal("10")
@@ -235,6 +237,7 @@ def test_build_position_batches_preserves_recovery_order_fields() -> None:
         matching_orders=[entry_order, exit_limit_order],  # type: ignore[arg-type]
         fill_times={"e_entry": t0},
         fill_prices={"e_entry": Decimal("60000")},
+        account_fills=(_trade(entry_order),),
     )
     assert len(batches) == 1
     batch = batches[0]
@@ -322,3 +325,21 @@ def test_build_position_batches_discards_stale_fills() -> None:
     assert batches[0].quantity == Decimal("22799")
     assert batches[0].entry_price == Decimal("0.004386")
     assert batches[0].opened_at == t_entry
+
+
+def _trade(order: PositionOrderFact) -> AccountFillEvent:
+    return AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol=order.symbol,
+        trade_id=f"trade-{order.exchange_order_id}",
+        order_id=order.exchange_order_id,
+        side=order.side,
+        price=order.price,
+        quantity=order.executed_quantity,
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=order.updated_at,
+        raw_payload={"is_system": True},
+    )

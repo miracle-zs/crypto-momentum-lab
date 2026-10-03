@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -897,6 +897,34 @@ class PostgresLiveContextProvider(LiveContextReader):
         """Force the next symbol-rule lookup to reload market metadata."""
         self._cached_rules.clear()
         self._cached_rules_at.clear()
+
+    def is_symbol_rules_warmed(self, symbol: str) -> bool:
+        """Return whether symbol trading rules are already cached."""
+        return symbol in self._cached_rules
+
+    async def warm_symbol_rules(
+        self,
+        symbols: Iterable[str],
+        now: datetime,
+    ) -> None:
+        """Preload symbol trading rules in a single batch before market loop."""
+        missing = [s for s in symbols if s not in self._cached_rules]
+        if not missing:
+            return
+        market_sessions = getattr(self, "_market_sessions", None)
+        if market_sessions is None:
+            market_sessions = self._sessions
+        try:
+            loaded_rules = await _load_trading_rules(market_sessions, set(missing))
+            for symbol, rules in loaded_rules.items():
+                self._cached_rules[symbol] = rules
+                self._cached_rules_at[symbol] = now
+        except Exception as error:
+            log.warning(
+                "live_symbol_rules_warmup_failed",
+                error_type=type(error).__name__,
+                symbol_count=len(missing),
+            )
 
     def _rules_load_guard(self) -> asyncio.Lock:
         lock = getattr(self, "_rules_load_lock", None)

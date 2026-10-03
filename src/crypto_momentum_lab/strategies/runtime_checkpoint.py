@@ -82,45 +82,39 @@ def market_state_from_payload(
         symbol=str(payload["symbol"]),
         bucket_start=datetime.fromisoformat(str(payload["bucket_start"])),
         bucket_end=datetime.fromisoformat(str(payload["bucket_end"])),
-        open_price=_payload_decimal(payload.get("open_price")),
-        high_price=_payload_decimal(payload.get("high_price")),
-        low_price=_payload_decimal(payload.get("low_price")),
-        close_price=_payload_decimal(payload.get("close_price")),
-        trade_count=int(str(payload.get("trade_count", 0))),
-        trade_notional=_required_decimal(payload.get("trade_notional", "0")),
-        aggressive_buy_notional=_required_decimal(
-            payload.get("aggressive_buy_notional", "0")
-        ),
-        aggressive_sell_notional=_required_decimal(
-            payload.get("aggressive_sell_notional", "0")
-        ),
-        last_bid_price=_payload_decimal(payload.get("last_bid_price")),
-        last_ask_price=_payload_decimal(payload.get("last_ask_price")),
-        spread=_payload_decimal(payload.get("spread")),
-        midpoint=_payload_decimal(payload.get("midpoint")),
-        liquidation_count=int(str(payload.get("liquidation_count", 0))),
-        liquidation_notional=_required_decimal(
-            payload.get("liquidation_notional", "0")
-        ),
-        mark_price=_payload_decimal(payload.get("mark_price")),
-        closed_kline_count=int(str(payload.get("closed_kline_count", 0))),
+        open_price=_payload_decimal(payload["open_price"]),
+        high_price=_payload_decimal(payload["high_price"]),
+        low_price=_payload_decimal(payload["low_price"]),
+        close_price=_payload_decimal(payload["close_price"]),
+        trade_count=int(str(payload["trade_count"])),
+        trade_notional=_required_decimal(payload["trade_notional"]),
+        aggressive_buy_notional=_required_decimal(payload["aggressive_buy_notional"]),
+        aggressive_sell_notional=_required_decimal(payload["aggressive_sell_notional"]),
+        last_bid_price=_payload_decimal(payload["last_bid_price"]),
+        last_ask_price=_payload_decimal(payload["last_ask_price"]),
+        spread=_payload_decimal(payload["spread"]),
+        midpoint=_payload_decimal(payload["midpoint"]),
+        liquidation_count=int(str(payload["liquidation_count"])),
+        liquidation_notional=_required_decimal(payload["liquidation_notional"]),
+        mark_price=_payload_decimal(payload["mark_price"]),
+        closed_kline_count=int(str(payload["closed_kline_count"])),
         closed_kline_1m_open_time=_payload_datetime(
-            payload.get("closed_kline_1m_open_time")
+            payload["closed_kline_1m_open_time"]
         ),
         closed_kline_1m_close_time=_payload_datetime(
-            payload.get("closed_kline_1m_close_time")
+            payload["closed_kline_1m_close_time"]
         ),
         closed_kline_1m_open_price=_payload_decimal(
-            payload.get("closed_kline_1m_open_price")
+            payload["closed_kline_1m_open_price"]
         ),
         closed_kline_1m_close_price=_payload_decimal(
-            payload.get("closed_kline_1m_close_price")
+            payload["closed_kline_1m_close_price"]
         ),
-        source_event_count=int(str(payload.get("source_event_count", 0))),
-        first_received_at=_payload_datetime(payload.get("first_received_at")),
-        last_received_at=_payload_datetime(payload.get("last_received_at")),
-        data_complete=_payload_bool_default(payload, "data_complete", True),
-        missing_agg_trade_count=int(str(payload.get("missing_agg_trade_count", 0))),
+        source_event_count=int(str(payload["source_event_count"])),
+        first_received_at=_payload_datetime(payload["first_received_at"]),
+        last_received_at=_payload_datetime(payload["last_received_at"]),
+        data_complete=_payload_bool(payload, "data_complete"),
+        missing_agg_trade_count=int(str(payload["missing_agg_trade_count"])),
     )
 
 
@@ -151,14 +145,8 @@ def _payload_datetime(value: JsonValue) -> datetime | None:
     return datetime.fromisoformat(str(value))
 
 
-def _payload_bool_default(
-    payload: dict[str, JsonValue],
-    key: str,
-    default: bool,
-) -> bool:
-    value = payload.get(key)
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() == "true"
+def _payload_bool(payload: dict[str, JsonValue], key: str) -> bool:
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value

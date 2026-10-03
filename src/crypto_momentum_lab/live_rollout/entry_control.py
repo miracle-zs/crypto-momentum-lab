@@ -24,6 +24,8 @@ class LiveEntryControlGate:
         state_machine: object,
         scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        is_symbol_warmed: Callable[[str], bool] | None = None,
+        on_unwarmed_symbol: Callable[[str], None] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -31,6 +33,8 @@ class LiveEntryControlGate:
         self._state_machine = state_machine
         self._schedule = scheduled_risk_window
         self._clock = clock
+        self._is_symbol_warmed = is_symbol_warmed
+        self._on_unwarmed_symbol = on_unwarmed_symbol
         self._entry_enabled = True
         self._entry_enabled_reason = "initializing"
         self._risk_control_entry_blocked = False
@@ -68,6 +72,10 @@ class LiveEntryControlGate:
             return False, f"account_position_sync_pending:{symbol}"
         if symbol in self._exit_failure_by_symbol:
             return False, f"exit_failure:{symbol}:{self._exit_failure_by_symbol[symbol]}"
+        if self._is_symbol_warmed is not None and not self._is_symbol_warmed(symbol):
+            if self._on_unwarmed_symbol is not None:
+                self._on_unwarmed_symbol(symbol)
+            return False, f"symbol_not_prewarmed:{symbol}"
         return True, "entry_allowed"
 
     def _outside_scheduled_window(self) -> bool:

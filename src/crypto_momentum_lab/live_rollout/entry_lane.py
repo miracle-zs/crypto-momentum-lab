@@ -1,6 +1,6 @@
 """Entry decision and candidate execution lane for live rollout.
 
-The lane owns entry-specific filtering, policy comparison, signal recording,
+The lane owns entry-specific filtering, policy evaluation, signal recording,
 and candidate iteration.  Exchange submission remains an injected adapter so
 the lane can enforce ordering and fail-closed rules without owning the
 daemon's exchange or persistence implementations.
@@ -22,15 +22,18 @@ from crypto_momentum_lab.domain.execution.position_batches import (
 )
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.risk.limits import (
+    FixedLiveLimits,
+    LiveLimitContext,
+    evaluate_fixed_live_limits,
+)
 from crypto_momentum_lab.domain.strategy import (
-    EntryPolicyComparison,
-    EntryPolicyComparisonRequest,
+    CandidatePolicyDecision,
     EntryType,
     OrderIntentCandidate,
     StrategyDecision,
     UniverseRankingSnapshot,
-    compare_entry_policy_request,
-    summarize_entry_policy_comparisons,
+    evaluate_entry_candidate,
 )
 from crypto_momentum_lab.domain.strategy.entry_candidate import (
     entry_limit_price,
@@ -85,8 +88,6 @@ class EntryLaneConfig:
     entry_long_only: bool = False
     require_price_above_ema5: bool = False
     require_price_above_ema10: bool = False
-    entry_policy_compare_only: bool = False
-    entry_policy_enforce: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     max_concurrency_per_symbol: int | None = None
@@ -106,15 +107,6 @@ class EntryLaneConfig:
             and self.max_concurrency_per_symbol <= 0
         ):
             raise ValueError("max_concurrency_per_symbol must be positive")
-        if not isinstance(self.entry_policy_compare_only, bool):
-            raise TypeError("entry_policy_compare_only must be a bool")
-        if not isinstance(self.entry_policy_enforce, bool):
-            raise TypeError("entry_policy_enforce must be a bool")
-        if self.entry_policy_compare_only and self.entry_policy_enforce:
-            raise ValueError(
-                "entry_policy_compare_only and entry_policy_enforce "
-                "are mutually exclusive"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,19 +120,19 @@ class EntryLaneOutcome:
 class _EntryPolicyEvaluation:
     """One immutable policy evaluation shared by execution and telemetry."""
 
-    comparisons: tuple[EntryPolicyComparison, ...] = ()
+    decisions: tuple[CandidatePolicyDecision, ...] = ()
     skip_reason: str | None = None
     universe_snapshot_error: str | None = None
 
-    def comparison_for(
+    def decision_for(
         self,
         candidate_id: str,
-    ) -> EntryPolicyComparison | None:
+    ) -> CandidatePolicyDecision | None:
         return next(
             (
-                comparison
-                for comparison in self.comparisons
-                if comparison.candidate_id == candidate_id
+                evaluation
+                for evaluation in self.decisions
+                if evaluation.candidate_id == candidate_id
             ),
             None,
         )
@@ -242,23 +234,12 @@ class EntryExecutionLane:
                 entry_filter_context=entry_filter_context,
                 filter_context=filter_context,
             )
-        policy_comparisons = [
-            comparison.as_details() for comparison in policy_evaluation.comparisons
+        policy_decisions = [
+            evaluation.as_details() for evaluation in policy_evaluation.decisions
         ]
-        policy_comparison_summary: dict[str, object] | None = None
-        if (
-            self._config.entry_policy_compare_only or self._config.entry_policy_enforce
-        ) and (policy_evaluation.comparisons or policy_evaluation.skip_reason is None):
-            policy_comparison_summary = summarize_entry_policy_comparisons(
-                policy_evaluation.comparisons,
-                reduce_only_skipped=sum(
-                    candidate.reduce_only for candidate in decision.candidates
-                ),
-            ).as_details()
         policy_enforce_skip_reason = policy_evaluation.skip_reason
         if (
             policy_enforce_skip_reason is None
-            and self._config.entry_policy_enforce
             and policy_evaluation.universe_snapshot_error is not None
         ):
             policy_enforce_skip_reason = "universe_snapshot_error"
@@ -324,21 +305,9 @@ class EntryExecutionLane:
                     3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
-                "entry_policy_compare_only": (self._config.entry_policy_compare_only),
-                "entry_policy_enforce": self._config.entry_policy_enforce,
-                "entry_policy_mode": (
-                    "enforce"
-                    if self._config.entry_policy_enforce
-                    else (
-                        "compare_only"
-                        if self._config.entry_policy_compare_only
-                        else "legacy"
-                    )
-                ),
-                "entry_policy_comparisons": policy_comparisons,
-                "entry_policy_comparison_summary": policy_comparison_summary,
-                "entry_policy_compare_skip_reason": policy_evaluation.skip_reason,
-                "entry_policy_enforce_skip_reason": policy_enforce_skip_reason,
+                "entry_policy_mode": "enforce",
+                "entry_policy_decisions": policy_decisions,
+                "entry_policy_skip_reason": policy_enforce_skip_reason,
                 "entry_policy_universe_snapshot_error": (
                     policy_evaluation.universe_snapshot_error
                 ),
@@ -471,13 +440,13 @@ class EntryExecutionLane:
         approved = submitted = 0
         pending_reconciliation = False
         for candidate in decision.candidates:
-            if not candidate.reduce_only and self._config.entry_policy_enforce:
-                comparison = policy_evaluation.comparison_for(candidate.candidate_id)
+            if not candidate.reduce_only:
+                evaluation = policy_evaluation.decision_for(candidate.candidate_id)
                 if (
                     policy_evaluation.skip_reason is not None
                     or policy_evaluation.universe_snapshot_error is not None
-                    or comparison is None
-                    or not comparison.policy_decision.eligible
+                    or evaluation is None
+                    or not evaluation.policy_decision.eligible
                 ):
                     continue
             if (
@@ -537,10 +506,6 @@ class EntryExecutionLane:
         entry_filter_context: LiveEntryFilterContext | None,
         filter_context: Mapping[str, object] | None,
     ) -> _EntryPolicyEvaluation:
-        if not (
-            self._config.entry_policy_compare_only or self._config.entry_policy_enforce
-        ):
-            return _EntryPolicyEvaluation()
         context_available = (filter_context or {}).get(
             "context_available",
             context is not None,
@@ -569,63 +534,44 @@ class EntryExecutionLane:
         ema5 = None if entry_filter_context is None else entry_filter_context.ema5
         ema10 = None if entry_filter_context is None else entry_filter_context.ema10
         source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
-        comparisons: list[EntryPolicyComparison] = []
+        decisions: list[CandidatePolicyDecision] = []
         for candidate in decision.candidates:
             if candidate.reduce_only:
                 continue
-            legacy_rejection_reason = _live_entry_candidate_rejection_reason(
-                candidate,
-                entry_enabled=self._entry_enabled(),
-                entry_long_only=self._config.entry_long_only,
-                entry_symbols=entry_symbols,
-                context=entry_filter_context,
-                require_price_above_ema5=self._config.require_price_above_ema5,
-                require_price_above_ema10=self._config.require_price_above_ema10,
-                readiness=self._current_readiness(candidate.symbol),
-                now=recorded_at,
-            )
-
-            comparisons.append(
-                compare_entry_policy_request(
-                    EntryPolicyComparisonRequest(
-                        candidate=candidate,
-                        source_trace_id=source_trace,
-                        legacy_rejection_reason=legacy_rejection_reason,
-                        gate_reasons=gate_reasons,
-                        entry_enabled=self._entry_enabled(),
-                        entry_long_only=self._config.entry_long_only,
-                        entry_symbols=entry_symbols,
-                        universe_snapshot=universe_snapshot,
-                        entry_price=entry_price,
-                        ema5=ema5,
-                        ema10=ema10,
-                        require_price_above_ema5=(
-                            self._config.require_price_above_ema5
-                        ),
-                        require_price_above_ema10=(
-                            self._config.require_price_above_ema10
-                        ),
-                        observed_at=recorded_at,
-                        ema_observed_at=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_observed_at
-                        ),
-                        ema_snapshot_id=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_snapshot_id
-                        ),
-                        ema_config_hash=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_config_hash
-                        ),
-                    )
+            decisions.append(
+                evaluate_entry_candidate(
+                    candidate=candidate,
+                    source_trace_id=source_trace,
+                    gate_reasons=gate_reasons,
+                    entry_enabled=self._entry_enabled(),
+                    entry_long_only=self._config.entry_long_only,
+                    entry_symbols=entry_symbols,
+                    universe_snapshot=universe_snapshot,
+                    entry_price=entry_price,
+                    ema5=ema5,
+                    ema10=ema10,
+                    require_price_above_ema5=(self._config.require_price_above_ema5),
+                    require_price_above_ema10=(self._config.require_price_above_ema10),
+                    observed_at=recorded_at,
+                    ema_observed_at=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_observed_at
+                    ),
+                    ema_snapshot_id=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_snapshot_id
+                    ),
+                    ema_config_hash=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_config_hash
+                    ),
                 )
             )
         return _EntryPolicyEvaluation(
-            comparisons=tuple(comparisons),
+            decisions=tuple(decisions),
             universe_snapshot_error=universe_snapshot_error,
         )
 
@@ -698,11 +644,29 @@ def _live_entry_candidate_rejection_reason(
         return "short_entries_disabled"
     if entry_symbols is not None and candidate.symbol not in entry_symbols:
         return "outside_entry_symbol_pool"
-    if (
-        max_concurrency_per_symbol is not None
-        and symbol_concurrency >= max_concurrency_per_symbol
-    ):
-        return "max_concurrency_per_symbol_exceeded"
+    if max_concurrency_per_symbol is not None:
+        decision = evaluate_fixed_live_limits(
+            FixedLiveLimits(
+                notional_cap=None,
+                max_open_positions=None,
+                max_daily_loss=None,
+                max_gross_exposure=None,
+                max_concurrency_per_symbol=max_concurrency_per_symbol,
+            ),
+            LiveLimitContext(
+                symbol=candidate.symbol,
+                requested_notional=candidate.desired_notional or Decimal("0"),
+                open_position_symbols=frozenset(),
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                gross_exposure=Decimal("0"),
+                min_notional=Decimal("0"),
+                has_unresolved_order=False,
+                symbol_concurrency=symbol_concurrency,
+            ),
+        )
+        if not decision.allowed:
+            return decision.reason
     if not _live_entry_candidate_passes(
         candidate,
         context=context,

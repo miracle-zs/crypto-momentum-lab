@@ -602,6 +602,33 @@ async def test_trade_client_requires_explicit_live_enablement() -> None:
         await client.aclose()
 
 
+@pytest.mark.parametrize("body", ["not JSON", "null", "{}"])
+async def test_order_post_unreadable_response_has_unknown_outcome(body: str) -> None:
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, text=body)
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://fapi.binance.com"
+        ),
+        clock=lambda: datetime(2026, 7, 4, tzinfo=UTC),
+    )
+    try:
+        with pytest.raises(ExchangeSubmissionTimeoutError):
+            await client.submit_order(_order_plan())
+        assert requests == ["/fapi/v1/order"]
+    finally:
+        await client.aclose()
+
+
 async def test_trade_client_submits_signed_binance_order() -> None:
     captured_body = ""
 
@@ -1550,7 +1577,10 @@ async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip()
     )
 
     try:
+        assert client.is_entry_leverage_configured("BTCUSDT") is False
         await client.warm_entry_leverage(("BTCUSDT",))
+        assert client.is_entry_leverage_configured("BTCUSDT") is True
+        assert client.is_entry_leverage_configured("ETHUSDT") is False
         await client.submit_order(_order_plan())
     finally:
         await client.aclose()
@@ -1933,9 +1963,7 @@ async def test_trade_client_post_boundary_fence_blocks_order_after_pacer_wait() 
             fence_called_after_pacer = True
         raise OrderPreSubmissionError("lease revoked after rate limit queue wait")
 
-    async def on_boundary(
-        plan: OrderExecutionPlan, phase: str, now: datetime
-    ) -> None:
+    async def on_boundary(plan: OrderExecutionPlan, phase: str, now: datetime) -> None:
         telemetry_events.append(phase)
 
     client = BinanceUsdMTradeClient(
@@ -1970,8 +1998,7 @@ async def test_trade_client_post_boundary_fence_blocks_order_after_pacer_wait() 
     assert telemetry_events == []  # submit_request_started was never called!
 
 
-async def test_trade_client_post_boundary_blocks_order_after_margin_warmup(
-) -> None:
+async def test_trade_client_post_boundary_blocks_order_after_margin_warmup() -> None:
     captured_paths: list[str] = []
     margin_type_configured = asyncio.Event()
     halt_active = False
@@ -2003,9 +2030,7 @@ async def test_trade_client_post_boundary_blocks_order_after_margin_warmup(
 
     async def guard(plan: OrderExecutionPlan, now: datetime) -> None:
         if halt_active:
-            raise OrderPreSubmissionError(
-                "emergency halt active after margin warmup"
-            )
+            raise OrderPreSubmissionError("emergency halt active after margin warmup")
 
     client = BinanceUsdMTradeClient(
         api_key="key",

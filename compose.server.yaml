@@ -184,10 +184,8 @@ services:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
       CML_PAPER_EXIT_RUN_IDS: *paper-account-run-ids
-      # Keep the primary label as a compatibility/startup hint. Market-data
-      # also discovers every live account with a latest ready open-position
-      # reconciliation, including accounts whose services are stopped.
-      CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-}
+      # Explicit labels supplement accounts discovered from ready open-position
+      # reconciliations, including accounts whose services are stopped.
       CML_LIVE_POSITION_ACCOUNT_LABELS: ${CML_LIVE_POSITION_ACCOUNT_LABELS:-}
       CML_MARKET_STATE_HUB_HOST: 0.0.0.0
       CML_MARKET_STATE_HUB_PORT: "8766"
@@ -380,7 +378,6 @@ services:
       - --entry-long-only
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
-      - --entry-policy-enforce
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       - --margin-type

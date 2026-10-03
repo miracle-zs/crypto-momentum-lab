@@ -43,7 +43,9 @@ def _write_checkpoint(
                 "last_bucket_start": last_bucket_start.isoformat(),
                 "last_sequence": 42,
                 "last_symbol": "BTCUSDT",
-                "schema_version": 1,
+                "schema_version": 2,
+                "accepted_sequence": 42,
+                "materialized_sequence": 42,
                 "stream_id": "stream-id",
                 "updated_at": updated_at.isoformat(),
             }

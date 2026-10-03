@@ -13,14 +13,11 @@ def rank_utc_day_returns(
     *,
     top_count: int,
     ranking_depth: int,
-    loser_target_count: int | None = None,
+    loser_target_count: int,
 ) -> RankingResult:
-    effective_loser_target_count = (
-        top_count if loser_target_count is None else loser_target_count
-    )
-    if effective_loser_target_count < 0:
+    if loser_target_count < 0:
         raise ValueError("loser_target_count must be non-negative")
-    if ranking_depth < max(top_count, effective_loser_target_count):
+    if ranking_depth < max(top_count, loser_target_count):
         raise ValueError("ranking_depth must be >= top_count")
 
     valid: list[tuple[MarketCandidate, Decimal]] = []
@@ -73,7 +70,7 @@ def rank_utc_day_returns(
         entry.symbol
         for entry in (
             *gainers[:top_count],
-            *losers[:effective_loser_target_count],
+            *losers[:loser_target_count],
         )
     )
     return RankingResult(

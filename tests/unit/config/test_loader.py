@@ -16,6 +16,7 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
         "\n".join(
             [
                 "top_count: 20",
+                "loser_target_count: 20",
                 "activation_minute: 1",
                 "refresh_interval_minutes: 15",
             ]
@@ -171,7 +172,7 @@ def test_loads_websocket_capture_configuration(
     assert config.capture.max_subscriptions_per_connection == 100
     assert config.capture.ingress_queue_max_events == 4096
     assert config.capture.book_ticker_max_subscriptions_per_connection is None
-    assert config.capture.closure_delay_seconds == 3.0
+    assert config.capture.realtime_closure_delay_seconds == 3.0
     assert config.capture.archive.max_open_writers == 512
     assert config.capture.archive.group_commit_max_events == 250
     assert config.capture.archive.group_commit_max_milliseconds == 250

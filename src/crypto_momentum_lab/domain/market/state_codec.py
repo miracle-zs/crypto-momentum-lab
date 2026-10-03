@@ -49,9 +49,7 @@ def market_state_from_payload(
             spread=_optional_decimal(payload, "spread"),
             midpoint=_optional_decimal(payload, "midpoint"),
             liquidation_count=_require_int(payload, "liquidation_count"),
-            liquidation_notional=_require_decimal(
-                payload, "liquidation_notional"
-            ),
+            liquidation_notional=_require_decimal(payload, "liquidation_notional"),
             mark_price=_optional_decimal(payload, "mark_price"),
             closed_kline_count=_require_int(payload, "closed_kline_count"),
             source_event_count=_require_int(payload, "source_event_count"),
@@ -69,14 +67,8 @@ def market_state_from_payload(
             closed_kline_1m_close_price=_optional_decimal(
                 payload, "closed_kline_1m_close_price"
             ),
-            data_complete=_optional_bool_default(
-                payload,
-                "data_complete",
-                default=True,
-            ),
-            missing_agg_trade_count=(
-                _optional_int(payload, "missing_agg_trade_count") or 0
-            ),
+            data_complete=_require_bool(payload, "data_complete"),
+            missing_agg_trade_count=_require_int(payload, "missing_agg_trade_count"),
             is_backfill=_optional_bool_default(
                 payload,
                 "is_backfill",
@@ -173,3 +165,10 @@ def _optional_decimal(
     if payload.get(name) is None:
         return None
     return _require_decimal(payload, name)
+
+
+def _require_bool(payload: Mapping[str, object], name: str) -> bool:
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise MarketStateCodecError(f"{name} must be a boolean")
+    return value

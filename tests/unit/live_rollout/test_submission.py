@@ -80,10 +80,15 @@ class RecordingCoordinator:
             plan, preparation
         ):
             return None
-        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
-                  if f.name != "context_token"}
+        values = {
+            f.name: getattr(preparation, f.name)
+            for f in fields(preparation)
+            if f.name != "context_token"
+        }
         prepared = await self.repository.prepare_submission(
-            plan=plan, prepared_at=self.clock(), **values,
+            plan=plan,
+            prepared_at=self.clock(),
+            **values,
         )
         if prepared is None:
             return None
@@ -91,7 +96,8 @@ class RecordingCoordinator:
         return OrderExecutionResult(
             client_order_id=plan.client_order_id,
             state=ExchangeOrderState.ACKNOWLEDGED,
-            exchange_order_id="exchange-1", plan=plan,
+            exchange_order_id="exchange-1",
+            plan=plan,
             prepared_at=prepared.submitting_event.occurred_at,
         )
 
@@ -123,7 +129,8 @@ def _submission(
 
     gate = TestGate(run_id="run-1", state_machine=state_machine)
     state_machine.configure_submission(
-        repository, admission=LiveSubmissionAdmission(gate, context_is_current),
+        repository,
+        admission=LiveSubmissionAdmission(gate, context_is_current),
         clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
@@ -191,7 +198,10 @@ async def test_submission_prepares_with_fencing_before_coordinator_exchange() ->
     assert call["required_session_id"] == "run-1"
 
 
-async def test_submission_preserves_policy_quantized_quantity() -> None:
+@pytest.mark.parametrize(("budget", "accepted"), [("20", False), ("25", True)])
+async def test_submission_preserves_policy_quantity_only_within_budget(
+    budget, accepted
+) -> None:
     repository = RecordingPreparedRepository()
     coordinator = RecordingCoordinator()
     submission = _submission(
@@ -212,7 +222,7 @@ async def test_submission_preserves_policy_quantized_quantity() -> None:
     candidate = replace(
         _intent(),
         symbol="ETHUSDT",
-        desired_notional=Decimal("20"),
+        desired_notional=Decimal(budget),
         features={"position_side": "BOTH", "quantized_quantity": "0.02"},
     )
     reference_price = Decimal("1111.11")
@@ -231,6 +241,9 @@ async def test_submission_preserves_policy_quantized_quantity() -> None:
         reference_price=reference_price,
     )
 
+    if not accepted:
+        assert result is None
+        return
     assert result is not None
     assert result.plan.quantity == Decimal("0.02")
     assert result.plan.quantity * reference_price == Decimal("22.2222")
@@ -329,7 +342,10 @@ async def test_submission_does_not_absorb_dust_when_multiple_batches_exist() -> 
         symbol="BTCUSDT",
         side=StrategySide.LONG,
         entry_type=EntryType.MARKET,
-        features={"position_side": "BOTH", "batch_id": "batch-a"},
+        features={
+            "position_side": "BOTH",
+            "exit_allocations": [{"batch_id": "batch-a", "quantity": "0.0004"}],
+        },
     )
     context = replace(
         _runtime_context(),
@@ -591,8 +607,12 @@ async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts()
 
     current = [datetime(2026, 7, 3, 23, 44, 59, tzinfo=UTC)]
     repository = RecordingPreparedRepository()
-    gate = LiveEntryControlGate(run_id="run-1", state_machine=object(),
-        scheduled_risk_window=ScheduledRiskWindowConfig(), clock=lambda: current[0])
+    gate = LiveEntryControlGate(
+        run_id="run-1",
+        state_machine=object(),
+        scheduled_risk_window=ScheduledRiskWindowConfig(),
+        clock=lambda: current[0],
+    )
 
     class BoundaryCoordinator(RecordingCoordinator):
         async def prepare_and_execute(self, plan, *, preparation):
@@ -601,12 +621,16 @@ async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts()
             return await super().prepare_and_execute(plan, preparation=preparation)
 
     submission = _submission(
-        repository=repository, state_machine=BoundaryCoordinator(),
+        repository=repository,
+        state_machine=BoundaryCoordinator(),
         entry_enabled=lambda: gate.entry_enabled,
     )
     result = await submission.execute(
-        replace(_intent(), desired_notional=Decimal("20")), requested_quantity=None,
-        state=_state(), context=_runtime_context())
+        replace(_intent(), desired_notional=Decimal("20")),
+        requested_quantity=None,
+        state=_state(),
+        context=_runtime_context(),
+    )
     assert result is None
     assert not repository.prepare_calls
     assert repository.saved_intents == 0
@@ -626,7 +650,8 @@ async def test_queued_entry_with_invalidated_context_never_prepares_or_posts():
             return result
 
     submission = _submission(
-        repository=repository, state_machine=DelayedCoordinator(),
+        repository=repository,
+        state_machine=DelayedCoordinator(),
         context_is_current=lambda context: current[0],
     )
     result = await submission.execute(
@@ -788,3 +813,47 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
     )
     assert res_btc3 is not None
     assert res_btc3.plan.symbol == "BTCUSDT"
+
+
+@pytest.mark.asyncio
+async def test_submission_blocks_when_quantized_notional_exceeds_max_order_notional() -> (
+    None
+):
+    cand = replace(_intent(), desired_notional=Decimal("20"))
+    repo = RecordingPreparedRepository()
+    coord = RecordingCoordinator()
+    sub = _submission(
+        repository=repo,
+        state_machine=coord,
+        limits=FixedLiveLimits(
+            notional_cap=Decimal("25"),
+            max_open_positions=2,
+            max_daily_loss=Decimal("50"),
+            max_gross_exposure=Decimal("200"),
+        ),
+    )
+    ctx = _runtime_context()
+    ctx = replace(
+        ctx,
+        risk_config=replace(ctx.risk_config, max_order_notional=Decimal("22")),
+        trading_rules={
+            "BTCUSDT": SymbolTradingRules(
+                symbol="BTCUSDT",
+                tick_size=Decimal("1"),
+                step_size=Decimal("0.1"),
+                min_quantity=Decimal("2.3"),
+                max_quantity=Decimal("100"),
+                min_notional=Decimal("10"),
+            )
+        },
+    )
+    res = await sub.execute(
+        cand,
+        requested_quantity=None,
+        state=_state(),
+        context=ctx,
+        reference_price=Decimal("10"),
+    )
+    assert res is None
+    assert coord.events == []
+    assert repo.prepare_calls == []

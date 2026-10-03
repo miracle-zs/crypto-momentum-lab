@@ -56,18 +56,12 @@ class BinanceCredentialRef(BaseModel):
 
 
 class BinanceCredentialConfig(BaseModel):
-    """Role-separated Binance credential references.
-
-    ``allow_shared`` is an explicit migration escape hatch.  It defaults to
-    false so a complete configuration cannot accidentally recreate the
-    current shared-key deployment.
-    """
+    """Role-separated Binance credential references."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     read: BinanceCredentialRef
     trade: BinanceCredentialRef
-    allow_shared: bool = False
 
     @model_validator(mode="after")
     def validate_role_separation(self) -> "BinanceCredentialConfig":
@@ -78,11 +72,8 @@ class BinanceCredentialConfig(BaseModel):
             self.trade.api_secret_env,
         }
         has_overlap = len(referenced_names) < 4
-        if has_overlap and not self.allow_shared:
-            raise ValueError(
-                "read and trade credential references must not overlap unless "
-                "allow_shared is explicitly enabled"
-            )
+        if has_overlap:
+            raise ValueError("read and trade credential references must not overlap")
         return self
 
 
@@ -90,7 +81,7 @@ class UniverseConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     top_count: int = Field(gt=0)
-    loser_target_count: int | None = Field(default=None, ge=0)
+    loser_target_count: int = Field(ge=0)
     ranking_depth: int = Field(default=30, gt=0)
     extended_gainer_count: int = Field(default=0, ge=0)
     prewarm_retention_minutes: int = Field(default=0, ge=0)
@@ -104,15 +95,10 @@ class UniverseConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_ranking_depth(self) -> "UniverseConfig":
-        effective_loser_target_count = (
-            self.top_count
-            if self.loser_target_count is None
-            else self.loser_target_count
-        )
         if self.ranking_depth < max(
             self.top_count,
             self.extended_gainer_count,
-            effective_loser_target_count,
+            self.loser_target_count,
         ):
             raise ValueError(
                 "ranking_depth must be >= top_count, loser_target_count, "
@@ -124,16 +110,6 @@ class UniverseConfig(BaseModel):
         ):
             raise ValueError("ranking_depth must be >= full_stream_max_gainer_rank")
         return self
-
-    @property
-    def effective_loser_target_count(self) -> int:
-        """Return the loser target count, preserving legacy configs."""
-
-        return (
-            self.top_count
-            if self.loser_target_count is None
-            else self.loser_target_count
-        )
 
 
 class ArchiveConfig(BaseModel):
@@ -213,22 +189,6 @@ class CaptureConfig(BaseModel):
         if value.scheme not in {"ws", "wss"}:
             raise ValueError("websocket URLs must use ws or wss")
         return value
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_legacy_closure_delay(cls, value: object) -> object:
-        if not isinstance(value, dict) or "closure_delay_seconds" not in value:
-            return value
-        normalized = dict(value)
-        legacy_delay = normalized.pop("closure_delay_seconds")
-        normalized.setdefault("realtime_closure_delay_seconds", legacy_delay)
-        normalized.setdefault("durable_closure_delay_seconds", legacy_delay)
-        return normalized
-
-    @property
-    def closure_delay_seconds(self) -> float:
-        """Compatibility alias for the effective realtime delay."""
-        return self.realtime_closure_delay_seconds
 
     @model_validator(mode="after")
     def validate_archive_streams(self) -> "CaptureConfig":

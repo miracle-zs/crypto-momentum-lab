@@ -135,6 +135,32 @@ def test_gateway_allows_reduce_only_while_draining() -> None:
     assert evaluation.reason == "reduce_only_draining"
 
 
+def test_gateway_allows_reduce_only_while_draining_when_config_flag_is_false() -> None:
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(reduce_only=True),
+            RiskContext(
+                now=datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC),
+                active_lease=_lease(),
+                latest_market_state=_market_state(0),
+                account_state=ExecutionAccountStatus.READY_READONLY,
+                open_position_symbols=frozenset(),
+                active_halts=(),
+                risk_config=_risk_config(
+                    max_order_notional=Decimal("100"),
+                    allow_reduce_only_while_draining=False,
+                ),
+                strategy_state=StrategyLiveState.DRAINING,
+            ),
+        )
+        .evaluation
+    )
+
+    assert evaluation.decision is RiskDecision.APPROVED
+    assert evaluation.reason == "reduce_only_draining"
+
+
 def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
     evaluation = (
         RiskGateway()
@@ -271,6 +297,34 @@ def test_gateway_reduce_only_bypasses_entry_limits() -> None:
 def test_gateway_requires_limit_facts_for_configured_entry() -> None:
     with pytest.raises(ValueError, match="entry limit context is required"):
         RiskGateway(limits=_fixed_limits()).evaluate(_intent(), _context())
+
+
+def test_gateway_uses_stricter_position_limit_once():
+    limits = replace(_fixed_limits(), max_open_positions=4)
+    context = replace(
+        _context(),
+        open_position_symbols=frozenset({"ETHUSDT"}),
+        risk_config=replace(_context().risk_config, max_open_positions=1),
+    )
+    result = RiskGateway(limits=limits).evaluate(
+        _intent(),
+        context,
+        limit_context=replace(
+            _entry_limit_context(), open_position_symbols=context.open_position_symbols
+        ),
+    )
+    assert result.evaluation.reason == "max_open_positions_exceeded"
+
+
+def test_quantized_notional_cannot_exceed_approved_budget():
+    allowed, reason = RiskGateway().validate_quantized_notional(
+        Decimal("55"),
+        _context(),
+        gross_exposure=Decimal("0"),
+        approved_notional=Decimal("50"),
+    )
+    assert not allowed
+    assert reason == "quantized_order_notional_exceeds_approved_notional"
 
 
 def _context(

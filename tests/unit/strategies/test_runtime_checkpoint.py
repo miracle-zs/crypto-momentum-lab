@@ -27,28 +27,6 @@ def test_market_state_checkpoint_round_trips_quality_and_kline_fields() -> None:
     assert buffered == state
 
 
-def test_market_state_checkpoint_keeps_legacy_defaults() -> None:
-    payload = market_state_payload(_state())
-    for key in (
-        "closed_kline_1m_open_time",
-        "closed_kline_1m_close_time",
-        "closed_kline_1m_open_price",
-        "closed_kline_1m_close_price",
-        "data_complete",
-        "missing_agg_trade_count",
-    ):
-        del payload[key]
-
-    restored = market_state_from_payload(payload)
-
-    assert restored.closed_kline_1m_open_time is None
-    assert restored.closed_kline_1m_close_time is None
-    assert restored.closed_kline_1m_open_price is None
-    assert restored.closed_kline_1m_close_price is None
-    assert restored.data_complete is True
-    assert restored.missing_agg_trade_count == 0
-
-
 def _state(
     *,
     closed_kline: bool = False,

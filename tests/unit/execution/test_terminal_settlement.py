@@ -82,7 +82,7 @@ class ObservationUnitOfWork:
         self.fail_commit = False
 
     @asynccontextmanager
-    async def transaction(self, key):
+    async def transaction(self, key, account_scope=None):
         transaction = ObservationTransaction(self.head)
         yield transaction
         if self.fail_commit:

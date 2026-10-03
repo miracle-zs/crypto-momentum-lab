@@ -30,11 +30,6 @@ def digest_json_payload(payload: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def legacy_trade_payload_digest(fill: AccountFillEvent) -> str:
-    """Recognize existing identities written before transport-neutral hashing."""
-    return digest_json_payload(asdict(fill))
-
-
 def trade_payload_digest(fill: AccountFillEvent) -> str:
     """Hash immutable business facts, independent of REST/WS payload formatting."""
     payload = asdict(fill)

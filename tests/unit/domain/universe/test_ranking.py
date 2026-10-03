@@ -29,6 +29,7 @@ def test_ranks_gainers_and_losers_with_deterministic_ties() -> None:
             candidate("BBBUSDT", "100", "90"),
             candidate("DDDUSDT", "100", "95"),
         ],
+        loser_target_count=2,
         top_count=2,
         ranking_depth=2,
     )
@@ -48,6 +49,7 @@ def test_excludes_missing_or_non_positive_prices_with_reason() -> None:
             candidate("NOPRICEUSDT", "10", None),
             candidate("ZEROOPENUSDT", "0", "1"),
         ],
+        loser_target_count=20,
         top_count=20,
         ranking_depth=30,
     )
@@ -66,6 +68,7 @@ def test_small_population_deduplicates_target_union() -> None:
             candidate("AAAUSDT", "100", "101"),
             candidate("BBBUSDT", "100", "99"),
         ],
+        loser_target_count=20,
         top_count=20,
         ranking_depth=30,
     )
@@ -76,6 +79,7 @@ def test_small_population_deduplicates_target_union() -> None:
 def test_ranking_depth_keeps_entries_beyond_target_count() -> None:
     result = rank_utc_day_returns(
         [candidate(f"S{index}USDT", "100", str(100 + index)) for index in range(4)],
+        loser_target_count=1,
         top_count=1,
         ranking_depth=3,
     )
@@ -104,6 +108,7 @@ def test_rejects_ranking_depth_smaller_than_target_count() -> None:
     with pytest.raises(ValueError, match="ranking_depth"):
         rank_utc_day_returns(
             [candidate("AAAUSDT", "100", "101")],
+            loser_target_count=2,
             top_count=2,
             ranking_depth=1,
         )

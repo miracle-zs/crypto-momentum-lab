@@ -1,8 +1,10 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -42,6 +44,26 @@ class RiskContext:
 class CandidateRiskAssessment:
     candidate: OrderIntentCandidate | None
     evaluation: RiskEvaluation
+    approved_notional: Decimal | None = None
+    scope: ExecutionScope | None = None
+    version: str | None = None
+
+
+def _derive_scope(
+    intent: OrderIntentCandidate, context: RiskContext
+) -> ExecutionScope | None:
+    lease = context.active_lease
+    env = lease.environment if lease else "live"
+    acc = (
+        lease.account_label if lease else (context.required_account_label or "primary")
+    )
+    pos_side = getattr(intent, "position_side", None)
+    return ExecutionScope(
+        environment=env,
+        account_label=acc,
+        symbol=intent.symbol,
+        position_side=pos_side,
+    )
 
 
 class RiskGateway:
@@ -60,6 +82,7 @@ class RiskGateway:
         limit_context: LiveLimitContext | None = None,
     ) -> CandidateRiskAssessment:
         """Apply entry limits, then evaluate authority for the resulting candidate."""
+        capped_notional: Decimal | None = None
         if self._limits is not None and not intent.reduce_only:
             if limit_context is None:
                 raise ValueError("entry limit context is required")
@@ -71,7 +94,18 @@ class RiskGateway:
                 raise ValueError(
                     "entry limit context must match the candidate risk facts"
                 )
-            decision = evaluate_fixed_live_limits(self._limits, limit_context)
+            configured_max = context.risk_config.max_open_positions
+            effective_limits = replace(
+                self._limits,
+                max_open_positions=(
+                    configured_max
+                    if self._limits.max_open_positions is None
+                    else self._limits.max_open_positions
+                    if configured_max is None
+                    else min(self._limits.max_open_positions, configured_max)
+                ),
+            )
+            decision = evaluate_fixed_live_limits(effective_limits, limit_context)
             if not decision.allowed:
                 return CandidateRiskAssessment(
                     candidate=None,
@@ -81,17 +115,60 @@ class RiskGateway:
                         RiskDecision.REJECTED,
                         decision.reason,
                     ),
+                    approved_notional=None,
+                    scope=_derive_scope(intent, context),
+                    version=context.active_lease.lease_id
+                    if context.active_lease
+                    else None,
                 )
             intent = replace(intent, desired_notional=decision.capped_notional)
+            capped_notional = decision.capped_notional
+        elif intent.reduce_only:
+            capped_notional = intent.desired_notional
+
+        auth_eval = self._evaluate_authority(
+            intent, context, position_limit_checked=self._limits is not None
+        )
+        is_approved = auth_eval.decision is RiskDecision.APPROVED
         return CandidateRiskAssessment(
             candidate=intent,
-            evaluation=self._evaluate_authority(intent, context),
+            evaluation=auth_eval,
+            approved_notional=capped_notional if is_approved else None,
+            scope=_derive_scope(intent, context),
+            version=context.active_lease.lease_id if context.active_lease else None,
         )
+
+    def validate_quantized_notional(
+        self,
+        actual_notional: Decimal,
+        context: RiskContext,
+        gross_exposure: Decimal | None = None,
+        *,
+        approved_notional: Decimal | None = None,
+    ) -> tuple[bool, str | None]:
+        """Unified hard risk check on quantized order notional for non-reduce_only entries."""
+        if approved_notional is not None and actual_notional > approved_notional:
+            return False, "quantized_order_notional_exceeds_approved_notional"
+        if context.risk_config.max_order_notional is not None:
+            if actual_notional > context.risk_config.max_order_notional:
+                return False, "quantized_order_notional_exceeds_max_order_notional"
+        if context.risk_config.max_gross_notional is not None:
+            if gross_exposure is None:
+                return False, "missing_gross_exposure"
+            effective_gross = gross_exposure
+            if (
+                effective_gross + actual_notional
+                > context.risk_config.max_gross_notional
+            ):
+                return False, "quantized_order_notional_exceeds_max_gross_notional"
+        return True, None
 
     def _evaluate_authority(
         self,
         intent: OrderIntentCandidate,
         context: RiskContext,
+        *,
+        position_limit_checked: bool = False,
     ) -> RiskEvaluation:
         if context.now.tzinfo is None or context.now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
@@ -166,18 +243,11 @@ class RiskGateway:
             )
         if intent.reduce_only:
             if context.strategy_state is StrategyLiveState.DRAINING:
-                if context.risk_config.allow_reduce_only_while_draining:
-                    return _evaluation(
-                        intent,
-                        context,
-                        RiskDecision.APPROVED,
-                        "reduce_only_draining",
-                    )
                 return _evaluation(
                     intent,
                     context,
-                    RiskDecision.REJECTED,
-                    "strategy_draining",
+                    RiskDecision.APPROVED,
+                    "reduce_only_draining",
                 )
             if context.account_state in (
                 ExecutionAccountStatus.HALTED_READONLY,
@@ -242,7 +312,9 @@ class RiskGateway:
                 else "max_order_notional_exceeded",
             )
         if context.risk_config.max_open_positions is None or (
-            len(context.open_position_symbols) >= context.risk_config.max_open_positions
+            not position_limit_checked
+            and len(context.open_position_symbols)
+            >= context.risk_config.max_open_positions
             and intent.symbol not in context.open_position_symbols
         ):
             return _evaluation(

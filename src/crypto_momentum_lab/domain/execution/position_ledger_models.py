@@ -568,32 +568,6 @@ class FactCoverageInterval:
 
 
 @dataclass(frozen=True, slots=True)
-class PositionCheckpoint:
-    """Materialized checkpoint representing complete state at a known event cut."""
-
-    checkpoint_id: str
-    key: PositionKey
-    event_cut: datetime
-    net_quantity: Decimal
-    entry_price: Decimal
-    active_episode_id: str | None = None
-    active_batches: tuple[PositionLedgerBatch, ...] = ()
-    coverage_start: datetime | None = None
-    coverage_end: datetime | None = None
-    facts_hash: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.checkpoint_id.strip():
-            raise ValueError("checkpoint_id must not be empty")
-        if self.event_cut.tzinfo is None:
-            raise ValueError("event_cut must be timezone-aware")
-        if self.net_quantity < 0:
-            raise ValueError("net_quantity must be non-negative")
-        if self.entry_price < 0:
-            raise ValueError("entry_price must be non-negative")
-
-
-@dataclass(frozen=True, slots=True)
 class ExitOrderSubmissionFact:
     """The submission of an exit (reduce-only) order defining a batch boundary."""
 
@@ -722,7 +696,6 @@ class AccountFacts:
     snapshots: tuple[AccountPositionSnapshot, ...] = ()
     exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
     coverage: FactCoverageInterval | None = None
-    checkpoint: PositionCheckpoint | None = None
     has_synthetic_fills: bool = False
     conflicting_fills: tuple[AccountFillEvent, ...] = ()
     has_late_events: bool = False
@@ -795,7 +768,6 @@ class AccountFacts:
             "snapshots": unordered(self.snapshots),
             "exit_boundaries": unordered(self.exit_boundaries),
             "coverage": canonical(self.coverage),
-            "legacy_checkpoint": canonical(self.checkpoint),
             "recovery_checkpoint": canonical(self.recovery_checkpoint),
             "has_synthetic_fills": self.has_synthetic_fills,
             "has_late_events": self.has_late_events,
@@ -997,8 +969,7 @@ class PositionView:
             )
         )
         is_ready_health = (
-            self.health_status == PositionHealthStatus.READY
-            and self.is_comparable
+            self.health_status == PositionHealthStatus.READY and self.is_comparable
         )
         is_clean_stream_no_coverage = (
             self.stream_scope is not None

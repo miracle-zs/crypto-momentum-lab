@@ -159,7 +159,6 @@ _RUNTIME_STATE_RETENTION_HOURS = 12.0
 _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
 _RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
-_LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
 _LIVE_POSITION_ACCOUNT_LABELS_ENV = "CML_LIVE_POSITION_ACCOUNT_LABELS"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
@@ -219,29 +218,15 @@ def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
     )
 
 
-def parse_live_position_account_label(value: str | None = None) -> str | None:
-    raw_value = (
-        os.environ.get(_LIVE_POSITION_ACCOUNT_LABEL_ENV, "") if value is None else value
-    )
-    normalized = raw_value.strip()
-    return normalized or None
-
-
 def parse_live_position_account_labels(
     value: str | None = None,
 ) -> frozenset[str]:
-    """Parse the live accounts whose positions must remain market-protected.
-
-    The plural variable is additive and keeps the old singular variable as a
-    compatibility fallback for the one-account deployment.
-    """
-
-    if value is None:
-        plural_value = os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
-        singular_value = parse_live_position_account_label()
-    else:
-        plural_value = value
-        singular_value = None
+    """Parse the live accounts whose positions must remain market-protected."""
+    plural_value = (
+        os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
+        if value is None
+        else value
+    )
     raw_labels = (
         tuple(item.strip() for item in plural_value.split(","))
         if plural_value.strip()
@@ -252,8 +237,6 @@ def parse_live_position_account_labels(
             f"{_LIVE_POSITION_ACCOUNT_LABELS_ENV} must contain non-empty labels"
         )
     labels = {item for item in raw_labels if item}
-    if singular_value is not None:
-        labels.add(singular_value)
     return frozenset(labels)
 
 
@@ -278,9 +261,7 @@ async def _load_protected_symbols(
     Configured labels and the latest reconciliation runs determine the live
     accounts whose authoritative position states are included.
     """
-    paper_symbols = await paper_repository.load_open_position_symbols(
-        protected_run_ids
-    )
+    paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
     discovered_labels = await account_repository.load_active_position_account_labels(
         environment="live"
     )

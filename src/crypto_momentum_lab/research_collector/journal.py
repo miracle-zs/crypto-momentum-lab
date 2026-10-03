@@ -326,23 +326,14 @@ class ArchiveJournal:
         if not committed_receipts:
             return
 
-        committed_record_ids = {r.record_id for r in committed_receipts if r.record_id}
-        legacy_receipt_keys = {
-            (r.source_kind, r.stream_id, r.sequence)
-            for r in committed_receipts
-            if not r.record_id
-        }
-
-        paths_to_remove: list[Path] = []
-        for path, record in self._pending_records.items():
-            r = record.receipt
-            if r.record_id and r.record_id in committed_record_ids:
-                paths_to_remove.append(path)
-            elif (
-                not r.record_id
-                and (r.source_kind, r.stream_id, r.sequence) in legacy_receipt_keys
-            ):
-                paths_to_remove.append(path)
+        if any(not receipt.record_id for receipt in committed_receipts):
+            raise CollectorStateConflict("materialization receipt requires record_id")
+        committed_record_ids = {receipt.record_id for receipt in committed_receipts}
+        paths_to_remove = [
+            path
+            for path, record in self._pending_records.items()
+            if record.receipt.record_id in committed_record_ids
+        ]
 
         # Recalculate materialized_sequence as the contiguous covered prefix of
         # remaining records
@@ -555,11 +546,7 @@ class ArchiveJournal:
                 f"cannot read collector materialization resolutions {res_path}: {error}"
             ) from error
 
-    def recover(
-        self,
-        *,
-        legacy_spool_root: Path | None = None,
-    ) -> tuple[JournalRecord, ...]:
+    def recover(self) -> tuple[JournalRecord, ...]:
         """Recover uncommitted journal records from disk and rebuild byte accounting."""
         _clean_temporary_files(self._pending_root)
         self._pending_records.clear()
@@ -633,12 +620,6 @@ class ArchiveJournal:
         paths: list[Path] = []
         if self._pending_root.exists():
             paths.extend(self._pending_root.rglob("*.json"))
-
-        # Backward compatibility: include any pending records from
-        # legacy spool directory
-        if legacy_spool_root is not None and legacy_spool_root.exists():
-            _clean_temporary_files(legacy_spool_root)
-            paths.extend(legacy_spool_root.rglob("*.json"))
 
         records = {path: self._read_record(path) for path in sorted(set(paths))}
         receipt_identities = {
@@ -718,7 +699,7 @@ class ArchiveJournal:
             )
 
         schema_version = payload.get("schema_version")
-        if schema_version not in (1, 2):
+        if schema_version != 2:
             raise CollectorStateConflict(
                 f"unsupported collector journal record version {schema_version}: {path}"
             )
@@ -784,7 +765,7 @@ class ArchiveJournal:
         )
         record_id = payload.get("record_id")
         if not record_id or not isinstance(record_id, str):
-            record_id = path.stem
+            raise CollectorStateConflict(f"journal record_id is invalid: {path}")
 
         receipt = DurableReceipt(
             sequence=sequence,

@@ -296,6 +296,8 @@ async def test_collector_recovers_after_hub_stream_reset(tmp_path: Path) -> None
             environment="research",
             stream_id="stream-a",
             last_sequence=7,
+            accepted_sequence=7,
+            materialized_sequence=7,
             last_bucket_start=first.bucket_start,
             last_symbol=first.symbol,
         )

@@ -96,7 +96,7 @@ class UniverseRefreshService:
             candidates,
             top_count=self._config.top_count,
             ranking_depth=self._config.ranking_depth,
-            loser_target_count=self._config.effective_loser_target_count,
+            loser_target_count=self._config.loser_target_count,
         )
         activated = True
         memberships: tuple[TrackedMembership, ...] = ()

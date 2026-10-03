@@ -297,31 +297,6 @@ async def order_repository(
     await engine.dispose()
 
 
-async def test_claim_intent_allows_one_worker(
-    order_repository: tuple[
-        PostgresOrderPlanRepository,
-        PostgresOrderAdoptionRepository,
-        PostgresOrderReadRepository,
-        PostgresOrderEventRepository,
-        PostgresOrderSubmissionRepository,
-        async_sessionmaker[AsyncSession],
-    ],
-) -> None:
-    repository, adoption, reads, events, submissions, _ = order_repository
-    await _save_intent(submissions)
-
-    results = await asyncio.gather(
-        submissions.claim_intent(
-            "candidate-1", "worker-1", NOW, NOW + timedelta(minutes=1)
-        ),
-        submissions.claim_intent(
-            "candidate-1", "worker-2", NOW, NOW + timedelta(minutes=1)
-        ),
-    )
-
-    assert sorted(results) == [False, True]
-
-
 async def test_save_exchange_order_event_is_idempotent(
     order_repository: tuple[
         PostgresOrderPlanRepository,

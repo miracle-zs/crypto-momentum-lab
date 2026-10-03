@@ -132,7 +132,12 @@ async def test_reconcile_all_reconciles_every_unresolved_order() -> None:
 
     class Repository:
         async def load_unresolved_orders(self, run_id: str):
-            return tuple(SimpleNamespace(plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION) for plan in plans)
+            return tuple(
+                SimpleNamespace(
+                    plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                )
+                for plan in plans
+            )
 
     class StateMachine:
         async def reconcile_order(self, plan) -> None:
@@ -179,9 +184,13 @@ async def test_requested_repair_sleeps_when_idle_and_stops_after_resolution() ->
             await worker
 
 
-@pytest.mark.parametrize("state", [
-    ExchangeOrderState.ACKNOWLEDGED, ExchangeOrderState.PARTIALLY_FILLED,
-])
+@pytest.mark.parametrize(
+    "state",
+    [
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.PARTIALLY_FILLED,
+    ],
+)
 async def test_confirmed_resting_orders_use_ws_without_rest_repair(state):
     from unittest.mock import AsyncMock
 
@@ -207,7 +216,9 @@ async def test_unknown_order_retries_until_resolved_then_worker_sleeps():
         load_unresolved_orders=AsyncMock(side_effect=[(order,), (), ()])
     )
     machine = SimpleNamespace(reconcile_order=AsyncMock())
-    worker = LiveOrderReconciliation(repository, machine, "run-1", interval_seconds=0.01)
+    worker = LiveOrderReconciliation(
+        repository, machine, "run-1", interval_seconds=0.01
+    )
     task = asyncio.create_task(worker.run_requested())
     try:
         worker.request_recovery()
@@ -478,7 +489,9 @@ async def test_incomplete_event_wakes_existing_worker_and_does_not_block_next_fa
             scans += 1
             if scans == 2:
                 second_scan.set()
-            return (replace(order, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION),)
+            return (
+                replace(order, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION),
+            )
 
     class StateMachine:
         async def mark_reconciliation_pending(self, plan):
@@ -530,7 +543,15 @@ async def test_incomplete_earlier_run_order_is_repaired_by_existing_worker():
 
         async def load_unresolved_orders(self, run_id):
             scopes.append(run_id)
-            return (replace(order, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION),) if run_id == "earlier-run" else ()
+            return (
+                (
+                    replace(
+                        order, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                    ),
+                )
+                if run_id == "earlier-run"
+                else ()
+            )
 
     class StateMachine:
         async def mark_reconciliation_pending(self, _plan):
@@ -597,8 +618,12 @@ async def test_failed_exit_recovery_does_not_kill_existing_worker():
 
     recover = AsyncMock(side_effect=[TimeoutError("REST unavailable"), None])
     worker = LiveOrderReconciliation(
-        order_repository=SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=())),
-        state_machine=SimpleNamespace(), run_id="run", interval_seconds=0.01,
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=())
+        ),
+        state_machine=SimpleNamespace(),
+        run_id="run",
+        interval_seconds=0.01,
         recover_exits=recover,
     )
     task = asyncio.create_task(worker.run_requested())
@@ -612,6 +637,66 @@ async def test_failed_exit_recovery_does_not_kill_existing_worker():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_order_lookup_budget_rotates_across_unresolved_commands():
+    from unittest.mock import AsyncMock
+
+    orders = tuple(
+        SimpleNamespace(
+            plan=SimpleNamespace(client_order_id=str(i), reduce_only=False),
+            state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        )
+        for i in range(5)
+    )
+    machine = SimpleNamespace(reconcile_order=AsyncMock())
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=orders)
+        ),
+        state_machine=machine,
+        run_id="run",
+        max_order_lookups_per_pass=2,
+    )
+    for _ in range(3):
+        assert await worker.reconcile_all()
+    assert [
+        call.args[0].client_order_id for call in machine.reconcile_order.await_args_list
+    ] == ["0", "1", "2", "3", "4", "0"]
+
+
+async def test_slow_recovery_family_does_not_starve_other_families():
+    from unittest.mock import AsyncMock
+
+    blocked = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def positions():
+        await blocked.wait()
+
+    async def exits():
+        completed.set()
+        return False
+
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=())
+        ),
+        state_machine=object(),
+        run_id="run",
+        family_timeout_seconds=0.01,
+        repair_positions=positions,
+        recover_exits=exits,
+    )
+    worker.request_recovery()
+    task = asyncio.create_task(worker.run_requested())
+    try:
+        await asyncio.wait_for(completed.wait(), 1)
+        assert "positions" in worker._retry_at
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_position_repair_failure_does_not_skip_order_or_exit_recovery():
@@ -630,8 +715,13 @@ async def test_position_repair_failure_does_not_skip_order_or_exit_recovery():
         calls.append("exits")
         completed.set()
 
-    worker = LiveOrderReconciliation(order_repository=SimpleNamespace(load_unresolved_orders=orders),
-        state_machine=object(), run_id="run-1", repair_positions=positions, recover_exits=exits)
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(load_unresolved_orders=orders),
+        state_machine=object(),
+        run_id="run-1",
+        repair_positions=positions,
+        recover_exits=exits,
+    )
     worker.request_recovery()
     task = asyncio.create_task(worker.run_requested())
     try:
@@ -646,19 +736,30 @@ async def test_position_repair_failure_does_not_skip_order_or_exit_recovery():
 async def test_unknown_exit_routes_once_without_duplicate_generic_query(accepted):
     from unittest.mock import AsyncMock
 
-    unknown = SimpleNamespace(plan=SimpleNamespace(reduce_only=True, client_order_id="exit"),
-                              state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION)
-    entry = SimpleNamespace(plan=SimpleNamespace(reduce_only=False, client_order_id="entry"),
-                            state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION)
+    unknown = SimpleNamespace(
+        plan=SimpleNamespace(reduce_only=True, client_order_id="exit"),
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    )
+    entry = SimpleNamespace(
+        plan=SimpleNamespace(reduce_only=False, client_order_id="entry"),
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    )
     routed = []
+
     async def orders(run):
         return (unknown, entry)
+
     def route(order):
         routed.append(order)
         return accepted
+
     machine = SimpleNamespace(reconcile_order=AsyncMock())
-    worker = LiveOrderReconciliation(order_repository=SimpleNamespace(load_unresolved_orders=orders),
-        state_machine=machine, run_id="run-1", request_unknown_exit=route)
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(load_unresolved_orders=orders),
+        state_machine=machine,
+        run_id="run-1",
+        request_unknown_exit=route,
+    )
     await worker.reconcile_all()
     assert routed == [unknown]
     assert machine.reconcile_order.await_count == (1 if accepted else 2)

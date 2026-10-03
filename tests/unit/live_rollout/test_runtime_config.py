@@ -58,8 +58,6 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
             require_price_above_ema10=False,
             entry_order_type=EntryType.LIMIT,
             entry_limit_ttl_seconds=900,
-            entry_policy_compare_only=False,
-            entry_policy_enforce=False,
         ),
         execution=LiveRuntimeExecution(
             target_notional=Decimal("100.00"),

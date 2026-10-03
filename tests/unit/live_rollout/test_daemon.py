@@ -205,39 +205,6 @@ async def test_live_signal_record_includes_universe_and_effective_entry_context(
     assert effective["effective_expires_at"] == NOW + timedelta(minutes=15)
 
 
-async def test_live_signal_record_can_compare_entry_policy_without_submitting_change() -> (
-    None
-):
-    recorder = RecordingSignalRecorder()
-    exchange = PlanAwareExchange()
-    daemon = _daemon(
-        exchange=exchange,
-        signal_recorder=recorder,
-        entry_policy_compare_only=True,
-    )
-
-    result = await daemon.run(_states())
-
-    assert result.halt_reason is None
-    assert result.submitted_order_count == 1
-    assert exchange.calls == ["submit"]
-    assert recorder.decision_filter_context is not None
-    assert recorder.decision_filter_context["entry_policy_compare_only"] is True
-    comparisons = recorder.decision_filter_context["entry_policy_comparisons"]
-    assert len(comparisons) == 1
-    assert comparisons[0]["matched"] is True
-    assert recorder.decision_filter_context["entry_policy_comparison_summary"] == {
-        "candidates": 1,
-        "matched": 1,
-        "mismatched": 0,
-        "legacy_eligible": 1,
-        "policy_eligible": 1,
-        "reduce_only_skipped": 0,
-        "policy_reasons": {},
-        "mismatch_reasons": {},
-    }
-
-
 async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission() -> (
     None
 ):
@@ -246,7 +213,6 @@ async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission
     daemon = _daemon(
         exchange=exchange,
         signal_recorder=recorder,
-        entry_policy_enforce=True,
     )
 
     result = await daemon.run(_states())
@@ -255,18 +221,7 @@ async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission
     assert result.submitted_order_count == 1
     assert exchange.calls == ["submit"]
     assert recorder.decision_filter_context is not None
-    assert recorder.decision_filter_context["entry_policy_enforce"] is True
     assert recorder.decision_filter_context["entry_policy_mode"] == "enforce"
-    assert recorder.decision_filter_context["entry_policy_comparison_summary"] == {
-        "candidates": 1,
-        "matched": 1,
-        "mismatched": 0,
-        "legacy_eligible": 1,
-        "policy_eligible": 1,
-        "reduce_only_skipped": 0,
-        "policy_reasons": {},
-        "mismatch_reasons": {},
-    }
 
 
 async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
@@ -288,7 +243,6 @@ async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
         signal_recorder=recorder,
         entry_symbol_loader=load_symbols,
         entry_universe_snapshot_provider=empty_universe,
-        entry_policy_enforce=True,
     )
 
     result = await daemon.run(_states())
@@ -297,12 +251,10 @@ async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
     assert result.submitted_order_count == 0
     assert exchange.calls == []
     assert recorder.decision_filter_context is not None
-    summary = recorder.decision_filter_context["entry_policy_comparison_summary"]
-    assert summary["candidates"] == 1
-    assert summary["legacy_eligible"] == 1
-    assert summary["policy_eligible"] == 0
-    assert summary["mismatched"] == 1
-    assert summary["mismatch_reasons"] == {"outside_entry_universe": 1}
+    decisions = recorder.decision_filter_context["entry_policy_decisions"]
+    assert len(decisions) == 1
+    assert decisions[0]["policy_eligible"] is False
+    assert decisions[0]["policy_rejection_reasons"] == ["outside_entry_universe"]
 
 
 async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> None:
@@ -322,7 +274,6 @@ async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> 
         signal_recorder=recorder,
         entry_symbol_loader=load_symbols,
         entry_universe_snapshot_provider=broken_universe,
-        entry_policy_enforce=True,
     )
 
     result = await daemon.run(_states())
@@ -336,18 +287,9 @@ async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> 
         == "RuntimeError"
     )
     assert (
-        recorder.decision_filter_context["entry_policy_enforce_skip_reason"]
+        recorder.decision_filter_context["entry_policy_skip_reason"]
         == "universe_snapshot_error"
     )
-
-
-def test_live_policy_modes_are_mutually_exclusive() -> None:
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        _daemon(
-            exchange=PlanAwareExchange(),
-            entry_policy_compare_only=True,
-            entry_policy_enforce=True,
-        )
 
 
 @pytest.mark.parametrize("reduce_only", [False, True])
@@ -632,6 +574,7 @@ async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas() -> 
             entry_price=Decimal("30001"),
             ema5=Decimal("30000"),
             ema10=Decimal("29999"),
+            ema_observed_at=NOW,
         )
 
     daemon = _daemon(
@@ -789,7 +732,9 @@ async def test_unknown_order_scope_through_market_loop_and_submission(
         updated_at=NOW,
     )
     context = _runtime_context()
-    config = replace(context.risk_config, max_open_positions=2)
+    config = replace(
+        context.risk_config, max_open_positions=2, max_gross_notional=gross_cap
+    )
     context = replace(
         context,
         risk_config=config,
@@ -1325,6 +1270,7 @@ async def test_absent_recovery_order_falls_back_to_market_exit() -> None:
         entry_price=Decimal("30000"),
         opened_at=NOW - timedelta(minutes=30),
         recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_exit_started_at=recovery_created_at,
         recovery_order_created_at=recovery_created_at,
         recovery_order_plan=recovery_plan,
     )
@@ -1546,251 +1492,6 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
     assert exchange.plans[0].side == "SELL"
     assert exchange.plans[0].position_side is FuturesPositionSide.LONG
     assert exchange.plans[1].reduce_only is False
-
-
-async def test_account_event_lane_submits_exit_without_entry_decision() -> None:
-    exchange = PlanAwareExchange()
-    position = ManagedLivePosition(
-        symbol="BTCUSDT",
-        side="long",
-        position_side=FuturesPositionSide.LONG,
-        quantity=Decimal("0.001"),
-        entry_price=Decimal("31000"),
-        opened_at=datetime(2026, 7, 3, 23, 59, tzinfo=UTC),
-    )
-
-    async def position_context(state: object) -> LiveDaemonRuntimeContext:
-        del state
-        return replace(
-            _runtime_context(),
-            open_position_symbols=frozenset({"BTCUSDT"}),
-            managed_positions=(position,),
-        )
-
-    daemon = _daemon(
-        exchange=exchange,
-        context_provider=position_context,
-        exit_manager=LiveExitManager(
-            config=LiveExitConfig(
-                run_id="run-1",
-                strategy_name="compression_breakout",
-                strategy_version="v0",
-                strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(max_holding_seconds=30),
-            )
-        ),
-    )
-
-    failure = await daemon.process_account_event(_state())
-
-    assert failure is None
-    assert exchange.calls == ["submit"]
-    assert exchange.plans[0].reduce_only is True
-
-
-async def test_account_event_exit_does_not_wait_for_slow_market_exit() -> None:
-    exchange = PlanAwareExchange()
-    market_exit_started = asyncio.Event()
-    release_market_exit = asyncio.Event()
-    position_opened_at = datetime(2026, 7, 3, 23, 59, tzinfo=UTC)
-    positions = (
-        ManagedLivePosition(
-            symbol="ETHUSDT",
-            side="long",
-            position_side=FuturesPositionSide.LONG,
-            quantity=Decimal("0.001"),
-            entry_price=Decimal("31000"),
-            opened_at=position_opened_at,
-        ),
-        ManagedLivePosition(
-            symbol="BTCUSDT",
-            side="long",
-            position_side=FuturesPositionSide.LONG,
-            quantity=Decimal("0.001"),
-            entry_price=Decimal("31000"),
-            opened_at=position_opened_at,
-        ),
-    )
-
-    class SlowCandleLoader:
-        async def load_closed_candles(
-            self,
-            *,
-            symbol: str,
-            start: datetime,
-            end: datetime,
-        ) -> tuple[ClosedCandle15m, ...]:
-            del start, end
-            if symbol == "ETHUSDT":
-                market_exit_started.set()
-                await release_market_exit.wait()
-                return ()
-            return (
-                ClosedCandle15m(
-                    symbol="BTCUSDT",
-                    candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-                    candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
-                    open_price=Decimal("31000"),
-                    close_price=Decimal("30000"),
-                ),
-            )
-
-    async def position_context(state: object) -> LiveDaemonRuntimeContext:
-        del state
-        return replace(
-            _runtime_context(),
-            open_position_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
-            managed_positions=positions,
-        )
-
-    base_state = replace(
-        _state(),
-        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
-    )
-    market_state = replace(base_state, symbol="ETHUSDT")
-    account_state = replace(base_state, symbol="BTCUSDT")
-    daemon = _daemon(
-        exchange=exchange,
-        context_provider=position_context,
-        exit_manager=LiveExitManager(
-            config=LiveExitConfig(
-                run_id="run-1",
-                strategy_name="compression_breakout",
-                strategy_version="v0",
-                strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(mode=PositionExitMode.CANDLE_15M),
-            ),
-            candle_loader=SlowCandleLoader(),
-        ),
-    )
-    daemon.set_entry_enabled(False, reason="test_only")
-
-    async def states() -> AsyncIterator[MarketState15s]:
-        yield market_state
-
-    run_task = asyncio.create_task(daemon.run(states()))
-    await asyncio.wait_for(market_exit_started.wait(), timeout=1)
-    account_task = asyncio.create_task(daemon.process_account_event(account_state))
-    try:
-        account_failure = await asyncio.wait_for(
-            asyncio.shield(account_task),
-            timeout=0.05,
-        )
-    finally:
-        release_market_exit.set()
-
-    assert account_failure is None
-    assert await account_task is None
-    await run_task
-    assert exchange.calls == ["submit"]
-    assert exchange.plans[0].symbol == "BTCUSDT"
-    assert exchange.plans[0].reduce_only is True
-
-
-async def test_market_exit_workers_do_not_wait_for_another_symbol() -> None:
-    btc_exit_submitted = asyncio.Event()
-    market_exit_started = asyncio.Event()
-    release_market_exit = asyncio.Event()
-    position_opened_at = datetime(2026, 7, 3, 23, 59, tzinfo=UTC)
-    positions = (
-        ManagedLivePosition(
-            symbol="ETHUSDT",
-            side="long",
-            position_side=FuturesPositionSide.LONG,
-            quantity=Decimal("0.001"),
-            entry_price=Decimal("31000"),
-            opened_at=position_opened_at,
-        ),
-        ManagedLivePosition(
-            symbol="BTCUSDT",
-            side="long",
-            position_side=FuturesPositionSide.LONG,
-            quantity=Decimal("0.001"),
-            entry_price=Decimal("31000"),
-            opened_at=position_opened_at,
-        ),
-    )
-
-    class RecordingExchange(PlanAwareExchange):
-        async def submit_order(
-            self,
-            plan: OrderExecutionPlan,
-        ) -> ExchangeOrderSnapshot:
-            result = await super().submit_order(plan)
-            if plan.symbol == "BTCUSDT":
-                btc_exit_submitted.set()
-            return result
-
-    class SlowCandleLoader:
-        async def load_closed_candles(
-            self,
-            *,
-            symbol: str,
-            start: datetime,
-            end: datetime,
-        ) -> tuple[ClosedCandle15m, ...]:
-            del start, end
-            if symbol == "ETHUSDT":
-                market_exit_started.set()
-                await release_market_exit.wait()
-                return ()
-            return (
-                ClosedCandle15m(
-                    symbol="BTCUSDT",
-                    candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-                    candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
-                    open_price=Decimal("31000"),
-                    close_price=Decimal("30000"),
-                ),
-            )
-
-    exchange = RecordingExchange()
-
-    async def position_context(state: object) -> LiveDaemonRuntimeContext:
-        del state
-        return replace(
-            _runtime_context(),
-            open_position_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
-            managed_positions=positions,
-        )
-
-    base_state = replace(
-        _state(),
-        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
-    )
-    market_state = replace(base_state, symbol="ETHUSDT")
-    second_market_state = replace(base_state, symbol="BTCUSDT")
-    daemon = _daemon(
-        exchange=exchange,
-        context_provider=position_context,
-        exit_manager=LiveExitManager(
-            config=LiveExitConfig(
-                run_id="run-1",
-                strategy_name="compression_breakout",
-                strategy_version="v0",
-                strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(mode=PositionExitMode.CANDLE_15M),
-            ),
-            candle_loader=SlowCandleLoader(),
-        ),
-    )
-    daemon.set_entry_enabled(False, reason="test_only")
-
-    async def states() -> AsyncIterator[MarketState15s]:
-        yield market_state
-        yield second_market_state
-
-    run_task = asyncio.create_task(daemon.run(states()))
-    await asyncio.wait_for(market_exit_started.wait(), timeout=1)
-    try:
-        await asyncio.wait_for(btc_exit_submitted.wait(), timeout=0.2)
-    finally:
-        release_market_exit.set()
-    result = await run_task
-
-    assert result.halt_reason is None
-    assert exchange.calls == ["submit"]
-    assert exchange.plans[0].symbol == "BTCUSDT"
 
 
 async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
@@ -2162,7 +1863,9 @@ class FakeLiveRepository:
     ) -> None:
         pass
 
-    async def prepare_submission(self, *, intent, evaluation, plan, prepared_at, **kwargs):
+    async def prepare_submission(
+        self, *, intent, evaluation, plan, prepared_at, **kwargs
+    ):
         await self.save_approved_intent(intent, evaluation)
         return PreparedOrderSubmission(
             plan=plan,
@@ -2220,8 +1923,6 @@ def _daemon(
     entry_filter_context_loader=None,
     entry_universe_context_provider=None,
     entry_universe_snapshot_provider=None,
-    entry_policy_compare_only: bool = False,
-    entry_policy_enforce: bool = False,
     signal_recorder=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
@@ -2250,10 +1951,24 @@ def _daemon(
 
     async def default_context(state: object) -> LiveDaemonRuntimeContext:
         del state
-        return _runtime_context()
+        context = _runtime_context()
+        config = replace(context.risk_config, max_gross_notional=max_gross_exposure)
+        return replace(
+            context,
+            risk_config=config,
+            gate_context=replace(
+                context.gate_context,
+                risk_config=config,
+                approval=replace(
+                    context.gate_context.approval, risk_config_hash=config.config_hash
+                ),
+            ),
+        )
 
     coordinator = OrderExecutionCoordinator(
-        backend=machine, account_label="test_account", environment="live",
+        backend=machine,
+        account_label="test_account",
+        environment="live",
     )
     _created_coordinators.append(coordinator)
     submission_repository = repository or FakeLiveRepository()
@@ -2286,8 +2001,6 @@ def _daemon(
             entry_filter_context_loader=entry_filter_context_loader,
             entry_universe_context_provider=entry_universe_context_provider,
             entry_universe_snapshot_provider=entry_universe_snapshot_provider,
-            entry_policy_compare_only=entry_policy_compare_only,
-            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             scheduled_risk_window=scheduled_risk_window,
             readiness_provider=readiness_provider,
@@ -2667,17 +2380,23 @@ async def test_market_loop_keeps_processing_while_scheduled_io_waits(waiting_on)
         await release.wait()
         return ()
 
-    daemon = _daemon(exchange=PlanAwareExchange(), clock=lambda: now,
-                     scheduled_risk_window=ScheduledRiskWindowConfig(),
-                     cancel_unfilled_entry_orders=cancel,
-                     fetch_exchange_positions=verify)
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        clock=lambda: now,
+        scheduled_risk_window=ScheduledRiskWindowConfig(),
+        cancel_unfilled_entry_orders=cancel,
+        fetch_exchange_positions=verify,
+    )
 
     async def states():
         await started.wait()
         yield _state()
         state = _state()
-        yield replace(state, bucket_start=state.bucket_start + timedelta(seconds=15),
-                      bucket_end=state.bucket_end + timedelta(seconds=15))
+        yield replace(
+            state,
+            bucket_start=state.bucket_start + timedelta(seconds=15),
+            bucket_end=state.bucket_end + timedelta(seconds=15),
+        )
 
     task = asyncio.create_task(daemon.run(states()))
     try:
@@ -2694,8 +2413,11 @@ async def test_market_loop_keeps_processing_while_scheduled_io_waits(waiting_on)
 
 def test_schedule_gate_closes_at_boundary_without_waiting_for_timer():
     current = [datetime(2026, 7, 3, 23, 44, 59, tzinfo=UTC)]
-    daemon = _daemon(exchange=PlanAwareExchange(), clock=lambda: current[0],
-                     scheduled_risk_window=ScheduledRiskWindowConfig())
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        clock=lambda: current[0],
+        scheduled_risk_window=ScheduledRiskWindowConfig(),
+    )
     assert daemon.entry_enabled
     current[0] += timedelta(seconds=1)
     assert not daemon.entry_enabled
@@ -2724,8 +2446,13 @@ async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capa
     daemon = _daemon(exchange=PlanAwareExchange(), context_provider=Provider())
     generation = daemon._context_runtime.generation
     state = await anext(_states())
-    prefetched = PrefetchedContext(state=state, generation=generation,
-        received_at=fresh.now, context=_runtime_context(), error=None)
+    prefetched = PrefetchedContext(
+        state=state,
+        generation=generation,
+        received_at=fresh.now,
+        context=_runtime_context(),
+        error=None,
+    )
     daemon._market_admission.invalidate_context_cache()
     assert daemon._context_runtime.generation == generation + 1
     admitted = await daemon._market_admission.prepare(prefetched)

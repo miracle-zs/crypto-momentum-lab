@@ -284,7 +284,6 @@ def build_capability_evidence_provider(
             is_lease_active=is_lease_valid,
             is_emergency_authorized=False,
             is_universe_ready=is_app_valid,
-            is_collector_healthy=True,
             plan_hash=runtime_plan.plan_hash,
             runtime_generation=runtime_plan.runtime_generation,
             fencing_epoch=runtime_plan.fencing_epoch,

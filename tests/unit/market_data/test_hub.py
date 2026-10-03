@@ -98,23 +98,6 @@ def test_market_state_batch_decoder_tolerates_malformed_entered_symbols() -> Non
     assert decoded.entered_symbols == frozenset({"BTCUSDT"})
 
 
-def test_market_state_batch_decoder_defaults_legacy_completeness_fields() -> None:
-    state = fixture_state("BTCUSDT", 0)
-    payload = json.loads(
-        encode_market_state_batch(
-            (state,),
-            sequence=1,
-            published_at=state.bucket_end,
-        )
-    )
-    del payload["states"][0]["data_complete"]
-    del payload["states"][0]["missing_agg_trade_count"]
-
-    decoded = decode_market_state_batch(json.dumps(payload))
-
-    assert decoded == (state,)
-
-
 def test_market_state_batch_decoder_handles_is_backfill() -> None:
     from dataclasses import replace
 

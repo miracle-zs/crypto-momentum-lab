@@ -222,17 +222,6 @@ async def test_historical_durable_identity_conflict_is_not_order_absence():
     exchange.query_order_by_client_id.assert_not_awaited()
 
 
-async def test_existing_legacy_order_keeps_its_durable_identity():
-    command, exchange, session, recovery = case()
-    session.scalar.side_effect = [SimpleNamespace(
-        run_id="run", symbol="BTCUSDT", client_order_id="legacy-exit", reduce_only=True
-    ), 0]
-    result = await recovery(command)
-    assert result.status == "PENDING"
-    assert result.reason == "durable_order_exists_but_exchange_receipt_unknown"
-    exchange.query_order_by_client_id.assert_awaited_once_with("BTCUSDT", "legacy-exit")
-
-
 async def test_explicit_identity_conflict_does_not_query_or_supersede():
     command, exchange, session, recovery = case()
     command = replace(command, idempotency_key="explicit-id")
@@ -240,20 +229,4 @@ async def test_explicit_identity_conflict_does_not_query_or_supersede():
         run_id="run", symbol="BTCUSDT", client_order_id="different-id", reduce_only=True
     ), 0]
     assert (await recovery(command)).reason == "durable_order_identity_mismatch"
-    exchange.query_order_by_client_id.assert_not_awaited()
-
-
-@pytest.mark.parametrize("state,exchange_id,expected", [
-    ("rejected", None, "SUPERSEDED"),
-    ("unknown_pending", None, "PENDING"),
-    ("rejected", "123", "PENDING"),
-])
-async def test_invalid_legacy_receipt_requires_proven_rejection(state, exchange_id, expected):
-    command, exchange, session, recovery = case()
-    session.scalar.side_effect = [SimpleNamespace(
-        run_id="run", symbol="BTCUSDT", reduce_only=True,
-        client_order_id="cmd_exit_dec_龙虾USDT_70b9111923319e92",
-        state=state, exchange_order_id=exchange_id,
-    ), 0]
-    assert (await recovery(command)).status == expected
     exchange.query_order_by_client_id.assert_not_awaited()

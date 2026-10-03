@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
@@ -46,38 +44,6 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
 )
 
 log = structlog.get_logger(__name__)
-
-
-class ClosedCandle15mLoader(Protocol):
-    async def load_closed_candles(
-        self,
-        *,
-        symbol: str,
-        start: datetime,
-        end: datetime,
-    ) -> tuple[ClosedCandle15m, ...]: ...
-
-
-class ThreadedClosedCandle15mLoader:
-    def __init__(self, source: object) -> None:
-        load = getattr(source, "load_closed_candles", None)
-        if not callable(load):
-            raise TypeError("source must provide load_closed_candles")
-        self._load: Callable[..., tuple[ClosedCandle15m, ...]] = load
-
-    async def load_closed_candles(
-        self,
-        *,
-        symbol: str,
-        start: datetime,
-        end: datetime,
-    ) -> tuple[ClosedCandle15m, ...]:
-        return await asyncio.to_thread(
-            self._load,
-            symbol=symbol,
-            start=start,
-            end=end,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +202,11 @@ def managed_live_positions_from_views(
                     quantity=batch.quantity,
                     entry_price=batch.entry_price,
                     opened_at=batch.opened_at,
-                    exit_order_submitted_at=batch.exit_order_submitted_at,
+                    exit_order_submitted_at=(
+                        plan.created_at
+                        if plan is not None
+                        else batch.exit_order_submitted_at
+                    ),
                     recovery_order_client_id=(
                         None if recovery is None else plan.client_order_id
                     ),
@@ -352,10 +322,8 @@ class LiveExitManager:
         self,
         *,
         config: LiveExitConfig,
-        candle_loader: ClosedCandle15mLoader | None = None,
     ) -> None:
         self._config = config
-        self._candles = candle_loader
         self._checked_until: dict[tuple[str, FuturesPositionSide, str], datetime] = {}
         # Bumped when a durable client-order-id is already bound to a terminal
         # reduce-only row.  The recovery episode stays the same, but the next
@@ -380,17 +348,8 @@ class LiveExitManager:
 
     @property
     def uses_market_state_exit(self) -> bool:
-        """Whether the legacy 15-second state path should evaluate exits.
-
-        Production candle exits pass no loader and therefore use only the
-        independent final-candle feed.  An explicitly supplied loader keeps
-        the old path available for recovery and backwards-compatible callers.
-        """
-
-        return (
-            self._config.policy.max_holding_seconds is not None
-            or self._candles is not None
-        )
+        """Whether time-based exits need the market-state clock."""
+        return self._config.policy.max_holding_seconds is not None
 
     async def requests_for_state(
         self,
@@ -673,15 +632,6 @@ class LiveExitManager:
         mark_price = _exit_mark_price(state, position.side)
         if mark_price is None:
             return None
-        if self._config.policy.mode is PositionExitMode.CANDLE_15M:
-            if self._candles is not None:
-                candle_request = await self._candle_exit_request(
-                    state,
-                    position,
-                    mark_price,
-                )
-                if candle_request is not None:
-                    return candle_request
         reason = position_exit_reason(
             gross_return=_gross_return(position, mark_price),
             held_until=state.bucket_end,
@@ -700,78 +650,6 @@ class LiveExitManager:
             trigger_at=state.bucket_end,
             reference_price=mark_price,
         )
-
-    async def _candle_exit_request(
-        self,
-        state: MarketState15s,
-        position: ManagedLivePosition,
-        mark_price: Decimal,
-    ) -> LiveExitOrderRequest | None:
-        if self._candles is None:
-            raise AssertionError("candle loader was validated at construction")
-        if _uncovered_position_quantity(position) <= 0:
-            return None
-        closed_boundary = _candle_start_15m(state.bucket_end)
-        key = (
-            position.symbol,
-            position.position_side,
-            position.batch_id or position.opened_at.isoformat(),
-        )
-        start = self._checked_until.get(key, _candle_start_15m(position.opened_at))
-        if closed_boundary <= start:
-            return None
-        candles = await self._candles.load_closed_candles(
-            symbol=position.symbol,
-            start=start,
-            end=closed_boundary,
-        )
-        first_eligible_start = first_candle_start_after_entry(position.opened_at)
-        for candle in candles:
-            if candle.candle_start < first_eligible_start:
-                self._checked_until[key] = candle.candle_end
-                continue
-            reason = position_exit_reason(
-                gross_return=_gross_return(position, candle.close_price),
-                held_until=candle.candle_end,
-                opened_at=position.opened_at,
-                symbol=position.symbol,
-                side=position.side,
-                policy=self._config.policy,
-                closed_candle=candle,
-            )
-            if reason is not None:
-                if (
-                    self._config.candle_grace_bars > 0
-                    and self._config.candle_grace_profit_pct > 0
-                ):
-                    if _recovery_target_touched(
-                        position=position,
-                        mark_price=mark_price,
-                        profit_pct=self._config.decision_profit_pct,
-                    ):
-                        return self._build_request(
-                            state=state,
-                            position=position,
-                            reason=reason,
-                            trigger_at=candle.candle_end,
-                            reference_price=mark_price,
-                        )
-                    return self._build_grace_limit_request(
-                        state=state,
-                        position=position,
-                        reason=reason,
-                        trigger_at=candle.candle_end,
-                        reference_price=mark_price,
-                    )
-                return self._build_request(
-                    state=state,
-                    position=position,
-                    reason=reason,
-                    trigger_at=candle.candle_end,
-                    reference_price=mark_price,
-                )
-            self._checked_until[key] = candle.candle_end
-        return None
 
     def _build_grace_limit_request(
         self,
@@ -956,6 +834,23 @@ class LiveExitManager:
                         position.batch_id
                         or (position.batches[0].batch_id if position.batches else None)
                     ),
+                    "exit_allocations": (
+                        [
+                            {
+                                "batch_id": position.batch_id,
+                                "quantity": str(order_quantity),
+                            }
+                        ]
+                        if position.batch_id
+                        else [
+                            {
+                                "batch_id": position.batches[0].batch_id,
+                                "quantity": str(order_quantity),
+                            }
+                        ]
+                        if len(position.batches) == 1
+                        else []
+                    ),
                     "projection_version": position.projection_version,
                     "trigger_at": trigger_at.astimezone(UTC).isoformat(),
                     "exit_order_type": entry_type.value,
@@ -1105,17 +1000,8 @@ def _recovery_order_blocks_current_episode(
 def _recovery_exit_started_at(
     position: ManagedLivePosition,
 ) -> datetime | None:
-    """Return the durable exit boundary for this position view.
-
-    ``recovery_exit_started_at`` is populated from historical exchange order
-    rows, including terminal rows.  The older recovery fields remain a
-    compatibility fallback for callers that construct a position directly.
-    """
-    if position.recovery_exit_started_at is not None:
-        return position.recovery_exit_started_at
-    if position.recovery_order_client_id is None:
-        return None
-    return position.recovery_order_created_at
+    """Return the durable exit boundary for this position view."""
+    return position.recovery_exit_started_at
 
 
 def _recovery_timeout_at(

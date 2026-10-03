@@ -52,6 +52,14 @@ def test_net_equity_delta_vs_cash_flow_adjusted_pnl() -> None:
         start_time=t0,
         end_time=t1,
         cash_flows=(deposit,),
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
 
     # 1. NET_EQUITY_DELTA: 16000 - 10000 = 6000 USDT
@@ -95,6 +103,14 @@ def test_twr_requires_subinterval_valuation_with_cash_flows() -> None:
         end_time=t1,
         cash_flows=(deposit,),
         valuation_points=(),
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     res_no_sub = AccountPerformanceCalculator.calculate(spec_twr, cut_no_sub)
     assert res_no_sub.status == MetricStatus.INSUFFICIENT_COVERAGE
@@ -118,6 +134,14 @@ def test_twr_requires_subinterval_valuation_with_cash_flows() -> None:
         end_time=t1,
         cash_flows=(deposit,),
         valuation_points=val_points,
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     res_with_sub = AccountPerformanceCalculator.calculate(spec_twr, cut_with_sub)
     assert res_with_sub.status == MetricStatus.CONFIRMED
@@ -152,6 +176,14 @@ def test_twr_deposit_does_not_create_artificial_return() -> None:
         end_time=t1,
         cash_flows=(deposit,),
         valuation_points=val_points,
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     spec_twr = MetricSpec(name="twr", family=MetricFamily.TIME_WEIGHTED_RETURN)
     res = AccountPerformanceCalculator.calculate(spec_twr, cut)
@@ -186,6 +218,14 @@ def test_mwr_modified_dietz_weighting() -> None:
         start_time=t0,
         end_time=t1,
         cash_flows=(deposit,),
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     # Test Modified Dietz calculation
     spec_dietz = MetricSpec(name="dietz", family=MetricFamily.MODIFIED_DIETZ)
@@ -325,6 +365,14 @@ def test_twr_with_subintervals_uses_linked_modified_dietz_method() -> None:
         end_time=t1,
         cash_flows=(deposit,),
         valuation_points=val_points,
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     spec_twr = MetricSpec(name="twr", family=MetricFamily.TIME_WEIGHTED_RETURN)
     res_twr = AccountPerformanceCalculator.calculate(spec_twr, cut)
@@ -542,6 +590,14 @@ def test_multi_asset_isolation_enforced() -> None:
             asset="USDT",
             cash_flows=(cf_btc,),
             currency_conversion_source=None,
+            coverage_receipt=CoverageReceipt(
+                account_label="primary",
+                asset="USDT",
+                interval_start=t0,
+                interval_end=t1,
+                source="exchange_income",
+                details="audited_cash_flows",
+            ),
         )
 
     # Allowed with explicit currency_conversion_source
@@ -554,6 +610,14 @@ def test_multi_asset_isolation_enforced() -> None:
         asset="USDT",
         cash_flows=(cf_btc,),
         currency_conversion_source="binance_spot_index_1m",
+        coverage_receipt=CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="exchange_income",
+            details="audited_cash_flows",
+        ),
     )
     assert cut_converted.currency_conversion_source == "binance_spot_index_1m"
 

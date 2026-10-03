@@ -75,8 +75,6 @@ def _make_test_config() -> LiveRuntimeConfig:
             require_price_above_ema10=False,
             entry_order_type=EntryType.LIMIT,
             entry_limit_ttl_seconds=900,
-            entry_policy_compare_only=False,
-            entry_policy_enforce=True,
         ),
         execution=LiveRuntimeExecution(
             target_notional=Decimal("100.00"),
@@ -105,8 +103,7 @@ def _make_test_config() -> LiveRuntimeConfig:
 
 
 @pytest.mark.asyncio
-async def test_assembly_failure_preserves_original_exception_and_cleans_up(
-) -> None:
+async def test_assembly_failure_preserves_original_exception_and_cleans_up() -> None:
     config = _make_test_config()
     cleaned_up: list[str] = []
 

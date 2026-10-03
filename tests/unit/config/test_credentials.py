@@ -2,7 +2,6 @@ import pytest
 from pydantic import ValidationError
 
 from crypto_momentum_lab.config import (
-    LEGACY_BINANCE_CREDENTIAL_REF,
     BinanceCredentialConfig,
     BinanceCredentialRef,
     BinanceCredentialRole,
@@ -13,7 +12,7 @@ from crypto_momentum_lab.config import (
 )
 
 
-def _credentials(*, allow_shared: bool = False) -> BinanceCredentialConfig:
+def _credentials() -> BinanceCredentialConfig:
     return BinanceCredentialConfig(
         read=BinanceCredentialRef(
             api_key_env="BINANCE_READ_API_KEY",
@@ -23,7 +22,6 @@ def _credentials(*, allow_shared: bool = False) -> BinanceCredentialConfig:
             api_key_env="BINANCE_TRADE_API_KEY",
             api_secret_env="BINANCE_TRADE_API_SECRET",
         ),
-        allow_shared=allow_shared,
     )
 
 
@@ -58,48 +56,6 @@ def test_runtime_resolver_selects_role_and_exposes_secret_free_metadata() -> Non
     assert "trade-key-value" not in repr(resolved)
     assert "trade-secret-value" not in repr(resolved)
     assert "trade-secret-value" not in str(resolved.metadata())
-
-
-def test_runtime_resolver_requires_explicit_legacy_fallback() -> None:
-    credentials = _credentials()
-    environment = {
-        "BINANCE_API_KEY": "legacy-key-value",
-        "BINANCE_API_SECRET": "legacy-secret-value",
-    }
-
-    with pytest.raises(CredentialResolutionError, match="BINANCE_READ_API_KEY"):
-        resolve_binance_credentials(
-            credentials,
-            BinanceCredentialRole.READ,
-            environ=environment,
-            legacy_ref=LEGACY_BINANCE_CREDENTIAL_REF,
-        )
-
-    resolved = resolve_binance_credentials(
-        credentials,
-        BinanceCredentialRole.READ,
-        environ=environment,
-        legacy_ref=LEGACY_BINANCE_CREDENTIAL_REF,
-        allow_legacy_fallback=True,
-    )
-    assert resolved.api_key == "legacy-key-value"
-    assert resolved.api_key_env == "BINANCE_API_KEY"
-
-
-def test_runtime_resolver_does_not_partially_fallback() -> None:
-    environment = {
-        "BINANCE_READ_API_KEY": "role-key-value",
-        "BINANCE_API_SECRET": "legacy-secret-value",
-    }
-
-    with pytest.raises(CredentialResolutionError, match="BINANCE_READ_API_SECRET"):
-        resolve_binance_credentials(
-            _credentials(),
-            BinanceCredentialRole.READ,
-            environ=environment,
-            legacy_ref=LEGACY_BINANCE_CREDENTIAL_REF,
-            allow_legacy_fallback=True,
-        )
 
 
 def test_role_config_override_keeps_the_other_role_explicit() -> None:
@@ -152,7 +108,7 @@ def test_runtime_resolver_fails_closed_without_secret_values(
     assert "read-secret-value" not in str(error.value)
 
 
-def test_shared_credential_pair_requires_an_explicit_migration_escape_hatch() -> None:
+def test_shared_credential_pair_is_rejected() -> None:
     shared = {
         "read": {
             "api_key_env": "BINANCE_API_KEY",
@@ -164,11 +120,10 @@ def test_shared_credential_pair_requires_an_explicit_migration_escape_hatch() ->
         },
     }
 
-    with pytest.raises(ValidationError, match="allow_shared"):
+    with pytest.raises(ValidationError, match="must not overlap"):
         BinanceCredentialConfig.model_validate(shared)
-    assert BinanceCredentialConfig.model_validate(
-        {**shared, "allow_shared": True}
-    ).allow_shared
+    with pytest.raises(ValidationError):
+        BinanceCredentialConfig.model_validate({**shared, "allow_shared": True})
 
 
 def test_partial_credential_reference_overlap_is_rejected() -> None:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -102,6 +102,37 @@ class PendingEntryReservation(Protocol):
         self,
         persisted_orders: tuple[PersistedExchangeOrder, ...],
     ) -> tuple[Decimal, frozenset[str]]: ...
+
+
+def resolve_authoritative_reference_price(
+    candidate: OrderIntentCandidate,
+    state: MarketState15s,
+    explicit_reference_price: Decimal | None = None,
+) -> tuple[Decimal | None, datetime, str]:
+    """Determine once the single authoritative reference price, timestamp, and source.
+
+    Downstream risk and execution planning share the identical price basis
+    without secondary implicit fallbacks.
+    """
+    ts = (
+        getattr(state, "bucket_end", None)
+        or getattr(state, "timestamp", None)
+        or datetime.now(UTC)
+    )
+    if explicit_reference_price is not None and explicit_reference_price > 0:
+        return explicit_reference_price, ts, "explicit"
+    feature_price = candidate.features.get("reference_price")
+    if feature_price is not None:
+        try:
+            parsed = Decimal(str(feature_price))
+            if parsed > 0:
+                return parsed, ts, "candidate_features"
+        except (ArithmeticError, ValueError):
+            pass
+    market_price = state.mark_price or state.close_price
+    if market_price is not None and market_price > 0:
+        return market_price, ts, "market_state"
+    return None, ts, "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,18 +344,13 @@ class LiveCandidateSubmission:
             )
             return None
         rules = context.trading_rules.get(candidate.symbol)
-        execution_reference_price = reference_price
-        if execution_reference_price is None:
-            candidate_reference_price = executable_candidate.features.get(
-                "reference_price"
+        execution_reference_price, ref_time, ref_source = (
+            resolve_authoritative_reference_price(
+                executable_candidate,
+                state,
+                explicit_reference_price=reference_price,
             )
-            if isinstance(candidate_reference_price, str):
-                try:
-                    execution_reference_price = Decimal(candidate_reference_price)
-                except ArithmeticError:
-                    execution_reference_price = None
-        if execution_reference_price is None:
-            execution_reference_price = state.mark_price or state.close_price
+        )
         if rules is None or execution_reference_price is None:
             return None
         trade_command = self._build_trade_command(
@@ -352,9 +378,7 @@ class LiveCandidateSubmission:
             or "orderflow_impulse"
         )
         resolved_strat_ver = (
-            plan.strategy_version
-            or executable_candidate.strategy_version
-            or "v0"
+            plan.strategy_version or executable_candidate.strategy_version or "v0"
         )
         if (
             plan.strategy_name != resolved_strat_name
@@ -366,16 +390,54 @@ class LiveCandidateSubmission:
                 strategy_version=resolved_strat_ver,
             )
 
+        actual_notional: Decimal | None = None
+        if plan.quantity is not None and execution_reference_price is not None:
+            actual_notional = plan.quantity * execution_reference_price
+
         if (
             requested_quantity is None
             and executable_candidate.desired_notional is not None
             and executable_candidate.desired_notional > 0
+            and actual_notional is not None
         ):
-            actual_notional = plan.quantity * execution_reference_price
             resize_fraction = (
                 executable_candidate.desired_notional - actual_notional
             ).copy_abs() / executable_candidate.desired_notional
             if resize_fraction > self._config.resize_tolerance:
+                return None
+
+        # Re-verify hard risk limits on actual quantized notional for non-reduce_only entries via RiskGateway
+        if not executable_candidate.reduce_only and actual_notional is not None:
+            allowed, ceiling_reason = self._risk_gateway.validate_quantized_notional(
+                actual_notional,
+                RiskContext(
+                    now=context.now,
+                    active_lease=context.active_lease,
+                    latest_market_state=state,
+                    account_state=context.account_state,
+                    open_position_symbols=risk_open_position_symbols,
+                    active_halts=context.active_halts,
+                    risk_config=context.risk_config,
+                    strategy_state=context.strategy_state,
+                    enforce_market_state_age=False,
+                    required_lease_owner=context.gate_context.required_lease_owner,
+                    required_account_label=context.gate_context.account_label,
+                    required_strategy_name=context.gate_context.strategy_name,
+                ),
+                gross_exposure=(
+                    limit_context.gross_exposure if limit_context is not None else None
+                ),
+                approved_notional=executable_candidate.desired_notional,
+            )
+            if not allowed:
+                log.info(
+                    "live_entry_blocked_by_quantized_ceiling",
+                    run_id=self._config.run_id,
+                    candidate_id=executable_candidate.candidate_id,
+                    symbol=executable_candidate.symbol,
+                    actual_notional=str(actual_notional),
+                    reason=ceiling_reason,
+                )
                 return None
         if (
             not executable_candidate.reduce_only
@@ -468,7 +530,7 @@ class LiveCandidateSubmission:
                 exposure_notional=(
                     None
                     if executable_candidate.reduce_only
-                    else executable_candidate.desired_notional
+                    else (actual_notional or executable_candidate.desired_notional)
                 ),
                 baseline_observed_at=context.account_observed_at,
                 context_token=context,
@@ -565,26 +627,35 @@ class LiveCandidateSubmission:
             else None
         )
         if candidate.reduce_only:
-            raw_batch_id = candidate.features.get("batch_id")
-            legacy_batch_id = str(raw_batch_id).strip() if raw_batch_id else None
-            legacy_allocs = (
-                (
+            raw_allocations = candidate.features.get("exit_allocations", [])
+            if not isinstance(raw_allocations, list):
+                raise ValueError("exit_allocations must be a list")
+            parsed_allocations: list[ExitAllocation] = []
+            for item in raw_allocations:
+                if not isinstance(item, dict) or set(item) != {"batch_id", "quantity"}:
+                    raise ValueError("exit allocation requires batch_id and quantity")
+                batch_id = item["batch_id"]
+                quantity = item["quantity"]
+                if not isinstance(batch_id, str) or not isinstance(quantity, str):
+                    raise ValueError("exit allocation values must be strings")
+                parsed_allocations.append(
                     ExitAllocation(
-                        batch_id=legacy_batch_id,
-                        allocated_quantity=req_qty,
-                    ),
+                        batch_id=batch_id, allocated_quantity=Decimal(quantity)
+                    )
                 )
-                if legacy_batch_id
-                else ()
-            )
-            if legacy_allocs:
+            allocations = tuple(parsed_allocations)
+            if allocations:
                 allocation_plan = ExitAllocationPlan(
                     position_key=position_key,
-                    allocations=legacy_allocs,
-                    total_allocated_quantity=req_qty,
+                    allocations=allocations,
+                    total_allocated_quantity=sum(
+                        (item.allocated_quantity for item in allocations), Decimal("0")
+                    ),
                     policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
                     projection_version=expected_projection_version,
                 )
+                if allocation_plan.total_allocated_quantity != req_qty:
+                    raise ValueError("exit allocations must equal requested quantity")
 
         return TradeCommand(
             command_id=candidate.candidate_id,

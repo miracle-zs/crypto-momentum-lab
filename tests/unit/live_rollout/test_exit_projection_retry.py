@@ -193,10 +193,10 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
 
     original_act = book.act
 
-    async def advance_before_act(request):
+    async def advance_before_act(*args, **kwargs):
         if len(decided) == 1:
             await advance_book()
-        return await original_act(request)
+        return await original_act(*args, **kwargs)
 
     if race_at == "before_act":
         book.act = advance_before_act

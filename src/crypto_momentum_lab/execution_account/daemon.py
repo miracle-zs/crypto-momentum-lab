@@ -41,32 +41,6 @@ log = structlog.get_logger(__name__)
 _QueueItem = TypeVar("_QueueItem")
 
 
-def _accepts_state_kwarg(func: object) -> bool:
-    try:
-        sig = inspect.signature(func)  # type: ignore[arg-type]
-        if "state" in sig.parameters:
-            return True
-        for p in sig.parameters.values():
-            if p.kind == inspect.Parameter.VAR_KEYWORD:
-                return True
-        return False
-    except (ValueError, TypeError):
-        return True
-
-
-def _accepts_reason_kwarg(func: object) -> bool:
-    try:
-        sig = inspect.signature(func)  # type: ignore[arg-type]
-        if "reason" in sig.parameters:
-            return True
-        for p in sig.parameters.values():
-            if p.kind == inspect.Parameter.VAR_KEYWORD:
-                return True
-        return False
-    except (ValueError, TypeError):
-        return True
-
-
 class AccountSyncCycle(Protocol):
     async def sync_once(
         self,
@@ -205,6 +179,7 @@ class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
         *,
         observed_at: datetime,
         state: ExecutionAccountStatus | None = None,
+        reason: str | None = None,
     ) -> None: ...
 
     async def persist_user_data_event(
@@ -959,11 +934,7 @@ class UserDataAccountSyncDaemon:
         if origin_event is not None and self._pipeline_recovery_origin_event is None:
             self._pipeline_recovery_origin_event = origin_event
         self._pipeline_recovery_event.set()
-        log_fn = (
-            log.info
-            if reason == "account_config_update"
-            else log.error
-        )
+        log_fn = log.info if reason == "account_config_update" else log.error
         log_fn(
             "binance_user_data_pipeline_recovery_requested",
             reason=reason,
@@ -1002,21 +973,11 @@ class UserDataAccountSyncDaemon:
             else ("fills_catching_up" if is_syncing else None)
         )
         now = self._now()
-        publish_heartbeat = self._service.publish_user_data_heartbeat
-        if _accepts_state_kwarg(publish_heartbeat):
-            if _accepts_reason_kwarg(publish_heartbeat):
-                await publish_heartbeat(
-                    observed_at=now,
-                    state=target_state,
-                    reason=reason,
-                )
-            else:
-                await publish_heartbeat(
-                    observed_at=now,
-                    state=target_state,
-                )
-        else:
-            await publish_heartbeat(observed_at=now)
+        await self._service.publish_user_data_heartbeat(
+            observed_at=now,
+            state=target_state,
+            reason=reason,
+        )
         self._notify_heartbeat()
         stream_token = getattr(self._stream, "continuity_token", 1)
         is_stream_open = stream_token is not None
@@ -1255,14 +1216,16 @@ def _metric_int(metrics: object, name: str) -> int | None:
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:
     return (
-        result.status in (ExecutionAccountStatus.RUNNING, ExecutionAccountStatus.READY_READONLY)
+        result.status
+        in (ExecutionAccountStatus.RUNNING, ExecutionAccountStatus.READY_READONLY)
         and result.snapshot is not None
     )
 
 
 def _is_usable_result(result: ExecutionAccountSyncResult) -> bool:
     return (
-        result.status in (
+        result.status
+        in (
             ExecutionAccountStatus.RUNNING,
             ExecutionAccountStatus.READY_READONLY,
             ExecutionAccountStatus.SYNCING,

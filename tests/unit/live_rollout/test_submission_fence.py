@@ -225,7 +225,6 @@ async def test_submission_fence_blocks_entry_on_evaluator_reject() -> None:
             "is_lease_active": True,
             "is_emergency_authorized": False,
             "is_universe_ready": True,
-            "is_collector_healthy": True,
         }
         defaults.update(kwargs)
         return CapabilityEvidence(**defaults)
@@ -280,7 +279,6 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
             "is_lease_active": True,
             "is_emergency_authorized": False,
             "is_universe_ready": True,
-            "is_collector_healthy": True,
         }
         defaults.update(kwargs)
         return CapabilityEvidence(**defaults)
