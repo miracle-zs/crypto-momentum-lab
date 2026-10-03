@@ -146,6 +146,7 @@ class LiveCandidateSubmission:
         record_signal_candidate: ReduceOnlySignalRecorder,
         telemetry: LiveTelemetrySink | None = None,
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
+        is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         self._risk_gateway = risk_gateway
         limits = risk_gateway.limits
@@ -163,6 +164,7 @@ class LiveCandidateSubmission:
         self._record_signal_candidate = record_signal_candidate
         self._telemetry = telemetry
         self._entry_order_lifecycle = entry_order_lifecycle
+        self._is_symbol_entry_allowed = is_symbol_entry_allowed
 
     async def execute(
         self,
@@ -174,15 +176,21 @@ class LiveCandidateSubmission:
         reference_price: Decimal | None = None,
     ) -> OrderExecutionResult | None:
         execution_now = self._clock()
-        if not candidate.reduce_only and not self._entry_enabled():
-            log.info(
-                "live_entry_blocked_before_execution",
-                run_id=self._config.run_id,
-                candidate_id=candidate.candidate_id,
-                symbol=candidate.symbol,
-                reason=self._entry_enabled_reason(),
+        if not candidate.reduce_only:
+            allowed, reason = (
+                self._is_symbol_entry_allowed(candidate.symbol)
+                if self._is_symbol_entry_allowed is not None
+                else (self._entry_enabled(), self._entry_enabled_reason())
             )
-            return None
+            if not allowed:
+                log.info(
+                    "live_entry_blocked_before_execution",
+                    run_id=self._config.run_id,
+                    candidate_id=candidate.candidate_id,
+                    symbol=candidate.symbol,
+                    reason=reason,
+                )
+                return None
         if candidate.expires_at <= execution_now:
             log.warning(
                 "live_candidate_expired_before_execution",
@@ -227,9 +235,20 @@ class LiveCandidateSubmission:
                     else context.gross_exposure + pending_notional
                 ),
                 min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
-                has_unresolved_order=any(
-                    order_state_is_uncertain(item)
-                    for item in context.unresolved_order_states
+                has_unresolved_order=(
+                    any(
+                        order_state_is_uncertain(getattr(order, "state", None))
+                        for order in getattr(context, "unresolved_orders", ()) or ()
+                        if getattr(getattr(order, "plan", None), "symbol", None) == candidate.symbol
+                    )
+                    or any(
+                        order_state_is_uncertain(getattr(order, "state", None))
+                        and (
+                            getattr(getattr(order, "plan", None), "price", None) is None
+                            or getattr(getattr(order, "plan", None), "quantity", None) is None
+                        )
+                        for order in getattr(context, "unresolved_orders", ()) or ()
+                    )
                 ),
                 symbol_concurrency=symbol_concurrency,
             )
@@ -377,15 +396,21 @@ class LiveCandidateSubmission:
                 time_in_force="GTD",
                 expires_at=executable_candidate.expires_at,
             )
-        if not executable_candidate.reduce_only and not self._entry_enabled():
-            log.info(
-                "live_entry_blocked_before_persistence",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-                reason=self._entry_enabled_reason(),
+        if not executable_candidate.reduce_only:
+            allowed, reason = (
+                self._is_symbol_entry_allowed(executable_candidate.symbol)
+                if self._is_symbol_entry_allowed is not None
+                else (self._entry_enabled(), self._entry_enabled_reason())
             )
-            return None
+            if not allowed:
+                log.info(
+                    "live_entry_blocked_before_persistence",
+                    run_id=self._config.run_id,
+                    candidate_id=executable_candidate.candidate_id,
+                    symbol=executable_candidate.symbol,
+                    reason=reason,
+                )
+                return None
         if not self._context_is_current(context):
             log.info(
                 "live_candidate_context_invalidated_before_submission",

@@ -124,7 +124,10 @@ def frozen_decision_inputs_from_context(
     cash = _cash_balance(context)
     if cash is None:
         return None
-    if context.account_state != ExecutionAccountStatus.READY_READONLY:
+    if context.account_state in (
+        ExecutionAccountStatus.HALTED_READONLY,
+        ExecutionAccountStatus.STOPPED,
+    ):
         return None
     if context.strategy_state != StrategyLiveState.ACTIVE:
         return None

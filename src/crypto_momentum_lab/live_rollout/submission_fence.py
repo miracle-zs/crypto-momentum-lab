@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
@@ -59,6 +59,7 @@ class LiveSubmissionFence:
             ]
             | None
         ) = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -82,6 +83,7 @@ class LiveSubmissionFence:
         self._capability_evaluator = capability_evaluator
         self._runtime_plan = runtime_plan
         self._evidence_provider = evidence_provider
+        self._clock = clock
 
     async def validate(
         self,
@@ -102,6 +104,21 @@ class LiveSubmissionFence:
             )
             if current_lease is None:
                 raise OrderPreSubmissionError("active lease disappeared")
+            now_utc = (
+                self._clock()
+                if self._clock is not None
+                else checked_at
+            )
+            lease_exp = getattr(current_lease, "expires_at", None)
+            if isinstance(lease_exp, datetime):
+                if lease_exp.tzinfo is None and now_utc.tzinfo is not None:
+                    lease_exp = lease_exp.replace(tzinfo=UTC)
+                elif lease_exp.tzinfo is not None and now_utc.tzinfo is None:
+                    now_utc = now_utc.replace(tzinfo=UTC)
+                if lease_exp <= now_utc:
+                    raise OrderPreSubmissionError(
+                        "active lease expired during pre-submission check"
+                    )
             if current_lease.owner != self._lease_owner:
                 raise OrderPreSubmissionError("active lease owner changed")
             if current_lease.strategy_name != self._strategy_name:
@@ -131,14 +148,14 @@ class LiveSubmissionFence:
                 else:
                     evidence = CapabilityEvidence(
                         evidence_version=f"ev_{self._account_label}_{checked_at.isoformat()}",
-                        market_freshness_seconds=0.0,
-                        is_account_concordant=True,
-                        is_account_identity_verified=True,
-                        unresolved_inflight_orders_count=0,
-                        is_approval_valid=True,
+                        market_freshness_seconds=float("inf"),
+                        is_account_concordant=False,
+                        is_account_identity_verified=False,
+                        unresolved_inflight_orders_count=1,
+                        is_approval_valid=False,
                         is_lease_active=True,
                         is_emergency_authorized=False,
-                        is_universe_ready=True,
+                        is_universe_ready=False,
                         is_collector_healthy=True,
                         plan_hash=self._runtime_plan.plan_hash,
                         runtime_generation=self._runtime_plan.runtime_generation,
@@ -168,6 +185,21 @@ class LiveSubmissionFence:
         )
         if current_lease is None:
             raise OrderPreSubmissionError("active lease disappeared")
+        now_utc = (
+            self._clock()
+            if self._clock is not None
+            else checked_at
+        )
+        lease_exp = getattr(current_lease, "expires_at", None)
+        if isinstance(lease_exp, datetime):
+            if lease_exp.tzinfo is None and now_utc.tzinfo is not None:
+                lease_exp = lease_exp.replace(tzinfo=UTC)
+            elif lease_exp.tzinfo is not None and now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=UTC)
+            if lease_exp <= now_utc:
+                raise OrderPreSubmissionError(
+                    "active lease expired during pre-submission check"
+                )
         if current_lease.owner != self._lease_owner:
             raise OrderPreSubmissionError("active lease owner changed")
         if current_lease.strategy_name != self._strategy_name:
@@ -197,19 +229,16 @@ class LiveSubmissionFence:
                 else:
                     evidence_entry = res
             else:
-                is_app_valid = (
-                    self._entry_enabled is None or self._entry_enabled()
-                ) and not bool(halts)
                 evidence_entry = CapabilityEvidence(
                     evidence_version=f"ev_{self._account_label}_{checked_at.isoformat()}",
-                    market_freshness_seconds=0.0,
-                    is_account_concordant=True,
-                    is_account_identity_verified=True,
-                    unresolved_inflight_orders_count=0,
-                    is_approval_valid=is_app_valid,
+                    market_freshness_seconds=float("inf"),
+                    is_account_concordant=False,
+                    is_account_identity_verified=False,
+                    unresolved_inflight_orders_count=1,
+                    is_approval_valid=False,
                     is_lease_active=True,
                     is_emergency_authorized=False,
-                    is_universe_ready=True,
+                    is_universe_ready=False,
                     is_collector_healthy=True,
                     plan_hash=self._runtime_plan.plan_hash,
                     runtime_generation=self._runtime_plan.runtime_generation,

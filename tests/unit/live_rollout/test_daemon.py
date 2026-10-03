@@ -1766,8 +1766,15 @@ async def test_pending_account_position_blocks_entries_without_halting() -> None
     failure = await daemon.process_account_event(replace(_state(), symbol="ETHUSDT"))
 
     assert failure == "pending_live_positions:ETHUSDT"
-    assert daemon.entry_enabled is False
-    assert daemon.entry_enabled_reason == ("account_position_sync_pending:ETHUSDT")
+    # Account-wide entry lane is not closed for other symbols
+    assert daemon.entry_enabled is True
+    # ETHUSDT is locally blocked from entry
+    assert daemon.is_symbol_entry_allowed("ETHUSDT") == (
+        False,
+        "account_position_sync_pending:ETHUSDT",
+    )
+    # Other symbols (e.g. BTCUSDT) remain allowed
+    assert daemon.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
     assert exchange.calls == []
 
 

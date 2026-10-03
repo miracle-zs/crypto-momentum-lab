@@ -53,6 +53,11 @@ from crypto_momentum_lab.persistence.postgres.command_repository import (
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresExecutionUnitOfWork,
 )
+from crypto_momentum_lab.domain.live_rollout import (
+    LIVE_APPROVAL_CONFIRMATION,
+    LiveOperatorApproval,
+)
+from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
 from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
     AsyncPostgresPositionReservationRepository,
 )
@@ -192,6 +197,7 @@ def build_capability_evidence_provider(
     get_context: Callable[[], object | None],
     get_market_age: Callable[[], float | None],
     has_api_key: Callable[[], bool],
+    get_approval: Callable[[], LiveOperatorApproval | None] | None = None,
 ) -> Callable[[OrderExecutionPlan, datetime], CapabilityEvidence]:
     """Build a closure that evaluates real-time system capability evidence."""
 
@@ -203,17 +209,25 @@ def build_capability_evidence_provider(
         market_age = (
             max(0.0, float(market_age_val))
             if market_age_val is not None
-            else 0.0
+            else float("inf")
         )
 
-        is_concordant = True
-        unresolved_count = 0
         ctx = get_context()
-        if ctx is not None:
+        if ctx is None:
+            is_concordant = False
+            unresolved_count = 1
+        else:
+            is_concordant = True
             order_sym = getattr(order_plan, "symbol", "")
-            if order_sym in getattr(ctx, "unmanaged_position_symbols", ()):
+            unmanaged = getattr(ctx, "unmanaged_position_symbols", ())
+            if isinstance(unmanaged, (set, frozenset, tuple, list)) and order_sym in unmanaged:
                 is_concordant = False
-            unresolved = getattr(ctx, "unresolved_orders", ()) or ()
+            pending = getattr(ctx, "pending_position_symbols", ())
+            if isinstance(pending, (set, frozenset, tuple, list)) and order_sym in pending:
+                is_concordant = False
+            unresolved = getattr(ctx, "unresolved_orders", ())
+            if not isinstance(unresolved, (set, frozenset, tuple, list)):
+                unresolved = ()
             curr_cid = getattr(order_plan, "client_order_id", None)
             unresolved_count = sum(
                 1
@@ -221,12 +235,28 @@ def build_capability_evidence_provider(
                 if getattr(getattr(o, "plan", None), "symbol", None) == order_sym
                 and getattr(getattr(o, "plan", None), "client_order_id", None)
                 != curr_cid
+                and order_state_is_uncertain(getattr(o, "state", None))
             )
 
-        is_app_valid = is_entry_enabled()
         now_utc = (
             checked_at if checked_at.tzinfo else checked_at.replace(tzinfo=UTC)
         )
+        if get_approval is not None:
+            approval = get_approval()
+            if approval is not None:
+                is_app_valid = (
+                    approval.approval_text == LIVE_APPROVAL_CONFIRMATION
+                    and (approval.expires_at is None or approval.expires_at > now_utc)
+                    and (approval.account_label == account_label)
+                    and (not runtime_plan.strategy_name or approval.strategy_name == runtime_plan.strategy_name)
+                )
+            else:
+                is_app_valid = False
+        elif is_entry_enabled is not None:
+            is_app_valid = is_entry_enabled()
+        else:
+            is_app_valid = False
+
         lease = get_active_lease()
         lease_exp = getattr(lease, "expires_at", None)
         is_lease_valid = (
@@ -254,7 +284,7 @@ def build_capability_evidence_provider(
             is_lease_active=is_lease_valid,
             is_emergency_authorized=False,
             is_universe_ready=is_app_valid,
-            is_collector_healthy=(market_age_val is not None),
+            is_collector_healthy=True,
             plan_hash=runtime_plan.plan_hash,
             runtime_generation=runtime_plan.runtime_generation,
             fencing_epoch=runtime_plan.fencing_epoch,

@@ -1,6 +1,8 @@
+from collections.abc import Callable
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -74,7 +76,9 @@ class RecordingCoordinator:
 
     async def prepare_and_execute(self, plan, *, preparation):
         self.events.append("prepare")
-        if self.admission is not None and self.admission.rejection_reason(plan, preparation):
+        if self.admission is not None and self.admission.rejection_reason(
+            plan, preparation
+        ):
             return None
         values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
                   if f.name != "context_token"}
@@ -99,6 +103,7 @@ def _submission(
     limits: FixedLiveLimits | None = None,
     entry_enabled=lambda: True,
     context_is_current=lambda context: True,
+    is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
 ) -> LiveCandidateSubmission:
     from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
     from crypto_momentum_lab.live_rollout.submission_admission import (
@@ -110,6 +115,12 @@ def _submission(
         def entry_enabled(self):
             return entry_enabled()
 
+        def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
+            if is_symbol_entry_allowed is not None:
+                return is_symbol_entry_allowed(symbol)
+            enabled = self.entry_enabled
+            return (enabled, "ready" if enabled else "disabled")
+
     gate = TestGate(run_id="run-1", state_machine=state_machine)
     state_machine.configure_submission(
         repository, admission=LiveSubmissionAdmission(gate, context_is_current),
@@ -120,9 +131,9 @@ def _submission(
             limits=limits
             or FixedLiveLimits(
                 notional_cap=Decimal("25"),
-                max_open_positions=1,
+                max_open_positions=2,
                 max_daily_loss=Decimal("10"),
-                max_gross_exposure=Decimal("25"),
+                max_gross_exposure=Decimal("50"),
             ),
         ),
         state_machine=cast(CoordinatedOrderExecutionPort, state_machine),
@@ -144,6 +155,7 @@ def _submission(
         ),
         remember_pending_entry=lambda plan, result: None,
         record_signal_candidate=lambda **kwargs: None,
+        is_symbol_entry_allowed=is_symbol_entry_allowed,
     )
 
 
@@ -626,3 +638,150 @@ async def test_queued_entry_with_invalidated_context_never_prepares_or_posts():
     assert result is None
     assert repository.prepare_calls == []
     assert posts == []
+
+
+@pytest.mark.asyncio
+async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
+    # 1. Symbol A (BTCUSDT) exit failure disallows BTC, but Symbol B (ETHUSDT) succeeds
+    symbol_allowed = {
+        "BTCUSDT": (False, "exit_failure:BTCUSDT:timeout"),
+        "ETHUSDT": (True, "entry_allowed"),
+    }
+    repo = RecordingPreparedRepository()
+    coord = RecordingCoordinator()
+    submission = _submission(
+        repository=repo,
+        state_machine=coord,
+        is_symbol_entry_allowed=lambda sym: symbol_allowed.get(
+            sym, (True, "entry_allowed")
+        ),
+    )
+
+    rules_eth = SymbolTradingRules(
+        symbol="ETHUSDT",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.001"),
+        min_quantity=Decimal("0.001"),
+        max_quantity=Decimal("100"),
+        min_notional=Decimal("5"),
+    )
+    base_ctx = replace(
+        _runtime_context(),
+        trading_rules={
+            **_runtime_context().trading_rules,
+            "ETHUSDT": rules_eth,
+        },
+    )
+    cand_btc = replace(
+        _intent(),
+        candidate_id="cand-btc",
+        symbol="BTCUSDT",
+        desired_notional=Decimal("15"),
+    )
+    cand_eth = replace(
+        _intent(),
+        candidate_id="cand-eth",
+        symbol="ETHUSDT",
+        desired_notional=Decimal("15"),
+    )
+
+    res_btc = await submission.execute(
+        cand_btc,
+        requested_quantity=None,
+        state=_state(),
+        context=base_ctx,
+    )
+    assert res_btc is None
+    assert repo.prepare_calls == []
+
+    res_eth = await submission.execute(
+        cand_eth,
+        requested_quantity=None,
+        state=_state(),
+        context=base_ctx,
+        reference_price=Decimal("3000"),
+    )
+    assert res_eth is not None
+    assert res_eth.plan.symbol == "ETHUSDT"
+
+    # 2. Uncertain order on BTCUSDT with bounded risk:
+    # Blocks BTCUSDT candidate, but does NOT block ETHUSDT candidate
+    repo2 = RecordingPreparedRepository()
+    coord2 = RecordingCoordinator()
+    sub2 = _submission(repository=repo2, state_machine=coord2)
+
+    unresolved_btc = SimpleNamespace(
+        plan=SimpleNamespace(
+            symbol="BTCUSDT",
+            price=Decimal("50000"),
+            quantity=Decimal("0.001"),
+            client_order_id="old_btc_cid",
+        ),
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    )
+    ctx_bounded_btc = replace(base_ctx, unresolved_orders=(unresolved_btc,))
+
+    # ETHUSDT candidate succeeds despite BTCUSDT uncertain order
+    res_eth2 = await sub2.execute(
+        cand_eth,
+        requested_quantity=None,
+        state=_state(),
+        context=ctx_bounded_btc,
+        reference_price=Decimal("3000"),
+    )
+    assert res_eth2 is not None
+    assert res_eth2.plan.symbol == "ETHUSDT"
+
+    # BTCUSDT candidate is blocked by its own uncertain order
+    res_btc2 = await sub2.execute(
+        cand_btc,
+        requested_quantity=None,
+        state=_state(),
+        context=ctx_bounded_btc,
+    )
+    assert res_btc2 is None
+
+    # 3. Uncertain order on BTCUSDT with unbounded risk (missing price/quantity):
+    # Blocks ETHUSDT candidate because worst-case gross risk is unbounded
+    unresolved_unbounded = SimpleNamespace(
+        plan=SimpleNamespace(
+            symbol="BTCUSDT",
+            price=None,
+            quantity=Decimal("0.001"),
+            client_order_id="unbounded_cid",
+        ),
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    )
+    ctx_unbounded = replace(base_ctx, unresolved_orders=(unresolved_unbounded,))
+    res_eth3 = await sub2.execute(
+        cand_eth,
+        requested_quantity=None,
+        state=_state(),
+        context=ctx_unbounded,
+        reference_price=Decimal("3000"),
+    )
+    assert res_eth3 is None
+
+    # 4. Confirmed resting order on BTCUSDT (ACKNOWLEDGED) is known, not uncertain:
+    # Does NOT block BTCUSDT candidate as uncertain order
+    resting_btc = SimpleNamespace(
+        plan=SimpleNamespace(
+            symbol="BTCUSDT",
+            price=Decimal("50000"),
+            quantity=Decimal("0.001"),
+            client_order_id="resting_btc_cid",
+        ),
+        state=ExchangeOrderState.ACKNOWLEDGED,
+    )
+    ctx_resting = replace(base_ctx, unresolved_orders=(resting_btc,))
+    repo3 = RecordingPreparedRepository()
+    coord3 = RecordingCoordinator()
+    sub3 = _submission(repository=repo3, state_machine=coord3)
+    res_btc3 = await sub3.execute(
+        cand_btc,
+        requested_quantity=None,
+        state=_state(),
+        context=ctx_resting,
+    )
+    assert res_btc3 is not None
+    assert res_btc3.plan.symbol == "BTCUSDT"

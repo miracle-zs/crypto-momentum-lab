@@ -25,15 +25,31 @@ def test_entry_control_composes_gate_priority_and_pending_positions() -> None:
     assert gate.entry_enabled_reason == "initializing"
 
     gate.set_pending_position_symbols({"BTCUSDT"})
-    assert gate.entry_enabled is False
-    assert gate.entry_enabled_reason == ("account_position_sync_pending:BTCUSDT")
+    # Account-wide lane remains open for other symbols
+    assert gate.entry_enabled is True
+    # BTCUSDT is locally protected
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (
+        False,
+        "account_position_sync_pending:BTCUSDT",
+    )
+    # ETHUSDT continues running
+    assert gate.is_symbol_entry_allowed("ETHUSDT") == (True, "entry_allowed")
 
     gate.set_scheduled_entry_blocked(True, reason="scheduled_risk_window")
     gate.set_risk_control_entry_blocked(
         True,
         reason="risk_control_state_recovering",
     )
+    assert gate.entry_enabled is False
     assert gate.entry_enabled_reason == "risk_control_state_recovering"
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (
+        False,
+        "risk_control_state_recovering",
+    )
+    assert gate.is_symbol_entry_allowed("ETHUSDT") == (
+        False,
+        "risk_control_state_recovering",
+    )
     assert state_machine.calls == ["block", "block"]
 
     gate.set_risk_control_entry_blocked(False, reason="risk_control_clear")
@@ -42,9 +58,17 @@ def test_entry_control_composes_gate_priority_and_pending_positions() -> None:
         False,
         reason="scheduled_risk_window_complete",
     )
-    assert gate.entry_enabled is False
-    assert gate.entry_enabled_reason == ("account_position_sync_pending:BTCUSDT")
+    # Account lane reopened, but BTCUSDT pending position sync remains protected
+    assert gate.entry_enabled is True
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (
+        False,
+        "account_position_sync_pending:BTCUSDT",
+    )
+    assert gate.is_symbol_entry_allowed("ETHUSDT") == (True, "entry_allowed")
     assert state_machine.calls == ["block", "block", "unblock"]
+
+    gate.set_pending_position_symbols(set())
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
 
 
 def test_entry_control_keeps_reopen_fail_closed_until_coordinator_recovers() -> None:
@@ -101,10 +125,30 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
         account_snapshot_available=True,
         strategy_warmup_ready=True,
     )
-    assert gate.entry_enabled_reason == ("exit_failure:BTCUSDT:exit request failed")
+    # Account level gate is blocked by cache warming
+    assert gate.entry_enabled_reason == "entry_cache_warming"
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (False, "entry_cache_warming")
+
+    # Clear cache warming
+    gate.set_entry_filter_cache_ready(True)
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=True,
+        market_state_unavailable_reason="market_state_hub_ready",
+        account_snapshot_available=True,
+        strategy_warmup_ready=True,
+    )
+    # Account level is enabled, but BTCUSDT has exit failure while ETHUSDT is allowed
+    assert gate.entry_enabled is True
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (
+        False,
+        "exit_failure:BTCUSDT:exit request failed",
+    )
+    assert gate.is_symbol_entry_allowed("ETHUSDT") == (True, "entry_allowed")
 
     gate.set_exit_failure("BTCUSDT", None)
-    gate.set_entry_filter_cache_ready(True)
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
     gate.refresh_entry_prerequisites(
         lease_heartbeat_degraded=False,
         session_draining=False,
@@ -187,10 +231,19 @@ def test_exit_failure_blocks_entry_immediately_without_prerequisite_refresh() ->
     gate = LiveEntryControlGate(run_id="run-1", state_machine=object())
     gate.set_entry_enabled(True, reason="ready")
     gate.set_exit_failure("BTCUSDT", "recovery_failed")
-    assert not gate.entry_enabled
-    assert gate.entry_enabled_reason == "exit_failure:BTCUSDT:recovery_failed"
+    # Global entry lane stays enabled for other symbols
+    assert gate.entry_enabled is True
+    # BTCUSDT is immediately blocked
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (
+        False,
+        "exit_failure:BTCUSDT:recovery_failed",
+    )
+    # ETHUSDT remains allowed
+    assert gate.is_symbol_entry_allowed("ETHUSDT") == (True, "entry_allowed")
+
+    # Clearing exit failure allows BTCUSDT again
     gate.set_exit_failure("BTCUSDT", None)
-    assert gate.entry_enabled
+    assert gate.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
 
 
 def test_schedule_reopen_does_not_release_active_risk_block():

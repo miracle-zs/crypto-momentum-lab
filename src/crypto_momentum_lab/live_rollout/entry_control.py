@@ -48,8 +48,6 @@ class LiveEntryControlGate:
             and not self._risk_control_entry_blocked
             and not self._scheduled_entry_blocked
             and self._outside_scheduled_window()
-            and not self._pending_position_symbols
-            and not self._exit_failure_by_symbol
         )
 
     @property
@@ -60,13 +58,17 @@ class LiveEntryControlGate:
             return self._scheduled_entry_block_reason
         if not self._outside_scheduled_window():
             return "scheduled_risk_window"
-        if self._pending_position_symbols:
-            symbols = ",".join(sorted(self._pending_position_symbols))
-            return f"account_position_sync_pending:{symbols}"
-        if self._entry_enabled and self._exit_failure_by_symbol:
-            symbol, failure = next(iter(self._exit_failure_by_symbol.items()))
-            return f"exit_failure:{symbol}:{failure}"
         return self._entry_enabled_reason
+
+    def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
+        """Check whether entry is allowed for a specific symbol."""
+        if not self.entry_enabled:
+            return False, self.entry_enabled_reason
+        if symbol in self._pending_position_symbols:
+            return False, f"account_position_sync_pending:{symbol}"
+        if symbol in self._exit_failure_by_symbol:
+            return False, f"exit_failure:{symbol}:{self._exit_failure_by_symbol[symbol]}"
+        return True, "entry_allowed"
 
     def _outside_scheduled_window(self) -> bool:
         # This read is synchronous even when cancellation/verification awaits I/O.
@@ -162,12 +164,6 @@ class LiveEntryControlGate:
             )
         elif session_draining:
             self.set_entry_enabled(False, reason="session_draining")
-        elif self._exit_failure_by_symbol:
-            symbol, failure = next(iter(self._exit_failure_by_symbol.items()))
-            self.set_entry_enabled(
-                False,
-                reason=f"exit_failure:{symbol}:{failure}",
-            )
         elif not strategy_warmup_ready:
             self.set_entry_enabled(False, reason=strategy_warmup_reason)
         elif not market_state_available:

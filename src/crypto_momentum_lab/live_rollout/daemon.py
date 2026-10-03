@@ -323,6 +323,7 @@ class LiveStrategyDaemon:
             record_signal_candidate=self._record_signal_candidate,
             telemetry=self._telemetry,
             entry_order_lifecycle=self._entry_order_lifecycle,
+            is_symbol_entry_allowed=self._entry_control.is_symbol_entry_allowed,
         )
         self._exit_processor = LiveExitProcessor(
             config=ExitProcessorConfig(run_id=config.run_id),
@@ -436,6 +437,9 @@ class LiveStrategyDaemon:
     @property
     def entry_enabled_reason(self) -> str:
         return self._entry_control.entry_enabled_reason
+
+    def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
+        return self._entry_control.is_symbol_entry_allowed(symbol)
 
     @property
     def exit_enabled(self) -> bool:

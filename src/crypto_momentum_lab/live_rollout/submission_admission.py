@@ -22,8 +22,13 @@ class LiveSubmissionAdmission:
     def rejection_reason(
         self, plan: OrderExecutionPlan, preparation: OrderSubmissionPreparation
     ) -> str | None:
-        if not plan.reduce_only and not self._gate.entry_enabled:
-            return self._gate.entry_enabled_reason
+        if not plan.reduce_only:
+            if hasattr(self._gate, "is_symbol_entry_allowed"):
+                allowed, reason = self._gate.is_symbol_entry_allowed(plan.symbol)
+                if not allowed:
+                    return reason
+            elif not self._gate.entry_enabled:
+                return self._gate.entry_enabled_reason
         context = preparation.context_token
         if context is not None:
             if not isinstance(context, LiveDaemonRuntimeContext):

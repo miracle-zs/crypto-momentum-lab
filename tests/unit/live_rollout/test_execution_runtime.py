@@ -177,3 +177,71 @@ def test_capability_evidence_provider_evaluates_runtime_facts() -> None:
     assert evidence.is_lease_active is True
     assert evidence.is_approval_valid is True
     assert evidence.unresolved_inflight_orders_count == 0
+
+
+def test_capability_evidence_provider_missing_facts_fail_closed() -> None:
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import Mock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.domain.risk import TradingLease
+    from crypto_momentum_lab.domain.runtime import RuntimePlan
+
+    mock_plan = Mock(spec=RuntimePlan)
+    mock_plan.plan_hash = "hash123"
+    mock_plan.runtime_generation = "gen1"
+    mock_plan.fencing_epoch = 1
+    mock_plan.declared_schema_compatibility = "v1"
+    mock_plan.observed_database_revision = "rev1"
+    mock_plan.strategy_name = "test_strat"
+
+    now = datetime.now(tz=UTC)
+    active_lease = Mock(spec=TradingLease)
+    active_lease.expires_at = now + timedelta(seconds=60)
+
+    # Missing market age -> float("inf")
+    # Missing approval -> False
+    # None context -> discordant
+    provider_missing = runtime.build_capability_evidence_provider(
+        account_label="acc1",
+        runtime_plan=mock_plan,
+        get_active_lease=lambda: active_lease,
+        is_entry_enabled=lambda: False,
+        get_context=lambda: None,
+        get_market_age=lambda: None,
+        has_api_key=lambda: True,
+    )
+    order_plan = Mock(spec=OrderExecutionPlan)
+    order_plan.symbol = "BTCUSDT"
+    order_plan.client_order_id = "cid1"
+
+    ev1 = provider_missing(order_plan, now)
+    assert ev1.market_freshness_seconds == float("inf")
+    assert ev1.is_account_concordant is False
+    assert ev1.is_approval_valid is False
+    assert ev1.unresolved_inflight_orders_count == 1
+
+    # Context with pending position sync on order symbol -> discordant
+    ctx_pending = Mock()
+    ctx_pending.pending_position_symbols = {"BTCUSDT"}
+    ctx_pending.unmanaged_position_symbols = ()
+    ctx_pending.unresolved_orders = ()
+
+    provider_pending = runtime.build_capability_evidence_provider(
+        account_label="acc1",
+        runtime_plan=mock_plan,
+        get_active_lease=lambda: active_lease,
+        is_entry_enabled=lambda: True,
+        get_context=lambda: ctx_pending,
+        get_market_age=lambda: 1.0,
+        has_api_key=lambda: True,
+    )
+    ev2 = provider_pending(order_plan, now)
+    assert ev2.is_account_concordant is False
+
+    # But ETHUSDT on same context is concordant
+    order_plan_eth = Mock(spec=OrderExecutionPlan)
+    order_plan_eth.symbol = "ETHUSDT"
+    order_plan_eth.client_order_id = "cid2"
+    ev3 = provider_pending(order_plan_eth, now)
+    assert ev3.is_account_concordant is True

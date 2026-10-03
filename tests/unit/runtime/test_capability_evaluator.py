@@ -320,11 +320,11 @@ def test_capability_evidence_fail_closed_on_missing_fields() -> None:
         )
 
 
-def test_enter_blocked_when_collector_unhealthy() -> None:
+def test_enter_not_blocked_when_collector_unhealthy() -> None:
     evaluator = CapabilityEvaluator()
     plan = _make_plan()
     ev = _make_evidence(is_collector_healthy=False)
     dec = evaluator.evaluate(SystemAction.ENTER, ev, plan)
-    assert dec.allowed is False
-    assert dec.reason == "collector_unhealthy"
+    assert dec.allowed is True
+    assert dec.reason == "entry_prerequisites_satisfied"
 

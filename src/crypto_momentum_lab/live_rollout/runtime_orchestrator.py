@@ -664,6 +664,7 @@ async def run_live_daemon(
         )
         capability_evaluator = CapabilityEvaluator()
 
+        approval: LiveOperatorApproval | None = None
         evidence_provider = build_capability_evidence_provider(
             account_label=account_label,
             runtime_plan=runtime_plan,
@@ -679,6 +680,7 @@ async def run_live_daemon(
             has_api_key=lambda: bool(
                 account_label and getattr(client, "_api_key", None)
             ),
+            get_approval=lambda: approval,
         )
 
         submission_fence = LiveSubmissionFence(
@@ -693,6 +695,7 @@ async def run_live_daemon(
             capability_evaluator=capability_evaluator,
             runtime_plan=runtime_plan,
             evidence_provider=evidence_provider,
+            clock=lambda: datetime.now(tz=UTC),
         )
 
         execution_runtime = await build_live_execution_runtime(

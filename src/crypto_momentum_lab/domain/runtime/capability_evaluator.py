@@ -185,8 +185,6 @@ class CapabilityEvaluator:
                 return _decision(False, "unresolved_inflight_orders_present")
             if not evidence.is_universe_ready:
                 return _decision(False, "universe_or_warmup_not_ready")
-            if not evidence.is_collector_healthy:
-                return _decision(False, "collector_unhealthy")
             if evidence.market_freshness_seconds > self._max_entry_age:
                 return _decision(False, "market_data_stale_for_entry")
             return _decision(True, "entry_prerequisites_satisfied")

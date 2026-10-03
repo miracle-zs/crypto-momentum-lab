@@ -420,3 +420,47 @@ async def test_submission_fence_evaluates_lease_at_current_time_after_delays() -
             cast(Any, SimpleNamespace(reduce_only=False, client_order_id="ord-1")),
             datetime(2026, 8, 4, 12, 0, 10, tzinfo=UTC),
         )
+
+
+@pytest.mark.asyncio
+async def test_submission_fence_detects_lease_expired_after_db_delay() -> None:
+    lease_expires_at = datetime(2026, 8, 4, 12, 0, 5, tzinfo=UTC)
+    current_time = [datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)]
+    lease = SimpleNamespace(
+        lease_id="lease-1",
+        owner="worker-1",
+        strategy_name="strategy-1",
+        code_generation="commit-1",
+        expires_at=lease_expires_at,
+    )
+
+    class DelayedRiskState:
+        async def load_active_lease(
+            self, environment: str, account_label: str, now: datetime
+        ):
+            # Simulate DB delay: clock advances past expiration
+            current_time[0] = datetime(2026, 8, 4, 12, 0, 6, tzinfo=UTC)
+            return lease
+
+        async def load_active_halts(self, environment: str, account_label: str):
+            return ()
+
+    fence = LiveSubmissionFence(
+        risk_state=cast(Any, DelayedRiskState()),
+        environment="live",
+        account_label="account-1",
+        strategy_name="strategy-1",
+        lease_owner="worker-1",
+        code_generation="commit-1",
+        active_lease=cast(Any, lambda: lease),
+        clock=lambda: current_time[0],
+    )
+
+    with pytest.raises(
+        OrderPreSubmissionError,
+        match="active lease expired during pre-submission check",
+    ):
+        await fence.validate(
+            cast(Any, SimpleNamespace(reduce_only=False, client_order_id="ord-1")),
+            datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC),
+        )
