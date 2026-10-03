@@ -78,3 +78,6 @@ Coordinator 负责等待状态的日志去重，按 PositionKey、目标 stream/
 后续已完成按任务种类唤醒与独立重试，见
 [第三步记录](recovery-task-scopes-20261003.md)；按仓位细分与退出远程查询的
 进一步合并仍未完成。
+
+后续已随 `02e6581f` 上线，见
+[部署与十分钟验收](../diagnostics/recovery-convergence-rollout-20261003.md)。

@@ -64,3 +64,6 @@ rtk proxy .venv/bin/python -m pytest -q tests/unit/live_rollout/test_recovery_ta
 
 本次修改仍在本地，尚未提交或部署。测试证明重复调用收敛，生产 CPU、数据库
 请求与恢复延迟的实际变化仍需上线观测。
+
+后续已随 `02e6581f` 上线，见
+[部署与十分钟验收](../diagnostics/recovery-convergence-rollout-20261003.md)。
