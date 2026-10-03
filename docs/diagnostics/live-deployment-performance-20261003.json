@@ -1,0 +1,2136 @@
+{
+  "before": {
+    "observed_at": "2026-10-03T13:42:53.874003+00:00",
+    "window_seconds": 900,
+    "containers": {
+      "crypto-momentum-lab-live-strategy-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:04:23.429249135Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_context_cache_invalidated": 32,
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_checkpoint_built": 86,
+          "strategy_checkpoint_persisted": 25,
+          "live_checkpoint_persisted": 25,
+          "live_runtime_memory_snapshot": 14,
+          "live_strategy_symbol_entry_baseline": 2
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 86,
+            "p50": 2.463,
+            "p95": 5.96,
+            "p99": 7.213,
+            "max": 7.44
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 25,
+            "p50": 10.273,
+            "p95": 16.558,
+            "p99": 37.982,
+            "max": 132.587
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 25,
+            "p50": 47.295,
+            "p95": 90.418,
+            "p99": 108.214,
+            "max": 121.213
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 25,
+            "p50": 20.615,
+            "p95": 45.405,
+            "p99": 75.609,
+            "max": 111.19
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 25,
+            "p50": 0.414,
+            "p95": 2.474,
+            "p99": 2.964,
+            "max": 4.625
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 25,
+            "p50": 11.221,
+            "p95": 27.668,
+            "p99": 29.946,
+            "max": 36.385
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 25,
+            "p50": 88.064,
+            "p95": 161.979,
+            "p99": 173.063,
+            "max": 182.245
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 25,
+            "p50": 127.427,
+            "p95": 199.709,
+            "p99": 215.037,
+            "max": 218.948
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 14,
+            "p50": 265256960.0,
+            "p95": 266878976.0,
+            "p99": 266878976.0,
+            "max": 266878976.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 14,
+            "p50": 34634.427984,
+            "p95": 35009.075862,
+            "p99": 35009.075862,
+            "max": 35069.198366
+          }
+        },
+        "readiness": {
+          "account_label": "account-4",
+          "code_commit": "040b4eaacf932901d53642669019cd1ed63506b0",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.444716,
+          "latest_market_state_at": "2026-10-03T13:42:45+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T13:42:45.448013+00:00",
+          "published_at": "2026-10-03T13:42:45.448013+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-4-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "FULLY_TRADEABLE",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 8,
+          "warmup_cutover_at": "2026-10-03T04:04:45+00:00",
+          "warmup_deferred_symbols": 22,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:04:23.426552657Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_runtime_memory_snapshot": 15,
+          "live_context_cache_invalidated": 32,
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_checkpoint_built": 88,
+          "strategy_checkpoint_persisted": 25,
+          "live_checkpoint_persisted": 25,
+          "live_strategy_symbol_entry_baseline": 2
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 261877760.0,
+            "p95": 262791168.0,
+            "p99": 262791168.0,
+            "max": 263282688.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 34649.304782,
+            "p95": 35023.770655,
+            "p99": 35023.770655,
+            "max": 35083.7839
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 88,
+            "p50": 2.395,
+            "p95": 5.603,
+            "p99": 6.6,
+            "max": 7.679
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 25,
+            "p50": 7.266,
+            "p95": 16.205,
+            "p99": 16.707,
+            "max": 21.276
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 25,
+            "p50": 39.087,
+            "p95": 73.458,
+            "p99": 75.977,
+            "max": 83.825
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 25,
+            "p50": 22.508,
+            "p95": 105.434,
+            "p99": 878.845,
+            "max": 954.172
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 25,
+            "p50": 0.308,
+            "p95": 0.855,
+            "p99": 1.046,
+            "max": 1.269
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 25,
+            "p50": 10.463,
+            "p95": 31.763,
+            "p99": 32.735,
+            "max": 1287.675
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 25,
+            "p50": 87.367,
+            "p95": 985.063,
+            "p99": 1058.229,
+            "max": 1349.501
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 25,
+            "p50": 115.43,
+            "p95": 1008.785,
+            "p99": 1123.133,
+            "max": 1399.435
+          }
+        },
+        "readiness": {
+          "account_label": "account-3",
+          "code_commit": "040b4eaacf932901d53642669019cd1ed63506b0",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.450337,
+          "latest_market_state_at": "2026-10-03T13:42:45+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T13:42:45.451500+00:00",
+          "published_at": "2026-10-03T13:42:45.451500+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-3-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "FULLY_TRADEABLE",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 8,
+          "warmup_cutover_at": "2026-10-03T04:04:45+00:00",
+          "warmup_deferred_symbols": 22,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:02:59.174532659Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_checkpoint_built": 85,
+          "strategy_checkpoint_persisted": 25,
+          "live_checkpoint_persisted": 25,
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_context_cache_invalidated": 32,
+          "live_runtime_memory_snapshot": 15,
+          "live_strategy_symbol_entry_baseline": 2
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 85,
+            "p50": 2.492,
+            "p95": 5.796,
+            "p99": 6.632,
+            "max": 7.33
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 25,
+            "p50": 8.569,
+            "p95": 17.166,
+            "p99": 22.458,
+            "max": 23.284
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 25,
+            "p50": 60.268,
+            "p95": 96.712,
+            "p99": 108.684,
+            "max": 119.47
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 25,
+            "p50": 16.413,
+            "p95": 41.618,
+            "p99": 42.734,
+            "max": 143.678
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 25,
+            "p50": 0.319,
+            "p95": 0.491,
+            "p99": 0.537,
+            "max": 0.569
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 25,
+            "p50": 11.79,
+            "p95": 20.875,
+            "p99": 22.829,
+            "max": 25.933
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 25,
+            "p50": 96.36,
+            "p95": 157.629,
+            "p99": 176.368,
+            "max": 188.502
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 25,
+            "p50": 135.877,
+            "p95": 218.578,
+            "p99": 218.664,
+            "max": 225.028
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 274972672.0,
+            "p95": 276496384.0,
+            "p99": 276496384.0,
+            "max": 276729856.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 34678.793416,
+            "p95": 35039.280235,
+            "p99": 35039.280235,
+            "max": 35099.280067
+          }
+        },
+        "readiness": {
+          "account_label": "primary",
+          "code_commit": "040b4eaacf932901d53642669019cd1ed63506b0",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.449501,
+          "latest_market_state_at": "2026-10-03T13:42:45+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T13:42:45.453151+00:00",
+          "published_at": "2026-10-03T13:42:45.453151+00:00",
+          "schema_version": 1,
+          "session_id": "live-b1-long-100u-5x-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "FULLY_TRADEABLE",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 8,
+          "warmup_cutover_at": "2026-10-03T04:03:15+00:00",
+          "warmup_deferred_symbols": 22,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:02:59.176441941Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_checkpoint_built": 87,
+          "strategy_checkpoint_persisted": 24,
+          "live_checkpoint_persisted": 24,
+          "live_runtime_memory_snapshot": 15,
+          "live_context_cache_invalidated": 32,
+          "live_strategy_symbol_entry_baseline": 2
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 87,
+            "p50": 2.4,
+            "p95": 5.926,
+            "p99": 9.178,
+            "max": 13.735
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 24,
+            "p50": 5.558,
+            "p95": 10.578,
+            "p99": 13.115,
+            "max": 31.056
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 24,
+            "p50": 56.79,
+            "p95": 100.943,
+            "p99": 113.018,
+            "max": 144.792
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 24,
+            "p50": 25.005,
+            "p95": 61.111,
+            "p99": 78.226,
+            "max": 782.001
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 24,
+            "p50": 0.302,
+            "p95": 0.58,
+            "p99": 0.688,
+            "max": 3.08
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 24,
+            "p50": 11.046,
+            "p95": 28.154,
+            "p99": 46.32,
+            "max": 52.362
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 24,
+            "p50": 102.536,
+            "p95": 195.75,
+            "p99": 234.939,
+            "max": 850.773
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 24,
+            "p50": 139.018,
+            "p95": 281.282,
+            "p99": 300.302,
+            "max": 866.562
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 282984448.0,
+            "p95": 284237824.0,
+            "p99": 284237824.0,
+            "max": 284237824.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 34663.762627,
+            "p95": 35024.295015,
+            "p99": 35024.295015,
+            "max": 35084.386307
+          }
+        },
+        "readiness": {
+          "account_label": "account-2",
+          "code_commit": "040b4eaacf932901d53642669019cd1ed63506b0",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.442362,
+          "latest_market_state_at": "2026-10-03T13:42:45+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T13:42:45.445668+00:00",
+          "published_at": "2026-10-03T13:42:45.445668+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-2-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "FULLY_TRADEABLE",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 8,
+          "warmup_cutover_at": "2026-10-03T04:03:15+00:00",
+          "warmup_deferred_symbols": 22,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-execution-account-live-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:01:27.744116607Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "binance_user_data_listen_key_kept_alive": 1
+        },
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:01:27.741696685Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "binance_user_data_listen_key_kept_alive": 1
+        },
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:00:09.683121406Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "binance_user_data_listen_key_kept_alive": 1
+        },
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T04:00:09.681106159Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "binance_user_data_listen_key_kept_alive": 1
+        },
+        "measurements": {}
+      },
+      "crypto-momentum-lab-research-collector-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T03:57:52.737752812Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-dashboard-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T03:57:07.580089014Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-market-data-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T03:57:07.575796693Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "market_data_health_snapshot": 30,
+          "market_data_event_loop_lag": 12,
+          "universe_refreshed": 15,
+          "market_data_24h_quote_volume_refreshed": 15,
+          "capture_symbols_updated": 3,
+          "capture_symbols_changed": 3,
+          "promotion_backfill_completed": 2
+        },
+        "measurements": {
+          "market_data_health_snapshot.ack_mismatch_count": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.aggregation_event_rate": {
+            "n": 30,
+            "p50": 192.027,
+            "p95": 228.059,
+            "p99": 228.373,
+            "max": 243.928
+          },
+          "market_data_health_snapshot.event_loop_lag_ms": {
+            "n": 30,
+            "p50": 47.0,
+            "p95": 179.0,
+            "p99": 404.0,
+            "max": 423.0
+          },
+          "market_data_health_snapshot.monitoring_symbols": {
+            "n": 30,
+            "p50": 41.0,
+            "p95": 41.0,
+            "p99": 41.0,
+            "max": 41.0
+          },
+          "market_data_health_snapshot.queue_backpressure_wait_seconds": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.queue_dropped_events": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.received_message_rate": {
+            "n": 30,
+            "p50": 287.624,
+            "p95": 325.513,
+            "p99": 325.989,
+            "max": 337.954
+          },
+          "market_data_health_snapshot.reconnect_count": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.rss_bytes": {
+            "n": 30,
+            "p50": 248905728.0,
+            "p95": 252502016.0,
+            "p99": 252751872.0,
+            "max": 252755968.0
+          },
+          "market_data_event_loop_lag.critical_threshold_ms": {
+            "n": 12,
+            "p50": 500.0,
+            "p95": 500.0,
+            "p99": 500.0,
+            "max": 500.0
+          },
+          "market_data_event_loop_lag.lag_ms": {
+            "n": 12,
+            "p50": 64.0,
+            "p95": 404.0,
+            "p99": 404.0,
+            "max": 423.0
+          },
+          "market_data_event_loop_lag.warning_threshold_ms": {
+            "n": 12,
+            "p50": 50.0,
+            "p95": 50.0,
+            "p99": 50.0,
+            "max": 50.0
+          },
+          "promotion_backfill_completed.lookback_seconds": {
+            "n": 2,
+            "p50": 2100.0,
+            "p95": 2100.0,
+            "p99": 2100.0,
+            "max": 2100.0
+          }
+        }
+      },
+      "crypto-momentum-lab-postgres-1": {
+        "health": "healthy",
+        "started_at": "2026-09-29T07:41:39.668520732Z",
+        "oom": false,
+        "restart_count": 0
+      }
+    },
+    "host_load": "0.78 0.80 1.02 7/557 3817514",
+    "ops_monitor": "active"
+  },
+  "after_intermediate_version": {
+    "observed_at": "2026-10-03T14:16:26.820008+00:00",
+    "window_seconds": 900,
+    "containers": {
+      "crypto-momentum-lab-live-strategy-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:59:08.818733116Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_checkpoint_built": 61,
+          "strategy_checkpoint_persisted": 23,
+          "live_checkpoint_persisted": 23,
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_runtime_memory_snapshot": 15,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "live_context_cache_invalidated": 28,
+          "live_strategy_symbol_entry_baseline": 8,
+          "live_runtime_cache_pruned": 1
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 61,
+            "p50": 3.051,
+            "p95": 8.102,
+            "p99": 12.493,
+            "max": 16.692
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 23,
+            "p50": 10.99,
+            "p95": 75.717,
+            "p99": 89.311,
+            "max": 136.123
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 23,
+            "p50": 45.702,
+            "p95": 77.711,
+            "p99": 79.062,
+            "max": 83.911
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 23,
+            "p50": 18.345,
+            "p95": 256.137,
+            "p99": 297.119,
+            "max": 327.398
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 23,
+            "p50": 0.306,
+            "p95": 0.508,
+            "p99": 0.844,
+            "max": 4.656
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 23,
+            "p50": 14.105,
+            "p95": 153.042,
+            "p99": 155.98,
+            "max": 242.957
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 23,
+            "p50": 98.936,
+            "p95": 521.599,
+            "p99": 645.968,
+            "max": 655.67
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 23,
+            "p50": 120.519,
+            "p95": 887.15,
+            "p99": 918.298,
+            "max": 1060.589
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 200335360.0,
+            "p95": 200413184.0,
+            "p99": 200413184.0,
+            "max": 200413184.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 1068.090167,
+            "p95": 1428.365415,
+            "p99": 1428.365415,
+            "max": 1488.396775
+          }
+        },
+        "readiness": {
+          "account_label": "account-3",
+          "code_commit": "729170e983c95ea58e01a977df155d665a1a227f",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.426946,
+          "latest_market_state_at": "2026-10-03T14:16:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:16:15.432618+00:00",
+          "published_at": "2026-10-03T14:16:15.432618+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-3-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 28,
+          "warmup_cutover_at": "2026-10-03T14:00:00+00:00",
+          "warmup_deferred_symbols": 2,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:59:08.836825905Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_runtime_memory_snapshot": 15,
+          "live_checkpoint_built": 61,
+          "strategy_checkpoint_persisted": 23,
+          "live_checkpoint_persisted": 23,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "live_context_cache_invalidated": 28,
+          "live_strategy_symbol_entry_baseline": 7,
+          "live_runtime_cache_pruned": 1
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 202596352.0,
+            "p95": 202670080.0,
+            "p99": 202670080.0,
+            "max": 202674176.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 1068.175318,
+            "p95": 1442.960009,
+            "p99": 1442.960009,
+            "max": 1502.994453
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 61,
+            "p50": 3.305,
+            "p95": 6.913,
+            "p99": 8.513,
+            "max": 13.98
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 23,
+            "p50": 6.568,
+            "p95": 56.543,
+            "p99": 92.879,
+            "max": 92.94
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 23,
+            "p50": 45.794,
+            "p95": 77.513,
+            "p99": 79.587,
+            "max": 80.905
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 23,
+            "p50": 16.09,
+            "p95": 252.223,
+            "p99": 313.47,
+            "max": 401.135
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 23,
+            "p50": 0.262,
+            "p95": 1.384,
+            "p99": 1.968,
+            "max": 2.016
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 23,
+            "p50": 8.475,
+            "p95": 155.148,
+            "p99": 157.185,
+            "max": 161.764
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 23,
+            "p50": 91.927,
+            "p95": 500.327,
+            "p99": 587.656,
+            "max": 699.867
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 23,
+            "p50": 133.35,
+            "p95": 594.251,
+            "p99": 1092.722,
+            "max": 1259.719
+          }
+        },
+        "readiness": {
+          "account_label": "account-4",
+          "code_commit": "729170e983c95ea58e01a977df155d665a1a227f",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.425018,
+          "latest_market_state_at": "2026-10-03T14:16:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:16:15.431524+00:00",
+          "published_at": "2026-10-03T14:16:15.431524+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-4-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 28,
+          "warmup_cutover_at": "2026-10-03T14:00:00+00:00",
+          "warmup_deferred_symbols": 2,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:56:37.804095014Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_context_cache_invalidated": 30,
+          "live_runtime_memory_snapshot": 15,
+          "live_checkpoint_built": 61,
+          "strategy_checkpoint_persisted": 24,
+          "live_checkpoint_persisted": 24,
+          "live_strategy_symbol_entry_baseline": 7,
+          "live_runtime_cache_pruned": 1
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 206721024.0,
+            "p95": 206790656.0,
+            "p99": 206790656.0,
+            "max": 206794752.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 1082.817534,
+            "p95": 1443.37196,
+            "p99": 1443.37196,
+            "max": 1503.448843
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 61,
+            "p50": 4.041,
+            "p95": 8.579,
+            "p99": 11.54,
+            "max": 15.162
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 24,
+            "p50": 5.161,
+            "p95": 74.539,
+            "p99": 90.567,
+            "max": 92.273
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 24,
+            "p50": 11.788,
+            "p95": 84.736,
+            "p99": 89.873,
+            "max": 93.133
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 24,
+            "p50": 15.291,
+            "p95": 224.493,
+            "p99": 260.689,
+            "max": 430.293
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 24,
+            "p50": 0.346,
+            "p95": 2.986,
+            "p99": 6.273,
+            "max": 6.525
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 24,
+            "p50": 8.846,
+            "p95": 107.6,
+            "p99": 125.449,
+            "max": 172.767
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 24,
+            "p50": 86.189,
+            "p95": 413.513,
+            "p99": 502.005,
+            "max": 683.709
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 24,
+            "p50": 96.69,
+            "p95": 814.907,
+            "p99": 970.355,
+            "max": 1131.351
+          }
+        },
+        "readiness": {
+          "account_label": "account-2",
+          "code_commit": "729170e983c95ea58e01a977df155d665a1a227f",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.420152,
+          "latest_market_state_at": "2026-10-03T14:16:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:16:15.424460+00:00",
+          "published_at": "2026-10-03T14:16:15.424460+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-2-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 27,
+          "warmup_cutover_at": "2026-10-03T13:57:45+00:00",
+          "warmup_deferred_symbols": 3,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:56:37.815906033Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 60,
+          "live_context_cache_invalidated": 29,
+          "live_runtime_memory_snapshot": 15,
+          "live_checkpoint_built": 61,
+          "strategy_checkpoint_persisted": 22,
+          "live_checkpoint_persisted": 22,
+          "live_strategy_symbol_entry_baseline": 7,
+          "live_runtime_cache_pruned": 1
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 15,
+            "p50": 248119296.0,
+            "p95": 248188928.0,
+            "p99": 248188928.0,
+            "max": 248197120.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 15,
+            "p50": 1068.119825,
+            "p95": 1442.978532,
+            "p99": 1442.978532,
+            "max": 1502.981755
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 61,
+            "p50": 3.47,
+            "p95": 8.108,
+            "p99": 8.493,
+            "max": 9.468
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 22,
+            "p50": 8.087,
+            "p95": 76.202,
+            "p99": 76.292,
+            "max": 124.927
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 22,
+            "p50": 71.781,
+            "p95": 105.006,
+            "p99": 133.218,
+            "max": 156.536
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 22,
+            "p50": 25.735,
+            "p95": 170.535,
+            "p99": 175.044,
+            "max": 264.494
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 22,
+            "p50": 0.352,
+            "p95": 3.737,
+            "p99": 4.471,
+            "max": 5.899
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 22,
+            "p50": 14.133,
+            "p95": 117.684,
+            "p99": 154.244,
+            "max": 166.886
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 22,
+            "p50": 142.487,
+            "p95": 401.101,
+            "p99": 468.793,
+            "max": 518.091
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 22,
+            "p50": 182.107,
+            "p95": 830.233,
+            "p99": 843.626,
+            "max": 939.663
+          }
+        },
+        "readiness": {
+          "account_label": "primary",
+          "code_commit": "729170e983c95ea58e01a977df155d665a1a227f",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.422947,
+          "latest_market_state_at": "2026-10-03T14:16:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:16:15.424118+00:00",
+          "published_at": "2026-10-03T14:16:15.424118+00:00",
+          "schema_version": 1,
+          "session_id": "live-b1-long-100u-5x-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 27,
+          "warmup_cutover_at": "2026-10-03T13:58:00+00:00",
+          "warmup_deferred_symbols": 3,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-execution-account-live-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:54:52.939433791Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:54:52.953581119Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:53:24.268869683Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:53:24.26660437Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-research-collector-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:51:07.991716285Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-dashboard-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:50:24.809737496Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-market-data-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:50:24.805703158Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "market_data_health_snapshot": 30,
+          "market_data_24h_quote_volume_refreshed": 15,
+          "universe_refreshed": 15,
+          "promotion_backfill_completed": 6,
+          "market_data_event_loop_lag": 5,
+          "capture_symbols_updated": 2,
+          "capture_symbols_changed": 2
+        },
+        "measurements": {
+          "market_data_health_snapshot.ack_mismatch_count": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.aggregation_event_rate": {
+            "n": 30,
+            "p50": 175.85,
+            "p95": 213.684,
+            "p99": 229.867,
+            "max": 230.167
+          },
+          "market_data_health_snapshot.event_loop_lag_max_ms": {
+            "n": 30,
+            "p50": 3.0,
+            "p95": 310.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_health_snapshot.event_loop_lag_ms": {
+            "n": 30,
+            "p50": 3.0,
+            "p95": 310.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p50_ms": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p95_ms": {
+            "n": 30,
+            "p50": 1.0,
+            "p95": 3.0,
+            "p99": 5.0,
+            "max": 5.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p99_ms": {
+            "n": 30,
+            "p50": 3.0,
+            "p95": 310.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_health_snapshot.monitoring_symbols": {
+            "n": 30,
+            "p50": 35.0,
+            "p95": 37.0,
+            "p99": 37.0,
+            "max": 37.0
+          },
+          "market_data_health_snapshot.queue_backpressure_wait_seconds": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.queue_dropped_events": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.received_message_rate": {
+            "n": 30,
+            "p50": 272.833,
+            "p95": 311.204,
+            "p99": 323.7,
+            "max": 335.733
+          },
+          "market_data_health_snapshot.reconnect_count": {
+            "n": 30,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.rss_bytes": {
+            "n": 30,
+            "p50": 182562816.0,
+            "p95": 191336448.0,
+            "p99": 191340544.0,
+            "max": 191832064.0
+          },
+          "promotion_backfill_completed.lookback_seconds": {
+            "n": 6,
+            "p50": 2100.0,
+            "p95": 2100.0,
+            "p99": 2100.0,
+            "max": 2100.0
+          },
+          "market_data_event_loop_lag.critical_threshold_ms": {
+            "n": 5,
+            "p50": 500.0,
+            "p95": 500.0,
+            "p99": 500.0,
+            "max": 500.0
+          },
+          "market_data_event_loop_lag.lag_ms": {
+            "n": 5,
+            "p50": 310.0,
+            "p95": 532.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_event_loop_lag.max_ms": {
+            "n": 5,
+            "p50": 310.0,
+            "p95": 532.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_event_loop_lag.p50_ms": {
+            "n": 5,
+            "p50": 0.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          },
+          "market_data_event_loop_lag.p95_ms": {
+            "n": 5,
+            "p50": 2.0,
+            "p95": 2.0,
+            "p99": 2.0,
+            "max": 5.0
+          },
+          "market_data_event_loop_lag.p99_ms": {
+            "n": 5,
+            "p50": 310.0,
+            "p95": 532.0,
+            "p99": 532.0,
+            "max": 575.0
+          },
+          "market_data_event_loop_lag.warning_threshold_ms": {
+            "n": 5,
+            "p50": 50.0,
+            "p95": 50.0,
+            "p99": 50.0,
+            "max": 50.0
+          }
+        }
+      },
+      "crypto-momentum-lab-postgres-1": {
+        "health": "healthy",
+        "started_at": "2026-09-29T07:41:39.668520732Z",
+        "oom": false,
+        "restart_count": 0
+      }
+    },
+    "host_load": "1.18 1.49 2.45 2/532 3909741",
+    "ops_monitor": "active"
+  },
+  "account_state_window": [
+    {
+      "account_label": "account-3",
+      "state": "running",
+      "n": 18
+    },
+    {
+      "account_label": "primary",
+      "state": "running",
+      "n": 20
+    },
+    {
+      "account_label": "account-2",
+      "state": "running",
+      "n": 19
+    },
+    {
+      "account_label": "account-4",
+      "state": "running",
+      "n": 18
+    }
+  ],
+  "intermediate_commit": "729170e983c95ea58e01a977df155d665a1a227f",
+  "final_commit": "0d386bcb6d10bd13b8ec7f42dcc561cbeb8ce0b1",
+  "notes": [
+    "15-minute observational windows, no controlled benchmark",
+    "30 health snapshots each, sampled lag percentiles are not per-event percentiles",
+    "market subscriptions and traffic differ",
+    "7 exits rejected before POST by RuntimePlan.strategy_name AttributeError; corrected in final commit"
+  ],
+  "final_observation": {
+    "observed_at": "2026-10-03T14:31:16.298381+00:00",
+    "window_seconds": 240,
+    "containers": {
+      "crypto-momentum-lab-live-strategy-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:25:44.414574208Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 16,
+          "live_checkpoint_built": 4,
+          "strategy_checkpoint_persisted": 4,
+          "live_checkpoint_persisted": 4,
+          "live_context_cache_invalidated": 13,
+          "live_runtime_memory_snapshot": 4,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "binance_submit_order_resolving_fill_price": 1,
+          "binance_submit_order_fill_price_resolved": 1,
+          "live_exit_evaluation_deferred": 4,
+          "live_account_event_duplicate_terminal_order": 2
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 4,
+            "p50": 1.262,
+            "p95": 3.369,
+            "p99": 3.369,
+            "max": 3.923
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 4,
+            "p50": 13.32,
+            "p95": 20.799,
+            "p99": 20.799,
+            "max": 23.765
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 4,
+            "p50": 9.155,
+            "p95": 9.523,
+            "p99": 9.523,
+            "max": 17.51
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 4,
+            "p50": 83.668,
+            "p95": 87.1,
+            "p99": 87.1,
+            "max": 137.32
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 4,
+            "p50": 0.226,
+            "p95": 0.232,
+            "p99": 0.232,
+            "max": 0.312
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 4,
+            "p50": 15.403,
+            "p95": 38.103,
+            "p99": 38.103,
+            "max": 45.065
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 4,
+            "p50": 127.701,
+            "p95": 171.175,
+            "p99": 171.175,
+            "max": 174.159
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 4,
+            "p50": 181.251,
+            "p95": 211.903,
+            "p99": 211.903,
+            "max": 234.063
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 4,
+            "p50": 203743232.0,
+            "p95": 203743232.0,
+            "p99": 203743232.0,
+            "max": 203997184.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 4,
+            "p50": 2297.798624,
+            "p95": 2358.129009,
+            "p99": 2358.129009,
+            "max": 2418.150848
+          },
+          "live_exit_evaluation_deferred.retry_delay_seconds": {
+            "n": 4,
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          }
+        },
+        "readiness": {
+          "account_label": "account-3",
+          "code_commit": "0d386bcb6d10bd13b8ec7f42dcc561cbeb8ce0b1",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.425922,
+          "latest_market_state_at": "2026-10-03T14:31:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:31:15.427055+00:00",
+          "published_at": "2026-10-03T14:31:15.427055+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-3-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 29,
+          "warmup_cutover_at": "2026-10-03T14:26:15+00:00",
+          "warmup_deferred_symbols": 1,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:25:44.411239819Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 16,
+          "live_context_cache_invalidated": 10,
+          "live_checkpoint_built": 4,
+          "strategy_checkpoint_persisted": 4,
+          "live_checkpoint_persisted": 4,
+          "live_runtime_memory_snapshot": 4,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "binance_submit_order_resolving_fill_price": 1,
+          "binance_submit_order_fill_price_resolved": 1,
+          "live_exit_evaluation_deferred": 2,
+          "live_account_event_duplicate_terminal_order": 1
+        },
+        "measurements": {
+          "live_checkpoint_built.build_ms": {
+            "n": 4,
+            "p50": 3.884,
+            "p95": 4.47,
+            "p99": 4.47,
+            "max": 6.072
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 4,
+            "p50": 14.915,
+            "p95": 31.904,
+            "p99": 31.904,
+            "max": 99.181
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 4,
+            "p50": 11.464,
+            "p95": 12.541,
+            "p99": 12.541,
+            "max": 27.278
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 4,
+            "p50": 53.137,
+            "p95": 98.045,
+            "p99": 98.045,
+            "max": 163.683
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 4,
+            "p50": 4.31,
+            "p95": 4.326,
+            "p99": 4.326,
+            "max": 4.555
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 4,
+            "p50": 20.4,
+            "p95": 51.121,
+            "p99": 51.121,
+            "max": 102.899
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 4,
+            "p50": 105.875,
+            "p95": 198.632,
+            "p99": 198.632,
+            "max": 397.806
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 4,
+            "p50": 137.37,
+            "p95": 362.815,
+            "p99": 362.815,
+            "max": 763.923
+          },
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 4,
+            "p50": 207077376.0,
+            "p95": 207085568.0,
+            "p99": 207085568.0,
+            "max": 207323136.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 4,
+            "p50": 2283.937222,
+            "p95": 2344.508914,
+            "p99": 2344.508914,
+            "max": 2417.70476
+          },
+          "live_exit_evaluation_deferred.retry_delay_seconds": {
+            "n": 2,
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          }
+        },
+        "readiness": {
+          "account_label": "account-4",
+          "code_commit": "0d386bcb6d10bd13b8ec7f42dcc561cbeb8ce0b1",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.421385,
+          "latest_market_state_at": "2026-10-03T14:31:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:31:15.427479+00:00",
+          "published_at": "2026-10-03T14:31:15.427479+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-4-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 29,
+          "warmup_cutover_at": "2026-10-03T14:26:15+00:00",
+          "warmup_deferred_symbols": 1,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:23:51.275068079Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 16,
+          "live_runtime_memory_snapshot": 4,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "live_context_cache_invalidated": 8,
+          "live_checkpoint_built": 5,
+          "strategy_checkpoint_persisted": 5,
+          "live_checkpoint_persisted": 5
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 4,
+            "p50": 246202368.0,
+            "p95": 247332864.0,
+            "p99": 247332864.0,
+            "max": 247435264.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 4,
+            "p50": 2267.788193,
+            "p95": 2327.873206,
+            "p99": 2327.873206,
+            "max": 2388.173237
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 5,
+            "p50": 7.226,
+            "p95": 7.779,
+            "p99": 7.779,
+            "max": 10.857
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 5,
+            "p50": 9.063,
+            "p95": 15.044,
+            "p99": 15.044,
+            "max": 17.255
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 5,
+            "p50": 21.006,
+            "p95": 37.975,
+            "p99": 37.975,
+            "max": 59.091
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 5,
+            "p50": 85.202,
+            "p95": 130.724,
+            "p99": 130.724,
+            "max": 257.097
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 5,
+            "p50": 0.396,
+            "p95": 0.407,
+            "p99": 0.407,
+            "max": 5.632
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 5,
+            "p50": 13.256,
+            "p95": 24.073,
+            "p99": 24.073,
+            "max": 47.62
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 5,
+            "p50": 140.249,
+            "p95": 196.222,
+            "p99": 196.222,
+            "max": 379.707
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 5,
+            "p50": 191.247,
+            "p95": 334.47,
+            "p99": 334.47,
+            "max": 478.245
+          }
+        },
+        "readiness": {
+          "account_label": "primary",
+          "code_commit": "0d386bcb6d10bd13b8ec7f42dcc561cbeb8ce0b1",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.41545,
+          "latest_market_state_at": "2026-10-03T14:31:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:31:15.417881+00:00",
+          "published_at": "2026-10-03T14:31:15.417881+00:00",
+          "schema_version": 1,
+          "session_id": "live-b1-long-100u-5x-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 29,
+          "warmup_cutover_at": "2026-10-03T14:25:00+00:00",
+          "warmup_deferred_symbols": 1,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-live-strategy-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:23:51.279631226Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "live_entry_symbol_cache_refreshed": 16,
+          "account_snapshot_execution_book_evidence_ready": 1,
+          "live_context_cache_invalidated": 8,
+          "live_runtime_memory_snapshot": 4,
+          "live_checkpoint_built": 5,
+          "strategy_checkpoint_persisted": 5,
+          "live_checkpoint_persisted": 5
+        },
+        "measurements": {
+          "live_runtime_memory_snapshot.rss_bytes": {
+            "n": 4,
+            "p50": 200114176.0,
+            "p95": 200392704.0,
+            "p99": 200392704.0,
+            "max": 200478720.0
+          },
+          "live_runtime_memory_snapshot.volume_oldest_age_seconds": {
+            "n": 4,
+            "p50": 2267.742593,
+            "p95": 2327.80387,
+            "p99": 2327.80387,
+            "max": 2388.155615
+          },
+          "live_checkpoint_built.build_ms": {
+            "n": 5,
+            "p50": 5.123,
+            "p95": 5.934,
+            "p99": 5.934,
+            "max": 15.829
+          },
+          "strategy_checkpoint_persisted.commit_ms": {
+            "n": 5,
+            "p50": 6.39,
+            "p95": 7.831,
+            "p99": 7.831,
+            "max": 24.837
+          },
+          "strategy_checkpoint_persisted.event_loop_lag_ms": {
+            "n": 5,
+            "p50": 19.228,
+            "p95": 19.908,
+            "p99": 19.908,
+            "max": 33.957
+          },
+          "strategy_checkpoint_persisted.pool_acquire_ms": {
+            "n": 5,
+            "p50": 81.015,
+            "p95": 116.881,
+            "p99": 116.881,
+            "max": 125.812
+          },
+          "strategy_checkpoint_persisted.prepare_ms": {
+            "n": 5,
+            "p50": 0.259,
+            "p95": 0.361,
+            "p99": 0.361,
+            "max": 0.391
+          },
+          "strategy_checkpoint_persisted.sql_execute_ms": {
+            "n": 5,
+            "p50": 22.331,
+            "p95": 25.423,
+            "p99": 25.423,
+            "max": 32.59
+          },
+          "strategy_checkpoint_persisted.total_ms": {
+            "n": 5,
+            "p50": 120.401,
+            "p95": 176.744,
+            "p99": 176.744,
+            "max": 201.764
+          },
+          "live_checkpoint_persisted.duration_ms": {
+            "n": 5,
+            "p50": 137.993,
+            "p95": 213.596,
+            "p99": 213.596,
+            "max": 255.408
+          }
+        },
+        "readiness": {
+          "account_label": "account-2",
+          "code_commit": "0d386bcb6d10bd13b8ec7f42dcc561cbeb8ce0b1",
+          "entry_enabled": true,
+          "entry_enabled_reason": "live_entry_prerequisites_ready",
+          "entry_universe_count": 30,
+          "entry_universe_target_count": 30,
+          "latest_market_state_age_seconds": 0.419951,
+          "latest_market_state_at": "2026-10-03T14:31:15+00:00",
+          "migration_revision": "20260911_0036",
+          "observed_at": "2026-10-03T14:31:15.423941+00:00",
+          "published_at": "2026-10-03T14:31:15.423941+00:00",
+          "schema_version": 1,
+          "session_id": "live-account-2-v1",
+          "strategy": "orderflow_impulse",
+          "stream_readiness": {
+            "overall": "UNKNOWN",
+            "streams": {}
+          },
+          "tradeability": {
+            "entry_gate_open": true,
+            "entry_gate_reason": "live_entry_prerequisites_ready",
+            "exit_gate_open": true,
+            "exit_gate_reason": "normal",
+            "halt_active": false,
+            "mode": "RUNNING",
+            "unmanaged_risk_clear": true
+          },
+          "warmup_complete_symbols": 29,
+          "warmup_cutover_at": "2026-10-03T14:24:45+00:00",
+          "warmup_deferred_symbols": 1,
+          "warmup_expected_symbols": 30,
+          "warmup_required_buckets": 140
+        }
+      },
+      "crypto-momentum-lab-execution-account-live-account-4-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:22:23.242698775Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-3-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:22:23.252622887Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:20:45.948693544Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-execution-account-live-account-2-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T14:20:45.956684407Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {},
+        "measurements": {}
+      },
+      "crypto-momentum-lab-research-collector-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:51:07.991716285Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-dashboard-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:50:24.809737496Z",
+        "oom": false,
+        "restart_count": 0
+      },
+      "crypto-momentum-lab-market-data-1": {
+        "health": "healthy",
+        "started_at": "2026-10-03T13:50:24.805703158Z",
+        "oom": false,
+        "restart_count": 0,
+        "events": {
+          "market_data_health_snapshot": 8,
+          "market_data_event_loop_lag": 4,
+          "universe_refreshed": 4,
+          "market_data_24h_quote_volume_refreshed": 4
+        },
+        "measurements": {
+          "market_data_health_snapshot.ack_mismatch_count": {
+            "n": 8,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.aggregation_event_rate": {
+            "n": 8,
+            "p50": 222.563,
+            "p95": 247.5,
+            "p99": 247.5,
+            "max": 271.333
+          },
+          "market_data_health_snapshot.event_loop_lag_max_ms": {
+            "n": 8,
+            "p50": 26.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_health_snapshot.event_loop_lag_ms": {
+            "n": 8,
+            "p50": 26.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p50_ms": {
+            "n": 8,
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p95_ms": {
+            "n": 8,
+            "p50": 2.0,
+            "p95": 184.0,
+            "p99": 184.0,
+            "max": 350.0
+          },
+          "market_data_health_snapshot.event_loop_lag_p99_ms": {
+            "n": 8,
+            "p50": 26.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_health_snapshot.monitoring_symbols": {
+            "n": 8,
+            "p50": 41.0,
+            "p95": 41.0,
+            "p99": 41.0,
+            "max": 41.0
+          },
+          "market_data_health_snapshot.queue_backpressure_wait_seconds": {
+            "n": 8,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.queue_dropped_events": {
+            "n": 8,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.received_message_rate": {
+            "n": 8,
+            "p50": 317.361,
+            "p95": 338.9,
+            "p99": 338.9,
+            "max": 373.267
+          },
+          "market_data_health_snapshot.reconnect_count": {
+            "n": 8,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          },
+          "market_data_health_snapshot.rss_bytes": {
+            "n": 8,
+            "p50": 195465216.0,
+            "p95": 196640768.0,
+            "p99": 196640768.0,
+            "max": 196640768.0
+          },
+          "market_data_event_loop_lag.critical_threshold_ms": {
+            "n": 4,
+            "p50": 500.0,
+            "p95": 500.0,
+            "p99": 500.0,
+            "max": 500.0
+          },
+          "market_data_event_loop_lag.lag_ms": {
+            "n": 4,
+            "p50": 429.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_event_loop_lag.max_ms": {
+            "n": 4,
+            "p50": 429.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_event_loop_lag.p50_ms": {
+            "n": 4,
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          },
+          "market_data_event_loop_lag.p95_ms": {
+            "n": 4,
+            "p50": 80.0,
+            "p95": 184.0,
+            "p99": 184.0,
+            "max": 350.0
+          },
+          "market_data_event_loop_lag.p99_ms": {
+            "n": 4,
+            "p50": 429.0,
+            "p95": 917.0,
+            "p99": 917.0,
+            "max": 1035.0
+          },
+          "market_data_event_loop_lag.warning_threshold_ms": {
+            "n": 4,
+            "p50": 50.0,
+            "p95": 50.0,
+            "p99": 50.0,
+            "max": 50.0
+          }
+        }
+      },
+      "crypto-momentum-lab-postgres-1": {
+        "health": "healthy",
+        "started_at": "2026-09-29T07:41:39.668520732Z",
+        "oom": false,
+        "restart_count": 0
+      }
+    },
+    "host_load": "2.38 3.95 3.77 2/542 3960357",
+    "ops_monitor": "active"
+  },
+  "final_deployment": {
+    "status": "success",
+    "phase": "complete",
+    "updated_at": "2026-10-03T14:29:32Z",
+    "deployment_seconds": 472,
+    "verification_retry_seconds": 60,
+    "initial_verification_error": "account-3 restored checkpoint market age stale 1057.992253s, fresh on next publication",
+    "natural_orders": {
+      "API3_AR_acknowledged": 7,
+      "ZRO_filled": 2,
+      "ZRO_created_to_filled_ms": [
+        629.501,
+        1136.603
+      ]
+    }
+  }
+}
