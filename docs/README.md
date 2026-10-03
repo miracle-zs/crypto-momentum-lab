@@ -12,6 +12,7 @@
 - [架构审视与设计边界诊断](architecture/system-overengineering-architecture-review-20261003.md)：模块依赖关系图、六阶段防御时序、风控门禁职责精准核对与高价值重构路径。
 - [交易执行安全与架构简化修改计划](architecture/system-overengineering-modification-plan-20261003.md)：文档修订、最终 POST 围栏、敞口交接验证及分批架构简化；执行契约、公共候选工具、统一风控和类型消环已落地，含完整文件清单、回归结果与剩余验收记录。
 - [运行版本问题审计与新版本对照](architecture/server-runtime-audit-20261003.md)：当前运行版本部署以来的日志、订单和就绪状态，逐项核对新版本修复范围及启动回归。
+- [实盘运行简化与局部异常隔离计划](architecture/live-runtime-simplification-plan-20261003.md)：单一 RUNNING 运行态、局部订单限制、既有 Server 酱通知，以及服务器问题和新版启动回归的分批改造与验收。
 
 ## 约束与操作
 
