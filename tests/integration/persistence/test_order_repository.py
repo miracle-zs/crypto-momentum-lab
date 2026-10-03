@@ -156,7 +156,10 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
     assert restored.command_requires_recovery(plan.client_order_id)
     coordinator = OrderExecutionCoordinator(backend=object(), account_label=account, environment="live", execution_book=restored)
     try:
-        assert not await recover_restored_commands(book=restored, coordinator=coordinator, orders=reads)
+        assert not await recover_restored_commands(
+            book=restored, coordinator=coordinator, orders=reads,
+            reconcile_order=coordinator.reconcile_order,
+        )
         assert restored.get_outbox(plan.client_order_id).state == DispatchState.TERMINAL
         restarted = _book(factory)
         await restarted.restore(account_label=account)
@@ -216,7 +219,10 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
                                              environment="live", execution_book=restored)
     try:
         pending = history != "complete"
-        assert await recover_restored_commands(book=restored, coordinator=coordinator, orders=reads) is pending
+        assert await recover_restored_commands(
+            book=restored, coordinator=coordinator, orders=reads,
+            reconcile_order=coordinator.reconcile_order,
+        ) is pending
         assert restored.command_requires_recovery(plan.client_order_id) is pending
         assert (await restored.read(scope)).total_quantity == 0
         assert restored._journals[scope.to_position_key().canonical_id].read_cut().fills == ()

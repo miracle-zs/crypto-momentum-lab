@@ -588,7 +588,7 @@ async def run_live_daemon(
             decision_unit_of_work=decision_unit_of_work,
             hedge_mode=hedge_mode,
             request_exit_recovery=lambda: (
-                order_reconciliation.request_recovery()
+                order_reconciliation.request_exit_recovery()
                 if order_reconciliation is not None else None
             ),
         )
@@ -702,7 +702,7 @@ async def run_live_daemon(
         order_event_runtime = LiveOrderEventRuntime(
             telemetry=telemetry,
             request_recovery=lambda: (
-                order_reconciliation.request_recovery()
+                order_reconciliation.request_order_recovery()
                 if order_reconciliation is not None else None
             ),
         )
@@ -983,8 +983,11 @@ async def run_live_daemon(
             state_machine=execution_coordinator,
             run_id=session_id,
             recover_exits=recover_decision_exits,
-            recover_commands=lambda: recover_restored_commands(
-                book=execution_book, coordinator=execution_coordinator, orders=order_read_repository,
+            recover_commands=lambda reconcile_order: recover_restored_commands(
+                book=execution_book,
+                coordinator=execution_coordinator,
+                orders=order_read_repository,
+                reconcile_order=reconcile_order,
             ),
         )
         await order_reconciliation.reconcile_all(include_confirmed=True)
@@ -1310,7 +1313,7 @@ async def run_live_daemon(
                 lambda context: context_provider.is_current(context)
             ),
             invalidate_context=invalidate_repaired_context,
-            request_recovery=order_reconciliation.request_recovery,
+            request_recovery=order_reconciliation.request_position_recovery,
         )
         order_reconciliation.repair_positions = position_repair.repair_pending
         context_provider = PostgresLiveContextProvider(
@@ -1361,7 +1364,7 @@ async def run_live_daemon(
             return None
 
         daemon = LiveStrategyDaemon(
-            request_exit_recovery=order_reconciliation.request_recovery,
+            request_exit_recovery=order_reconciliation.request_exit_recovery,
             cached_context_provider=lambda: context_provider.cached_context,
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1657,7 +1660,7 @@ async def run_live_daemon(
                 # A durable accepted exit is dispatchable only after the
                 # account facts for the current Hub epoch have reached the
                 # restored Book and its original projection token still wins.
-                order_reconciliation.request_recovery()
+                order_reconciliation.notify_account_facts_changed()
             control_plane_runtime.on_account_snapshot(event)
             if event.account_snapshot is not None or event.fills:
                 exit_channel_runtime.note_account_facts_changed(event.symbols)

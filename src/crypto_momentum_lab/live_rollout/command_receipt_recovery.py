@@ -1,13 +1,18 @@
 """Reconcile restored commands even when the order read model is terminal."""
 
+from collections.abc import Awaitable, Callable
+
 from crypto_momentum_lab.domain.execution.command_models import DispatchState
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_read_repository import (
     OrderReadRepository,
 )
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
+
+OrderRecoveryLookup = Callable[[OrderExecutionPlan], Awaitable[object]]
 
 
 async def recover_restored_commands(
@@ -15,6 +20,7 @@ async def recover_restored_commands(
     book: ExecutionBook,
     coordinator: OrderExecutionCoordinator,
     orders: OrderReadRepository,
+    reconcile_order: OrderRecoveryLookup,
 ) -> bool:
     pending = False
     for entry in book.list_outbox():
@@ -32,6 +38,6 @@ async def recover_restored_commands(
                 )
             elif requires_recovery:
                 # Missing priced facts require exchange lookup, never a new submit.
-                await coordinator.reconcile_order(persisted.plan)
+                await reconcile_order(persisted.plan)
         pending = book.command_requires_recovery(entry.command_id) or pending
     return pending

@@ -15,6 +15,7 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     Duplicate,
     EvidenceConflict,
     ExecutionObserveResult,
+    WaitingForEvidence,
 )
 
 
@@ -52,7 +53,7 @@ async def observe_evidence_group(
         )
         fill_result = await observe_one(one_fill)
         forget_identity(_evidence_identity(one_fill))
-        if isinstance(fill_result, EvidenceConflict):
+        if isinstance(fill_result, (EvidenceConflict, WaitingForEvidence)):
             return replace(fill_result, evidence_id=evidence.evidence_id)
         last_result = fill_result
         if isinstance(fill_result, Applied):
@@ -63,7 +64,7 @@ async def observe_evidence_group(
 
     remainder = replace(evidence, fill=None, fills=())
     base_result = await observe_one(remainder)
-    if isinstance(base_result, EvidenceConflict):
+    if isinstance(base_result, (EvidenceConflict, WaitingForEvidence)):
         return base_result
     if isinstance(base_result, Duplicate):
         return base_result

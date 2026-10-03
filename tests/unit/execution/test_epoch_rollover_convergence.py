@@ -18,6 +18,8 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 )
 from crypto_momentum_lab.domain.execution.observation_models import (
     EvidenceConflict,
+    EvidencePendingReason,
+    WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
@@ -110,8 +112,8 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
 
     obs_2 = await book.observe(evidence_new_epoch)
 
-    assert isinstance(obs_2, EvidenceConflict)
-    assert "validated recovery checkpoint" in obs_2.reason
+    assert isinstance(obs_2, WaitingForEvidence)
+    assert obs_2.reason is EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
     preserved = await book.read(
         scope, stream_id="account_event_hub", stream_epoch="epoch-1"
     )
@@ -120,13 +122,10 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges() -> (
+async def test_different_epoch_quantity_waits_until_source_history_is_complete() -> (
     None
 ):
-    """If the new stream's snapshot quantity disagrees with the ledger (actual desync),
-
-    epoch rollover must be rejected with an EvidenceConflict to protect data integrity.
-    """
+    """Different quantities alone cannot prove a conflict across a stream gap."""
     book = ExecutionBook()
     scope = ExecutionScope(
         environment="live",
@@ -199,7 +198,12 @@ async def test_non_flat_position_epoch_adoption_rejected_when_quantity_diverges(
         )
     )
 
-    assert isinstance(obs_mismatch, EvidenceConflict)
+    assert isinstance(obs_mismatch, WaitingForEvidence)
+    assert obs_mismatch.reason is EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
+    preserved = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    assert preserved.total_quantity == Decimal("137.6")
 
 
 @pytest.mark.asyncio

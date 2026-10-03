@@ -78,7 +78,9 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     Duplicate,
     EvidenceConflict,
+    EvidencePendingReason,
     ExecutionObserveResult,
+    WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
@@ -282,7 +284,7 @@ class ExecutionBook:
     Implements Section 7 of RFC 2026-09-25:
     - read(scope, requirement) -> PositionView
     - act(request) -> Accepted | AlreadyAccepted | StaleView | Blocked | CommandConflict
-    - observe(evidence) -> Applied | Duplicate | EvidenceConflict
+    - observe(evidence) -> Applied | Duplicate | WaitingForEvidence | EvidenceConflict
     """
 
     def __init__(
@@ -2097,9 +2099,9 @@ class ExecutionBook:
                     self._requires_verified_stream_adoption(key)
                     and current_scope != scope
                 ):
-                    return EvidenceConflict(
+                    return WaitingForEvidence(
                         evidence_id=evidence.evidence_id,
-                        reason="durable flat history requires a verified source-anchored scan",
+                        reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
                     )
                 if (
                     canon not in self._journals
@@ -2141,14 +2143,12 @@ class ExecutionBook:
                 and (
                     evidence.coverage_evidence is None
                     or evidence.fill_load_provenance is None
+                    or not evidence.fill_load_provenance.is_complete
                 )
             ):
-                return EvidenceConflict(
+                return WaitingForEvidence(
                     evidence_id=evidence.evidence_id,
-                    reason=(
-                        "stream epoch changed without a complete "
-                        "source-anchored fill scan"
-                    ),
+                    reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
                 )
             candidate = self._staged_copy(key=key)
             try:
@@ -2177,14 +2177,14 @@ class ExecutionBook:
                                 and (
                                     evidence.coverage_evidence is None
                                     or evidence.fill_load_provenance is None
+                                    or not evidence.fill_load_provenance.is_complete
                                 )
                             ):
                                 raise _AbortObservation(
-                                    EvidenceConflict(
+                                    WaitingForEvidence(
                                         evidence_id=evidence.evidence_id,
                                         reason=(
-                                            "stream epoch changed without a complete "
-                                            "source-anchored fill scan"
+                                            EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
                                         ),
                                     )
                                 )
@@ -2218,14 +2218,14 @@ class ExecutionBook:
                             and (
                                 evidence.coverage_evidence is None
                                 or evidence.fill_load_provenance is None
+                                or not evidence.fill_load_provenance.is_complete
                             )
                         ):
                             raise _AbortObservation(
-                                EvidenceConflict(
+                                WaitingForEvidence(
                                     evidence_id=evidence.evidence_id,
                                     reason=(
-                                        "stream epoch changed without a complete "
-                                        "source-anchored fill scan"
+                                        EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
                                     ),
                                 )
                             )
@@ -2415,7 +2415,7 @@ class ExecutionBook:
                         observe_one=candidate._observe_mutating,
                         forget_identity=candidate._seen_evidence_ids.discard,
                     )
-                    if isinstance(result, EvidenceConflict):
+                    if isinstance(result, (EvidenceConflict, WaitingForEvidence)):
                         raise _AbortObservation(result)
                     journal = candidate._ensure_journal(key)
                     fact_delta = journal.pending_fact_delta()
@@ -2608,12 +2608,9 @@ class ExecutionBook:
                         journal.adopt_stream_scope(scope)
                     self._last_sequences.pop(key.canonical_id, None)
                 else:
-                    return EvidenceConflict(
+                    return WaitingForEvidence(
                         evidence_id=evidence.evidence_id,
-                        reason=(
-                            "execution stream changed; a validated recovery checkpoint "
-                            "must be adopted before this position can continue"
-                        ),
+                        reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
                     )
             try:
                 journal = self._journal_for_scope(key, scope)
@@ -2968,6 +2965,7 @@ __all__ = [
     "DispatchState",
     "Duplicate",
     "EvidenceConflict",
+    "WaitingForEvidence",
     "ExecutionActResult",
     "ExecutionBook",
     "ExecutionEvidence",

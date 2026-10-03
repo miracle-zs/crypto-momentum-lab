@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from decimal import Decimal
+from functools import partial
 
 import structlog
 
@@ -107,17 +108,18 @@ class LiveUnmanagedPositionRepair:
             for position in context.account_snapshot.positions
         )
 
-    async def repair_pending(self) -> None:
+    async def repair_pending(self) -> bool:
+        """Return whether the worker must retain a retry for unfinished repair."""
         context = self._pending
         self._pending = None
         if context is None or context.account_snapshot is None:
-            return
+            return False
         if not self._is_current(context):
-            return
+            return False
         stream = self._book.get_active_stream("live", self._account)
         if stream is None:
             self._pending = context
-            return
+            return True
         repaired = False
         for position in context.account_snapshot.positions:
             if not self._is_current(context):
@@ -148,8 +150,10 @@ class LiveUnmanagedPositionRepair:
                         request=request,
                         uow=self._uow,
                         book=self._book,
-                        is_current=lambda: self._repair_is_current(
-                            request, position.entry_price
+                        is_current=partial(
+                            self._repair_is_current,
+                            request,
+                            position.entry_price,
                         ),
                     )
                     or repaired
@@ -166,3 +170,4 @@ class LiveUnmanagedPositionRepair:
         elif self._pending is None and self._is_current(context):
             # Retry on the existing worker's next periodic pass, without a spin loop.
             self._pending = context
+        return self._pending is not None

@@ -55,9 +55,10 @@ def _scope() -> ExecutionScope:
 
 
 @pytest.mark.asyncio
-async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> None:
+async def test_old_stream_snapshot_waits_without_copy_or_transaction() -> None:
     from crypto_momentum_lab.domain.execution.observation_models import (
-        EvidenceConflict,
+        EvidencePendingReason,
+        WaitingForEvidence,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -88,8 +89,8 @@ async def test_old_stream_snapshot_conflict_avoids_copy_and_transaction() -> Non
             sequence=1,
         )
     )
-    assert isinstance(result, EvidenceConflict)
-    assert "stream epoch changed" in result.reason
+    assert isinstance(result, WaitingForEvidence)
+    assert result.reason is EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
 
 
 @pytest.mark.asyncio
@@ -2830,10 +2831,10 @@ async def test_outbox_scope_controls_flat_stream_fast_path(same_position, dispat
     )
     if same_position:
         from crypto_momentum_lab.domain.execution.observation_models import (
-            EvidenceConflict,
+            WaitingForEvidence,
         )
 
-        assert isinstance(result, EvidenceConflict)
+        assert isinstance(result, WaitingForEvidence)
         assert book._stream_scopes[key.canonical_id].stream_epoch == "old-epoch"
         return
     assert isinstance(result, Applied)

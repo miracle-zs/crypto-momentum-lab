@@ -724,7 +724,7 @@ async def test_flat_bootstrap_cannot_prevent_durable_parent_scan_adoption(
         # A consumer reconnect receives a flat bootstrap before the periodic scan.
         if bootstrap == "observe":
             from crypto_momentum_lab.domain.execution.observation_models import (
-                EvidenceConflict,
+                WaitingForEvidence,
             )
 
             result = await book.observe(
@@ -738,7 +738,7 @@ async def test_flat_bootstrap_cannot_prevent_durable_parent_scan_adoption(
                     sequence=1,
                 )
             )
-            assert isinstance(result, EvidenceConflict)
+            assert isinstance(result, WaitingForEvidence)
         else:
             book.register_active_stream(
                 environment="live",

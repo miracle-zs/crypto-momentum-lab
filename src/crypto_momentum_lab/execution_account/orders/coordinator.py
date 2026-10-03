@@ -52,7 +52,11 @@ from crypto_momentum_lab.domain.execution.legacy_reservation_repository import (
     assemble_legacy_execution_book,
 )
 from crypto_momentum_lab.domain.execution.observation_models import (
+    Applied,
+    Duplicate,
     EvidenceConflict,
+    EvidencePendingReason,
+    WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrderReceipt
 from crypto_momentum_lab.domain.execution.order_state import (
@@ -449,6 +453,9 @@ class OrderExecutionCoordinator:
         self._entry_submissions_idle = asyncio.Event()
         self._entry_submissions_idle.set()
         self._confirmed_flat_streams: dict[PositionKey, tuple[str, str]] = {}
+        self._waiting_for_evidence: dict[
+            PositionKey, tuple[str | None, str | None, EvidencePendingReason]
+        ] = {}
         self._active_stream: tuple[str, str] | None = None
 
     @property
@@ -629,6 +636,17 @@ class OrderExecutionCoordinator:
                 raise ValueError("fill scan requires a source stream")
             scans_by_key[key] = source_scan
         conflict_reasons: Counter[str] = Counter()
+        waiting_reasons: Counter[str] = Counter()
+        waiting_positions: list[str] = []
+        ready_positions: list[str] = []
+
+        def note_waiting(key: PositionKey, reason: EvidencePendingReason) -> None:
+            state = (stream_id, stream_epoch, reason)
+            if self._waiting_for_evidence.get(key) != state:
+                self._waiting_for_evidence[key] = state
+                waiting_reasons[reason.value] += 1
+                waiting_positions.append(key.canonical_id)
+
         for key in sorted(
             positions_by_key.keys() | fills_by_key.keys(),
             key=lambda item: item.canonical_id,
@@ -703,12 +721,15 @@ class OrderExecutionCoordinator:
                         parent = await self._execution_book.load_recovery_checkpoint(
                             parent_scope
                         )
-                        if (
-                            parent is None
-                            or parent.checkpoint_id != scan.source_anchor_id
-                        ):
+                        if parent is None:
+                            note_waiting(
+                                key, EvidencePendingReason.PARENT_CHECKPOINT_UNAVAILABLE
+                            )
+                            continue
+                        if parent.checkpoint_id != scan.source_anchor_id:
+                            self._waiting_for_evidence.pop(key, None)
                             conflict_reasons[
-                                "fill scan parent checkpoint unavailable"
+                                "fill scan parent checkpoint identity mismatch"
                             ] += 1
                             continue
                         adoption = StreamCheckpointAdoption(
@@ -737,10 +758,16 @@ class OrderExecutionCoordinator:
                     sequence=sequence,
                 )
             )
-            if isinstance(result, EvidenceConflict):
+            if isinstance(result, WaitingForEvidence):
+                note_waiting(key, result.reason)
+            elif isinstance(result, EvidenceConflict):
+                self._waiting_for_evidence.pop(key, None)
                 conflict_reasons[result.reason] += 1
+            elif isinstance(result, (Applied, Duplicate)):
+                if self._waiting_for_evidence.pop(key, None) is not None:
+                    ready_positions.append(key.canonical_id)
             if (
-                not isinstance(result, EvidenceConflict)
+                isinstance(result, (Applied, Duplicate))
                 and pos is not None
                 and pos.position_amt == 0
                 and not scoped_fills
@@ -748,6 +775,25 @@ class OrderExecutionCoordinator:
                 and stream_epoch is not None
             ):
                 self._confirmed_flat_streams[key] = (stream_id, stream_epoch)
+        if waiting_positions:
+            log.info(
+                "account_snapshot_execution_book_waiting_for_evidence",
+                account_label=self._account_label,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+                sequence=sequence,
+                positions=tuple(waiting_positions),
+                reasons=dict(waiting_reasons),
+            )
+        if ready_positions:
+            log.info(
+                "account_snapshot_execution_book_evidence_ready",
+                account_label=self._account_label,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+                sequence=sequence,
+                positions=tuple(ready_positions),
+            )
         if conflict_reasons:
             log.error(
                 "account_snapshot_execution_book_conflicts",
@@ -1097,6 +1143,11 @@ class OrderExecutionCoordinator:
                     settlement_fills=settlement_fills,
                 )
             )
+            if isinstance(result, WaitingForEvidence):
+                raise ExecutionReadinessError(
+                    "cumulative order evidence is waiting for recovery: "
+                    + result.reason.value
+                )
             if isinstance(result, EvidenceConflict):
                 raise RuntimeError(
                     "cumulative order evidence was rejected: " + result.reason

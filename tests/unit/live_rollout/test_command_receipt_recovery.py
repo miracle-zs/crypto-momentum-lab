@@ -98,6 +98,7 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
     try:
         assert not await recover_restored_commands(
             book=book, coordinator=coordinator, orders=orders,
+            reconcile_order=coordinator.reconcile_order,
         )
         assert not book.command_requires_recovery("legacy")
         assert book.get_outbox("legacy").external_order_id == "111"
@@ -182,8 +183,9 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
         # The previous unresolved-orders-only scan leaves this command blocked.
         await runtime.reconcile_all(include_confirmed=True)
         assert book.command_requires_recovery("legacy")
-        runtime.recover_commands = lambda: recover_restored_commands(
-            book=book, coordinator=coordinator, orders=orders
+        runtime.recover_commands = lambda reconcile_order: recover_restored_commands(
+            book=book, coordinator=coordinator, orders=orders,
+            reconcile_order=reconcile_order,
         )
         assert not await runtime.reconcile_all(include_confirmed=True)
         assert book.get_outbox("legacy").state == DispatchState.TERMINAL

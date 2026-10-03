@@ -2244,7 +2244,9 @@ async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
 
         async def observe(self, evidence):
             self.evidence.append(evidence)
-            return object()
+            from crypto_momentum_lab.domain.execution.observation_models import Applied
+
+            return Applied(evidence.evidence_id, "flat-view")
 
     book = Book()
     coord = OrderExecutionCoordinator(
