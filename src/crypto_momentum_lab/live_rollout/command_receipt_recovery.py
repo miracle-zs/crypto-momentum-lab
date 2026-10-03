@@ -36,7 +36,7 @@ async def recover_restored_commands(
                 await coordinator.observe_recovered_receipt(
                     persisted.plan, persisted.terminal_receipt
                 )
-            elif requires_recovery:
+            elif persisted.state.terminal or requires_recovery:
                 # Missing priced facts require exchange lookup, never a new submit.
                 await reconcile_order(persisted.plan)
         pending = book.command_requires_recovery(entry.command_id) or pending

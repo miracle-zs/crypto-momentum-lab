@@ -1146,6 +1146,15 @@ class OrderExecutionCoordinator:
                 )
             )
             if isinstance(result, WaitingForEvidence):
+                if res.state.terminal:
+                    self._execution_book._recovery_required_commands.add(res.client_order_id)
+                    log.warning(
+                        "order_terminal_evidence_waiting_for_recovery",
+                        client_order_id=res.client_order_id,
+                        state=res.state.value,
+                        reason=result.reason.value,
+                    )
+                    return
                 raise ExecutionReadinessError(
                     "cumulative order evidence is waiting for recovery: "
                     + result.reason.value
@@ -1171,9 +1180,11 @@ class OrderExecutionCoordinator:
                     ) from transition_err
             raise
         if getattr(result, "recovery_required", False):
-            raise RuntimeError(
-                "ExecutionBook applied order facts but reservation settlement "
-                f"requires recovery: {getattr(result, 'diagnostics', ())}"
+            self._execution_book._recovery_required_commands.add(res.client_order_id)
+            log.warning(
+                "order_facts_applied_reservation_recovery_required",
+                client_order_id=res.client_order_id,
+                diagnostics=getattr(result, "diagnostics", ()),
             )
 
     async def _record_submission_failure(

@@ -11,6 +11,7 @@ from typing import Literal
 
 import structlog
 
+from crypto_momentum_lab.domain.execution.command_models import DispatchState
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -122,7 +123,19 @@ class LiveOrderReconciliation:
                 and (snapshot.exchange_order_id != persisted.exchange_order_id)
             ):
                 raise ValueError("WS order update conflicts with its durable identity")
-            if persisted.state.terminal and (
+            is_outbox_terminal = True
+            book = getattr(self.state_machine, "execution_book", None)
+            if callable(book):
+                book = book()
+            if book is not None:
+                entry = book.get_outbox(event.client_order_id)
+                if entry is not None and entry.state not in (
+                    DispatchState.TERMINAL,
+                    DispatchState.REJECTED,
+                ):
+                    is_outbox_terminal = False
+
+            if is_outbox_terminal and persisted.state.terminal and (
                 snapshot is None
                 or snapshot.executed_quantity <= persisted.executed_quantity
             ):
@@ -133,6 +146,23 @@ class LiveOrderReconciliation:
                     state=persisted.state.value,
                 )
                 return
+
+            if not is_outbox_terminal and persisted.state.terminal:
+                if persisted.terminal_receipt is not None and hasattr(
+                    self.state_machine, "observe_recovered_receipt"
+                ):
+                    await self.state_machine.observe_recovered_receipt(
+                        persisted.plan, persisted.terminal_receipt
+                    )
+                    return
+                elif snapshot is not None:
+                    await self.state_machine.apply_observed_snapshot(
+                        persisted.plan, snapshot
+                    )
+                    return
+                else:
+                    await self.state_machine.reconcile_order(persisted.plan)
+                    return
             if snapshot is None:
                 await self.state_machine.mark_reconciliation_pending(
                     persisted.plan,

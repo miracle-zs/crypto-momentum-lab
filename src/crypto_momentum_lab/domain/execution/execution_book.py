@@ -1783,7 +1783,7 @@ class ExecutionBook:
                     # Revision zero is valid only after that journal was restored;
                     # persist_head still performs the first-writer CAS in this tx.
                     expected_head_revision = head.revision if head is not None else 0
-                    if self._head_revisions.get(canon) != expected_head_revision:
+                    if self._head_revisions.get(canon, 0) != expected_head_revision:
                         raise RuntimeError(
                             "durable execution head changed; restore is required"
                         )
@@ -2123,23 +2123,53 @@ class ExecutionBook:
             # of historical symbols on every refresh.
             current_scope = self._stream_scopes.get(canon)
             current_book = self._books.get(canon)
+            is_unfilled_terminal_order = (
+                evidence.order_event is not None
+                and evidence.order_event.state.terminal
+                and not evidence.settlement_fills
+                and not evidence.fills
+                and evidence.fill is None
+                and (
+                    evidence.cumulative_order is None
+                    or evidence.cumulative_order.cumulative_quantity == Decimal("0")
+                )
+            )
+            active_res = self.get_active_reservations(key)
+            res_held_by_order = (
+                is_unfilled_terminal_order
+                and evidence.order_event is not None
+                and all(
+                    r.command_id == evidence.order_event.client_order_id
+                    for r in active_res
+                )
+            )
+            has_blocking_reservations = bool(active_res) and not res_held_by_order
             can_rollover = (
                 not self._requires_verified_stream_adoption(key)
                 and evidence.coverage_evidence is None
                 and evidence.stream_checkpoint_adoption is None
                 and evidence.source_anchor_snapshot is None
                 and current_book is not None
-                and evidence.snapshot is not None
-                and evidence.snapshot.position_amt == Decimal("0")
+                and (
+                    (
+                        evidence.snapshot is not None
+                        and evidence.snapshot.position_amt == Decimal("0")
+                    )
+                    or (
+                        is_unfilled_terminal_order
+                        and current_book.get_view().total_quantity == Decimal("0")
+                    )
+                )
                 and current_book.get_view().total_quantity == Decimal("0")
                 and not current_book.get_view().batches
                 and not current_book.get_view().unallocated_quantity
-                and not bool(self.get_active_reservations(key))
+                and not has_blocking_reservations
             )
             if (
                 current_scope is not None
                 and current_scope != scope
                 and not can_rollover
+                and not is_unfilled_terminal_order
                 and (
                     evidence.coverage_evidence is None
                     or evidence.fill_load_provenance is None
@@ -2174,6 +2204,7 @@ class ExecutionBook:
                             adopting_epoch = True
                             if (
                                 not can_rollover
+                                and not is_unfilled_terminal_order
                                 and (
                                     evidence.coverage_evidence is None
                                     or evidence.fill_load_provenance is None
@@ -2194,27 +2225,45 @@ class ExecutionBook:
                                 or current_book.get_view().projection_version
                                 != head.projection_version
                             ):
-                                raise _AbortObservation(
-                                    EvidenceConflict(
-                                        evidence_id=evidence.evidence_id,
-                                        reason=(
-                                            "local position facts do not match the "
-                                            "durable head before stream adoption"
-                                        ),
+                                reloaded = await candidate._reload_position(key)
+                                if (
+                                    reloaded is None
+                                    or reloaded.projection_version
+                                    != head.projection_version
+                                ):
+                                    raise _AbortObservation(
+                                        EvidenceConflict(
+                                            evidence_id=evidence.evidence_id,
+                                            reason=(
+                                                "local position facts do not match the "
+                                                "durable head before stream adoption"
+                                            ),
+                                        )
                                     )
-                                )
                         else:
                             current_view = candidate._ensure_book(key).get_view()
                             if current_view.projection_version != head.projection_version:
-                                raise RuntimeError(
-                                    "local position facts do not match durable execution head"
-                                )
+                                reloaded = await candidate._reload_position(key)
+                                if (
+                                    reloaded is None
+                                    or reloaded.projection_version
+                                    != head.projection_version
+                                ):
+                                    raise _AbortObservation(
+                                        WaitingForEvidence(
+                                            evidence_id=evidence.evidence_id,
+                                            reason=(
+                                                EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED
+                                            ),
+                                        )
+                                    )
 
                     current_scope = candidate._stream_scopes.get(canon)
                     if current_scope is not None and current_scope != scope:
                         adopting_epoch = True
                         if (
                             not can_rollover
+                            and not is_unfilled_terminal_order
                             and (
                                 evidence.coverage_evidence is None
                                 or evidence.fill_load_provenance is None
@@ -2293,6 +2342,16 @@ class ExecutionBook:
                                 rollover_journal.adopt_stream_scope(scope)
                             candidate._recovery_adoption_scope = scope
                             candidate._last_sequences.pop(canon, None)
+                        elif is_unfilled_terminal_order:
+                            if canon not in candidate._journals:
+                                candidate._journals[canon] = AccountJournal(
+                                    key, stream_scope=scope
+                                )
+                                candidate._books[canon] = PositionBook(
+                                    candidate._journals[canon]
+                                )
+                                candidate._journal_revisions[canon] = 0
+                            candidate._stream_scopes[canon] = scope
                         else:
                             candidate._journals[canon] = AccountJournal(
                                 key, stream_scope=scope
@@ -2582,6 +2641,17 @@ class ExecutionBook:
             )
 
         key = evidence.scope.to_position_key()
+        is_unfilled_terminal_order = (
+            evidence.order_event is not None
+            and evidence.order_event.state.terminal
+            and not evidence.settlement_fills
+            and not evidence.fills
+            and evidence.fill is None
+            and (
+                evidence.cumulative_order is None
+                or evidence.cumulative_order.cumulative_quantity == Decimal("0")
+            )
+        )
         if evidence.stream_id is not None and evidence.stream_epoch is not None:
             scope = AccountFactStreamScope.for_position_key(
                 key,
@@ -2591,15 +2661,33 @@ class ExecutionBook:
             current_scope = self._stream_scopes.get(key.canonical_id)
             if current_scope is not None and current_scope != scope:
                 current_book = self._books.get(key.canonical_id)
+                active_res = self.get_active_reservations(key)
+                res_held_by_order = (
+                    is_unfilled_terminal_order
+                    and evidence.order_event is not None
+                    and all(
+                        r.command_id == evidence.order_event.client_order_id
+                        for r in active_res
+                    )
+                )
+                has_blocking_reservations = bool(active_res) and not res_held_by_order
                 can_rollover = (
                     evidence.coverage_evidence is None
                     and current_book is not None
-                    and evidence.snapshot is not None
-                    and evidence.snapshot.position_amt == Decimal("0")
+                    and (
+                        (
+                            evidence.snapshot is not None
+                            and evidence.snapshot.position_amt == Decimal("0")
+                        )
+                        or (
+                            is_unfilled_terminal_order
+                            and current_book.get_view().total_quantity == Decimal("0")
+                        )
+                    )
                     and current_book.get_view().total_quantity == Decimal("0")
                     and not current_book.get_view().batches
                     and not current_book.get_view().unallocated_quantity
-                    and not bool(self.get_active_reservations(key))
+                    and not has_blocking_reservations
                 )
                 if can_rollover:
                     self._stream_scopes[key.canonical_id] = scope
@@ -2607,6 +2695,8 @@ class ExecutionBook:
                     if journal is not None:
                         journal.adopt_stream_scope(scope)
                     self._last_sequences.pop(key.canonical_id, None)
+                elif is_unfilled_terminal_order:
+                    pass
                 else:
                     return WaitingForEvidence(
                         evidence_id=evidence.evidence_id,
@@ -2615,7 +2705,10 @@ class ExecutionBook:
             try:
                 journal = self._journal_for_scope(key, scope)
             except RuntimeError as err:
-                return EvidenceConflict(evidence.evidence_id, str(err))
+                if is_unfilled_terminal_order:
+                    journal = self._ensure_journal(key)
+                else:
+                    return EvidenceConflict(evidence.evidence_id, str(err))
         else:
             journal = self._ensure_journal(key)
         book = self._ensure_book(key)
