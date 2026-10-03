@@ -43,6 +43,9 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryClient,
 )
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionResult,
+)
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
@@ -93,6 +96,10 @@ from crypto_momentum_lab.live_rollout.market_admission import (
 from crypto_momentum_lab.live_rollout.market_loop import LiveMarketLoop
 from crypto_momentum_lab.live_rollout.pending_entries import (
     LivePendingEntryRegistry,
+)
+from crypto_momentum_lab.live_rollout.position_lifecycle import (
+    PositionLifecycleActors,
+    live_symbol_position_key,
 )
 from crypto_momentum_lab.live_rollout.runtime_cache import (
     LiveRuntimeCacheMaintenance,
@@ -246,6 +253,7 @@ class LiveStrategyDaemon:
         self._fetch_exchange_positions = fetch_exchange_positions
         self._run_active = False
         self._exit_enabled = True
+        self._position_actors = PositionLifecycleActors()
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
         strategy_protected_symbols = getattr(strategy, "cache_protected_symbols", None)
         strategy_pruner = getattr(strategy, "prune_inactive_symbols", None)
@@ -344,6 +352,8 @@ class LiveStrategyDaemon:
             ),
             invalidate_context_cache=self._context_runtime.invalidate,
             context_is_current=self._context_runtime.is_current,
+            position_actors=self._position_actors,
+            account_label=config.account_label,
             request_recovery=request_exit_recovery,
         )
         self._exit_lane = ExitExecutionLane(
@@ -395,7 +405,7 @@ class LiveStrategyDaemon:
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
-            execute_candidate=self._submission.execute,
+            execute_candidate=self._execute_entry_candidate,
             invalidate_context=self._context_runtime.invalidate,
             telemetry=self._telemetry,
             signal_recorder=self._signal_recorder,
@@ -432,6 +442,26 @@ class LiveStrategyDaemon:
             scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
             run_market_loop=self._market_loop.run,
             set_run_active=self._set_run_active,
+            position_actors=self._position_actors,
+        )
+
+    async def _execute_entry_candidate(
+        self,
+        candidate: OrderIntentCandidate,
+        *,
+        requested_quantity: Decimal | None,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> OrderExecutionResult | None:
+        """Run entry submission inside the shared account/symbol lifecycle."""
+        return await self._position_actors.run(
+            live_symbol_position_key(self._config.account_label, candidate.symbol),
+            lambda: self._submission.execute(
+                candidate,
+                requested_quantity=requested_quantity,
+                state=state,
+                context=context,
+            ),
         )
 
     @property

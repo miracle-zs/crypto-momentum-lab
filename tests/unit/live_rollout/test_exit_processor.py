@@ -696,7 +696,6 @@ async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query
         outcome = await asyncio.wait_for(processor.process_quote(
             SimpleNamespace(symbol=state.symbol), state, context), 0.5)
         assert outcome.failure == f"pending_exit_order_recovery:{state.symbol}"
-        assert not processor._exit_symbol_locks[state.symbol].locked()
         assert calls == ["unknown-exit"]
         release.set()
         await asyncio.wait_for(worker, 1)
