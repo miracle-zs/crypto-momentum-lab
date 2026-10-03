@@ -174,17 +174,73 @@ class PostgresOrderEventRepository:
                                     updated_at=event.occurred_at,
                                 )
                             )
-                            await session.execute(
-                                update(LiveExposureClaimRow)
-                                .where(
-                                    LiveExposureClaimRow.intent_id == order_intent_id,
-                                    LiveExposureClaimRow.active.is_(True),
+                            if current_order_state == ExchangeOrderState.FILLED.value:
+                                await session.execute(
+                                    update(LiveExposureClaimRow)
+                                    .where(
+                                        LiveExposureClaimRow.intent_id
+                                        == order_intent_id,
+                                        LiveExposureClaimRow.active.is_(True),
+                                    )
+                                    .values(
+                                        updated_at=event.occurred_at,
+                                    )
                                 )
-                                .values(
-                                    active=False,
-                                    updated_at=event.occurred_at,
+                            else:
+                                executed_qty = (
+                                    _event_executed_quantity(event) or Decimal("0")
                                 )
-                            )
+                                if executed_qty <= Decimal("0"):
+                                    await session.execute(
+                                        update(LiveExposureClaimRow)
+                                        .where(
+                                            LiveExposureClaimRow.intent_id
+                                            == order_intent_id,
+                                            LiveExposureClaimRow.active.is_(True),
+                                        )
+                                        .values(
+                                            active=False,
+                                            updated_at=event.occurred_at,
+                                        )
+                                    )
+                                else:
+                                    order_row = await session.scalar(
+                                        select(ExchangeOrderRow).where(
+                                            ExchangeOrderRow.client_order_id
+                                            == event.client_order_id
+                                        )
+                                    )
+                                    order_qty = (
+                                        order_row.quantity
+                                        if order_row is not None
+                                        and order_row.quantity is not None
+                                        else Decimal("1")
+                                    )
+                                    claim_row = await session.scalar(
+                                        select(LiveExposureClaimRow).where(
+                                            LiveExposureClaimRow.intent_id
+                                            == order_intent_id,
+                                            LiveExposureClaimRow.active.is_(True),
+                                        )
+                                    )
+                                    if claim_row is not None and order_qty > Decimal("0"):
+                                        claim_row.notional = (
+                                            executed_qty / order_qty
+                                        ) * claim_row.notional
+                                        claim_row.updated_at = event.occurred_at
+                                    else:
+                                        await session.execute(
+                                            update(LiveExposureClaimRow)
+                                            .where(
+                                                LiveExposureClaimRow.intent_id
+                                                == order_intent_id,
+                                                LiveExposureClaimRow.active.is_(True),
+                                            )
+                                            .values(
+                                                active=False,
+                                                updated_at=event.occurred_at,
+                                            )
+                                        )
         return inserted is not None
 
     async def save_fill(self, fill: ExchangeOrderFill) -> bool:

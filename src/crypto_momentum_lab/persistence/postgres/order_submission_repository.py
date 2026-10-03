@@ -7,7 +7,6 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import (
     delete,
-    func,
     select,
     text,
     update,
@@ -153,6 +152,7 @@ class PostgresOrderSubmissionRepository:
         current_gross_exposure: Decimal | None = None,
         open_position_symbols: frozenset[str] | None = None,
         exposure_notional: Decimal | None = None,
+        baseline_observed_at: datetime | None = None,
     ) -> PreparedOrderSubmission | None:
         """Grant one durable submission; existing orders must be reconciled.
 
@@ -341,38 +341,70 @@ class PostgresOrderSubmissionRepository:
                             and current_daily_pnl <= -max_daily_loss
                         ):
                             raise OrderPreSubmissionError("max daily loss reached")
-                        active_claim_sum = await session.scalar(
-                            select(
-                                func.coalesce(
-                                    func.sum(LiveExposureClaimRow.notional),
-                                    Decimal("0"),
+                        claims_result = (
+                            await session.execute(
+                                select(LiveExposureClaimRow, ExchangeOrderRow)
+                                .outerjoin(
+                                    ExchangeOrderRow,
+                                    ExchangeOrderRow.intent_id
+                                    == LiveExposureClaimRow.intent_id,
                                 )
-                            ).where(
-                                LiveExposureClaimRow.environment == environment,
-                                LiveExposureClaimRow.account_label == account_label,
-                                LiveExposureClaimRow.strategy_name == strategy_name,
-                                LiveExposureClaimRow.active.is_(True),
-                                LiveExposureClaimRow.intent_id != intent.candidate_id,
+                                .where(
+                                    LiveExposureClaimRow.environment == environment,
+                                    LiveExposureClaimRow.account_label
+                                    == account_label,
+                                    LiveExposureClaimRow.strategy_name
+                                    == strategy_name,
+                                    LiveExposureClaimRow.active.is_(True),
+                                    LiveExposureClaimRow.intent_id
+                                    != intent.candidate_id,
+                                )
+                                .with_for_update(of=LiveExposureClaimRow)
                             )
-                        )
-                        active_claim_symbols = set(
-                            (
-                                await session.scalars(
-                                    select(LiveExposureClaimRow.symbol)
-                                    .where(
-                                        LiveExposureClaimRow.environment == environment,
-                                        LiveExposureClaimRow.account_label
-                                        == account_label,
-                                        LiveExposureClaimRow.strategy_name
-                                        == strategy_name,
-                                        LiveExposureClaimRow.active.is_(True),
-                                        LiveExposureClaimRow.intent_id
-                                        != intent.candidate_id,
-                                    )
-                                    .distinct()
+                        ).all()
+                        for claim_row, order_row in claims_result:
+                            if order_row is not None:
+                                executed_qty = (
+                                    order_row.executed_quantity
+                                    if order_row.executed_quantity is not None
+                                    else Decimal("0")
                                 )
-                            ).all()
+                                terminal_states = (
+                                    ExchangeOrderState.FILLED.value,
+                                    ExchangeOrderState.CANCELED.value,
+                                    ExchangeOrderState.EXPIRED.value,
+                                    ExchangeOrderState.REJECTED.value,
+                                )
+                                if (
+                                    order_row.state in terminal_states
+                                    and executed_qty <= Decimal("0")
+                                ):
+                                    claim_row.active = False
+                                    claim_row.updated_at = prepared_at
+                                elif (
+                                    order_row.state == ExchangeOrderState.FILLED.value
+                                    or (
+                                        executed_qty > Decimal("0")
+                                        and order_row.state in terminal_states
+                                    )
+                                ):
+                                    is_covered = (
+                                        claim_row.symbol in open_position_symbols
+                                        and (
+                                            baseline_observed_at is None
+                                            or baseline_observed_at
+                                            >= order_row.updated_at
+                                        )
+                                    )
+                                    if is_covered:
+                                        claim_row.active = False
+                                        claim_row.updated_at = prepared_at
+                        active_claims = [c for c, _ in claims_result if c.active]
+                        active_claim_sum = sum(
+                            (c.notional for c in active_claims),
+                            Decimal("0"),
                         )
+                        active_claim_symbols = {c.symbol for c in active_claims}
                         if (
                             max_open_positions is not None
                             and len(
@@ -386,7 +418,7 @@ class PostgresOrderSubmissionRepository:
                         if (
                             max_gross_exposure is not None
                             and current_gross_exposure
-                            + (active_claim_sum or Decimal("0"))
+                            + active_claim_sum
                             + exposure_notional
                             > max_gross_exposure
                         ):

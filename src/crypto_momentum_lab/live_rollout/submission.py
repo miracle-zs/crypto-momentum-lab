@@ -460,6 +460,7 @@ class LiveCandidateSubmission:
                 exposure_notional=(
                     None if limit_decision is None else limit_decision.capped_notional
                 ),
+                baseline_observed_at=context.account_observed_at,
                 context_token=context,
             ),
         )

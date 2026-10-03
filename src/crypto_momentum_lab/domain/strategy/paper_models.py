@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
 from crypto_momentum_lab.domain.strategy.models import (
     OrderIntentCandidate,
     StrategyCheckpoint,
@@ -13,6 +15,9 @@ from crypto_momentum_lab.domain.strategy.models import (
     StrategySignal,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
 
 
 class SimulatedFillStatus(StrEnum):

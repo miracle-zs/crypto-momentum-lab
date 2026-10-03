@@ -673,6 +673,387 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
     assert claim.active is True
 
 
+async def test_filled_entry_claim_retained_and_blocks_stale_baseline_order(
+    order_repository,
+) -> None:
+    repository, adoption, reads, events, submissions, factory = order_repository
+    await _save_live_lease(factory)
+    first_intent = _intent()
+    first_evaluation = _evaluation(first_intent, "eval-fill-block-1")
+    first_plan = _plan()
+
+    second_intent = replace(first_intent, candidate_id="candidate-fill-2")
+    second_evaluation = _evaluation(second_intent, "eval-fill-block-2")
+    second_plan = replace(
+        first_plan,
+        intent_id="candidate-fill-2",
+        client_order_id="cml_cccccccccccccccccccccccccccccccc",
+        symbol="ETHUSDT",
+    )
+    claim_kwargs = {
+        "environment": "live",
+        "account_label": "primary",
+        "strategy_name": "compression_breakout",
+        "required_lease_owner": "worker-1",
+        "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
+        "max_open_positions": 5,
+        "max_daily_loss": Decimal("1000"),
+        "max_gross_exposure": Decimal("150"),
+        "current_daily_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "open_position_symbols": frozenset(),
+        "exposure_notional": Decimal("100"),
+    }
+
+    first = await submissions.prepare_submission(
+        intent=first_intent,
+        evaluation=first_evaluation,
+        plan=first_plan,
+        prepared_at=NOW + timedelta(seconds=1),
+        **claim_kwargs,
+    )
+    assert first is not None
+
+    t_fill = NOW + timedelta(seconds=3)
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="first-filled",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=t_fill,
+            exchange_order_id="first-exchange-order",
+            details={
+                "executed_quantity": str(first_plan.quantity),
+                "average_price": "100",
+            },
+        )
+    )
+
+    async with factory() as session:
+        claim_row = await session.get(LiveExposureClaimRow, first_plan.intent_id)
+        assert claim_row is not None
+        assert claim_row.active is True
+
+    with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
+        await submissions.prepare_submission(
+            intent=second_intent,
+            evaluation=second_evaluation,
+            plan=second_plan,
+            prepared_at=NOW + timedelta(seconds=4),
+            baseline_observed_at=t_fill - timedelta(seconds=1),
+            **claim_kwargs,
+        )
+
+
+async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
+    order_repository,
+) -> None:
+    repository, adoption, reads, events, submissions, factory = order_repository
+    await _save_live_lease(factory)
+    first_intent = _intent()
+    first_evaluation = _evaluation(first_intent, "eval-cover-1")
+    first_plan = _plan()
+
+    second_intent = replace(first_intent, candidate_id="candidate-cover-2")
+    second_evaluation = _evaluation(second_intent, "eval-cover-2")
+    second_plan = replace(
+        first_plan,
+        intent_id="candidate-cover-2",
+        client_order_id="cml_dddddddddddddddddddddddddddddddd",
+        symbol="ETHUSDT",
+    )
+    claim_kwargs = {
+        "environment": "live",
+        "account_label": "primary",
+        "strategy_name": "compression_breakout",
+        "required_lease_owner": "worker-1",
+        "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
+        "max_open_positions": 5,
+        "max_daily_loss": Decimal("1000"),
+        "max_gross_exposure": Decimal("150"),
+        "current_daily_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "open_position_symbols": frozenset(),
+        "exposure_notional": Decimal("100"),
+    }
+
+    first = await submissions.prepare_submission(
+        intent=first_intent,
+        evaluation=first_evaluation,
+        plan=first_plan,
+        prepared_at=NOW + timedelta(seconds=1),
+        **claim_kwargs,
+    )
+    assert first is not None
+
+    t_fill = NOW + timedelta(seconds=3)
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="first-covered-filled",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=t_fill,
+            exchange_order_id="first-covered-order",
+            details={
+                "executed_quantity": str(first_plan.quantity),
+                "average_price": "100",
+            },
+        )
+    )
+
+    updated_kwargs = dict(claim_kwargs)
+    updated_kwargs["current_gross_exposure"] = Decimal("100")
+    updated_kwargs["open_position_symbols"] = frozenset({first_plan.symbol})
+
+    with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
+        await submissions.prepare_submission(
+            intent=second_intent,
+            evaluation=second_evaluation,
+            plan=second_plan,
+            prepared_at=NOW + timedelta(seconds=4),
+            baseline_observed_at=t_fill + timedelta(seconds=1),
+            **updated_kwargs,
+        )
+
+    smaller_kwargs = dict(updated_kwargs)
+    smaller_kwargs["exposure_notional"] = Decimal("40")
+    second = await submissions.prepare_submission(
+        intent=second_intent,
+        evaluation=second_evaluation,
+        plan=second_plan,
+        prepared_at=NOW + timedelta(seconds=5),
+        baseline_observed_at=t_fill + timedelta(seconds=1),
+        **smaller_kwargs,
+    )
+    assert second is not None
+
+    async with factory() as session:
+        first_claim = await session.get(LiveExposureClaimRow, first_plan.intent_id)
+        assert first_claim is not None
+        assert first_claim.active is False
+
+
+async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
+    order_repository,
+) -> None:
+    repository, adoption, reads, events, submissions, factory = order_repository
+    await _save_live_lease(factory)
+    first_intent = _intent()
+    first_evaluation = _evaluation(first_intent, "eval-partial-1")
+    first_plan = replace(_plan(), quantity=Decimal("1.0"))
+
+    second_intent = replace(first_intent, candidate_id="candidate-partial-2")
+    second_evaluation = _evaluation(second_intent, "eval-partial-2")
+    second_plan = replace(
+        first_plan,
+        intent_id="candidate-partial-2",
+        client_order_id="cml_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        symbol="ETHUSDT",
+    )
+    claim_kwargs = {
+        "environment": "live",
+        "account_label": "primary",
+        "strategy_name": "compression_breakout",
+        "required_lease_owner": "worker-1",
+        "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
+        "max_open_positions": 5,
+        "max_daily_loss": Decimal("1000"),
+        "max_gross_exposure": Decimal("150"),
+        "current_daily_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "open_position_symbols": frozenset(),
+        "exposure_notional": Decimal("100"),
+    }
+
+    first = await submissions.prepare_submission(
+        intent=first_intent,
+        evaluation=first_evaluation,
+        plan=first_plan,
+        prepared_at=NOW + timedelta(seconds=1),
+        **claim_kwargs,
+    )
+    assert first is not None
+
+    t_partial = NOW + timedelta(seconds=2)
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="partial-fill-event",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.PARTIALLY_FILLED,
+            occurred_at=t_partial,
+            exchange_order_id="partial-order-id",
+            details={"executed_quantity": "0.6", "average_price": "100"},
+        )
+    )
+
+    t_cancel = NOW + timedelta(seconds=3)
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="partial-canceled-event",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.CANCELED,
+            occurred_at=t_cancel,
+            exchange_order_id="partial-order-id",
+            details={"executed_quantity": "0.6", "average_price": "100"},
+        )
+    )
+
+    async with factory() as session:
+        claim = await session.get(LiveExposureClaimRow, first_plan.intent_id)
+        assert claim is not None
+        assert claim.active is True
+        assert claim.notional == Decimal("60")
+
+    with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
+        await submissions.prepare_submission(
+            intent=second_intent,
+            evaluation=second_evaluation,
+            plan=second_plan,
+            prepared_at=NOW + timedelta(seconds=4),
+            baseline_observed_at=t_cancel - timedelta(seconds=1),
+            **claim_kwargs,
+        )
+
+    second_kwargs = dict(claim_kwargs)
+    second_kwargs["exposure_notional"] = Decimal("80")
+    second = await submissions.prepare_submission(
+        intent=second_intent,
+        evaluation=second_evaluation,
+        plan=second_plan,
+        prepared_at=NOW + timedelta(seconds=5),
+        baseline_observed_at=t_cancel - timedelta(seconds=1),
+        **second_kwargs,
+    )
+    assert second is not None
+
+
+async def test_concurrent_workers_with_stale_baseline_serialized_by_advisory_lock(
+    order_repository,
+) -> None:
+    repository, adoption, reads, events, submissions, factory = order_repository
+    await _save_live_lease(factory)
+    worker1_intent = _intent()
+    worker1_evaluation = _evaluation(worker1_intent, "eval-concurrent-1")
+    worker1_plan = _plan()
+
+    worker2_intent = replace(worker1_intent, candidate_id="candidate-concurrent-2")
+    worker2_evaluation = _evaluation(worker2_intent, "eval-concurrent-2")
+    worker2_plan = replace(
+        worker1_plan,
+        intent_id="candidate-concurrent-2",
+        client_order_id="cml_ffffffffffffffffffffffffffffffff",
+        symbol="ETHUSDT",
+    )
+    claim_kwargs = {
+        "environment": "live",
+        "account_label": "primary",
+        "strategy_name": "compression_breakout",
+        "required_lease_owner": "worker-1",
+        "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
+        "max_open_positions": 5,
+        "max_daily_loss": Decimal("1000"),
+        "max_gross_exposure": Decimal("150"),
+        "current_daily_pnl": Decimal("0"),
+        "current_gross_exposure": Decimal("0"),
+        "open_position_symbols": frozenset(),
+        "exposure_notional": Decimal("100"),
+    }
+
+    async def try_submit(sub_repo, intent, eval_obj, plan):
+        try:
+            return await sub_repo.prepare_submission(
+                intent=intent,
+                evaluation=eval_obj,
+                plan=plan,
+                prepared_at=NOW + timedelta(seconds=1),
+                **claim_kwargs,
+            )
+        except OrderPreSubmissionError as err:
+            return err
+
+    repo1 = PostgresOrderSubmissionRepository(factory)
+    repo2 = PostgresOrderSubmissionRepository(factory)
+
+    results = await asyncio.gather(
+        try_submit(repo1, worker1_intent, worker1_evaluation, worker1_plan),
+        try_submit(repo2, worker2_intent, worker2_evaluation, worker2_plan),
+    )
+
+    succeeded = [r for r in results if not isinstance(r, Exception) and r is not None]
+    failed = [r for r in results if isinstance(r, OrderPreSubmissionError)]
+    assert len(succeeded) == 1
+    assert len(failed) == 1
+    assert "gross exposure" in str(failed[0])
+
+
+async def test_duplicate_and_out_of_order_terminal_events_are_idempotent(
+    order_repository,
+) -> None:
+    repository, adoption, reads, events, submissions, factory = order_repository
+    await _save_live_lease(factory)
+    plan = _plan()
+    intent = _intent()
+    await submissions.prepare_submission(
+        intent=intent,
+        evaluation=_evaluation(intent, "eval-idempotent"),
+        plan=plan,
+        prepared_at=NOW,
+        environment="live",
+        account_label="primary",
+        strategy_name="compression_breakout",
+        required_lease_owner="worker-1",
+        required_lease_id="lease-test",
+        required_code_generation="test-generation",
+        max_gross_exposure=Decimal("150"),
+        current_daily_pnl=Decimal("0"),
+        current_gross_exposure=Decimal("0"),
+        open_position_symbols=frozenset(),
+        exposure_notional=Decimal("100"),
+    )
+
+    t_filled = NOW + timedelta(seconds=2)
+    assert await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="idemp-fill-1",
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=t_filled,
+            exchange_order_id="ex-1",
+            details={"executed_quantity": str(plan.quantity), "average_price": "100"},
+        )
+    ) is True
+
+    assert await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="idemp-fill-2",
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=t_filled + timedelta(milliseconds=10),
+            exchange_order_id="ex-1",
+            details={"executed_quantity": str(plan.quantity), "average_price": "100"},
+        )
+    ) is True
+
+    assert await events.append_order_event(
+        ExchangeOrderEvent(
+            event_id="idemp-late-ack",
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            occurred_at=t_filled - timedelta(seconds=1),
+            exchange_order_id="ex-1",
+            details={"status": "NEW"},
+        )
+    ) is True
+
+    persisted = await reads.load_order(plan.client_order_id)
+    assert persisted is not None
+    assert persisted.state is ExchangeOrderState.FILLED
+
+
 async def test_live_submission_rejects_stale_code_generation(
     order_repository,
 ) -> None:

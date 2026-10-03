@@ -375,3 +375,48 @@ async def test_submission_fence_requires_order_identity_before_durable_reads() -
             cast(Any, SimpleNamespace(reduce_only=False)),
             datetime.now(tz=UTC),
         )
+
+
+async def test_submission_fence_evaluates_lease_at_current_time_after_delays() -> None:
+    lease_expires_at = datetime(2026, 8, 4, 12, 0, 5, tzinfo=UTC)
+    lease = SimpleNamespace(
+        lease_id="lease-1",
+        owner="worker-1",
+        strategy_name="strategy-1",
+        code_generation="commit-1",
+        expires_at=lease_expires_at,
+    )
+
+    class RiskState:
+        async def load_active_lease(
+            self, environment: str, account_label: str, now: datetime
+        ):
+            if now >= lease_expires_at:
+                return None  # Lease has expired at 'now'
+            return lease
+
+        async def load_active_halts(self, environment: str, account_label: str):
+            return ()
+
+    fence = LiveSubmissionFence(
+        risk_state=cast(Any, RiskState()),
+        environment="live",
+        account_label="account-1",
+        strategy_name="strategy-1",
+        lease_owner="worker-1",
+        code_generation="commit-1",
+        active_lease=cast(Any, lambda: lease),
+    )
+
+    # Valid before expiration
+    await fence.validate(
+        cast(Any, SimpleNamespace(reduce_only=False, client_order_id="ord-1")),
+        datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC),
+    )
+
+    # Expired when evaluated at timestamp after delay
+    with pytest.raises(OrderPreSubmissionError, match="active lease disappeared"):
+        await fence.validate(
+            cast(Any, SimpleNamespace(reduce_only=False, client_order_id="ord-1")),
+            datetime(2026, 8, 4, 12, 0, 10, tzinfo=UTC),
+        )

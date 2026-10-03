@@ -9,7 +9,6 @@ import json
 import os
 from collections.abc import (
     AsyncIterable,
-    AsyncIterator,
     Awaitable,
     Callable,
 )
@@ -21,7 +20,7 @@ from time import perf_counter
 from typing import Any
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
@@ -53,8 +52,6 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, TradingLease
 from crypto_momentum_lab.domain.runtime import (
     CapabilityEvaluator,
-    CapabilityEvidence,
-    RuntimePlanCompiler,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -64,7 +61,6 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
-    PositionExitMode,
     PositionExitPolicy,
 )
 from crypto_momentum_lab.domain.strategy.sizing import SymbolLotRules
@@ -73,7 +69,6 @@ from crypto_momentum_lab.execution_account.binance.client import (
 )
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
-    WebSocketAccountEventSource,
     WebSocketAccountPositionExpectationPublisher,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -83,10 +78,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     SubmitPolicy,
 )
-from crypto_momentum_lab.execution_account.risk_control_hub import (
-    RiskControlEvent,
-    WebSocketRiskControlSource,
-)
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 from crypto_momentum_lab.live_rollout.account_event_ports import (
@@ -95,13 +86,15 @@ from crypto_momentum_lab.live_rollout.account_event_ports import (
 )
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
-    ClosedCandle15mFeedConfig,
 )
 from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
     recover_restored_commands,
 )
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
+from crypto_momentum_lab.live_rollout.database_assembly import (
+    assemble_live_persistence,
+)
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
@@ -113,7 +106,10 @@ from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycl
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 from crypto_momentum_lab.live_rollout.execution_runtime import (
     LiveExecutionCallbacks,
+    build_capability_evidence_provider,
     build_live_execution_runtime,
+    build_live_submission_fence,
+    compile_live_runtime_plan,
 )
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
@@ -142,6 +138,17 @@ from crypto_momentum_lab.live_rollout.lease_recovery import (
     maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.market_assembly import (
+    LiveChannelSources,
+    LiveStartupMarketAssembly,
+    assemble_live_candle_sources,
+    assemble_live_channel_sources,
+    assemble_live_quote_volume,
+    assemble_live_startup_market_buffer,
+    build_live_market_state_stream,
+    observe_market_states as _observe_market_states,
+    run_risk_control_channel as _run_risk_control_channel,
+)
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
@@ -160,7 +167,6 @@ from crypto_momentum_lab.live_rollout.position_self_healing import (
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     live_limits_from_approval,
-    poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.readiness import (
     LiveReadinessPublisher,
@@ -178,7 +184,6 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
     _LIVE_LEASE_RENEW_BEFORE_SECONDS,
     _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
-    _LIVE_STARTUP_BUFFER_LIMIT,
     LiveRuntimeConfig,
     _live_strategy_config,
     _live_strategy_config_hash,
@@ -199,9 +204,6 @@ from crypto_momentum_lab.live_rollout.session import (
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
-from crypto_momentum_lab.live_rollout.startup_market_buffer import (
-    StartupMarketStateBuffer,
-)
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     checkpoint_needs_market_recovery as _checkpoint_needs_market_recovery,
 )
@@ -218,9 +220,6 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
     restore_live_strategy_from_checkpoint as _restore_live_strategy_from_checkpoint,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
-    strategy_last_processed_at_by_symbol as _strategy_last_processed_at_by_symbol,
-)
-from crypto_momentum_lab.live_rollout.startup_recovery import (
     wait_for_durable_market_state_cutover as _wait_for_durable_market_state_cutover,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
@@ -235,13 +234,6 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     is_retryable_live_startup_error as _is_retryable_live_startup_error,
 )
-from crypto_momentum_lab.live_rollout.stream_recovery import (
-    resilient_market_state_stream as _resilient_market_state_stream,
-)
-from crypto_momentum_lab.live_rollout.stream_recovery import (
-    resilient_risk_control_stream as _resilient_risk_control_stream,
-)
-from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
@@ -252,14 +244,6 @@ from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
-    ClosedCandleEmaProvider,
-)
-from crypto_momentum_lab.market_data.hub import (
-    WebSocketMarketStateSource,
-)
-from crypto_momentum_lab.market_data.quote_hub import (
-    WebSocketMarketQuoteSource,
-    WebSocketMarketQuoteVolumeSource,
 )
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
@@ -270,32 +254,11 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
     PostgresLiveSignalRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
-    PostgresOrderAdoptionRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_event_repository import (
-    PostgresOrderEventRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_read_repository import (
-    PostgresOrderReadRepository,
-)
-from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
-    PostgresOrderSubmissionRepository,
-)
-from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
-    PostgresPaperDaemonRepository,
-)
 from crypto_momentum_lab.persistence.postgres.position_repair import (
     PostgresPositionRepairUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
-)
-from crypto_momentum_lab.persistence.postgres.risk_repository import (
-    PostgresRiskRepository,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_account_state as _latest_account_state,
@@ -308,18 +271,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
-    PostgresRuntimeTelemetryRepository,
-)
-from crypto_momentum_lab.persistence.postgres.session import (
-    create_checkpoint_database_engine,
-    create_execution_database_engine,
-    create_market_database_engine,
-    create_observability_database_engine,
-)
-from crypto_momentum_lab.persistence.postgres.shadow_repository import (
-    PostgresShadowRepository,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
@@ -457,18 +408,10 @@ async def run_live_daemon(
 
     now = datetime.now(tz=UTC)
     ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
-    execution_engine = create_execution_database_engine(
-        execution_database_url,
-    )
-    ownership_registry.register("execution_engine", execution_engine.dispose)
-    market_engine = create_market_database_engine(market_database_url)
-    ownership_registry.register("market_engine", market_engine.dispose)
-    observability_engine = create_observability_database_engine(
-        observability_database_url,
-    )
-    ownership_registry.register("observability_engine", observability_engine.dispose)
-    checkpoint_engine = create_checkpoint_database_engine(observability_database_url)
-    ownership_registry.register("checkpoint_engine", checkpoint_engine.dispose)
+    execution_engine: AsyncEngine | None = None
+    market_engine: AsyncEngine | None = None
+    observability_engine: AsyncEngine | None = None
+    checkpoint_engine: AsyncEngine | None = None
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
@@ -483,13 +426,11 @@ async def run_live_daemon(
     live_repository: PostgresLiveRolloutRepository | None = None
     telemetry: LiveRuntimeTelemetry | None = None
     volume_cache: WebSocketQuoteVolumeProvider | None = None
-    volume_source: WebSocketMarketQuoteVolumeSource | None = None
     signal_recorder: LiveStrategySignalRecorder | None = None
     daemon: LiveStrategyDaemon | None = None
-    hub_source: WebSocketMarketStateSource | None = None
-    startup_market_buffer: StartupMarketStateBuffer | None = None
+    startup_market_assembly: LiveStartupMarketAssembly | None = None
     startup_market_state_task: asyncio.Task[None] | None = None
-    risk_control_source: WebSocketRiskControlSource | None = None
+    channel_sources: LiveChannelSources | None = None
     risk_control_task: asyncio.Task[None] | None = None
     risk_control_runtime: LiveRiskControlRuntime | None = None
     control_plane_runtime: LiveControlPlaneRuntime | None = None
@@ -512,52 +453,43 @@ async def run_live_daemon(
         startup_last_phase_at = now
 
     try:
-        execution_factory = async_sessionmaker(
-            execution_engine,
-            expire_on_commit=False,
+        persistence = assemble_live_persistence(
+            execution_database_url=execution_database_url,
+            market_database_url=market_database_url,
+            observability_database_url=observability_database_url,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            ownership_registry=ownership_registry,
         )
-        market_factory = async_sessionmaker(
-            market_engine,
-            expire_on_commit=False,
+        execution_engine = persistence.engines.execution_engine
+        market_engine = persistence.engines.market_engine
+        observability_engine = persistence.engines.observability_engine
+        checkpoint_engine = persistence.engines.checkpoint_engine
+        heartbeat_engine = persistence.engines.heartbeat_engine
+
+        execution_factory = persistence.factories.execution_factory
+        market_factory = persistence.factories.market_factory
+        observability_factory = persistence.factories.observability_factory
+        heartbeat_factory = persistence.factories.heartbeat_factory
+
+        shadow_repository = persistence.repositories.shadow_repository
+        live_repository = persistence.repositories.live_repository
+        risk_repository = persistence.repositories.risk_repository
+        heartbeat_live_repository = (
+            persistence.repositories.heartbeat_live_repository
         )
-        observability_factory = async_sessionmaker(
-            observability_engine,
-            expire_on_commit=False,
+        heartbeat_risk_repository = (
+            persistence.repositories.heartbeat_risk_repository
         )
-        checkpoint_factory = async_sessionmaker(
-            checkpoint_engine,
-            expire_on_commit=False,
+        order_repository = persistence.repositories.order_repository
+        order_adoption_repository = (
+            persistence.repositories.order_adoption_repository
         )
-        shadow_repository = PostgresShadowRepository(execution_factory)
-        live_repository = PostgresLiveRolloutRepository(
-            execution_factory,
-            strategy_scope=("live", account_label, strategy_name),
-        )
-        risk_repository = PostgresRiskRepository(execution_factory)
-        # Lease liveness is a control-plane concern.  Give it one isolated
-        # connection with a short driver timeout so a slow market/reconcile
-        # query cannot consume the pool needed by the heartbeat.
-        heartbeat_engine = create_execution_database_engine(
-            execution_database_url,
-            pool_size=1,
-            max_overflow=0,
-            pool_timeout_seconds=3,
-            command_timeout_seconds=5,
-        )
-        ownership_registry.register("heartbeat_engine", heartbeat_engine.dispose)
-        heartbeat_factory = async_sessionmaker(
-            heartbeat_engine,
-            expire_on_commit=False,
-        )
-        heartbeat_live_repository = PostgresLiveRolloutRepository(heartbeat_factory)
-        heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
-        order_repository = PostgresOrderPlanRepository(execution_factory)
-        order_adoption_repository = PostgresOrderAdoptionRepository(execution_factory)
-        order_read_repository = PostgresOrderReadRepository(execution_factory)
-        order_event_repository = PostgresOrderEventRepository(execution_factory)
-        submission_repository = PostgresOrderSubmissionRepository(execution_factory)
-        checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
-        telemetry_repository = PostgresRuntimeTelemetryRepository(observability_factory)
+        order_read_repository = persistence.repositories.order_read_repository
+        order_event_repository = persistence.repositories.order_event_repository
+        submission_repository = persistence.repositories.submission_repository
+        checkpoint_repository = persistence.repositories.checkpoint_repository
+        telemetry_repository = persistence.repositories.telemetry_repository
         telemetry = LiveRuntimeTelemetry(
             run_id=session_id,
             account_label=account_label,
@@ -571,14 +503,12 @@ async def run_live_daemon(
         )
         ownership_registry.register("telemetry", telemetry.stop)
         await telemetry.start()
-        volume_source = WebSocketMarketQuoteVolumeSource(
-            url=market_quote_volume_hub_url,
-            environment=market_environment,
-            consumer_id=f"live-volume:{session_id}",
+        volume_cache = await assemble_live_quote_volume(
+            market_quote_volume_hub_url=market_quote_volume_hub_url,
+            market_environment=market_environment,
+            session_id=session_id,
+            ownership_registry=ownership_registry,
         )
-        volume_cache = WebSocketQuoteVolumeProvider(volume_source)
-        ownership_registry.register("volume_cache", volume_cache.stop)
-        await volume_cache.start()
         signal_repository = PostgresLiveSignalRepository(observability_factory)
         decision_unit_of_work = AsyncPostgresDecisionUnitOfWork(execution_factory)
         fact_source = LiveDecisionFactSource(
@@ -716,109 +646,37 @@ async def run_live_daemon(
                 f"got {target_notional}"
             )
 
-        plan_overrides = {
-            "target_notional": target_notional,
-            "order_type": "market"
-            if getattr(config.strategy, "market_orders", False)
-            else "limit",
-            "max_open_positions": risk_config.max_open_positions,
-            "max_account_drawdown": getattr(
-                risk_config, "max_account_drawdown", "0.10"
-            ),
-            "max_gross_notional": risk_config.max_gross_notional,
-            "max_order_notional": getattr(
-                risk_config, "max_order_notional", target_notional
-            ),
-            # Live exits belong to LiveExitManager (closed candle + grace).
-            # Never inject a second, time-based exit through the entry policy.
-            "max_holding_seconds": None,
-        }
-        runtime_plan = RuntimePlanCompiler.compile(
-            environment="live",
+        runtime_plan = compile_live_runtime_plan(
+            config=config,
+            target_notional=target_notional,
+            risk_config=risk_config,
             account_label=account_label,
             strategy_name=strategy_name,
-            git_commit=git_commit_hash,
-            schema_version=migration_revision,
-            runtime_generation=git_commit_hash,
-            fencing_epoch=int(getattr(active_lease, "fencing_token", 1) or 1),
-            observed_database_revision=migration_revision,
-            overrides=plan_overrides,
-            strict=True,
+            git_commit_hash=git_commit_hash,
+            migration_revision=migration_revision,
+            active_lease=active_lease,
         )
         capability_evaluator = CapabilityEvaluator()
 
-        def _provide_capability_evidence(
-            order_plan: OrderExecutionPlan,
-            checked_at: datetime,
-        ) -> CapabilityEvidence:
-            market_age = 0.0
-            if (
-                live_readiness is not None
+        evidence_provider = build_capability_evidence_provider(
+            account_label=account_label,
+            runtime_plan=runtime_plan,
+            get_active_lease=lambda: active_lease,
+            is_entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
+            get_context=lambda: fact_source.current_context,
+            get_market_age=lambda: (
+                float(live_readiness._latest_market_state_age_seconds)
+                if live_readiness is not None
                 and live_readiness._latest_market_state_age_seconds is not None
-            ):
-                market_age = max(
-                    0.0, float(live_readiness._latest_market_state_age_seconds)
-                )
+                else None
+            ),
+            has_api_key=lambda: bool(
+                account_label and getattr(client, "_api_key", None)
+            ),
+        )
 
-            is_concordant = True
-            unresolved_count = 0
-            ctx = fact_source.current_context
-            if ctx is not None:
-                order_sym = getattr(order_plan, "symbol", "")
-                if order_sym in getattr(ctx, "unmanaged_position_symbols", ()):
-                    is_concordant = False
-                unresolved = getattr(ctx, "unresolved_orders", ()) or ()
-                curr_cid = getattr(order_plan, "client_order_id", None)
-                unresolved_count = sum(
-                    1
-                    for o in unresolved
-                    if getattr(getattr(o, "plan", None), "symbol", None) == order_sym
-                    and getattr(getattr(o, "plan", None), "client_order_id", None)
-                    != curr_cid
-                )
-
-            is_app_valid = daemon is not None and daemon.entry_enabled
-            now_utc = (
-                checked_at if checked_at.tzinfo else checked_at.replace(tzinfo=UTC)
-            )
-            lease_exp = getattr(active_lease, "expires_at", None)
-            is_lease_valid = (
-                (
-                    lease_exp is not None
-                    and (
-                        lease_exp if lease_exp.tzinfo else lease_exp.replace(tzinfo=UTC)
-                    )
-                    > now_utc
-                )
-                if active_lease
-                else False
-            )
-            is_identity_ok = bool(account_label and getattr(client, "_api_key", None))
-
-            return CapabilityEvidence(
-                evidence_version=f"ev_{account_label}_{checked_at.isoformat()}",
-                market_freshness_seconds=market_age,
-                is_account_concordant=is_concordant,
-                is_account_identity_verified=is_identity_ok,
-                unresolved_inflight_orders_count=unresolved_count,
-                is_approval_valid=is_app_valid,
-                is_lease_active=is_lease_valid,
-                is_emergency_authorized=False,
-                is_universe_ready=is_app_valid,
-                is_collector_healthy=True
-                if live_readiness is None
-                else (live_readiness._latest_market_state_age_seconds is not None),
-                plan_hash=runtime_plan.plan_hash,
-                runtime_generation=runtime_plan.runtime_generation,
-                fencing_epoch=runtime_plan.fencing_epoch,
-                declared_schema_compatibility=runtime_plan.declared_schema_compatibility,
-                observed_database_revision=runtime_plan.observed_database_revision,
-                observed_at=checked_at,
-            )
-
-        submission_fence = LiveSubmissionFence(
+        submission_fence = build_live_submission_fence(
             risk_state=heartbeat_risk_repository,
-            environment="live",
             account_label=account_label,
             strategy_name=strategy_name,
             lease_owner=lease_owner,
@@ -827,7 +685,7 @@ async def run_live_daemon(
             entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
             capability_evaluator=capability_evaluator,
             runtime_plan=runtime_plan,
-            evidence_provider=_provide_capability_evidence,
+            evidence_provider=evidence_provider,
         )
 
         execution_runtime = await build_live_execution_runtime(
@@ -1147,52 +1005,16 @@ async def run_live_daemon(
                 cutover_at=startup_cutover.isoformat(),
             )
             live_readiness.set_expected_warmup_symbols(startup_warmup_symbols)
-        if market_state_source == "hub":
-            startup_market_buffer = StartupMarketStateBuffer(
-                max_states=_LIVE_STARTUP_BUFFER_LIMIT,
-                on_state_skipped=hub_cursor_state.acknowledge_state,
-            )
-
-            def on_startup_market_connection_change(
-                available: bool,
-                reason: str | None,
-            ) -> None:
-                if startup_market_buffer is not None:
-                    startup_market_buffer.observe_connection_change(
-                        available,
-                        reason,
-                    )
-                if control_plane_runtime is not None:
-                    control_plane_runtime.on_market_connection_change(
-                        available,
-                        reason,
-                    )
-
-            hub_source = WebSocketMarketStateSource(
-                url=market_state_hub_url,
-                environment=market_environment,
-                consumer_id=f"live-strategy:{session_id}",
-                on_connection_change=on_startup_market_connection_change,
-                on_batch=hub_cursor_state.observe_batch,
-                # A live worker may only consume a contiguous epoch.  If the
-                # bounded Hub replay cannot bridge a reconnect, let the
-                # worker fail so the durable startup rewarm path rebuilds the
-                # strategy before it can submit again.
-                fail_on_replay_unavailable=True,
-                preserve_sequence_on_overflow=True,
-            )
-            if hub_cursor_state.has_cursor:
-                hub_source.set_resume_cursor(
-                    stream_id=hub_cursor_state.stream_id,
-                    sequence=hub_cursor_state.sequence,
-                )
-            startup_market_state_task = asyncio.create_task(
-                _collect_startup_market_states(
-                    source=hub_source,
-                    buffer=startup_market_buffer,
-                ),
-                name=f"live-startup-market-buffer:{session_id}",
-            )
+        startup_market_assembly = assemble_live_startup_market_buffer(
+            market_state_source=market_state_source,
+            market_state_hub_url=market_state_hub_url,
+            market_environment=market_environment,
+            session_id=session_id,
+            hub_cursor_state=hub_cursor_state,
+        )
+        startup_market_buffer = startup_market_assembly.buffer
+        hub_source = startup_market_assembly.hub_source
+        startup_market_state_task = startup_market_assembly.task
         market_cursor: RuntimeStateCursor | None = None
         if checkpoint is not None:
             if requires_market_recovery:
@@ -1236,24 +1058,19 @@ async def run_live_daemon(
             approval=approval,
             risk_config=risk_config,
         )
-        ema_provider: ClosedCandleEmaProvider | None = None
-        if exit_mode is PositionExitMode.CANDLE_15M:
-            candle_source = BinanceRestClosedCandle15mSource(base_url)
-            ownership_registry.register("candle_source", candle_source.close)
-            closed_candle_feed = BinanceClosedCandle15mFeed(
-                config=ClosedCandle15mFeedConfig(
-                    websocket_url=market_websocket_url,
-                    environment=market_environment,
-                    consumer_id=f"live-exit-candles:{session_id}",
-                ),
-                backfill_source=candle_source,
-            )
-            ownership_registry.register("closed_candle_feed", closed_candle_feed.stop)
-        if require_price_above_ema5 or require_price_above_ema10:
-            if candle_source is None:
-                candle_source = BinanceRestClosedCandle15mSource(base_url)
-                ownership_registry.register("candle_source", candle_source.close)
-            ema_provider = ClosedCandleEmaProvider(candle_source)
+        candle_assembly = assemble_live_candle_sources(
+            exit_mode=exit_mode,
+            base_url=base_url,
+            market_websocket_url=market_websocket_url,
+            market_environment=market_environment,
+            session_id=session_id,
+            require_price_above_ema5=require_price_above_ema5,
+            require_price_above_ema10=require_price_above_ema10,
+            ownership_registry=ownership_registry,
+        )
+        candle_source = candle_assembly.candle_source
+        closed_candle_feed = candle_assembly.closed_candle_feed
+        ema_provider = candle_assembly.ema_provider
 
         entry_runtime = LiveEntryRuntime(
             universe_reader=(
@@ -1552,6 +1369,9 @@ async def run_live_daemon(
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
         )
+        startup_market_assembly.set_control_plane_listener(
+            control_plane_runtime.on_market_connection_change
+        )
         order_reconciliation.on_unknown_order = (
             control_plane_runtime.on_account_snapshot_recovery
         )
@@ -1599,27 +1419,33 @@ async def run_live_daemon(
             )
         mark_live_ready()
         log_startup_phase("live_readiness_published")
-        startup_phase = False
-        quote_source: WebSocketMarketQuoteSource | None = None
-        state_stream: AsyncIterable[MarketState15s]
-        if market_state_source == "hub" and startup_market_buffer is not None:
-            state_stream = startup_market_buffer.stream(
-                skip_through=_strategy_last_processed_at_by_symbol(strategy)
-            )
-        else:
-            state_stream = poll_live_market_states(
-                repository=state_repository,
-                environment=market_environment,
-                max_runtime_seconds=max_runtime_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-                cursor=market_cursor,
-            )
-        account_source = WebSocketAccountEventSource(
-            url=account_event_hub_url,
-            environment="live",
+        state_stream = build_live_market_state_stream(
+            market_state_source=market_state_source,
+            startup_market_buffer=startup_market_buffer,
+            strategy=strategy,
+            state_repository=state_repository,
+            market_environment=market_environment,
+            max_runtime_seconds=float(max_runtime_seconds),
+            poll_interval_seconds=poll_interval_seconds,
+            market_cursor=market_cursor,
+        )
+        channel_sources = assemble_live_channel_sources(
+            market_state_source=market_state_source,
+            market_quote_hub_url=market_quote_hub_url,
+            market_environment=market_environment,
+            account_event_hub_url=account_event_hub_url,
             account_label=account_label,
-            consumer_id=f"live-exit:{session_id}",
-            on_recovery=control_plane_runtime.on_account_snapshot_recovery,
+            session_id=session_id,
+            on_account_recovery=control_plane_runtime.on_account_snapshot_recovery,
+            hub_source=hub_source,
+            risk_control_enabled=risk_control_enabled,
+            risk_control_hub_url=risk_control_hub_url,
+            strategy_name=strategy_name,
+            on_risk_control_connection_change=(
+                risk_control_runtime.on_connection_change
+                if risk_control_runtime is not None
+                else None
+            ),
         )
         exit_channel_runtime = LiveExitChannelRuntime(
             daemon=daemon,
@@ -1680,16 +1506,6 @@ async def run_live_daemon(
                 control_plane_runtime.on_account_snapshot_recovery
             ),
         )
-        if risk_control_enabled and risk_control_hub_url:
-            risk_control_source = WebSocketRiskControlSource(
-                url=risk_control_hub_url,
-                environment="live",
-                account_label=account_label,
-                strategy_name=strategy_name,
-                session_id=session_id,
-                consumer_id=f"live-risk-control:{session_id}",
-                on_connection_change=risk_control_runtime.on_connection_change,
-            )
         quote_task: asyncio.Task[None] | None = None
         closed_candle_task: asyncio.Task[None] | None = None
         grace_timeout_task: asyncio.Task[None] | None = None
@@ -1705,15 +1521,10 @@ async def run_live_daemon(
                 exit_channel_runtime.run_grace_timeout_channel(),
                 name=f"live-grace-timeout:{session_id}",
             )
-        if market_state_source == "hub":
-            quote_source = WebSocketMarketQuoteSource(
-                url=market_quote_hub_url,
-                environment=market_environment,
-                consumer_id=f"live-exit-quotes:{session_id}",
-            )
+        if channel_sources.quote_source is not None:
             quote_task = asyncio.create_task(
                 exit_channel_runtime.run_quote_channel(
-                    source=quote_source,
+                    source=channel_sources.quote_source,
                 )
             )
 
@@ -1750,13 +1561,16 @@ async def run_live_daemon(
             )
         )
         account_task = asyncio.create_task(
-            account_event_runtime.run(account_source),
+            account_event_runtime.run(channel_sources.account_source),
             name=f"live-account-events:{session_id}",
         )
-        if risk_control_source is not None:
+        if (
+            channel_sources.risk_control_source is not None
+            and risk_control_runtime is not None
+        ):
             risk_control_task = asyncio.create_task(
                 _run_risk_control_channel(
-                    source=risk_control_source,
+                    source=channel_sources.risk_control_source,
                     on_event=risk_control_runtime.on_event,
                 ),
                 name=f"live-risk-control:{session_id}",
@@ -1785,15 +1599,6 @@ async def run_live_daemon(
                 health_monitor.run(),
                 name=f"live-local-health:{session_id}",
             )
-
-        def stop_runtime_sources() -> None:
-            if hub_source is not None:
-                hub_source.stop()
-            if quote_source is not None:
-                quote_source.stop()
-            account_source.stop()
-            if risk_control_source is not None:
-                risk_control_source.stop()
 
         async def close_risk_control() -> None:
             if risk_control_runtime is not None:
@@ -1831,7 +1636,7 @@ async def run_live_daemon(
                     else None
                 )
             ),
-            stop_sources=stop_runtime_sources,
+            stop_sources=channel_sources.stop_all,
             close_risk_control=close_risk_control,
             stop_entry_caches=stop_entry_caches,
             wait_for_entry_submissions_idle=(
@@ -1932,58 +1737,6 @@ async def run_live_daemon(
             if shutdown_task is not None:
                 await asyncio.gather(shutdown_task, return_exceptions=True)
             await ownership_registry.teardown_all()
-
-
-async def _observe_market_states(
-    states: AsyncIterable[MarketState15s],
-    cache: LatestMarketStateCache,
-    *,
-    on_observed: Callable[..., None] | None = None,
-    strategy: object | None = None,
-    entry_universe_count: Callable[[datetime], int] | None = None,
-) -> AsyncIterator[MarketState15s]:
-    async for state in states:
-        cache.observe(state)
-        if on_observed is not None and strategy is not None:
-            count = (
-                0
-                if entry_universe_count is None
-                else entry_universe_count(state.bucket_start)
-            )
-            on_observed(
-                state,
-                strategy=strategy,
-                entry_universe_count=count,
-            )
-        yield state
-
-
-async def _collect_startup_market_states(
-    *,
-    source: AsyncIterable[MarketState15s],
-    buffer: StartupMarketStateBuffer,
-) -> None:
-    """Consume Hub data during DB warmup and hand the same stream forward."""
-
-    try:
-        async for state in _resilient_market_state_stream(source):
-            await buffer.append(state)
-    except asyncio.CancelledError:
-        raise
-    except Exception as error:
-        buffer.close(error)
-        raise
-    else:
-        buffer.close()
-
-
-async def _run_risk_control_channel(
-    *,
-    source: AsyncIterable[RiskControlEvent],
-    on_event: Callable[[RiskControlEvent], Awaitable[None]],
-) -> None:
-    async for event in _resilient_risk_control_stream(source):
-        await on_event(event)
 
 
 async def _bootstrap_execution_position_facts(

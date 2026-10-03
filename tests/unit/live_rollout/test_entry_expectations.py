@@ -9,12 +9,45 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.execution_account.expectations import (
     AccountPositionExpectation,
+    AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
 )
 
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_expectation_registry_discard_and_ttl_behavior() -> None:
+    clock_time = NOW
+    registry = AccountPositionExpectationRegistry(
+        environment="live",
+        account_label="account-1",
+        clock=lambda: clock_time,
+    )
+    plan = _plan()
+    expectation = AccountPositionExpectation.from_plan(
+        plan,
+        environment="live",
+        account_label="account-1",
+        registered_at=NOW,
+    )
+    registry.register(expectation)
+    assert registry.pending_count == 1
+
+    # When order is rejected by fence, discard prevents expectation matching
+    registry.discard(plan.client_order_id)
+    assert registry.pending_count == 0
+    assert (
+        registry.consume(
+            symbol="BTCUSDT",
+            position_side="BOTH",
+            position_amt=Decimal("0.25"),
+            observed_at=NOW,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

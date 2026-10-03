@@ -214,6 +214,23 @@ class OrderExecutionStateMachine:
         self._sleep = sleep
         self._lock = asyncio.Lock() if serialize_commands else None
         self._observation_lock = asyncio.Lock()
+        self._exchange_configured = False
+
+    def _ensure_exchange_configured(self) -> None:
+        if self._exchange_configured:
+            return
+        self._exchange_configured = True
+        set_guard = getattr(self._exchange, "set_before_order_submit_guard", None)
+        if callable(set_guard):
+            set_guard(self._on_before_exchange_submit)
+        set_boundary = getattr(
+            self._exchange, "set_exchange_boundary_callbacks", None
+        )
+        if callable(set_boundary):
+            set_boundary(
+                on_request=self._on_exchange_request,
+                on_response=self._on_exchange_response,
+            )
 
     async def submit(
         self,
@@ -221,6 +238,7 @@ class OrderExecutionStateMachine:
         *,
         prepared_submission: _PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
+        self._ensure_exchange_configured()
         if self._lock is None:
             return await self._execute_approved_intent(
                 plan,
@@ -740,31 +758,42 @@ class OrderExecutionStateMachine:
         call: Callable[[], Awaitable[ExchangeCallResult]],
     ) -> ExchangeCallResult:
         try:
-            if operation == "submit" and self._on_before_exchange_submit is not None:
-                await self._on_before_exchange_submit(plan, self._now())
             if (
                 operation == "submit"
                 and not plan.reduce_only
                 and self._on_before_submit is not None
             ):
                 await self._on_before_submit(plan, self._now())
+            if (
+                operation == "submit"
+                and self._on_before_exchange_submit is not None
+                and not hasattr(self._exchange, "set_before_order_submit_guard")
+            ):
+                await self._on_before_exchange_submit(plan, self._now())
         except Exception as guard_exc:
             if isinstance(guard_exc, _OrderPreSubmissionError):
                 raise
             raise _OrderPreSubmissionError(
                 f"pre-submission guard failed: {guard_exc}"
             ) from guard_exc
-        await self._notify_exchange_boundary(
-            plan,
-            f"{operation}_request_started",
+
+        exchange_handles_boundary = (
+            operation == "submit"
+            and hasattr(self._exchange, "set_exchange_boundary_callbacks")
         )
+        if not exchange_handles_boundary:
+            await self._notify_exchange_boundary(
+                plan,
+                f"{operation}_request_started",
+            )
         try:
             return await call()
         finally:
-            await self._notify_exchange_boundary(
-                plan,
-                f"{operation}_response_received",
-            )
+            if not exchange_handles_boundary:
+                await self._notify_exchange_boundary(
+                    plan,
+                    f"{operation}_response_received",
+                )
 
     async def _notify_exchange_boundary(
         self,

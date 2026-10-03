@@ -62,6 +62,7 @@ class OrderSubmissionRepository(Protocol):
         current_gross_exposure: Decimal | None = None,
         open_position_symbols: frozenset[str] | None = None,
         exposure_notional: Decimal | None = None,
+        baseline_observed_at: datetime | None = None,
     ) -> PreparedOrderSubmission | None: ...
 
 
@@ -83,6 +84,7 @@ class OrderSubmissionPreparation:
     current_gross_exposure: Decimal | None = None
     open_position_symbols: frozenset[str] | None = None
     exposure_notional: Decimal | None = None
+    baseline_observed_at: datetime | None = None
     context_token: object | None = None
 
 

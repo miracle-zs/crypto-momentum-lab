@@ -3,12 +3,14 @@
 ## 当前入口
 
 - [仓库现状](current-state.md)：仓库基线、服务轮廓，以及按日期限定的生产观测。
-- [项目 README](../README.md)：安装、数据采集、Replay、Paper 和部署入口。
+- [项目 README](../README.md)：安装、数据采集、本地 Orderflow 研究和部署入口。
 - [持仓批次上下文](../CONTEXT.md)：批次身份、平仓边界和追加开仓术语。
 - [重构蓝图](architecture/system-refactor-blueprint-20260925.md)：设计依据和带基线的实施记录；不代表当前生产状态。
 - [持仓批次一致性提案](architecture/position-batch-consistency-20260925.md)：事实账本与退出分配闭环设计。
 - [交易系统架构调整计划](architecture/trading-architecture-adjustment-plan-20261001.md)：六批结构调整与累计本地验收记录；数据库及生产验收尚未完成。
 - [调整后的交易架构](architecture/trading-architecture-after-adjustment-20261001.md)：累计改动的模块图、下单时序与剩余边界；基于本地工作树。
+- [架构审视与设计边界诊断](architecture/system-overengineering-architecture-review-20261003.md)：模块依赖关系图、六阶段防御时序、风控门禁职责精准核对与高价值重构路径。
+- [交易执行安全与架构简化修改计划](architecture/system-overengineering-modification-plan-20261003.md)：文档修订、最终 POST 围栏、敞口交接验证及分批架构简化；待实施。
 
 ## 约束与操作
 
@@ -19,6 +21,9 @@
 - [告警、SLO 与看板](runbooks/operational-alert-monitor.md)：服务端告警、决策 SLO 和只读操作看板。
 - [Market-state Hub 手册](runbooks/market-state-hub.md) 与[本地优化脚本手册](runbooks/local-full-data-optimization.md)：后者记录现有旧脚本用法，结果解释以新设计为准。
 - [PostgreSQL 容量与保留期记录](postgres-capacity-and-retention-2026-09-14.md)：`cml-archive-trim.service` 引用的日期化运维依据，执行前需复核当前水位和配置。
+- [清理执行计划](plans/2026-10-03-dormant-code-cleanup.md)：分阶段清理与验证记录。
+- [沉睡代码与清理清单](dormant-code-and-cleanup-inventory.md)：已核实的退役范围、归档路径与保留边界。
+- [性能优化与算法实践指南](performance-optimization-and-algorithm-best-practices.md)：回测撮合、因果对账、MTM 连续估值与网格寻优的高性能算法与工程架构实践。
 
 ## 研究与历史证据
 

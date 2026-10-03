@@ -1904,3 +1904,248 @@ async def test_submit_order_retains_missing_price_when_query_remains_zero() -> N
         assert snapshot.average_price == Decimal("0")
     finally:
         await client.aclose()
+
+
+async def test_trade_client_post_boundary_fence_blocks_order_after_pacer_wait() -> None:
+    captured_paths: list[str] = []
+    telemetry_events: list[str] = []
+    pacer_wait_completed = False
+    fence_called_after_pacer = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": "entry-1",
+                "orderId": 12345,
+                "symbol": "BTCUSDT",
+                "status": "NEW",
+                "executedQty": "0",
+                "cumQuote": "0",
+                "avgPrice": "0",
+            },
+        )
+
+    async def guard(plan: OrderExecutionPlan, now: datetime) -> None:
+        nonlocal fence_called_after_pacer
+        if pacer_wait_completed:
+            fence_called_after_pacer = True
+        raise OrderPreSubmissionError("lease revoked after rate limit queue wait")
+
+    async def on_boundary(
+        plan: OrderExecutionPlan, phase: str, now: datetime
+    ) -> None:
+        telemetry_events.append(phase)
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        request_interval_seconds=0.01,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        on_before_order_submit=guard,
+        on_exchange_request=on_boundary,
+        on_exchange_response=on_boundary,
+    )
+
+    pacer_wait_completed = True
+    try:
+        with pytest.raises(
+            OrderPreSubmissionError, match="lease revoked after rate limit queue wait"
+        ):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert fence_called_after_pacer is True
+    assert captured_paths == []  # /fapi/v1/order was never called!
+    assert telemetry_events == []  # submit_request_started was never called!
+
+
+async def test_trade_client_post_boundary_blocks_order_after_margin_warmup(
+) -> None:
+    captured_paths: list[str] = []
+    margin_type_configured = asyncio.Event()
+    halt_active = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            return httpx.Response(
+                200,
+                json=[{"symbol": "BTCUSDT", "marginType": "ISOLATED"}],
+            )
+        if request.url.path == "/fapi/v1/marginType":
+            margin_type_configured.set()
+            return httpx.Response(200, json={"code": 200, "msg": "success"})
+        if request.url.path == "/fapi/v1/order":
+            return httpx.Response(
+                200,
+                json={
+                    "clientOrderId": "entry-1",
+                    "orderId": 12345,
+                    "symbol": "BTCUSDT",
+                    "status": "NEW",
+                    "executedQty": "0",
+                    "cumQuote": "0",
+                    "avgPrice": "0",
+                },
+            )
+        return httpx.Response(404)
+
+    async def guard(plan: OrderExecutionPlan, now: datetime) -> None:
+        if halt_active:
+            raise OrderPreSubmissionError(
+                "emergency halt active after margin warmup"
+            )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        margin_type="CROSSED",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        on_before_order_submit=guard,
+    )
+
+    async def submit_with_delay():
+        return await client.submit_order(_order_plan())
+
+    task = asyncio.create_task(submit_with_delay())
+    await asyncio.wait_for(margin_type_configured.wait(), timeout=1.0)
+    # Halt occurs while order was being prepared
+    halt_active = True
+
+    try:
+        with pytest.raises(
+            OrderPreSubmissionError, match="emergency halt active after margin warmup"
+        ):
+            await task
+    finally:
+        await client.aclose()
+
+    assert "/fapi/v1/symbolConfig" in captured_paths
+    assert "/fapi/v1/marginType" in captured_paths
+    assert "/fapi/v1/order" not in captured_paths  # POST was blocked!
+
+
+async def test_trade_client_post_boundary_uses_current_time_after_delays() -> None:
+    current_time = datetime(2026, 7, 4, 0, 0, 0, tzinfo=UTC)
+    observed_guard_time: datetime | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": "entry-1",
+                "orderId": 12345,
+                "symbol": "BTCUSDT",
+                "status": "NEW",
+                "executedQty": "0",
+                "cumQuote": "0",
+                "avgPrice": "0",
+            },
+        )
+
+    async def guard(plan: OrderExecutionPlan, now: datetime) -> None:
+        nonlocal observed_guard_time
+        observed_guard_time = now
+
+    def clock():
+        return current_time
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=clock,
+        on_before_order_submit=guard,
+    )
+
+    # Clock advances to simulate elapsed time during preparation
+    current_time = datetime(2026, 7, 4, 0, 0, 15, tzinfo=UTC)
+    try:
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert observed_guard_time == datetime(2026, 7, 4, 0, 0, 15, tzinfo=UTC)
+
+
+async def test_trade_client_reduce_only_post_boundary_guard() -> None:
+    captured_paths: list[str] = []
+    guard_executed = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": "exit-1",
+                "orderId": 54321,
+                "symbol": "BTCUSDT",
+                "status": "NEW",
+                "executedQty": "0",
+                "cumQuote": "0",
+                "avgPrice": "0",
+            },
+        )
+
+    async def guard(plan: OrderExecutionPlan, now: datetime) -> None:
+        nonlocal guard_executed
+        guard_executed = True
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        margin_type="CROSSED",
+        entry_leverage=10,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        on_before_order_submit=guard,
+    )
+
+    exit_plan = replace(
+        _order_plan(),
+        client_order_id="exit-1",
+        reduce_only=True,
+        side="SELL",
+        position_side=FuturesPositionSide.LONG,
+    )
+    try:
+        snapshot = await client.submit_order(exit_plan)
+    finally:
+        await client.aclose()
+
+    assert guard_executed is True
+    assert captured_paths == ["/fapi/v1/order"]  # Skipped warmup!
+    assert snapshot.state == ExchangeOrderState.ACKNOWLEDGED

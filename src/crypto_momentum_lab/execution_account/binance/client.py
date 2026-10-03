@@ -5,7 +5,7 @@ import heapq
 import hmac
 import math
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -70,12 +70,14 @@ from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryObservation,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeBoundaryCallback,
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
+    OrderExchangeSubmitGuard,
 )
 
 log = structlog.get_logger(__name__)
@@ -812,16 +814,27 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
         *,
         priority: int = _COMMAND_BACKGROUND_PRIORITY,
+        on_before_post: Callable[[], Awaitable[None]] | None = None,
+        on_request_started: Callable[[], Awaitable[None]] | None = None,
+        on_response_received: Callable[[], Awaitable[None]] | None = None,
     ) -> object:
         await self._command_request_pacer.wait(priority=priority)
+        if on_before_post is not None:
+            await on_before_post()
+        if on_request_started is not None:
+            await on_request_started()
         signed_params = self._signed_params(params)
-        response = await self._client.post(
-            path,
-            data=signed_params,
-            headers={"X-MBX-APIKEY": self._api_key},
-        )
-        _raise_for_status(response)
-        return response.json()
+        try:
+            response = await self._client.post(
+                path,
+                data=signed_params,
+                headers={"X-MBX-APIKEY": self._api_key},
+            )
+            _raise_for_status(response)
+            return response.json()
+        finally:
+            if on_response_received is not None:
+                await on_response_received()
 
     async def _signed_delete(
         self,
@@ -909,6 +922,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         entry_leverage: int | None = None,
         margin_type: str | None = None,
         leverage_fallback_steps: int = 2,
+        on_before_order_submit: OrderExchangeSubmitGuard | None = None,
+        on_exchange_request: ExchangeBoundaryCallback | None = None,
+        on_exchange_response: ExchangeBoundaryCallback | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
             raise ValueError("entry_leverage must be between 1 and 125")
@@ -941,6 +957,24 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         self._configured_leverage_by_symbol: dict[str, int] = {}
         self._configured_margin_type_by_symbol: dict[str, str] = {}
         self._margin_type_lock = asyncio.Lock()
+        self._on_before_order_submit = on_before_order_submit
+        self._on_exchange_request = on_exchange_request
+        self._on_exchange_response = on_exchange_response
+
+    def set_before_order_submit_guard(
+        self,
+        guard: OrderExchangeSubmitGuard | None,
+    ) -> None:
+        self._on_before_order_submit = guard
+
+    def set_exchange_boundary_callbacks(
+        self,
+        *,
+        on_request: ExchangeBoundaryCallback | None = None,
+        on_response: ExchangeBoundaryCallback | None = None,
+    ) -> None:
+        self._on_exchange_request = on_request
+        self._on_exchange_response = on_response
 
     @property
     def configured_margin_type_count(self) -> int:
@@ -1063,6 +1097,46 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                         "GTD order must expire more than 600 seconds from now"
                     )
                 params["goodTillDate"] = int(plan.expires_at.timestamp() * 1000)
+
+        async def _check_fence() -> None:
+            if self._on_before_order_submit is not None:
+                try:
+                    await self._on_before_order_submit(plan, self._now())
+                except OrderPreSubmissionError:
+                    raise
+                except Exception as exc:
+                    raise OrderPreSubmissionError(
+                        f"pre-submission guard failed: {exc}"
+                    ) from exc
+
+        async def _notify_request_started() -> None:
+            if self._on_exchange_request is not None:
+                try:
+                    await self._on_exchange_request(
+                        plan, "submit_request_started", self._now()
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "exchange_boundary_telemetry_failed",
+                        client_order_id=plan.client_order_id,
+                        phase="submit_request_started",
+                        error_type=type(exc).__name__,
+                    )
+
+        async def _notify_response_received() -> None:
+            if self._on_exchange_response is not None:
+                try:
+                    await self._on_exchange_response(
+                        plan, "submit_response_received", self._now()
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "exchange_boundary_telemetry_failed",
+                        client_order_id=plan.client_order_id,
+                        phase="submit_response_received",
+                        error_type=type(exc).__name__,
+                    )
+
         try:
             payload = await self._signed_post(
                 "/fapi/v1/order",
@@ -1072,6 +1146,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     if plan.reduce_only
                     else _COMMAND_ENTRY_PRIORITY
                 ),
+                on_before_post=_check_fence,
+                on_request_started=_notify_request_started,
+                on_response_received=_notify_response_received,
             )
         except httpx.TimeoutException as exc:
             raise ExchangeSubmissionTimeoutError(

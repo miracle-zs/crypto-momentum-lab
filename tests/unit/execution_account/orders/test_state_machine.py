@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -15,11 +16,13 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeBoundaryCallback,
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
+    OrderExchangeSubmitGuard,
     OrderExecutionStateMachine,
     SubmitPolicy,
 )
@@ -614,3 +617,195 @@ async def test_fact_commits_remain_serial_without_holding_command_network_lock()
         ExchangeOrderState.ACKNOWLEDGED,
         ExchangeOrderState.FILLED,
     ]
+
+
+class FakeBoundaryExchange(FakeExchange):
+    def __init__(self, *, submit_result: ExchangeOrderSnapshot | Exception) -> None:
+        super().__init__(submit_result=submit_result)
+        self.guard: OrderExchangeSubmitGuard | None = None
+        self.on_request: ExchangeBoundaryCallback | None = None
+        self.on_response: ExchangeBoundaryCallback | None = None
+        self.post_count = 0
+
+    def set_before_order_submit_guard(
+        self, guard: OrderExchangeSubmitGuard | None
+    ) -> None:
+        self.guard = guard
+
+    def set_exchange_boundary_callbacks(
+        self,
+        *,
+        on_request: ExchangeBoundaryCallback | None = None,
+        on_response: ExchangeBoundaryCallback | None = None,
+    ) -> None:
+        self.on_request = on_request
+        self.on_response = on_response
+
+    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
+        self.calls.append("submit")
+        if self.guard is not None:
+            await self.guard(plan, datetime.now(tz=UTC))
+        if self.on_request is not None:
+            await self.on_request(plan, "submit_request_started", datetime.now(tz=UTC))
+        self.post_count += 1
+        try:
+            if isinstance(self.submit_result, Exception):
+                raise self.submit_result
+            return replace(self.submit_result, client_order_id=plan.client_order_id)
+        finally:
+            if self.on_response is not None:
+                await self.on_response(
+                    plan, "submit_response_received", datetime.now(tz=UTC)
+                )
+
+
+async def test_state_machine_blocks_post_when_lease_revoked_during_hub_register(
+) -> None:
+    exchange = FakeBoundaryExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
+    )
+    repository = FakeOrderRepository()
+    telemetry_phases: list[str] = []
+
+    hub_started = asyncio.Event()
+    hub_release = asyncio.Event()
+    lease_active = True
+
+    async def on_hub_register(_plan: OrderExecutionPlan, _now: datetime) -> None:
+        hub_started.set()
+        await hub_release.wait()
+
+    async def boundary_fence(_plan: OrderExecutionPlan, _now: datetime) -> None:
+        if not lease_active:
+            raise OrderPreSubmissionError("lease revoked during hub wait")
+
+    async def on_telemetry(
+        _plan: OrderExecutionPlan, phase: str, _now: datetime
+    ) -> None:
+        telemetry_phases.append(phase)
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        event_repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_before_submit=on_hub_register,
+        on_before_exchange_submit=boundary_fence,
+        on_exchange_request=on_telemetry,
+        on_exchange_response=on_telemetry,
+        serialize_commands=False,
+    )
+
+    plan = _plan()
+    submit_task = asyncio.create_task(machine.submit(plan))
+
+    await asyncio.wait_for(hub_started.wait(), timeout=1.0)
+    # Lease is revoked while Hub registration is in flight
+    lease_active = False
+    hub_release.set()
+
+    result = await submit_task
+
+    assert result.state is ExchangeOrderState.REJECTED
+    assert exchange.post_count == 0
+    assert "submit_request_started" not in telemetry_phases
+    assert repository.events[-1].details == {
+        "reason": "lease revoked during hub wait",
+        "phase": "before_exchange_submit",
+    }
+
+
+async def test_state_machine_hub_failure_blocks_exchange_submit() -> None:
+    exchange = FakeBoundaryExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
+    )
+    repository = FakeOrderRepository()
+
+    async def failing_hub(_plan: OrderExecutionPlan, _now: datetime) -> None:
+        raise OrderPreSubmissionError(
+            "account position expectation registration failed: TimeoutError"
+        )
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        event_repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_before_submit=failing_hub,
+        serialize_commands=False,
+    )
+
+    result = await machine.submit(_plan())
+
+    assert result.state is ExchangeOrderState.REJECTED
+    assert exchange.calls == []
+    assert exchange.post_count == 0
+    assert repository.events[-1].details == {
+        "reason": "account position expectation registration failed: TimeoutError",
+        "phase": "before_exchange_submit",
+    }
+
+
+async def test_state_machine_concurrent_workers_recheck_post_boundary() -> None:
+    exchange = FakeBoundaryExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
+    )
+    repository = FakeOrderRepository()
+
+    active_halt = False
+    order_a_completed = asyncio.Event()
+
+    async def boundary_fence(plan: OrderExecutionPlan, _now: datetime) -> None:
+        if plan.client_order_id == "order-b":
+            # Wait until order A completes and triggers halt
+            await order_a_completed.wait()
+        if active_halt:
+            raise OrderPreSubmissionError("halted by peer worker event")
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        event_repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_before_exchange_submit=boundary_fence,
+        serialize_commands=False,
+    )
+
+    plan_a = replace(_plan(), client_order_id="order-a")
+    plan_b = replace(_plan(), client_order_id="order-b")
+
+    async def run_order_a():
+        nonlocal active_halt
+        res = await machine.submit(plan_a)
+        active_halt = True
+        order_a_completed.set()
+        return res
+
+    res_a, res_b = await asyncio.gather(run_order_a(), machine.submit(plan_b))
+
+    assert res_a.state is ExchangeOrderState.ACKNOWLEDGED
+    assert res_b.state is ExchangeOrderState.REJECTED
+    assert exchange.post_count == 1  # Only order A posted
+    assert res_b.client_order_id == "order-b"
+
+
+async def test_state_machine_timeout_with_halt_remains_unknown_and_no_resend(
+) -> None:
+    exchange = FakeExchange(
+        submit_result=ExchangeSubmissionTimeoutError("timed out waiting for POST"),
+        query_result=None,
+    )
+    exchange.query_results = [None, None, None, None, None]
+    repository = FakeOrderRepository()
+
+    machine = _machine(exchange, repository)
+    result = await machine.submit(_plan())
+
+    assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert exchange.calls == ["submit", "query", "query", "query", "query", "query"]

@@ -1394,6 +1394,7 @@ class OrderExecutionCoordinator:
                             current_gross_exposure=preparation.current_gross_exposure,
                             open_position_symbols=preparation.open_position_symbols,
                             exposure_notional=preparation.exposure_notional,
+                            baseline_observed_at=preparation.baseline_observed_at,
                         )
                 except OrderRecoveryPendingError as rejection:
                     log.info(

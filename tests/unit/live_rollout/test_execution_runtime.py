@@ -92,3 +92,111 @@ async def test_failed_or_cancelled_restore_never_exposes_submission(monkeypatch,
     constructor.assert_not_called()
     args["exchange"].assert_not_called()
     assert not args["exchange"].method_calls
+
+
+def test_compile_live_runtime_plan_applies_overrides() -> None:
+    from decimal import Decimal
+    from unittest.mock import Mock
+
+    from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, TradingLease
+    from crypto_momentum_lab.live_rollout.runtime_config import LiveRuntimeConfig
+
+    config = Mock(spec=LiveRuntimeConfig)
+    config.strategy = Mock()
+    config.strategy.market_orders = False
+
+    risk_cfg = Mock(spec=RiskConfigSnapshot)
+    risk_cfg.max_open_positions = 5
+    risk_cfg.max_gross_notional = Decimal("50000")
+    risk_cfg.max_account_drawdown = "0.05"
+    risk_cfg.max_order_notional = Decimal("10000")
+
+    lease = Mock(spec=TradingLease)
+    lease.fencing_token = 42
+
+    plan = runtime.compile_live_runtime_plan(
+        config=config,
+        target_notional=Decimal("10000"),
+        risk_config=risk_cfg,
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        git_commit_hash="abc1234",
+        migration_revision="20261003_0001",
+        active_lease=lease,
+    )
+
+    assert plan.account_label == "primary"
+    assert plan.fencing_epoch == 42
+    assert plan.effective_policy.target_notional == Decimal("10000")
+    assert plan.effective_policy.order_type == "limit"
+    assert plan.effective_policy.max_open_positions == 5
+
+
+def test_capability_evidence_provider_evaluates_runtime_facts() -> None:
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import Mock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.domain.risk import TradingLease
+    from crypto_momentum_lab.domain.runtime import RuntimePlan
+
+    mock_plan = Mock(spec=RuntimePlan)
+    mock_plan.plan_hash = "hash123"
+    mock_plan.runtime_generation = "gen1"
+    mock_plan.fencing_epoch = 1
+    mock_plan.declared_schema_compatibility = "v1"
+    mock_plan.observed_database_revision = "rev1"
+
+    now = datetime.now(tz=UTC)
+    active_lease = Mock(spec=TradingLease)
+    active_lease.expires_at = now + timedelta(seconds=60)
+
+    ctx = Mock()
+    ctx.unmanaged_position_symbols = ()
+    ctx.unresolved_orders = ()
+
+    provider = runtime.build_capability_evidence_provider(
+        account_label="acc1",
+        runtime_plan=mock_plan,
+        get_active_lease=lambda: active_lease,
+        is_entry_enabled=lambda: True,
+        get_context=lambda: ctx,
+        get_market_age=lambda: 2.5,
+        has_api_key=lambda: True,
+    )
+
+    order_plan = Mock(spec=OrderExecutionPlan)
+    order_plan.symbol = "BTCUSDT"
+    order_plan.client_order_id = "cid1"
+
+    evidence = provider(order_plan, now)
+
+    assert evidence.market_freshness_seconds == 2.5
+    assert evidence.is_account_concordant is True
+    assert evidence.is_account_identity_verified is True
+    assert evidence.is_lease_active is True
+    assert evidence.is_approval_valid is True
+    assert evidence.unresolved_inflight_orders_count == 0
+
+
+def test_build_live_submission_fence_constructs_fence() -> None:
+    from unittest.mock import Mock
+
+    from crypto_momentum_lab.domain.runtime import CapabilityEvaluator, RuntimePlan
+    from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence
+
+    fence = runtime.build_live_submission_fence(
+        risk_state=Mock(),
+        account_label="acc1",
+        strategy_name="strat1",
+        lease_owner="worker1",
+        code_generation="gen1",
+        active_lease=lambda: None,
+        entry_enabled=lambda: True,
+        capability_evaluator=Mock(spec=CapabilityEvaluator),
+        runtime_plan=Mock(spec=RuntimePlan),
+        evidence_provider=Mock(),
+    )
+
+    assert isinstance(fence, LiveSubmissionFence)
+
