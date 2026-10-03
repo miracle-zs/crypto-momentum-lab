@@ -1143,10 +1143,16 @@ async def test_grace_timeout_resizes_intent_after_cancel_fill() -> None:
         open_position_symbols=frozenset({"BTCUSDT"}),
         managed_positions=(position,),
     )
+
+    async def current_position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return context
+
     daemon = _daemon(
         exchange=exchange,
         repository=repository,
         hedge_mode=True,
+        context_provider=current_position_context,
     )
 
     approved, submitted, failure = await daemon._exit_processor.process_requests(

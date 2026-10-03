@@ -814,6 +814,7 @@ class LiveExitProcessor:
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
         reference_price: Decimal | None,
+        require_current_position: bool = False,
     ) -> tuple[
         OrderExecutionResult | None,
         LiveDaemonRuntimeContext,
@@ -827,6 +828,12 @@ class LiveExitProcessor:
         )
         if failure is not None:
             return None, context, failure
+        refreshed_request = _rebase_exit_request(
+            request, context, require_current_position=require_current_position
+        )
+        if refreshed_request is None:
+            return None, context, "exit_position_already_flat"
+        request = refreshed_request
         for attempt in range(2):
             try:
                 result = await self._submission.execute(
@@ -895,6 +902,12 @@ class LiveExitProcessor:
             )
             if failure is not None:
                 return None, context, failure
+            refreshed_request = _rebase_exit_request(
+                request, context, require_current_position=require_current_position
+            )
+            if refreshed_request is None:
+                return None, context, "exit_position_already_flat"
+            request = refreshed_request
         return None, context, f"pending_live_context:{state.symbol}"
 
     async def process_requests(
@@ -967,34 +980,21 @@ class LiveExitProcessor:
                     return approved, submitted, "cancel_not_confirmed"
                 if cancel_result.state is ExchangeOrderState.REJECTED:
                     return approved, submitted, "cancel_rejected"
-                if cancel_result.state is ExchangeOrderState.ABSENT_RECONCILED:
-                    # The cancel response proved that the old recovery order
-                    # is gone.  Refresh the account view before submitting a
-                    # market fallback so a late fill cannot make us reuse
-                    # the stale planned quantity.
-                    context, failure = await self._load_fresh_exit_context(
-                        state=state,
-                        context=context,
-                    )
-                    if failure is not None:
-                        return approved, submitted, failure
                 remaining = max(
                     Decimal("0"),
                     request.cancel_plan.quantity - cancel_result.executed_quantity,
                 )
                 if remaining <= 0 and not request.fallback_to_current_position:
                     continue
-                if request.fallback_to_current_position:
-                    # A scheduled flatten must size the fallback from a
-                    # freshly loaded position after canceling the recovery
-                    # order.  The recovery order may have partially filled or
-                    # been filled while the cancel request was in flight.
-                    context, failure = await self._load_fresh_exit_context(
-                        state=state,
-                        context=context,
-                    )
-                    if failure is not None:
-                        return approved, submitted, failure
+                # Canceling a recovery order can publish account facts and
+                # invalidate the context that produced this fallback. Always
+                # rebuild a reduce-only request from the post-cancel position.
+                context, failure = await self._load_fresh_exit_context(
+                    state=state,
+                    context=context,
+                )
+                if failure is not None:
+                    return approved, submitted, failure
                 current_position_quantity = next(
                     (
                         position.quantity
@@ -1022,49 +1022,19 @@ class LiveExitProcessor:
                     request.fallback_candidate,
                     fallback_quantity,
                 )
-                try:
-                    result = await self._submission.execute(
-                        fallback_candidate,
-                        requested_quantity=fallback_quantity,
-                        state=state,
-                        context=context,
-                        reference_price=reference_price,
-                    )
-                except OrderProjectionConflictError:
-                    self._invalidate_context_cache()
-                    return approved, submitted, f"pending_live_context:{state.symbol}"
-                except Exception as error:
-                    if _is_missing_position_facts(error):
-                        log.error(
-                            "live_exit_position_facts_unavailable",
-                            run_id=self._config.run_id,
-                            symbol=fallback_candidate.symbol,
-                            candidate_id=fallback_candidate.candidate_id,
-                            error=str(error),
-                        )
-                        return approved, submitted, "position_facts_not_restored"
-                    if (
-                        self._exit_manager is not None
-                        and order_identity_errors.is_durable_order_identity_conflict(
-                            error
-                        )
-                    ):
-                        log.error(
-                            "live_exit_order_identity_conflict",
-                            run_id=self._config.run_id,
-                            symbol=fallback_candidate.symbol,
-                            candidate_id=fallback_candidate.candidate_id,
-                            error_type=type(error).__name__,
-                            error=str(error),
-                        )
-                        self._exit_manager.note_order_identity_conflict(
-                            fallback_candidate.symbol
-                        )
-                        return approved, submitted, "order_identity_conflict"
-                    raise
+                result, context, context_failure = await self._execute_exit_submission(
+                    LiveExitOrderRequest(
+                        candidate=fallback_candidate,
+                        quantity=fallback_quantity,
+                    ),
+                    state=state,
+                    context=context,
+                    reference_price=reference_price,
+                    require_current_position=True,
+                )
+                if context_failure is not None:
+                    return approved, submitted, context_failure
                 if result is None:
-                    if fallback_candidate.expires_at <= self._clock():
-                        return approved, submitted, "candidate_expired"
                     return approved, submitted, "exit_fallback_not_executed"
                 if invalidate_context:
                     self._invalidate_context_cache()
@@ -1271,6 +1241,9 @@ def _build_exit_recovery_candidate(
 def _resize_reduce_only_candidate(
     candidate: OrderIntentCandidate,
     quantity: Decimal,
+    *,
+    allocations: list[dict[str, str]] | None = None,
+    projection_version: str | None = None,
 ) -> OrderIntentCandidate:
     """Keep fallback intent metadata aligned with its final quantity."""
 
@@ -1280,6 +1253,10 @@ def _resize_reduce_only_candidate(
         raise ValueError("reduce-only candidate quantity must be positive")
     features = dict(candidate.features)
     features["quantity"] = str(quantity)
+    if allocations is not None:
+        features["exit_allocations"] = allocations
+    if projection_version is not None:
+        features["projection_version"] = projection_version
     desired_notional = candidate.desired_notional
     raw_reference_price = features.get("reference_price")
     if desired_notional is not None and isinstance(raw_reference_price, str):
@@ -1289,11 +1266,105 @@ def _resize_reduce_only_candidate(
             reference_price = None
         if reference_price is not None and reference_price > 0:
             desired_notional = quantity * reference_price
+    identity_changed = (
+        quantity != Decimal(str(candidate.features.get("quantity", quantity)))
+        or allocations is not None
+        and allocations != candidate.features.get("exit_allocations")
+        or projection_version is not None
+        and projection_version != candidate.features.get("projection_version")
+    )
+    candidate_id = candidate.candidate_id
+    signal_id = candidate.signal_id
+    if identity_changed:
+        projection_identity = projection_version or features.get(
+            "projection_version", ""
+        )
+        allocation_identity = allocations or features.get("exit_allocations", [])
+        identity = (
+            f"{candidate.signal_id}:quantity:{quantity}:"
+            f"projection:{projection_identity}:"
+            f"allocations:{allocation_identity}"
+        )
+        identity_id = uuid5(NAMESPACE_URL, identity)
+        candidate_id = f"live-exit-{identity_id}"
+        signal_id = f"live-exit-signal-{identity_id}"
     return replace(
         candidate,
+        candidate_id=candidate_id,
+        signal_id=signal_id,
         desired_notional=desired_notional,
         features=features,
     )
+
+
+def _rebase_exit_request(
+    request: LiveExitOrderRequest,
+    context: LiveDaemonRuntimeContext,
+    *,
+    require_current_position: bool = False,
+) -> LiveExitOrderRequest | None:
+    """Rebuild a reduce-only quantity/allocation against the latest position."""
+    candidate = request.candidate
+    managed_positions = getattr(context, "managed_positions", None)
+    if not candidate.reduce_only or managed_positions is None:
+        return request
+    raw_side = candidate.features.get("position_side")
+    candidate_side = getattr(candidate.side, "value", candidate.side)
+    position = next(
+        (
+            item
+            for item in managed_positions
+            if item.symbol == candidate.symbol
+            and (
+                item.position_side.value == raw_side
+                if raw_side is not None
+                else getattr(item.side, "value", item.side) == candidate_side
+            )
+        ),
+        None,
+    )
+    if position is None:
+        return None if require_current_position else request
+
+    quantity = min(request.quantity, position.quantity)
+    raw_allocations = candidate.features.get("exit_allocations")
+    allocations: list[dict[str, str]] | None = None
+    if isinstance(raw_allocations, list) and raw_allocations:
+        available: dict[str, Decimal] = {
+            batch.batch_id: batch.quantity
+            for batch in getattr(position, "batches", ())
+        }
+        if not available and position.batch_id:
+            available[position.batch_id] = position.quantity
+        allocations = []
+        remaining = quantity
+        for allocation in raw_allocations:
+            if not isinstance(allocation, dict):
+                continue
+            batch_id = allocation.get("batch_id")
+            raw_quantity = allocation.get("quantity")
+            if not isinstance(batch_id, str) or not isinstance(raw_quantity, str):
+                continue
+            try:
+                allocated = Decimal(raw_quantity)
+            except ArithmeticError:
+                continue
+            batch_available = available.get(batch_id, Decimal("0"))
+            resized = min(allocated, batch_available, remaining)
+            if resized > 0:
+                allocations.append({"batch_id": batch_id, "quantity": str(resized)})
+                available[batch_id] = batch_available - resized
+                remaining -= resized
+        quantity -= remaining
+    if quantity <= 0:
+        return None
+    resized_candidate = _resize_reduce_only_candidate(
+        candidate,
+        quantity,
+        allocations=allocations,
+        projection_version=getattr(position, "projection_version", None),
+    )
+    return LiveExitOrderRequest(candidate=resized_candidate, quantity=quantity)
 
 
 def _is_missing_position_facts(error: Exception) -> bool:

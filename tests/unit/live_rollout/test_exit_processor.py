@@ -780,7 +780,7 @@ async def test_cancel_fallback_waits_for_fresh_context_without_submitting():
     assert submission.calls == []
 
 
-async def test_grace_cancel_rebuilds_fallback_from_latest_position_after_context_invalidation():
+async def test_grace_cancel_rebuilds_fallback_from_latest_position():
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.execution.order_state import (
@@ -799,7 +799,11 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position_after_context
         Decimal("1.0"), Decimal("100"), NOW,
         batch_id="batch-1", projection_version="old",
     )
-    fresh_position = replace(old_position, quantity=Decimal("0.6"), projection_version="new")
+    fresh_position = replace(
+        old_position,
+        quantity=Decimal("0.6"),
+        projection_version="new",
+    )
     fresh_context = SimpleNamespace(
         pending_position_symbols=frozenset(),
         unmanaged_position_symbols=frozenset(),
@@ -807,7 +811,11 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position_after_context
     )
     submission = RecordingSubmission(_acknowledged_result())
     processor = _processor(submission, context_is_current=lambda _: is_current[0])
-    processor._context_provider = AsyncMock(return_value=fresh_context)
+    async def refresh_context(_state):
+        is_current[0] = True
+        return fresh_context
+
+    processor._context_provider = AsyncMock(side_effect=refresh_context)
     processor._apply_context = lambda _: None
     processor._state_machine = SimpleNamespace(cancel_order=AsyncMock(
         side_effect=lambda _plan: (
@@ -849,6 +857,7 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position_after_context
     assert processor._context_provider.await_count == 1
     submitted_candidate, submitted_quantity, _ = submission.calls[0]
     assert submitted_quantity == Decimal("0.6")
+    assert submitted_candidate.candidate_id != candidate.candidate_id
     assert submitted_candidate.features["quantity"] == "0.6"
     assert submitted_candidate.features["exit_allocations"] == [
         {"batch_id": "batch-1", "quantity": "0.6"}
