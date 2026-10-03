@@ -860,6 +860,14 @@ def test_refresh_approval_runtime_preserves_existing_limits(monkeypatch) -> None
     monkeypatch.setattr(main, "_load_active_approval", fake_load)
     monkeypatch.setattr(main, "_latest_risk_config_hash", fake_risk_hash)
     monkeypatch.setattr(main, "_runtime_strategy_config_hash", lambda _: "e" * 64)
+    monkeypatch.setattr(
+        main,
+        "_runtime_manifest_account_for_cli",
+        lambda path, *, account_label, strategy: (path, account_label, strategy),
+    )
+    monkeypatch.setattr(
+        main, "_runtime_manifest_strategy_config_hash", lambda _: "e" * 64
+    )
     monkeypatch.setattr(main, "_save_approval", fake_save)
 
     result = runner.invoke(
@@ -870,6 +878,8 @@ def test_refresh_approval_runtime_preserves_existing_limits(monkeypatch) -> None
             "postgresql+asyncpg://unused",
             "--account-label",
             "account-2",
+            "--runtime-manifest",
+            "/runtime/live.yaml",
             "--git-commit-hash",
             "f" * 40,
             "--migration-revision",
@@ -924,11 +934,22 @@ def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
     monkeypatch.setattr(main, "_load_active_approval", fake_load)
     monkeypatch.setattr(main, "_latest_risk_config_hash", fake_risk_hash)
     monkeypatch.setattr(main, "_runtime_strategy_config_hash", lambda _: "e" * 64)
+    monkeypatch.setattr(
+        main,
+        "_runtime_manifest_account_for_cli",
+        lambda path, *, account_label, strategy: (path, account_label, strategy),
+    )
+    monkeypatch.setattr(
+        main, "_runtime_manifest_strategy_config_hash", lambda _: "e" * 64
+    )
     monkeypatch.setattr(main, "_save_approval", fake_save)
 
     # Success case
+    preflight_kwargs: list[dict[str, object]] = []
+
     async def fake_preflight_ok(*args, **kwargs):
-        del args, kwargs
+        del args
+        preflight_kwargs.append(kwargs)
         return {"preflight_ok": True, "preflight_errors": []}
 
     monkeypatch.setattr(main, "_preflight_summary", fake_preflight_ok)
@@ -941,6 +962,8 @@ def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
             "postgresql+asyncpg://unused",
             "--account-label",
             "account-2",
+            "--runtime-manifest",
+            "/runtime/live.yaml",
             "--git-commit-hash",
             "f" * 40,
             "--migration-revision",
@@ -950,6 +973,7 @@ def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
     )
     assert result_ok.exit_code == 0
     assert '"preflight_ok": true' in result_ok.stdout
+    assert preflight_kwargs[0]["expected_strategy_config_hash"] == "e" * 64
 
     # Failure case
     async def fake_preflight_fail(*args, **kwargs):
@@ -966,6 +990,8 @@ def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
             "postgresql+asyncpg://unused",
             "--account-label",
             "account-2",
+            "--runtime-manifest",
+            "/runtime/live.yaml",
             "--git-commit-hash",
             "f" * 40,
             "--migration-revision",
@@ -2065,7 +2091,17 @@ async def test_real_preflight_summary_checks_account_state(monkeypatch, status, 
         AsyncMock(return_value=SimpleNamespace(config_hash="risk")),
     )
     monkeypatch.setattr(main, "_latest_account_state", AsyncMock(return_value=status))
-    result = await main._preflight_summary("test", "primary", "orderflow_impulse")
+    manifest_hash = "c" * 64
+    monkeypatch.setenv("CML_LIVE_STRATEGY_CONFIG_HASH", manifest_hash)
+    result = await main._preflight_summary(
+        "test",
+        "primary",
+        "orderflow_impulse",
+        expected_strategy_config_hash=manifest_hash,
+    )
     assert result["preflight_checks"]["account_ready"] is ready
+    assert result["runtime_strategy_config_hash"] == manifest_hash
+    assert result["preflight_checks"]["runtime_strategy_config_matches_manifest"]
+    assert result["preflight_checks"]["runtime_strategy_config_matches_configured"]
     assert result["account_state"] == status.value
     engine.dispose.assert_awaited_once()

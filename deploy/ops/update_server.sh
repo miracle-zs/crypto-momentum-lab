@@ -1394,6 +1394,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
         refresh-approval-runtime \
         --account-label "$account" \
         --strategy orderflow_impulse \
+        --runtime-manifest /app/deploy/live-runtime.yaml \
         --git-commit-hash "$runtime_commit" \
         --migration-revision "$(migration_revision_for_account "$account")" \
         --verify-preflight \

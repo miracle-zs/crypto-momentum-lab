@@ -760,6 +760,13 @@ def refresh_approval_runtime_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    runtime_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-manifest",
+            help="Derive the approved strategy hash from this runtime manifest.",
+        ),
+    ] = None,
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
     verify_preflight: Annotated[
@@ -786,8 +793,22 @@ def refresh_approval_runtime_command(
         raise typer.BadParameter(
             f"active approval is missing for {account_label}/{strategy}"
         )
+    manifest_account = (
+        None
+        if runtime_manifest is None
+        else _runtime_manifest_account_for_cli(
+            runtime_manifest,
+            account_label=account_label,
+            strategy=strategy,
+        )
+    )
+    raw_strategy_hash = (
+        _runtime_strategy_config_hash(strategy)
+        if manifest_account is None
+        else _runtime_manifest_strategy_config_hash(manifest_account)
+    )
     strategy_config_hash = _validate_hex_hash(
-        _runtime_strategy_config_hash(strategy),
+        raw_strategy_hash,
         "runtime strategy config hash",
         _CONFIG_HASH_LENGTH,
     )
@@ -862,6 +883,11 @@ def refresh_approval_runtime_command(
                 strategy,
                 expected_git_commit=git_commit_hash,
                 expected_migration_revision=migration_revision,
+                expected_strategy_config_hash=(
+                    None
+                    if manifest_account is None
+                    else strategy_config_hash
+                ),
             )
         )
         typer.echo(json.dumps(payload, sort_keys=True))
@@ -2044,18 +2070,36 @@ async def _preflight_summary(
         )
         unresolved = await PostgresOrderReadRepository(factory).load_unresolved_orders()
         risk_config = await _latest_risk_config(factory, account_label)
-        runtime_config = _preflight_runtime_strategy_config()
-        runtime_strategy_config_hash = _live_strategy_config_hash(
-            strategy_name,
-            profile=runtime_config.profile,
-            entry_positive_gainer_top_count=(
-                runtime_config.entry_positive_gainer_top_count
-            ),
-            require_price_above_ema5=runtime_config.require_price_above_ema5,
-            require_price_above_ema10=runtime_config.require_price_above_ema10,
-            entry_order_type=runtime_config.entry_order_type,
-            entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
-        )
+        if expected_strategy_config_hash is None:
+            runtime_config = _preflight_runtime_strategy_config()
+            runtime_strategy_config_hash = _live_strategy_config_hash(
+                strategy_name,
+                profile=runtime_config.profile,
+                entry_positive_gainer_top_count=(
+                    runtime_config.entry_positive_gainer_top_count
+                ),
+                require_price_above_ema5=runtime_config.require_price_above_ema5,
+                require_price_above_ema10=runtime_config.require_price_above_ema10,
+                entry_order_type=runtime_config.entry_order_type,
+                entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
+            )
+            runtime_strategy_config_inputs: dict[str, object] = {
+                **runtime_config.profile.as_dict(),
+                "entry_positive_gainer_top_count": (
+                    runtime_config.entry_positive_gainer_top_count
+                ),
+                "require_price_above_ema5": runtime_config.require_price_above_ema5,
+                "require_price_above_ema10": runtime_config.require_price_above_ema10,
+                "entry_policy_mode": runtime_config.entry_policy_mode,
+                "entry_order_type": runtime_config.entry_order_type.value,
+                "entry_limit_ttl_seconds": runtime_config.entry_limit_ttl_seconds,
+            }
+        else:
+            runtime_strategy_config_hash = expected_strategy_config_hash.strip().lower()
+            runtime_strategy_config_inputs = {
+                "source": "runtime_manifest",
+                "strategy_config_hash": runtime_strategy_config_hash,
+            }
         configured_strategy_config_hash = (
             os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower() or None
         )
@@ -2139,17 +2183,7 @@ async def _preflight_summary(
                 if approved_strategy_config_hash is None
                 else runtime_strategy_config_hash == approved_strategy_config_hash
             ),
-            "runtime_strategy_config_inputs": {
-                **runtime_config.profile.as_dict(),
-                "entry_positive_gainer_top_count": (
-                    runtime_config.entry_positive_gainer_top_count
-                ),
-                "require_price_above_ema5": runtime_config.require_price_above_ema5,
-                "require_price_above_ema10": runtime_config.require_price_above_ema10,
-                "entry_policy_mode": runtime_config.entry_policy_mode,
-                "entry_order_type": runtime_config.entry_order_type.value,
-                "entry_limit_ttl_seconds": runtime_config.entry_limit_ttl_seconds,
-            },
+            "runtime_strategy_config_inputs": runtime_strategy_config_inputs,
         }
     finally:
         await engine.dispose()
