@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from crypto_momentum_lab.persistence.postgres.legacy_order_identity_repair import (
+from scripts.maintenance_archive.legacy_order_identity_repair import (
     build_legacy_identity_report,
 )
 

@@ -2,6 +2,14 @@
 
 文档核对日期：2026-09-29。仓库代码基线：`616096dec29e6779c5c24d8bc5b5d233adad8bd4`（HEAD 提交于 2026-09-28）。最近一份生产快照记录至 2026-09-28 16:43（Asia/Shanghai）：当时四个 Live 容器已恢复运行，策略镜像为服务器提交 `bb7d5635ca71d1244980e60334969a1ac7b33ba3`（诊断记录映射到本地提交 `18adfee`），看板镜像为 `b655aa4`。这些镜像与当前仓库 HEAD 不同；快照不证明 9 月 29 日的线上状态。
 
+## 2026-10-03 本地仓库清理更新
+
+以下更新描述本地工作树，不代表生产已部署：旧 Research、Replay/Paper、Shadow CLI
+及 Compression/Liquidation 策略已经退役。服务器 Compose 不再定义 Paper runner。
+保留 Orderflow 实盘、本地 `local_optimization/`、研究采集器、行情、账户与看板能力；
+保留历史账本和数据库迁移。下方的 9 月观测及旧能力描述应按原日期理解。
+详见[执行计划](plans/2026-10-03-dormant-code-cleanup.md)。
+
 ## 仓库能确认的系统轮廓
 
 - 项目面向 Binance USD-M 永续合约，提供行情采集、策略研究、Replay、Paper、账户同步、受控实盘执行和运维看板能力。根 [README](../README.md) 给出本地启动、数据采集、Replay、Paper 和服务器 Paper 部署入口。

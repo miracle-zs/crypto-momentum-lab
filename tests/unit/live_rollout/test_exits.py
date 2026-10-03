@@ -22,7 +22,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
-from tests.unit.shadow_operation.test_service import _state
+from tests.fixtures.live_market import _state
 
 
 async def test_scheduled_flatten_targets_full_position_as_reduce_only_market() -> None:

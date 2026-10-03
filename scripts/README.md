@@ -14,7 +14,6 @@
 | `merge_15m_kline_tail.py` | 数据清洗 | 拼接合并增量 K线尾部数据，填补断点 |
 | `merge_runtime_state_exports.py` | 数据清洗 | 合并分散的运行时状态数据导出切片 |
 | `backfill_binance_15s_from_aggtrades.py` | 数据重构 | 从 aggTrades 高频归档生成 15s 级聚合行情 |
-| `repair_server_state_20260929.py` | 生产运维 | 针对服务器 PostgreSQL 历史状态元数据的专项修复 |
 | `materialize_server_paper_snapshot.py` | 生产运维 | 固化服务器模拟运行快照与日志 |
 | `build_daily_account_alignment.py` | 巡检对账 | 生成多账户每日对齐基线数据 |
 | `inspect_live_market_time_alignment.py` | 巡检对账 | 检查行情数据与服务器时钟时间戳的一致性 |
@@ -29,3 +28,10 @@
 
 早期课题阶段探索性研究脚本（Orderflow 特征分析、爆仓级联、K线边界回放、阶段性回测）已统一归档于 [`research_archive/`](research_archive/README.md)。
 正式参数寻优与对账分析请统一使用 [`local_optimization/`](../local_optimization/) 模块。
+
+## 非日常执行归档
+
+- [历史维护工具](maintenance_archive/README.md)：日期化事故修复与历史订单身份审计。
+- [审查复现脚本](review_archive/README.md)：已修复问题的手动复现与性能采样。
+
+这些目录不进入默认测试集，也不属于实盘或日常本地寻优入口。

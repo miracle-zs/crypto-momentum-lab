@@ -1,1 +1,0 @@
-"""Shadow operation CLI application."""

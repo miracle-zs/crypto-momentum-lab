@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from crypto_momentum_lab.live_rollout.context_prefetch import LiveContextPrefetcher
-from tests.unit.shadow_operation.test_service import _state
+from tests.fixtures.live_market import _state
 
 
 @pytest.mark.asyncio

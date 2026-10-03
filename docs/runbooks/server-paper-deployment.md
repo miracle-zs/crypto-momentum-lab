@@ -1,62 +1,19 @@
-# Server Paper Deployment
+# Server Deployment
 
-This deployment consumes Binance public USD-M market data and runs one active
-strategy family with two paper accounts in paper mode. The default profile does not accept
-Binance credentials and cannot place orders. The opt-in `live` profile is
-documented separately in `small-capital-live-session.md`.
+Updated 2026-10-03 for the repository cleanup. The filename is retained for
+existing links. The base stack runs PostgreSQL, migrations, universe bootstrap,
+market data, the research collector, and the operator dashboard. The opt-in
+`live` profile and account overlay run four isolated Orderflow Live accounts.
+This describes repository configuration, not an observation of running servers.
 
-The server profile subscribes to `aggTrade`, `bookTicker`, and `forceOrder`.
-`aggTrade` feeds the active strategies, `bookTicker` supplies executable bid/ask
-prices, and `forceOrder` remains captured for liquidation research and risk
-context even though no Liquidation trading account is active. Candle exits load
-immutable official UTC-aligned 15-minute klines from Binance REST only when
-positions require them; one-minute klines are not continuously subscribed or
-archived.
+All four Paper runner definitions and their standalone CLI have been removed.
+Historical run IDs, database records, dashboard queries, and market-data exit
+protection remain available. The update script still archives, stops, and
+removes containers left by older checkouts, using their Compose labels.
 
-The compression-breakout daemon keeps 15-second states for execution and risk
-monitoring, while entry signals use the frozen one-minute shadow profile:
-
-- 60 one-minute buckets, or 60 minutes, in the frozen compression range;
-- maximum range width of 2.5%;
-- minimum breakout distance of 0.3%;
-- two closed one-minute buckets for acceptance;
-- 60 one-minute buckets, or 60 minutes, of per-symbol cooldown.
-
-The two active virtual accounts are isolated by run ID and each starts with
-1,000 USDT:
-
-- `paper-account-16-orderflow-b8-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B8 exit;
-- `paper-account-17-orderflow-b1-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B1 exit.
-
-The other paper run IDs remain in PostgreSQL for historical analysis, but their
-Compose services use the `retired-paper` profile and are not part of the
-default server stack.
-
-For all `candle_15m` exits, the candle containing the entry is observation-only;
-the first eligible exit candle is the next complete 15-minute candle.
-The configured Binance REST source is authoritative for these exits. If its
-request, response, or completeness check fails, the runner keeps the position
-open, records the source error, and retries on the next backoff window; it does
-not synthesize a partial candle or fall back to a different close price.
-Positions created before the candle cursor migration have no replay boundary;
-the runner checks only the latest complete 15-minute window, persists the first
-successful candle as the new cursor, and emits a one-time legacy-cursor warning.
-
-The previously deployed Compression, 45-minute, and C1 imbalance accounts are
-kept in the database for historical analysis but are no longer active runners.
-
-No Liquidation trading account is deployed. The preregistered C0/C1/C2 replay
-found no candidate that passed both train and validation gates.
-
-The active B1 and B8 filters are applied after the shared baseline Orderflow
-decision. Rejected signals still advance the baseline strategy cooldown, so
-accounts 16 and 17 remain strict subsets of the same signal stream used by the
-historical filter study. They share one positive Top10 gainer entry universe
-and a `0.40` minimum aggressive imbalance, which makes their B8-versus-B1
-comparison synchronous.
-
-The retired Top100 and baseline variants remain available in the database for
-comparison, but they are not restarted by the normal deployment path.
+Compression and Liquidation are no longer supported runtime strategies.
+Historical studies and implementations can be reproduced from Git baseline
+`02e6581f3bc71feac0f91f84fa405460ea26730f`.
 
 ## Deploy
 
@@ -71,7 +28,7 @@ comparison, but they are not restarted by the normal deployment path.
    ```
 
    Run `git rev-parse HEAD` in the checkout to obtain the commit value. The
-   compose build passes it into the image and the paper runners persist it in
+   compose build passes it into the image and the Live runners persist it in
    their runtime identity; deployment fails closed when it is omitted.
 
 4. Build and start the stack for the first deployment:
@@ -89,136 +46,20 @@ comparison, but they are not restarted by the normal deployment path.
    server block, validate with `nginx -t`, and reload Nginx. The dashboard is
    anonymous by default, so expose it only over TLS or a private tunnel/VPN.
 
-### Deployment timing and efficient verification
-
-The 2026-09-08 deployment took approximately 13 minutes end to end, including
-operator checks. Image building took about 82 seconds and recreating the active
-paper container plus dashboard took about 23 seconds. Paper readiness took
-roughly 2–3 minutes, including the first checkpoint and subsequent probe.
-Repeated serial checks and interactive SSH calls that waited after command
-completion added avoidable time. Total deployment duration is not service
-downtime: existing containers continue running during the build.
-
-For a comparable incremental release, aim for approximately 3–5 minutes; this
-is a planning target, not a timeout or availability guarantee. Cold builds,
-archive recovery, database load, and checkpoint restoration can take longer.
-
-- Complete code review and local tests before the deployment window. On the
-  server, combine independent preflight checks into one bounded SSH operation.
-- Build once, restart market-data, and wait for its health before restarting
-  affected paper services. Poll health every 5–10 seconds with a bounded
-  deadline; inspect logs on failure or timeout instead of restarting repeatedly.
-- Collect all affected service health states and image identities together,
-  then check recent logs, checkpoint progress, and the HTTP health endpoint.
-  Avoid reopening source files or repeating successful checks without new
-  evidence. Configure the SSH runner to return when the command exits.
-- `start_period: 15m` is the market-data startup failure grace period, not a
-  mandatory delay. A successful probe can mark it healthy immediately. Paper
-  readiness depends on a successful checkpoint; allow for probe scheduling
-  after that checkpoint rather than sleeping for the entire grace period.
-
 ## Verify
 
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-orderflow-gainer10-pair
+  market-data research-collector dashboard
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
 
-The `market-data` healthcheck requires a recent 15-second market-state row.
-Each paper runner healthcheck requires a recent durable checkpoint for its run
-ID. Docker's restart policy reacts to process exit, not health status alone; an
-alive container that becomes `unhealthy` must be investigated and explicitly
-restarted. The application exits on its own watchdog failures so the restart
-policy can handle normal market-data stalls.
-
-Paper runtime-state readers keep the configured one-second poll interval while
-processing a batch and back off only when the durable table is idle, up to three
-seconds. This bounds the additional durable-state lag while avoiding repeated
-empty queries across the paper processes.
-
-The server Compose manifest runs the market-data, live-account, and live-strategy
-database probes every 60 seconds, the research collector probe every 90 seconds,
-and paper probes every 60 seconds. The dashboard probe uses the local HTTP
-endpoint through Python's standard library with `-S`, so it does not import
-the application or database driver for each check.
-
-The market-data process fails and lets Docker restart it when a 15-minute
-universe refresh exceeds 120 seconds, when no live market state arrives within
-120 seconds after startup, or when the latest market-state watermark becomes
-more than 120 seconds old. Shutdown first cancels subscription-management
-tasks, closes WebSocket connections concurrently, keeps the archive consumer
-running until its bounded queue is empty, and then finalizes open writers. This
-cleanup is capped at 55 seconds inside Compose's 60-second stop grace period.
-A restart scans and recovers any interrupted raw archives before opening live
-subscriptions; on a large archive this startup phase can take several minutes.
-The market-data healthcheck has a 15-minute startup period for archive recovery
-and rejects `ready` records written before the current container started. The
-process handles both `SIGTERM` and `SIGINT` through this shutdown path. Do not
-use `SIGKILL` for planned deployments.
-
-The remote console is available at `https://<server>/momentum/`. The
-exchange-account panel remains empty because this stack intentionally has no
-Binance private-account credentials; the two active paper-account panels
-remain active.
-
-## Paper Artifacts
-
-The paper daemon persists strategy signals, order-intent candidates, and
-simulated fills in PostgreSQL. Pending candidates are reloaded after a daemon
-restart, and repeated writes are idempotent.
-
-Realtime paper commands use zero additional execution buckets: after a
-strategy consumes a newly closed 15-second state, a market candidate is filled
-immediately using that state's executable bid or ask. This matches the live
-order path. It does not remove the inherent 15-second aggregation delay; a
-signal that depends on a bucket is only known when that bucket closes.
-
-The dashboard separates the two active paper accounts by strategy and exit mode into:
-
-- account equity and balance history;
-- currently open positions with mark price and unrealized PnL;
-- closed trades with net realized PnL;
-- a lifecycle ledger labeled `开多`, `开空`, `平多`, or `平空`.
-
-The overview response stays bounded for normal polling. Select an account and
-use `查看全部历史` to load its complete closed-trade and lifecycle history on
-demand.
-
-Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
-filled entry. A filled entry opens a paper position. The active B1 and B8
-accounts first close profitably at the warning candle's official close (or the
-current executable mark if it has recovered into net profit). Only a net-losing
-warning arms a reduce-only recovery limit at 0.58% above entry for long
-positions (or 0.58% below entry for short positions); a quote touching that
-limit closes at the executable quote, and otherwise the account exits at the
-first executable mark on the one-bar or eight-bar timeout. Both retain the
-existing 24-hour maximum-holding safeguard.
-
-PnL includes both entry and exit taker fees. All paper accounts evaluate the
-closed state's trade close, rather than intrabucket high/low.
-
-The market-data service subscribes to the 40-symbol momentum universe plus
-symbols with open positions in the paper runs listed by
-`CML_PAPER_EXIT_RUN_IDS`. Strategy runners continue to allow entries only for
-the active 40-symbol universe; protected symbols are consumed only so existing
-positions can be marked and exited. Keep the environment variable in
-`compose.server.yaml` aligned whenever a paper account is added or renamed.
-
-The server profile has no private account connection, so virtual fills require
-the latest bid/ask and use the marketable side of that quote. Candle exits are
-triggered only after all 15 official one-minute klines in the UTC-aligned
-15-minute interval have reported `closed=true`. No order is sent to Binance.
-
-Inspect persisted artifact counts with:
-
-```bash
-docker compose --env-file .env.server -f compose.server.yaml exec -T postgres \
-  psql -U cml -d cml -c \
-  'select run_id, signal_count, candidate_count, fill_count, pending_candidate_count from strategy_runs order by created_at desc limit 5;'
-```
+Live health, approval binding, and rollout verification are covered below and
+in `small-capital-live-session.md`. Health does not prove historical ledger
+consistency. Docker restart policies react to process exits, so investigate an
+alive but unhealthy service explicitly.
 
 ## Fast Server Update
 
@@ -237,7 +78,7 @@ outside the release layer, so source-only changes rebuild a small local wheel.
 Healthchecks retain their 60/90-second steady-state intervals to keep
 probe CPU low, but use a 5-second `start_interval` (15 seconds for the long
 market-data recovery window) while a container is starting. Stateless
-research, paper, and dashboard services stop after 20 seconds; Live services
+research and dashboard services stop after 20 seconds; Live services
 retain a longer grace period for state and exchange cleanup. The deployment
 script treats that grace period as a maximum: it explicitly stops the old Live
 containers, polls their captured IDs until they are no longer running, waits

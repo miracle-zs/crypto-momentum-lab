@@ -10,7 +10,7 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
 from crypto_momentum_lab.live_rollout.volume import QuoteVolume24hSnapshot
-from tests.unit.shadow_operation.test_service import (
+from tests.fixtures.live_market import (
     _signal,
     _state,
 )

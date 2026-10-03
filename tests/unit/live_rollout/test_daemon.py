@@ -78,12 +78,12 @@ from tests.unit.execution_account.orders.test_state_machine import (
     _snapshot,
 )
 from tests.unit.live_rollout.test_gates import _context as gate_context
-from tests.unit.shadow_operation.test_service import (
+from tests.fixtures.live_market import (
     FakeStrategy,
     _intent,
     _state,
 )
-from tests.unit.shadow_operation.test_service import (
+from tests.fixtures.live_market import (
     _context as shadow_context,
 )
 

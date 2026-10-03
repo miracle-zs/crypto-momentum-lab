@@ -53,7 +53,7 @@ from crypto_momentum_lab.persistence.postgres.position_order_window import (
     _OrderAnchorEvent,
 )
 from tests.unit.live_rollout.test_gates import _context as gate_context
-from tests.unit.shadow_operation.test_service import _context as shadow_context
+from tests.fixtures.live_market import _context as shadow_context
 
 NOW = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
 

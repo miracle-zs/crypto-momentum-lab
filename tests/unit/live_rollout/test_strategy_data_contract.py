@@ -6,7 +6,7 @@ from crypto_momentum_lab.live_rollout.market_loop import (
     _strategy_max_gap_seconds,
     _strategy_state_interval_seconds,
 )
-from tests.unit.strategy_runner.test_daemon import FakeStrategy
+from tests.fixtures.runtime_strategy import FakeStrategy
 
 
 class SlowerStrategy(FakeStrategy):

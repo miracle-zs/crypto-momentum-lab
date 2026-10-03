@@ -1,1 +1,0 @@
-"""Research command line application."""

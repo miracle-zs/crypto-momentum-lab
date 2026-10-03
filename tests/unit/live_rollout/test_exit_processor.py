@@ -30,7 +30,7 @@ from crypto_momentum_lab.live_rollout.order_identity_errors import (
     is_durable_order_identity_conflict,
 )
 from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 

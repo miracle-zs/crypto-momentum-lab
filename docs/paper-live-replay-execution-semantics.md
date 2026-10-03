@@ -1,5 +1,9 @@
 # Replay / Paper / Live execution semantics
 
+> 2026-10-03 状态更新：本文的旧 `strategy_runner/` Replay/Paper 实现已退役，
+> 前面的模拟语义比较仅作为历史说明（基线 `02e6581f3bc71feac0f91f84fa405460ea26730f`）。
+> 当前本地研究使用 `local_optimization/`。后面的 Live 故障注入发布门禁仍然有效。
+
 这份文档把 Replay、Paper 和 Live 的执行语义固定成发布前必须知道的
 差异清单。它不是要求三条路径共享一条执行实现；它定义哪些差异是故意的，
 以及哪些结论不能从模拟环境外推到真实交易。
@@ -86,14 +90,13 @@ Paper 可在一个模拟账户内保存多个 `PaperPosition`，但不会在提�
 - 并发 entry 的 exposure claim / max positions 仲裁；
 - 提交时通过、成交时信号已经衰减的当前处理契约。
 
-当前选择是保留这些执行语义差异，而不是强行让 Paper 假装成 Live。任何
+清理前的选择是保留这些执行语义差异，而不是强行让 Paper 假装成 Live。任何
 需要“Paper 与 Live 可互换”的产品结论，都必须先补齐对应的 execution adapter
 和测试契约。
 
-## 现有测试证据
+## 测试证据与历史边界
 
-- `tests/unit/strategy_runner/test_fills.py`、`test_paper.py`、`test_replay.py`：
-  模拟 latency、expiry、fill、pending/rejected 与 Paper position 行为。
+- 旧 `tests/unit/strategy_runner/` 模拟行为测试随入口退役，历史版本见上述基线。
 - `tests/unit/live_rollout/test_entry_orders.py`、`test_daemon.py`、`test_exits.py`：
   GTD timer、过期 candidate、batch/recovery exit 与 partial/reconcile 相关行为。
 - `tests/unit/execution_account/orders/test_state_machine.py`：

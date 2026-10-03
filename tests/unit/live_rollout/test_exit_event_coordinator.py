@@ -31,7 +31,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
 )
 from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
-from tests.unit.shadow_operation.test_service import _state
+from tests.fixtures.live_market import _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 

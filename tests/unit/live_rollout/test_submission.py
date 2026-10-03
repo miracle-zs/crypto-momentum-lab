@@ -33,7 +33,7 @@ from crypto_momentum_lab.live_rollout.submission import (
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from tests.unit.live_rollout.test_daemon import _runtime_context
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 

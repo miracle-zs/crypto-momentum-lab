@@ -56,7 +56,7 @@ from tests.unit.live_rollout.test_submission import (
     _submission,
 )
 from tests.unit.market_data.test_hub import fixture_state
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 pytestmark = pytest.mark.e2e
 

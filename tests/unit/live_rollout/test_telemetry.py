@@ -23,7 +23,7 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     STRATEGY_OUTPUT_OBSERVED,
     LiveRuntimeTelemetry,
 )
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 
 async def test_live_telemetry_rolls_up_phase_latency_by_symbol_and_lane() -> None:

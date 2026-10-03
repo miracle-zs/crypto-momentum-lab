@@ -1,21 +1,18 @@
+"""Shared market and risk fixtures for Live and execution tests."""
+
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
-    RiskEvaluation,
+    RiskHalt,
     StrategyLiveState,
     TradingLease,
     TradingLeaseState,
-)
-from crypto_momentum_lab.domain.shadow_operation.models import (
-    ShadowDecisionMetric,
-    ShadowOrderPlan,
-    ShadowSession,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -25,105 +22,20 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionStateMachine,
-    SubmitPolicy,
-)
-from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.shadow_operation.service import (
-    ShadowOperationConfig,
-    ShadowOperationContext,
-    ShadowOperationService,
-)
-from tests.unit.execution_account.orders.test_state_machine import (
-    FakeExchange,
-    FakeOrderRepository,
-    _snapshot,
-)
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
 
-async def test_shadow_service_requires_active_strategy_lease() -> None:
-    service, shadow_repository, _ = _service()
-
-    result = await service.run((_state(),), _context(active_lease=None))
-
-    assert result.halt_reason == "missing_active_lease"
-    assert shadow_repository.sessions[0].state == "halted"
-
-
-async def test_shadow_service_requires_ready_account_sync() -> None:
-    service, _, _ = _service()
-
-    result = await service.run(
-        (_state(),),
-        _context(account_state=ExecutionAccountStatus.DEGRADED),
-    )
-
-    assert result.halt_reason == "account_not_ready"
-    assert result.processed_state_count == 0
-
-
-async def test_shadow_service_persists_suppression_for_approved_intent() -> None:
-    service, shadow_repository, order_state_repository = _service()
-
-    result = await service.run((_state(),), _context())
-
-    assert result.approved_intent_count == 1
-    assert result.suppression_count == 1
-    assert len(shadow_repository.plans) == 1
-    assert len(order_state_repository.suppressions) == 1
-
-
-async def test_shadow_service_halts_on_market_staleness() -> None:
-    service, shadow_repository, _ = _service()
-    stale_now = NOW + timedelta(minutes=2)
-
-    result = await service.run((_state(),), _context(now=stale_now))
-
-    assert result.halt_reason == "stale_market_state"
-    assert shadow_repository.metrics[-1].category == "stale_data_block"
-
-
-def _service() -> tuple[
-    ShadowOperationService,
-    "FakeShadowRepository",
-    FakeOrderRepository,
-]:
-    shadow_repository = FakeShadowRepository()
-    approved_repository = FakeApprovedIntentRepository()
-    order_state_repository = FakeOrderRepository()
-    exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
-    machine = OrderExecutionStateMachine(
-        exchange=exchange,
-        repository=order_state_repository,
-        shadow_repository=order_state_repository,
-        event_repository=order_state_repository,
-        submit_policy=SubmitPolicy.SHADOW_SUPPRESS,
-        live_submit_enabled=False,
-        clock=lambda: NOW,
-    )
-    return (
-        ShadowOperationService(
-            strategy=FakeStrategy(),
-            risk_gateway=RiskGateway(),
-            shadow_repository=shadow_repository,
-            approved_intent_repository=approved_repository,
-            state_machine=machine,
-            config=ShadowOperationConfig(
-                run_id="shadow-1",
-                account_label="primary",
-                strategy_name="compression_breakout",
-                strategy_config_hash="a" * 64,
-                lease_owner="shadow-worker",
-                max_market_state_age_seconds=30,
-                resize_tolerance=Decimal("0.20"),
-            ),
-        ),
-        shadow_repository,
-        order_state_repository,
-    )
+@dataclass(frozen=True, slots=True)
+class RiskFixtureContext:
+    now: datetime
+    active_lease: TradingLease | None
+    account_state: ExecutionAccountStatus
+    open_position_symbols: frozenset[str]
+    active_halts: tuple[RiskHalt, ...]
+    risk_config: RiskConfigSnapshot
+    strategy_state: StrategyLiveState
+    trading_rules: dict[str, SymbolTradingRules]
 
 
 class FakeStrategy:
@@ -150,48 +62,14 @@ class FakeStrategy:
         return StrategyCheckpoint({}, {}, {}, {})
 
 
-class FakeApprovedIntentRepository:
-    async def save_approved_intent(
-        self,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-    ) -> None:
-        pass
-
-
-class FakeShadowRepository:
-    def __init__(self) -> None:
-        self.sessions: list[ShadowSession] = []
-        self.plans: list[ShadowOrderPlan] = []
-        self.metrics: list[ShadowDecisionMetric] = []
-
-    async def start_session(self, session_record: ShadowSession) -> None:
-        self.sessions.append(session_record)
-
-    async def end_session(
-        self,
-        run_id: str,
-        *,
-        state: str,
-        ended_at: datetime,
-    ) -> None:
-        pass
-
-    async def save_order_plan(self, plan: ShadowOrderPlan) -> None:
-        self.plans.append(plan)
-
-    async def save_metric(self, metric: ShadowDecisionMetric) -> None:
-        self.metrics.append(metric)
-
-
 def _context(
     *,
     active_lease: TradingLease | None | object = "default",
     account_state: ExecutionAccountStatus = ExecutionAccountStatus.READY_READONLY,
     now: datetime = NOW,
-) -> ShadowOperationContext:
+) -> RiskFixtureContext:
     lease = _lease() if active_lease == "default" else active_lease
-    return ShadowOperationContext(
+    return RiskFixtureContext(
         now=now,
         active_lease=lease,
         account_state=account_state,

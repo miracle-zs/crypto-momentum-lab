@@ -30,8 +30,8 @@ restarting any non-Live service, then run the full preflight immediately before
 restarting each Live container and verify its structured readiness snapshot.
 The additional-account overlay is loaded only when an account-2/3/4
 service is already running; stopped accounts are not started implicitly.
-The default paper rollout keeps only paper-orderflow-gainer10-pair active;
-retired paper containers are archived, stopped, and removed during the update.
+No Paper runner is deployed. Retired Paper containers from older checkouts
+are archived, stopped, and removed during the update.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
 the target runtime while preserving their existing limits and operator fields;
 it requires --live and an explicit git-ref.
@@ -781,8 +781,8 @@ if [[ "$live_overlay_required" == 1 ]]; then
 fi
 # No paper service is active any more: the last one was retired on 2026-09-16
 # because it held ~84 MB of RAM plus ~55 MB of swap on a host that is short of
-# memory, to run a research-only strategy.  Every paper service now lives under
-# the retired-paper profile, and an update must remove any container that was
+# memory, to run a research-only strategy. The definitions have been removed;
+# an update must still remove any container that was
 # created before it was moved there.
 active_paper_services=()
 retired_paper_services=(

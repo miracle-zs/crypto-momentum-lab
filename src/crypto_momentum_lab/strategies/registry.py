@@ -10,16 +10,6 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyMetadata,
     StrategyRunIdentity,
 )
-from crypto_momentum_lab.strategies.compression_breakout import (
-    CompressionBreakoutConfig,
-    CompressionBreakoutRuntimeConfig,
-    CompressionBreakoutRuntimeStrategy,
-)
-from crypto_momentum_lab.strategies.liquidation_cascade import (
-    LiquidationCascadeConfig,
-    LiquidationCascadeRuntimeConfig,
-    LiquidationCascadeRuntimeStrategy,
-)
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
     OrderFlowImpulseRuntimeConfig,
@@ -61,19 +51,11 @@ class StrategyRegistryError(ValueError):
     pass
 
 
-type RuntimeConfig = (
-    CompressionBreakoutRuntimeConfig
-    | OrderFlowImpulseRuntimeConfig
-    | LiquidationCascadeRuntimeConfig
-)
+type RuntimeConfig = OrderFlowImpulseRuntimeConfig
 
 
 def supported_strategy_names() -> tuple[str, ...]:
-    return (
-        "compression_breakout",
-        "orderflow_impulse",
-        "liquidation_cascade",
-    )
+    return ("orderflow_impulse",)
 
 
 def build_runtime_config(
@@ -81,108 +63,82 @@ def build_runtime_config(
     *,
     config: dict[str, object],
 ) -> RuntimeConfig:
+    if strategy_name != "orderflow_impulse":
+        raise StrategyRegistryError(f"unsupported strategy: {strategy_name}")
     candidate_notional = _optional_decimal(config.get("candidate_notional"))
     candidate_ttl_buckets = _int_value(
         config.get("candidate_ttl_buckets"),
         default=4,
         field_name="candidate_ttl_buckets",
     )
-    if strategy_name == "compression_breakout":
-        signal_interval_seconds = _int_value(
-            config.get("signal_interval_seconds"),
-            default=300,
-            field_name="signal_interval_seconds",
-        )
-        event_config = config.get("compression_breakout")
-        if event_config is None:
-            raise StrategyRegistryError("compression_breakout configuration is required")
-        if not isinstance(event_config, CompressionBreakoutConfig):
-            raise StrategyRegistryError("compression_breakout config is invalid")
-        return CompressionBreakoutRuntimeConfig(
-            event_config=event_config,
-            candidate_notional=candidate_notional,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-        )
-    if strategy_name == "orderflow_impulse":
-        event_config = config.get("order_flow_impulse")
-        if event_config is None:
-            if "order_flow_impulse_impulse_window_buckets" in config:
-                try:
-                    event_config = OrderFlowImpulseConfig(
-                        impulse_window_buckets=_int_value(
-                            config.get("order_flow_impulse_impulse_window_buckets"),
-                            default=0,
-                            field_name="impulse_window_buckets",
-                        ),
-                        baseline_window_buckets=_int_value(
-                            config.get("order_flow_impulse_baseline_window_buckets"),
-                            default=4,
-                            field_name="baseline_window_buckets",
-                        ),
-                        breakout_window_buckets=_int_value(
-                            config.get("order_flow_impulse_breakout_window_buckets"),
-                            default=4,
-                            field_name="breakout_window_buckets",
-                        ),
-                        min_return_pct=_decimal_value(
-                            config.get("order_flow_impulse_min_return_pct"),
-                            default=Decimal("0"),
-                            field_name="min_return_pct",
-                        ),
-                        min_aggressive_imbalance=_decimal_value(
-                            config.get("order_flow_impulse_min_aggressive_imbalance"),
-                            default=Decimal("0"),
-                            field_name="min_aggressive_imbalance",
-                        ),
-                        min_notional_intensity=_decimal_value(
-                            config.get("order_flow_impulse_min_notional_intensity"),
-                            default=Decimal("0"),
-                            field_name="min_notional_intensity",
-                        ),
-                        confirmation_buckets=_int_value(
-                            config.get("order_flow_impulse_confirmation_buckets"),
-                            default=0,
-                            field_name="confirmation_buckets",
-                        ),
-                        cooldown_buckets=_int_value(
-                            config.get("cooldown_buckets"),
-                            default=0,
-                            field_name="cooldown_buckets",
-                        ),
-                        forward_horizon_buckets=tuple(
-                            config.get("order_flow_impulse_forward_horizon_buckets") or (1,)
-                        ),
-                        min_notional_5m_vs_30m=_decimal_value(
-                            config.get("order_flow_impulse_min_notional_5m_vs_30m"),
-                            default=Decimal("0"),
-                            field_name="min_notional_5m_vs_30m",
-                        ),
-                    )
-                except Exception as error:
-                    raise StrategyRegistryError(f"orderflow_impulse config is invalid: {error}") from error
-            else:
-                raise StrategyRegistryError("orderflow_impulse configuration is required")
-        if not isinstance(event_config, OrderFlowImpulseConfig):
-            raise StrategyRegistryError("orderflow_impulse config is invalid")
-        event_config = _replace_order_flow_overrides(event_config, config)
-        return OrderFlowImpulseRuntimeConfig(
-            event_config=event_config,
-            candidate_notional=candidate_notional,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-        )
-    if strategy_name == "liquidation_cascade":
-        event_config = config.get("liquidation_cascade")
-        if event_config is None:
-            raise StrategyRegistryError("liquidation_cascade configuration is required")
-        if not isinstance(event_config, LiquidationCascadeConfig):
-            raise StrategyRegistryError("liquidation_cascade config is invalid")
-        return LiquidationCascadeRuntimeConfig(
-            event_config=event_config,
-            candidate_notional=candidate_notional,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-        )
-    raise StrategyRegistryError(f"unsupported strategy: {strategy_name}")
+    event_config = config.get("order_flow_impulse")
+    if event_config is None:
+        if "order_flow_impulse_impulse_window_buckets" in config:
+            try:
+                event_config = OrderFlowImpulseConfig(
+                    impulse_window_buckets=_int_value(
+                        config.get("order_flow_impulse_impulse_window_buckets"),
+                        default=0,
+                        field_name="impulse_window_buckets",
+                    ),
+                    baseline_window_buckets=_int_value(
+                        config.get("order_flow_impulse_baseline_window_buckets"),
+                        default=4,
+                        field_name="baseline_window_buckets",
+                    ),
+                    breakout_window_buckets=_int_value(
+                        config.get("order_flow_impulse_breakout_window_buckets"),
+                        default=4,
+                        field_name="breakout_window_buckets",
+                    ),
+                    min_return_pct=_decimal_value(
+                        config.get("order_flow_impulse_min_return_pct"),
+                        default=Decimal("0"),
+                        field_name="min_return_pct",
+                    ),
+                    min_aggressive_imbalance=_decimal_value(
+                        config.get("order_flow_impulse_min_aggressive_imbalance"),
+                        default=Decimal("0"),
+                        field_name="min_aggressive_imbalance",
+                    ),
+                    min_notional_intensity=_decimal_value(
+                        config.get("order_flow_impulse_min_notional_intensity"),
+                        default=Decimal("0"),
+                        field_name="min_notional_intensity",
+                    ),
+                    confirmation_buckets=_int_value(
+                        config.get("order_flow_impulse_confirmation_buckets"),
+                        default=0,
+                        field_name="confirmation_buckets",
+                    ),
+                    cooldown_buckets=_int_value(
+                        config.get("cooldown_buckets"),
+                        default=0,
+                        field_name="cooldown_buckets",
+                    ),
+                    forward_horizon_buckets=tuple(
+                        config.get("order_flow_impulse_forward_horizon_buckets") or (1,)
+                    ),
+                    min_notional_5m_vs_30m=_decimal_value(
+                        config.get("order_flow_impulse_min_notional_5m_vs_30m"),
+                        default=Decimal("0"),
+                        field_name="min_notional_5m_vs_30m",
+                    ),
+                )
+            except Exception as error:
+                raise StrategyRegistryError(
+                    f"orderflow_impulse config is invalid: {error}"
+                ) from error
+        else:
+            raise StrategyRegistryError("orderflow_impulse configuration is required")
+    if not isinstance(event_config, OrderFlowImpulseConfig):
+        raise StrategyRegistryError("orderflow_impulse config is invalid")
+    event_config = _replace_order_flow_overrides(event_config, config)
+    return OrderFlowImpulseRuntimeConfig(
+        event_config=event_config,
+        candidate_notional=candidate_notional,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+    )
 
 
 def build_runtime_strategy(
@@ -192,20 +148,7 @@ def build_runtime_strategy(
     identity: StrategyRunIdentity,
 ) -> RuntimeStrategyProtocol:
     runtime_config = build_runtime_config(strategy_name, config=config)
-    if isinstance(runtime_config, CompressionBreakoutRuntimeConfig):
-        return CompressionBreakoutRuntimeStrategy(
-            config=runtime_config,
-            identity=identity,
-        )
-    if isinstance(runtime_config, OrderFlowImpulseRuntimeConfig):
-        return OrderFlowImpulseRuntimeStrategy(
-            config=runtime_config,
-            identity=identity,
-        )
-    return LiquidationCascadeRuntimeStrategy(
-        config=runtime_config,
-        identity=identity,
-    )
+    return OrderFlowImpulseRuntimeStrategy(config=runtime_config, identity=identity)
 
 
 def _optional_decimal(value: object) -> Decimal | None:

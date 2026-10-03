@@ -2,6 +2,12 @@
 
 本目录保存项目早期各研究课题、阶段性事件研究（Event Study）与历史回放分析脚本。
 
+2026-10-03 清理后，本目录只作为历史研究档案，不承诺每个脚本与当前代码兼容。
+旧 Research、Replay/Paper、Shadow CLI 以及 Compression/Liquidation 实现已从
+运行包移除。依赖这些实现的历史脚本（例如 `backfill_paper_grace_exits.py`）
+须在清理前基线 `02e6581f3bc71feac0f91f84fa405460ea26730f` 的独立 checkout
+中复现；不应为档案脚本恢复当前运行包中的旧依赖。其专属回放测试也已退出默认测试集。
+
 > ⚠️ **说明**：
 > 1. 本目录下脚本属于历史研究成果沉淀与复现存档，不再承担日常生产运维与持续部署职能。
 > 2. 正式参数寻优（8D 网格、Pareto 前沿、多场景稳健推荐）已统一迁移至模块化流水线：[`local_optimization/generate_six_scenarios_dashboard.py`](../../local_optimization/generate_six_scenarios_dashboard.py)。

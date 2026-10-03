@@ -19,7 +19,7 @@ from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryExecutionLane,
     EntryLaneConfig,
 )
-from tests.unit.shadow_operation.test_service import _intent, _signal, _state
+from tests.fixtures.live_market import _intent, _signal, _state
 
 NOW = datetime(2026, 9, 29, 14, 6, 45, tzinfo=UTC)
 

@@ -46,7 +46,7 @@ from tests.unit.execution_account.orders.test_coordinator import (
 )
 from tests.unit.live_rollout.test_exit_processor import NOW, _context, _processor
 from tests.unit.live_rollout.test_exits import _config
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 
 @pytest.mark.parametrize("path", ("candle", "queued_conflict"))

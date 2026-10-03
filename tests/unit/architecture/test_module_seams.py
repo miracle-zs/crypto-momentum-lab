@@ -32,7 +32,6 @@ import pytest
         "crypto_momentum_lab.live_rollout.entry_expectations",
         "crypto_momentum_lab.live_rollout.resource_ports",
         "crypto_momentum_lab.live_rollout.resource_lifecycle",
-        "crypto_momentum_lab.strategy_runner.live_source",
         "crypto_momentum_lab.research_collector.source",
         "crypto_momentum_lab.research_collector",
         "crypto_momentum_lab.research_collector.models",
@@ -94,10 +93,6 @@ importlib.import_module(sys.argv[1])
         (
             "crypto_momentum_lab.operator_dashboard",
             "crypto_momentum_lab.operator_dashboard.api",
-        ),
-        (
-            "crypto_momentum_lab.strategy_runner",
-            "crypto_momentum_lab.strategy_runner.live_source",
         ),
     ],
 )

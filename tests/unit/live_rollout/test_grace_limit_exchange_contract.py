@@ -29,7 +29,7 @@ from crypto_momentum_lab.execution_account.orders.trade_command_executor import 
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager, LiveExitOrderRequest
 from tests.unit.live_rollout.test_exits import FakeCandleLoader, _config, _long_position
-from tests.unit.shadow_operation.test_service import _state
+from tests.fixtures.live_market import _state
 
 
 @pytest.mark.parametrize("planner", ("command", "intent"))

@@ -2719,7 +2719,7 @@ def _submission_preparation(plan):
     from dataclasses import replace
 
     from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
-    from tests.unit.shadow_operation.test_service import _intent
+    from tests.fixtures.live_market import _intent
 
     intent = replace(_intent(), candidate_id=plan.intent_id, run_id=plan.run_id)
     return OrderSubmissionPreparation(

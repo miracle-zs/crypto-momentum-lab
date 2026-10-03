@@ -10,7 +10,7 @@ from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitExecutionLane,
     ExitLaneOutcome,
 )
-from tests.unit.shadow_operation.test_service import _state
+from tests.fixtures.live_market import _state
 
 
 async def test_market_lane_keeps_latest_state_and_merges_outcomes() -> None:

@@ -1,12 +1,10 @@
 # Small-Capital Live Session
 
-This runbook enables one selected strategy on one dedicated Binance USD-M
-Futures account. The existing paper account for that strategy keeps running
-from the same `research` market-state feed. Entries use the same strategy
-configuration; execution, balances, positions, and exits remain isolated.
-
-Do not enable the `live` Compose profile on the current 2 GB server. Upgrade it
-to at least 4 GB RAM first. The default Compose deployment remains paper-only.
+This runbook enables Orderflow on a dedicated Binance USD-M Futures account.
+The base Compose stack runs data collection and the read-only dashboard; Live
+accounts require the explicit `live` profile. No Paper runner or standalone
+Shadow CLI remains after the 2026-10-03 cleanup. Account-specific execution,
+balances, positions, and exits remain isolated.
 
 ## Binance Account
 
@@ -103,29 +101,14 @@ $COMPOSE --profile live run --rm --no-deps -T live-strategy renew-lease \
   --confirmation "RENEW LIVE RISK LEASE" </dev/null
 ```
 
-## 3. Run Matching Shadow
+## 3. Validate Before Approval
 
-The shadow run reads the same `research` states, generates Hedge Mode plans,
-and persists each order as terminal `suppressed`. It cannot call a Binance write
-endpoint.
-
-```bash
-$COMPOSE --profile live run --rm --no-deps \
-  --entrypoint cml-shadow-operation live-strategy run \
-  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
-  --strategy "$CML_LIVE_STRATEGY" \
-  --market-environment research \
-  --run-id "shadow-${CML_LIVE_SESSION_ID}" \
-  --max-runtime-seconds 7200 \
-  --require-lease-owner "$CML_LIVE_LEASE_OWNER" \
-  --hedge-mode --json
-```
-
-Review the report and record all three drills from
-the Shadow Operation Session section below. The live worker records an
-advisory warning when no completed matching shadow session exists, but this
-check does not block startup. A completed matching shadow session remains useful
-as preflight evidence, and its age is not a runtime gate.
+Use the local research/reconciliation workflow and the fault-injection release
+gates in `docs/paper-live-replay-execution-semantics.md`. The standalone Shadow
+CLI has been retired. Existing matching-shadow evidence and its advisory
+preflight check remain readable; missing evidence follows the existing
+acknowledgement rules below. Approval, lease, risk, and real-order confirmation
+gates remain mandatory.
 
 ## 4. Approve And Preflight
 
@@ -260,75 +243,6 @@ read-only account sync running until the post-session report is complete.
 Start with one position and materially less than the 100 USDT paper notional.
 Increase exposure only after several reviewed live sessions have no unresolved
 orders, reconciliation mismatch, unexpected exit, or operational halt.
-
-## Shadow Operation Session
-
-Shadow operation exercises live market data, the selected runtime strategy,
-read-only account state, the risk gateway, Binance exchange metadata,
-quantization, persistence, and reconciliation. No Binance write endpoint is
-allowed in this phase.
-
-### Preflight
-
-Record and review:
-
-- current Git commit and strategy config hash;
-- Alembic database migration head;
-- execution account label and `READY_READONLY` state;
-- active trading lease, selected strategy, and required lease owner;
-- current risk config hash and numeric limits;
-- absence of active global halts and unresolved exchange orders.
-
-Run the read-only account synchronization first:
-
-```bash
-cml-execution-account sync-once \
-  --account-label primary \
-  --hedge-mode \
-  --database-url "$CML_DATABASE_URL"
-```
-
-Run a bounded shadow session:
-
-```bash
-cml-shadow-operation run \
-  --account-label primary \
-  --strategy compression_breakout \
-  --market-environment research \
-  --run-id "$RUN_ID" \
-  --database-url "$CML_DATABASE_URL" \
-  --max-runtime-seconds 7200 \
-  --require-lease-owner shadow-preflight \
-  --hedge-mode \
-  --json
-```
-
-Generate the report:
-
-```bash
-cml-shadow-operation report \
-  --run-id "$RUN_ID" \
-  --database-url "$CML_DATABASE_URL" \
-  --json
-```
-
-Review signal count, approved and rejected intents, rejection reasons,
-would-submit and suppression counts, stale/account/risk blocks, min-notional
-blocks, latency percentiles, unresolved plans, and drill outcomes. Store the
-JSON output with the operator notes before considering small-capital trading.
-
-### Drills
-
-Run halt and restart-related drills against the same session:
-
-```bash
-cml-shadow-operation drill --run-id "$RUN_ID" --drill stale_market_data --database-url "$CML_DATABASE_URL"
-cml-shadow-operation drill --run-id "$RUN_ID" --drill process_restart_with_active_lease --database-url "$CML_DATABASE_URL"
-cml-shadow-operation drill --run-id "$RUN_ID" --drill order_submission_ambiguity --database-url "$CML_DATABASE_URL"
-```
-
-Any unexpected exchange write attempt, missing suppression, stale account,
-expired lease, unresolved plan, failed drill, or active halt fails the session.
 
 ## Multi-account Live rollout
 

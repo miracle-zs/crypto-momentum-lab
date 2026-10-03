@@ -4,7 +4,6 @@ from decimal import Decimal
 import pytest
 
 from crypto_momentum_lab.domain.strategy import RunMode, StrategyRunIdentity
-from crypto_momentum_lab.strategies.liquidation_cascade import LiquidationCascadeConfig
 from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategies.registry import (
     StrategyRegistryError,
@@ -15,25 +14,26 @@ from crypto_momentum_lab.strategies.registry import (
 
 
 def test_registry_lists_supported_strategy_names() -> None:
-    assert supported_strategy_names() == (
-        "compression_breakout",
-        "orderflow_impulse",
-        "liquidation_cascade",
-    )
+    assert supported_strategy_names() == ("orderflow_impulse",)
 
 
-def test_registry_rejects_unknown_strategy() -> None:
+@pytest.mark.parametrize(
+    "strategy_name", ["unknown", "compression_breakout", "liquidation_cascade"]
+)
+def test_registry_rejects_unsupported_strategy(strategy_name: str) -> None:
     with pytest.raises(StrategyRegistryError, match="unsupported strategy"):
         build_runtime_strategy(
-            "unknown",
+            strategy_name,
             config={},
-            identity=_identity("unknown"),
+            identity=_identity(strategy_name),
         )
 
 
 def test_registry_fails_closed_when_strategy_config_missing() -> None:
 
-    with pytest.raises(StrategyRegistryError, match="orderflow_impulse configuration is required"):
+    with pytest.raises(
+        StrategyRegistryError, match="orderflow_impulse configuration is required"
+    ):
         build_runtime_strategy(
             "orderflow_impulse",
             config={
@@ -42,10 +42,6 @@ def test_registry_fails_closed_when_strategy_config_missing() -> None:
             },
             identity=_identity("orderflow_impulse"),
         )
-    with pytest.raises(StrategyRegistryError, match="liquidation_cascade configuration is required"):
-        build_runtime_config("liquidation_cascade", config={})
-    with pytest.raises(StrategyRegistryError, match="compression_breakout configuration is required"):
-        build_runtime_config("compression_breakout", config={})
 
 
 def test_registry_builds_orderflow_runtime_strategy() -> None:
@@ -72,26 +68,6 @@ def test_registry_builds_orderflow_runtime_strategy() -> None:
     )
 
     assert strategy.metadata().name == "orderflow_impulse"
-
-
-def test_registry_uses_liquidation_imbalance_threshold() -> None:
-    event_config = LiquidationCascadeConfig(
-        liquidation_window_buckets=2,
-        breakout_window_buckets=4,
-        min_liquidation_count=1,
-        min_liquidation_notional=Decimal("10000"),
-        min_price_move_pct=Decimal("0.01"),
-        min_aggressive_imbalance=Decimal("0.33"),
-        confirmation_buckets=1,
-        cooldown_buckets=2,
-        forward_horizon_buckets=(1,),
-    )
-    runtime_config = build_runtime_config(
-        "liquidation_cascade",
-        config={"liquidation_cascade": event_config},
-    )
-
-    assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.33")
 
 
 def test_registry_allows_account_scoped_orderflow_profile_overrides() -> None:

@@ -20,7 +20,7 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     SourceIngress,
     TraceKey,
 )
-from tests.unit.shadow_operation.test_service import _intent, _state
+from tests.fixtures.live_market import _intent, _state
 
 
 def test_source_ingress_keeps_source_and_local_receive_times_separate() -> None:

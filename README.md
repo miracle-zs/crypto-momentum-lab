@@ -62,96 +62,25 @@ The smoke run should produce non-empty `aggTrade`, `bookTicker`,
 `forceOrder` is subscribed but can legitimately remain empty during quiet
 market periods.
 
-## Strategy Replay
+## Local Orderflow Research
 
-```bash
-.venv/bin/cml-strategy-runner replay \
-  --strategy compression_breakout \
-  --states-root data/derived/market_states_15s \
-  --output reports/compression-breakout-replay.json \
-  --execution-latency-buckets 1 \
-  --taker-fee-rate 0.0004 \
-  --slippage-bps 0
-```
+The active research workflow lives in `local_optimization/`: parameter search,
+scenario evaluation, high-frequency MTM equity, and Live/replay reconciliation.
+See [the local research runbook](docs/runbooks/local-full-data-optimization.md).
 
-Replay reports are deterministic JSON artifacts. They include standardized
-signals, order-intent candidates, and cost-aware simulated fills using the
-configured latency, taker fee, spread, and slippage assumptions. Use
-`--no-simulate-fills` to produce a signal/candidate-only report.
+The old Research, Replay/Paper, and standalone Shadow CLIs were retired on
+2026-10-03. Historical implementations are available at Git baseline
+`02e6581f3bc71feac0f91f84fa405460ea26730f`; they are no longer installed commands.
+See [the cleanup plan and verification](docs/plans/2026-10-03-dormant-code-cleanup.md).
 
-## Paper Trading Runner
+## Server Deployment
 
-```bash
-.venv/bin/cml-strategy-runner paper \
-  --strategy compression_breakout \
-  --states-root data/derived/market_states_15s \
-  --output reports/compression-breakout-paper.json \
-  --execution-latency-buckets 1 \
-  --taker-fee-rate 0.0004 \
-  --slippage-bps 0
-```
+The base server stack contains PostgreSQL, migration/bootstrap jobs, public
+market data, the research collector, and the read-only operator dashboard.
+No Paper runner is deployed. The explicit `live` profile adds the primary
+account synchronizer and gated Orderflow strategy; `compose.live.accounts.yaml`
+adds accounts 2–4.
 
-Paper mode reuses the same strategy core and writes a local JSON report with
-signals, order-intent candidates, and simulated paper fills. It does not connect
-to a Binance account or submit real orders.
-
-PostgreSQL persistence is opt-in. The default command above writes only the
-local JSON report. To persist the paper-run artifacts after a successful JSON
-write:
-
-```bash
-.venv/bin/cml-strategy-runner paper \
-  --strategy compression_breakout \
-  --states-root data/derived/market_states_15s \
-  --output reports/compression-breakout-paper.json \
-  --execution-latency-buckets 1 \
-  --taker-fee-rate 0.0004 \
-  --slippage-bps 0 \
-  --persist \
-  --database-url "$CML_DATABASE_URL"
-```
-
-### Paper Live Source
-
-After `market-data` is writing closed runtime states to PostgreSQL, run a
-bounded paper session directly from those rows:
-
-```bash
-.venv/bin/cml-strategy-runner paper-live-source \
-  --strategy compression_breakout \
-  --database-url "$CML_DATABASE_URL" \
-  --environment research \
-  --output reports/compression-breakout-paper-live-source.json \
-  --max-states 1000 \
-  --idle-timeout-seconds 60 \
-  --persist
-```
-
-This command is simulated paper execution. The default server stack starts
-without Binance private credentials. The explicit `live` Compose profile adds
-the primary read-only account synchronizer and gated live strategy. Additional
-account-specific live services are defined in `compose.live.accounts.yaml`; see
-the [small-capital live runbook](docs/runbooks/small-capital-live-session.md)
-and [multi-account live runbook](docs/runbooks/small-capital-live-session.md).
-
-## Server Paper Deployment
-
-The production-style paper stack includes PostgreSQL, migrations, an initial
-universe refresh, public Binance market-data capture, one active paper strategy
-daemon, and the read-only operator dashboard. The daemon reads market states
-once and fans the same entry decision into the active B8 and B1 Top10-gainer
-accounts; positions and exits remain independent. It never receives Binance
-private API credentials and cannot place orders.
-
-The server compression profile evaluates 20 closed 5-minute bars, representing
-a 100-minute compression window. The active order-flow profile uses 15-second
-states. Raw 15-second states remain the execution and risk-monitoring clock for
-both active accounts.
-
-```bash
-cp .env.server.example .env.server
-# Replace the placeholder with a random alphanumeric PostgreSQL password.
-docker compose --env-file .env.server -f compose.server.yaml up -d --build
-```
-
-See `docs/runbooks/server-paper-deployment.md` for Nginx setup and verification.
+See [server deployment and updates](docs/runbooks/server-paper-deployment.md)
+and [the Live runbook](docs/runbooks/small-capital-live-session.md) for release
+identity, approval, preflight, account isolation, and verification.
