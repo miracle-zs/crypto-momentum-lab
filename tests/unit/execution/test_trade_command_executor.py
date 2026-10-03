@@ -1,9 +1,10 @@
-"""Unit tests for TradeCommandExecutor."""
+"""Unit tests for plan_order_execution."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
+from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -11,9 +12,8 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
-from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-    TradeCommandExecutor,
+from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+    plan_order_execution,
 )
 
 RULES = SymbolTradingRules(
@@ -34,7 +34,7 @@ POS_KEY = PositionKey(
 
 
 def test_trade_command_executor_downward_quantization() -> None:
-    """TradeCommandExecutor quantizes strictly downward to step_size, recording remainder."""
+    """Planning quantizes downward to step_size and records the remainder."""
     cmd = TradeCommand(
         command_id="cmd-1",
         position_key=POS_KEY,
@@ -45,7 +45,7 @@ def test_trade_command_executor_downward_quantization() -> None:
         reduce_only=True,
     )
 
-    result = TradeCommandExecutor.plan_execution(
+    result = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",
@@ -71,7 +71,7 @@ def test_trade_command_executor_min_quantity_rejection() -> None:
         requested_quantity=Decimal("0.0005"),
     )
 
-    result = TradeCommandExecutor.plan_execution(
+    result = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",
@@ -95,7 +95,7 @@ def test_trade_command_executor_max_quantity_rejection() -> None:
         requested_quantity=Decimal("150.0"),
     )
 
-    result = TradeCommandExecutor.plan_execution(
+    result = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",
@@ -119,7 +119,7 @@ def test_trade_command_executor_min_notional_handling() -> None:
         requested_quantity=Decimal("0.001"),
         reduce_only=False,
     )
-    entry_result = TradeCommandExecutor.plan_execution(
+    entry_result = plan_order_execution(
         entry_cmd,
         RULES,
         run_id="run-1",
@@ -138,7 +138,7 @@ def test_trade_command_executor_min_notional_handling() -> None:
         requested_quantity=Decimal("0.001"),
         reduce_only=True,
     )
-    exit_result = TradeCommandExecutor.plan_execution(
+    exit_result = plan_order_execution(
         exit_cmd,
         RULES,
         run_id="run-1",
@@ -163,7 +163,7 @@ def test_trade_command_executor_limit_price_and_hedge_mode() -> None:
     )
 
     # In One-Way mode:
-    result_one_way = TradeCommandExecutor.plan_execution(
+    result_one_way = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",
@@ -178,7 +178,7 @@ def test_trade_command_executor_limit_price_and_hedge_mode() -> None:
     assert result_one_way.plan.client_order_id == "custom-order-id-1"
 
     # In Hedge mode:
-    result_hedge = TradeCommandExecutor.plan_execution(
+    result_hedge = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",
@@ -202,7 +202,7 @@ def test_trade_command_executor_limit_sell_price_rounding_up() -> None:
         reduce_only=True,
     )
 
-    result = TradeCommandExecutor.plan_execution(
+    result = plan_order_execution(
         cmd,
         RULES,
         run_id="run-1",

@@ -9,8 +9,8 @@ daemon's exchange or persistence implementations.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -31,6 +31,10 @@ from crypto_momentum_lab.domain.strategy import (
     UniverseRankingSnapshot,
     compare_entry_policy_request,
     summarize_entry_policy_comparisons,
+)
+from crypto_momentum_lab.domain.strategy.entry_candidate import (
+    entry_limit_price,
+    prepare_entry_candidate,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -793,7 +797,7 @@ def _planned_entry_execution_context(
     entry_order_type: EntryType,
     limit_ttl_seconds: int,
 ) -> dict[str, object]:
-    prepared = _prepare_entry_candidate_for_observation(
+    prepared = prepare_entry_candidate(
         candidate,
         state=state,
         execution_now=execution_now,
@@ -803,7 +807,7 @@ def _planned_entry_execution_context(
     if prepared.entry_type is not EntryType.LIMIT:
         price_source = None
     else:
-        _, price_source = _entry_limit_price(candidate, state=state)
+        _, price_source = entry_limit_price(candidate, state=state)
     return {
         "original_entry_type": _enum_text(candidate.entry_type),
         "original_limit_price": candidate.limit_price,
@@ -813,49 +817,3 @@ def _planned_entry_execution_context(
         "effective_expires_at": prepared.expires_at,
         "desired_notional": candidate.desired_notional,
     }
-
-
-def _entry_limit_price(
-    candidate: OrderIntentCandidate,
-    *,
-    state: MarketState15s,
-) -> tuple[Decimal | None, str | None]:
-    if candidate.limit_price is not None:
-        return candidate.limit_price, "candidate.limit_price"
-    if (
-        _enum_text(candidate.side) == "long"
-        and state.last_ask_price is not None
-        and state.close_price is not None
-    ):
-        return (
-            min(state.last_ask_price, state.close_price),
-            "min(state.last_ask_price,state.close_price)",
-        )
-    if _enum_text(candidate.side) == "long" and state.last_ask_price is not None:
-        return state.last_ask_price, "state.last_ask_price"
-    if state.close_price is not None:
-        return state.close_price, "state.close_price"
-    if state.mark_price is not None:
-        return state.mark_price, "state.mark_price"
-    if state.midpoint is not None:
-        return state.midpoint, "state.midpoint"
-    return None, None
-
-
-def _prepare_entry_candidate_for_observation(
-    candidate: OrderIntentCandidate,
-    *,
-    state: MarketState15s,
-    execution_now: datetime,
-    entry_order_type: EntryType,
-    limit_ttl_seconds: int,
-) -> OrderIntentCandidate:
-    if candidate.reduce_only or entry_order_type is EntryType.MARKET:
-        return candidate
-    signal_price, _ = _entry_limit_price(candidate, state=state)
-    return replace(
-        candidate,
-        entry_type=EntryType.LIMIT,
-        limit_price=signal_price,
-        expires_at=execution_now + timedelta(seconds=limit_ttl_seconds),
-    )

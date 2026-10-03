@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -12,6 +12,11 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
     TradingLeaseState,
+)
+from crypto_momentum_lab.domain.risk.limits import (
+    FixedLiveLimits,
+    LiveLimitContext,
+    evaluate_fixed_live_limits,
 )
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
 
@@ -33,8 +38,57 @@ class RiskContext:
     required_strategy_name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateRiskAssessment:
+    candidate: OrderIntentCandidate | None
+    evaluation: RiskEvaluation
+
+
 class RiskGateway:
+    def __init__(self, *, limits: FixedLiveLimits | None = None) -> None:
+        self._limits = limits
+
+    @property
+    def limits(self) -> FixedLiveLimits | None:
+        return self._limits
+
     def evaluate(
+        self,
+        intent: OrderIntentCandidate,
+        context: RiskContext,
+        *,
+        limit_context: LiveLimitContext | None = None,
+    ) -> CandidateRiskAssessment:
+        """Apply entry limits, then evaluate authority for the resulting candidate."""
+        if self._limits is not None and not intent.reduce_only:
+            if limit_context is None:
+                raise ValueError("entry limit context is required")
+            if (
+                limit_context.symbol != intent.symbol
+                or limit_context.requested_notional != intent.desired_notional
+                or limit_context.open_position_symbols != context.open_position_symbols
+            ):
+                raise ValueError(
+                    "entry limit context must match the candidate risk facts"
+                )
+            decision = evaluate_fixed_live_limits(self._limits, limit_context)
+            if not decision.allowed:
+                return CandidateRiskAssessment(
+                    candidate=None,
+                    evaluation=_evaluation(
+                        intent,
+                        context,
+                        RiskDecision.REJECTED,
+                        decision.reason,
+                    ),
+                )
+            intent = replace(intent, desired_notional=decision.capped_notional)
+        return CandidateRiskAssessment(
+            candidate=intent,
+            evaluation=self._evaluate_authority(intent, context),
+        )
+
+    def _evaluate_authority(
         self,
         intent: OrderIntentCandidate,
         context: RiskContext,
@@ -182,13 +236,9 @@ class RiskGateway:
                 if context.risk_config.max_order_notional is None
                 else "max_order_notional_exceeded",
             )
-        if (
-            context.risk_config.max_open_positions is None
-            or (
-                len(context.open_position_symbols)
-                >= context.risk_config.max_open_positions
-                and intent.symbol not in context.open_position_symbols
-            )
+        if context.risk_config.max_open_positions is None or (
+            len(context.open_position_symbols) >= context.risk_config.max_open_positions
+            and intent.symbol not in context.open_position_symbols
         ):
             return _evaluation(
                 intent,

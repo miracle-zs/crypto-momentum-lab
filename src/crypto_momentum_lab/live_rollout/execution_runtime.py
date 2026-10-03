@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.command_repository import CommandRepository
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeBoundaryCallback,
+    OrderExchangeClient,
+    OrderExchangeSubmitGuard,
+)
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -24,7 +29,6 @@ from crypto_momentum_lab.domain.execution.reservation_repository import (
 )
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, TradingLease
 from crypto_momentum_lab.domain.runtime import (
-    CapabilityEvaluator,
     CapabilityEvidence,
     RuntimePlan,
     RuntimePlanCompiler,
@@ -33,19 +37,12 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
-    ExchangeBoundaryCallback,
     OrderEventCallback,
     OrderEventRepository,
-    OrderExchangeClient,
-    OrderExchangeSubmitGuard,
     OrderExecutionStateMachine,
     OrderPlanRepository,
     OrderPreSubmissionCallback,
     SubmitPolicy,
-)
-from crypto_momentum_lab.live_rollout.submission_fence import (
-    LiveRiskStateReader,
-    LiveSubmissionFence,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     PostgresAccountJournalStore,
@@ -267,35 +264,3 @@ def build_capability_evidence_provider(
         )
 
     return _provide_capability_evidence
-
-
-def build_live_submission_fence(
-    *,
-    risk_state: LiveRiskStateReader,
-    account_label: str,
-    strategy_name: str,
-    lease_owner: str,
-    code_generation: str,
-    active_lease: Callable[[], TradingLease | None],
-    entry_enabled: Callable[[], bool],
-    capability_evaluator: CapabilityEvaluator,
-    runtime_plan: RuntimePlan,
-    evidence_provider: Callable[
-        [OrderExecutionPlan, datetime], CapabilityEvidence
-    ],
-) -> LiveSubmissionFence:
-    """Build pre-submission physical and capability gate fence."""
-    return LiveSubmissionFence(
-        risk_state=risk_state,
-        environment="live",
-        account_label=account_label,
-        strategy_name=strategy_name,
-        lease_owner=lease_owner,
-        code_generation=code_generation,
-        active_lease=active_lease,
-        entry_enabled=entry_enabled,
-        capability_evaluator=capability_evaluator,
-        runtime_plan=runtime_plan,
-        evidence_provider=evidence_provider,
-    )
-

@@ -4,8 +4,11 @@ import ast
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
+from typing import get_type_hints
 
+from crypto_momentum_lab.domain.operational.runtime_metadata import RuntimePlanMetadata
 from crypto_momentum_lab.domain.strategy.paper_models import PaperTradingRunReport
 
 
@@ -50,10 +53,7 @@ def _build_domain_dependency_graphs() -> tuple[
     dict[str, set[str]], dict[str, set[str]]
 ]:
     domain_dir = (
-        Path(__file__).resolve().parents[3]
-        / "src"
-        / "crypto_momentum_lab"
-        / "domain"
+        Path(__file__).resolve().parents[3] / "src" / "crypto_momentum_lab" / "domain"
     )
     subpackages = sorted(
         d.name
@@ -96,9 +96,7 @@ def _find_elementary_cycles(graph: dict[str, set[str]]) -> list[list[str]]:
     cycles: list[list[str]] = []
     nodes = sorted(list(set(graph.keys()) | {v for vs in graph.values() for v in vs}))
 
-    def dfs(
-        start: str, current: str, path: list[str], visited: set[str]
-    ) -> None:
+    def dfs(start: str, current: str, path: list[str], visited: set[str]) -> None:
         for nxt in sorted(graph.get(current, set())):
             if nxt == start:
                 cycles.append(path + [start])
@@ -112,19 +110,35 @@ def _find_elementary_cycles(graph: dict[str, set[str]]) -> list[list[str]]:
     return cycles
 
 
-def test_domain_runtime_subpackage_graph_has_zero_cycles() -> None:
+def test_domain_runtime_and_type_subpackage_graphs_have_zero_cycles() -> None:
     runtime_graph, all_graph = _build_domain_dependency_graphs()
 
     runtime_cycles = _find_elementary_cycles(runtime_graph)
-    assert (
-        runtime_cycles == []
-    ), f"Domain runtime subpackages contain cycles: {runtime_cycles}"
-
-    # Verify that the test correctly detects the 6 type-level cycles
-    all_cycles = _find_elementary_cycles(all_graph)
-    assert len(all_cycles) == 6, (
-        f"Expected 6 type-level cycles, got {len(all_cycles)}: {all_cycles}"
+    assert runtime_cycles == [], (
+        f"Domain runtime subpackages contain cycles: {runtime_cycles}"
     )
+
+    all_cycles = _find_elementary_cycles(all_graph)
+    assert all_cycles == [], f"Domain type dependencies contain cycles: {all_cycles}"
+
+
+def test_dependency_scanner_distinguishes_runtime_and_type_imports() -> None:
+    visitor = _ImportVisitor()
+    visitor.visit(
+        ast.parse(
+            "from crypto_momentum_lab.domain.strategy import OrderIntentCandidate\n"
+            "if TYPE_CHECKING:\n"
+            "    from crypto_momentum_lab.domain.runtime import RuntimePlan\n"
+            "else:\n"
+            "    import crypto_momentum_lab.domain.account\n"
+        )
+    )
+    assert visitor.runtime_imports == {
+        "crypto_momentum_lab.domain.strategy",
+        "crypto_momentum_lab.domain.account",
+    }
+    assert visitor.type_imports == {"crypto_momentum_lab.domain.runtime"}
+    assert _find_elementary_cycles({"a": {"b"}, "b": {"a"}}) == [["a", "b", "a"]]
 
 
 def test_paper_models_clean_subprocess_import_isolation() -> None:
@@ -145,8 +159,25 @@ def test_paper_models_clean_subprocess_import_isolation() -> None:
 
 
 def test_paper_trading_run_report_runtime_plan_annotation() -> None:
-    # Ensure dataclass fields and annotations work as intended
-    annotations = getattr(PaperTradingRunReport, "__annotations__", {})
-    assert "runtime_plan" in annotations
-    # RuntimePlan is stringified by __future__.annotations
-    assert annotations["runtime_plan"] == "RuntimePlan | None"
+    assert get_type_hints(PaperTradingRunReport)["runtime_plan"] == (
+        RuntimePlanMetadata | None
+    )
+
+
+def test_paper_report_preserves_concrete_plan_and_persisted_artifacts() -> None:
+    from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlanCompiler
+    from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
+        strategy_run_report_rows,
+    )
+    from tests.unit.persistence.postgres.test_strategy_run_repository import (
+        fixture_paper_report,
+    )
+
+    plan: RuntimePlanMetadata = RuntimePlanCompiler.compile(
+        environment="paper",
+        account_label="account-1",
+    )
+    base = fixture_paper_report()
+    report = replace(base, runtime_plan=plan)
+    assert report.runtime_plan is plan
+    assert strategy_run_report_rows(report) == strategy_run_report_rows(base)

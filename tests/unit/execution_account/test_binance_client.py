@@ -8,6 +8,14 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
+    ExchangeOrderQueryUnknownError,
+    ExchangeOrderRejectedError,
+    ExchangeSubmissionTimeoutError,
+    LiveSubmissionDisabledError,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -22,14 +30,6 @@ from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMTradeClient,
     _AsyncRequestPacer,
     _FileRequestPacer,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    ExchangeCancellationUnknownError,
-    ExchangeOrderAlreadyAbsentError,
-    ExchangeOrderQueryUnknownError,
-    ExchangeOrderRejectedError,
-    ExchangeSubmissionTimeoutError,
-    LiveSubmissionDisabledError,
 )
 
 
@@ -2149,3 +2149,22 @@ async def test_trade_client_reduce_only_post_boundary_guard() -> None:
     assert guard_executed is True
     assert captured_paths == ["/fapi/v1/order"]  # Skipped warmup!
     assert snapshot.state == ExchangeOrderState.ACKNOWLEDGED
+
+
+def test_trade_client_import_does_not_load_order_state_machine() -> None:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import crypto_momentum_lab.execution_account.binance.client; "
+            "assert 'crypto_momentum_lab.execution_account.orders.state_machine' "
+            "not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

@@ -1,7 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
 
-from crypto_momentum_lab.live_rollout.limits import (
+from crypto_momentum_lab.domain.risk.limits import (
     FixedLiveLimits,
     LiveLimitContext,
     evaluate_fixed_live_limits,

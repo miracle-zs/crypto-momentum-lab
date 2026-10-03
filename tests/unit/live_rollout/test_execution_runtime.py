@@ -177,26 +177,3 @@ def test_capability_evidence_provider_evaluates_runtime_facts() -> None:
     assert evidence.is_lease_active is True
     assert evidence.is_approval_valid is True
     assert evidence.unresolved_inflight_orders_count == 0
-
-
-def test_build_live_submission_fence_constructs_fence() -> None:
-    from unittest.mock import Mock
-
-    from crypto_momentum_lab.domain.runtime import CapabilityEvaluator, RuntimePlan
-    from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence
-
-    fence = runtime.build_live_submission_fence(
-        risk_state=Mock(),
-        account_label="acc1",
-        strategy_name="strat1",
-        lease_owner="worker1",
-        code_generation="gen1",
-        active_lease=lambda: None,
-        entry_enabled=lambda: True,
-        capability_evaluator=Mock(spec=CapabilityEvaluator),
-        runtime_plan=Mock(spec=RuntimePlan),
-        evidence_provider=Mock(),
-    )
-
-    assert isinstance(fence, LiveSubmissionFence)
-

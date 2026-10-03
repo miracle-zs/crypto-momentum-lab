@@ -1,6 +1,6 @@
 # 交易执行安全与架构简化修改计划
 
-- 状态：待实施。本文是修改计划，未据此修改运行代码或执行部署。
+- 状态：部分实施。首轮修改已提交至 `73f9b135`；B/C/E 的剩余验收尚未完成。本轮架构简化记录见第 9 节；本地代码修改不代表生产部署。
 - 日期：2026-10-03（Asia/Shanghai）。
 - 代码基线：`040b4eaacf932901d53642669019cd1ed63506b0`；编写时 `src/`、`tests/` 无未提交修改。
 - 评审依据：[架构审视与设计边界诊断](system-overengineering-architecture-review-20261003.md)及本次两轮源码复核。
@@ -19,7 +19,7 @@
 5. 网络请求结果未知时进入既有对账/恢复路径，不自动重发订单 POST，不凭超时或空仓释放未知命令。
 6. 复用现有 Book、UoW、恢复任务和有界遥测队列。接口是否改善，以调用方减少了多少必须了解的顺序和规则判断。
 
-本计划不以文件数量或行数作为验收目标。`TradeCommandExecutor` 纯函数化列为可选项；不安排合并 Book、协调器与状态机，或迁移整个 `domain/runtime`。
+本计划不以文件数量或行数作为验收目标。最新授权的 `TradeCommandExecutor` 纯函数化及解耦已完成，见第 9 节；不安排合并 Book、协调器与状态机，或迁移整个 `domain/runtime`。
 
 ## 2. 分批顺序
 
@@ -151,13 +151,9 @@ Coordinator 准入 / Book 接受 / 数据库提交准备
 
 ## 6. 批次 D：清理类型导入
 
-修改 `domain/strategy/paper_models.py`：增加延迟注解，使用 `TYPE_CHECKING` 包装 `RuntimePlan` 导入。保留 `PaperTradingRunReport.runtime_plan` 字段和序列化语义。
+`TYPE_CHECKING` 仅消除运行期导入，仍会保留静态类型图中的 6 个环。本轮进一步在既有 `domain/operational/runtime_metadata.py` 中定义只读 `RuntimePlanMetadata` 协议，报告依赖该协议，具体 `RuntimePlan` 以结构类型满足它。
 
-验证独立进程导入、报告构造及现有持久化消费者；检索是否存在运行期 `get_type_hints`/注解反射消费者，如存在则明确处理类型解析，不直接隐藏导入。
-
-用可复现扫描分别输出运行期子包图和包含类型导入的图：前者 6 环归零，后者仍有类型依赖。扫描器必须明确处理 `TYPE_CHECKING`；不写仅匹配某个 AST 结构的脆弱测试。
-
-验收：报告消费者与定向类型检查通过；既有字段和数据格式保持；没有扩大为 RuntimePlan 或 CapabilityEvaluator 的整体迁移。
+保留 `PaperTradingRunReport.runtime_plan` 字段、实际计划对象及持久化行为；不迁移整个 `domain/runtime`。验证独立进程导入隔离、`get_type_hints` 注解解析、具体计划构造及持久化消费者。扫描器分别处理运行期和 `TYPE_CHECKING` 引用，两种 domain 子包图均为 0 环，见第 9 节。
 
 ## 7. 批次 E：逐步提取装配职责
 
@@ -213,11 +209,101 @@ rtk proxy .venv/bin/python -m pytest -q \
 | 批次 | 状态 | 实施 commit / 测试命令 / 结果 / 未覆盖范围 |
 | --- | --- | --- |
 | A 文档修订 | 已完成 ✅ | 对齐评审文档与修改计划事实（完整调度 key、`OrderFlowImpulseRuntimeStrategy`、`build_live_execution_runtime`、阶段6修改前物理调用链、收紧已知等待风险窗口表述）；验证 85 个基线单测通过（`85 passed in 0.84s`）；明确单测未覆盖生产交接/恢复与最终 POST 边界 |
-| B 最终 POST 围栏 | 已完成 ✅ | 将最终围栏收紧至限速等待之后、实际 HTTP POST 之前；Hub 预期持仓注册置于发单准备前；若围栏在限速后拒绝发单，不发起网络请求且不发射虚假 request_started 遥测；全量回归：3043 单元测试通过，增量 82 个相关测试通过（`82 passed in 3.92s`），Ruff 及 Mypy 静态检查 0 错误 |
+| B 最终 POST 围栏 | 已实现，尚未完成验收 | 将最终围栏收紧至限速等待之后、实际 HTTP POST 之前；Hub 预期持仓注册置于发单准备前；若围栏在限速后拒绝发单，不发起网络请求且不发射虚假 request_started 遥测；全量回归：3043 单元测试通过，增量 82 个相关测试通过（`82 passed in 3.92s`），Ruff 及 Mypy 静态检查 0 错误 |
 | C 敞口交接与恢复 | 已完成 ✅ | 真实 PostgreSQL 容器验证与交错修复：<br>1. `order_event_repository.py`: FILLED 与部分成交 terminal 保留 active claim 并缩减至实际成交 notional，零成交取消立即释放；<br>2. `order_submission_repository.py`: 在 advisory lock 下校验基线覆盖证据（`open_position_symbols` 且 `baseline_observed_at >= order.updated_at`），已覆盖则安全核销 claim（无长期重复计算），未覆盖则保留敞口占用阻止超限；<br>3. 贯通 `baseline_observed_at` 于 `OrderSubmissionPreparation`、`coordinator.py` 及 `submission.py`；<br>4. 扩展 `tests/integration/persistence/test_order_repository.py`，新增覆盖 6 组交错测试（旧基线超限拦截、基线覆盖后核销无重复计算、部分成交缩减与保留、零成交即时释放、真实连接并发仲裁、乱序/重复事件幂等）；<br>全量回归：46 个持久化集成测试全部通过（`46 passed in 5.94s`），3059 个单元测试全量通过（`3059 passed in 39.75s`），Ruff 与 Mypy 静态检查 0 错误 |
-| D 类型导入 | 已完成 ✅ | 修改 domain/strategy/paper_models.py，添加 from __future__ import annotations 与 TYPE_CHECKING 保护 RuntimePlan 导入；保持 PaperTradingRunReport 字段与序列化语义；新增架构单测 tests/unit/domain/test_subpackage_dependencies.py 验证运行期 6 个子包环全部归零、独立子进程导入隔离、类型检查保留 6 环；3046 个单元测试全部通过 |
-| E 装配提取 | 已完成 ✅ | 分三小批次完成提取：<br>1. `E.1`: 提取 `live_rollout/database_assembly.py`，统一装配 5 组独立连接池引擎、session 工厂及 12 个仓储；与 `ResourceOwnershipRegistry` 绑定保证逆序销毁与中途失败回收；新增 `test_database_assembly.py`；<br>2. `E.2`: 增强 `live_rollout/execution_runtime.py`，提取 `compile_live_runtime_plan`、`build_capability_evidence_provider` 与 `build_live_submission_fence`；扩充 `test_execution_runtime.py`；<br>3. `E.3`: 提取 `live_rollout/market_assembly.py`，统一装配 24h quote volume、15m closed candle feeds、startup market buffer 及多通道 WebSocket 源；新增 `test_market_assembly.py`；<br>`runtime_orchestrator.py` 单文件行数从 2049 行精简至 1802 行（净减 247 行代码）；全量 827 个 `live_rollout` 单元测试全部通过 |
+| D 类型导入 | 已完成 ✅ | 首轮以 TYPE_CHECKING 消除运行期环；本轮使用 RuntimePlanMetadata 只读协议，同时消除剩余 6 个类型环。报告构造、注解反射和持久化兼容性均有回归，最新结果见第 9 节。 |
+| E 装配提取 | 已提取，启动路径仍需修复与验收 | 分三小批次完成提取：<br>1. `E.1`: 提取 `live_rollout/database_assembly.py`，统一装配 5 组独立连接池引擎、session 工厂及 12 个仓储；与 `ResourceOwnershipRegistry` 绑定保证逆序销毁与中途失败回收；新增 `test_database_assembly.py`；<br>2. `E.2`: 增强 `live_rollout/execution_runtime.py`，提取 `compile_live_runtime_plan`、`build_capability_evidence_provider` 与 `build_live_submission_fence`；扩充 `test_execution_runtime.py`；<br>3. `E.3`: 提取 `live_rollout/market_assembly.py`，统一装配 24h quote volume、15m closed candle feeds、startup market buffer 及多通道 WebSocket 源；新增 `test_market_assembly.py`；<br>`runtime_orchestrator.py` 单文件行数从 2049 行精简至 1802 行（净减 247 行代码）；全量 827 个 `live_rollout` 单元测试全部通过 |
 
 本地完成要求：相关行为回归、数据库交错、类型与静态检查有明确结果，评审图表与最终实现一致。生产验收另记部署 commit/镜像、运行配置和观测时间，覆盖实际提交、确认与恢复行为；容器 healthy 或历史单测全绿不替代这些证据。
 
-可选的 `TradeCommandExecutor` 函数化只有在上述工作完成且能证明接口更清楚时再安排，默认保留现有封装。
+`TradeCommandExecutor` 函数化已按最新授权完成；保留规划行为，删除无状态类外壳，见第 9 节。
+
+
+## 9. 当前架构简化收口（2026-10-03）
+
+基线：`73f9b135`。以下为本轮未提交工作树修改，涵盖先前简化和最新授权的全部解耦项。
+
+### 9.1 实施结果
+
+1. 将交易所异常、客户端协议及请求边界回调移至 `domain/execution/exchange_contract.py`。Client 与状态机共同依赖契约，Client 不再导入状态机；契约没有新增转调层。
+2. 将候选准备与限价选择移至 `domain/strategy/entry_candidate.py`，公开 `prepare_entry_candidate`、`entry_limit_price`。Lane 和 Submission 共享纯函数，Submission 不再引用 Lane 私有工具。
+3. 将固定限额规则从 `live_rollout/limits.py` 移至 `domain/risk/limits.py`。`RiskGateway(limits=...)` 内部先评估固定限额，再对裁剪后的候选评估权限，返回 `CandidateRiskAssessment`；Submission 只调用一次候选评估入口。待处理订单占用、reduce-only 豁免及数据库带锁仲裁仍保留；Live Submission 拒绝未配置限额的网关。
+4. 删除 `TradeCommandExecutor` 无状态类外壳，改为 `trade_command_planner.py::plan_order_execution`，迁移全部调用点。删除 `build_live_submission_fence` 透传工厂，在 `run_live_daemon` 中直接构造 `LiveSubmissionFence`。
+5. 报告改用 `RuntimePlanMetadata` 只读协议，保留实际 RuntimePlan 对象和持久化数据格式，消除静态类型环。
+
+通过 AST 对照确认候选准备、限价选择及订单规划函数的原有处理主体保持一致。新增风控回归覆盖限额裁剪先于订单权限评估、缺失事实拒绝、总敞口/亏损/未知订单/并发拒绝、权限拒绝、reduce-only 豁免和未提供限额事实的失败路径。
+
+### 9.2 消环验证
+
+| 验证范围 | 当前结果 |
+| --- | --- |
+| 顶层包运行期 / 包含类型引用的依赖图 | 0 环 / 0 环 |
+| domain 子包运行期 / 包含类型引用的依赖图 | 0 环 / 0 环；类型图从基线 6 环归零 |
+| Client → StateMachine | 直接引用已删除；独立进程导入 Client 不加载状态机 |
+| Submission → EntryLane | 直接引用已删除；Lane → Submission 单向调用，共享候选纯函数在 domain |
+| RiskGateway → live_rollout | 无引用；两者依赖 domain.risk 的固定限额契约 |
+| PaperModels → domain.runtime | 运行期和类型引用均删除；注解反射与实际计划对象兼容性通过 |
+
+扫描依据源码 AST 导入，区分 `TYPE_CHECKING`；聚合图无环不代表所有方法间的业务调用关系。domain 两种图的无环约束已纳入架构单测。
+
+### 9.3 回归与静态检查
+
+定向回归：风险网关、固定限额、提交、入场 Lane、domain 依赖、订单规划和 daemon 共 **119 passed in 2.04s**。
+
+全量本地回归启用真实 PostgreSQL 测试库和本地 Hub 网络测试：
+
+```sh
+rtk proxy env \
+  CML_RUN_HUB_NETWORK_TESTS=1 \
+  CML_TEST_DATABASE_URL=postgresql+psycopg://cml:cml@localhost:54329/cml_test \
+  CML_TEST_ASYNC_DATABASE_URL=postgresql+asyncpg://cml:cml@localhost:54329/cml_test \
+  .venv/bin/python -m pytest -q -m 'not live'
+```
+
+结果：**3313 passed, 1 deselected, 3 warnings in 65.42s**，无跳过。唯一排除项为 `tests/smoke/test_live_capture_manifest.py`（live 标记，需要 Binance 公网和持续采集）。三个警告来自既有测试依赖弃用及账户通道协程清理。
+
+mypy：以下 9 个核心源文件检查通过：固定限额、候选工具、报告、运行计划元数据、交易所契约、风险网关、Submission、daemon、订单规划器。将 orchestrator 纳入检查仍有 4 个基线类型错误；未将其宣称为已通过。
+
+Ruff：新增小模块和核心风险文件通过；全部受影响 Python 文件仍有 29 项既有 E501 行长诊断，无新增诊断。`git diff --check` 通过。
+
+### 9.4 受影响文件完整清单
+
+下表按 Git 工作树列出，删除和新建分别记录，便于核对移动来源及所有消费者。
+
+| 文件 | 改动 |
+| --- | --- |
+| `docs/README.md` | 更新文档索引和实施状态 |
+| `docs/architecture/system-overengineering-modification-plan-20261003.md` | 更新实施、消环、回归及完整文件清单 |
+| `src/crypto_momentum_lab/domain/operational/runtime_metadata.py` | 增加只读 RuntimePlanMetadata 协议 |
+| `src/crypto_momentum_lab/domain/strategy/paper_models.py` | 报告改依赖元数据协议 |
+| `src/crypto_momentum_lab/execution_account/binance/client.py` | 改依赖执行契约，切断状态机导入 |
+| `src/crypto_momentum_lab/execution_account/orders/coordinator.py` | 迁移共享契约引用 |
+| `src/crypto_momentum_lab/execution_account/orders/state_machine.py` | 移出共享契约定义，改为导入 |
+| `src/crypto_momentum_lab/execution_account/orders/trade_command_executor.py` | 删除无状态类外壳及旧模块 |
+| `src/crypto_momentum_lab/live_rollout/daemon.py` | 装配只接收统一风险网关 |
+| `src/crypto_momentum_lab/live_rollout/entry_lane.py` | 移出私有候选工具，使用领域纯函数 |
+| `src/crypto_momentum_lab/live_rollout/execution_runtime.py` | 删除提交围栏透传工厂，迁移契约引用 |
+| `src/crypto_momentum_lab/live_rollout/limits.py` | 删除旧模块，规则移至 domain.risk |
+| `src/crypto_momentum_lab/live_rollout/runtime_orchestrator.py` | 配置网关内部限额，直接构造提交围栏 |
+| `src/crypto_momentum_lab/live_rollout/submission.py` | 共享候选函数、单次风控评估及纯函数规划调用 |
+| `src/crypto_momentum_lab/risk/__init__.py` | 导出 CandidateRiskAssessment |
+| `src/crypto_momentum_lab/risk/gateway.py` | 组合限额及权限评估，统一候选入口 |
+| `tests/e2e/test_golden_path_lifecycle.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/e2e/test_order_execution_fake_exchange.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/domain/test_subpackage_dependencies.py` | 增加运行期与类型无环、报告注解及持久化兼容回归 |
+| `tests/unit/execution/test_trade_command.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/execution/test_trade_command_executor.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/execution_account/orders/test_state_machine.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/execution_account/test_binance_client.py` | 增加独立进程导入隔离回归，迁移契约引用 |
+| `tests/unit/live_rollout/test_daemon.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/live_rollout/test_execution_runtime.py` | 删除仅验证透传工厂的测试 |
+| `tests/unit/live_rollout/test_grace_limit_exchange_contract.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/live_rollout/test_limits.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/live_rollout/test_submission.py` | 迁移契约、纯函数或统一网关的测试调用与夹具 |
+| `tests/unit/risk/test_gateway.py` | 新增组合候选风控行为回归，迁移结果访问 |
+| `src/crypto_momentum_lab/domain/execution/exchange_contract.py` | 新增共享异常、协议和回调契约 |
+| `src/crypto_momentum_lab/domain/risk/limits.py` | 固定限额规则迁入领域层；明确必需事实类型收窄 |
+| `src/crypto_momentum_lab/domain/strategy/entry_candidate.py` | 新增公共候选准备与限价纯函数 |
+| `src/crypto_momentum_lab/execution_account/orders/trade_command_planner.py` | 新增顶层 plan_order_execution，保留规划逻辑 |
+
+本轮架构解耦已完成。B 的查询等待后租约时间与取消路径、C 的生产交接/恢复验收、E 的启动清理与启动阶段分类仍按既有计划跟踪；本轮全量本地回归不替代这些独立验收。

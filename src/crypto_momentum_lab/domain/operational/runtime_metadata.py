@@ -7,7 +7,26 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
+
+
+class RuntimePlanMetadata(Protocol):
+    """Read-only plan identity usable by reports without execution configuration."""
+
+    @property
+    def plan_id(self) -> str: ...
+
+    @property
+    def plan_hash(self) -> str: ...
+
+    @property
+    def runtime_generation(self) -> str: ...
+
+    @property
+    def fencing_epoch(self) -> int: ...
+
+    @property
+    def compiled_at(self) -> datetime: ...
 
 
 def compute_content_hash(content: str | bytes | dict[str, Any] | list[Any]) -> str:

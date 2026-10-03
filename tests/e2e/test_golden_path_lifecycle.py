@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
     TradingLease,
 )
+from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -53,7 +54,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
-from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
     LiveSubmissionConfig,
@@ -254,13 +254,14 @@ def _build_submission_service(
         ), clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
-        risk_gateway=RiskGateway(),
-        limits=limits
-        or FixedLiveLimits(
-            notional_cap=Decimal("25"),
-            max_open_positions=1,
-            max_daily_loss=Decimal("10"),
-            max_gross_exposure=Decimal("25"),
+        risk_gateway=RiskGateway(
+            limits=limits
+            or FixedLiveLimits(
+                notional_cap=Decimal("25"),
+                max_open_positions=1,
+                max_daily_loss=Decimal("10"),
+                max_gross_exposure=Decimal("25"),
+            ),
         ),
         state_machine=coordinator,
         config=LiveSubmissionConfig(

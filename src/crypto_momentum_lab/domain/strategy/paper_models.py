@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, uuid5
 
+from crypto_momentum_lab.domain.operational.runtime_metadata import RuntimePlanMetadata
 from crypto_momentum_lab.domain.strategy.models import (
     OrderIntentCandidate,
     StrategyCheckpoint,
@@ -15,9 +15,6 @@ from crypto_momentum_lab.domain.strategy.models import (
     StrategySignal,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
-
-if TYPE_CHECKING:
-    from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlan
 
 
 class SimulatedFillStatus(StrEnum):
@@ -246,7 +243,7 @@ class PaperTradingRunReport:
     fill_summary: dict[str, dict[str, FillSummaryValue]]
     portfolio_config: PaperExitConfig = field(default_factory=PaperExitConfig)
     paper_positions: tuple[PaperPosition, ...] = ()
-    runtime_plan: RuntimePlan | None = None
+    runtime_plan: RuntimePlanMetadata | None = None
 
 
 def _is_aware(value: datetime) -> bool:

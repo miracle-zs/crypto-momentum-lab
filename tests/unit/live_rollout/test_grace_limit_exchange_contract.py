@@ -24,12 +24,12 @@ from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTrad
 from crypto_momentum_lab.execution_account.orders.quantization import (
     quantize_order_plan,
 )
-from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-    TradeCommandExecutor,
+from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+    plan_order_execution,
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager, LiveExitOrderRequest
-from tests.unit.live_rollout.test_exits import FakeCandleLoader, _config, _long_position
 from tests.fixtures.live_market import _state
+from tests.unit.live_rollout.test_exits import FakeCandleLoader, _config, _long_position
 
 
 @pytest.mark.parametrize("planner", ("command", "intent"))
@@ -88,7 +88,7 @@ async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> N
             reduce_only=True,
             created_at=candidate.created_at,
         )
-        plan = TradeCommandExecutor.plan_execution(
+        plan = plan_order_execution(
             command, rules, run_id=candidate.run_id, reference_price=Decimal("99")
         ).plan
     else:

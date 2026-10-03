@@ -87,7 +87,6 @@ from crypto_momentum_lab.live_rollout.exit_processor import (
     LiveExitProcessor,
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.market_admission import (
     LiveMarketStateAdmission,
 )
@@ -167,7 +166,6 @@ class LiveStrategyDaemon:
         *,
         strategy: market_runtime_contracts.LiveRuntimeStrategy,
         risk_gateway: RiskGateway,
-        limits: FixedLiveLimits,
         submission_repository: OrderSubmissionRepository,
         persist_checkpoint: PersistCheckpoint,
         state_machine: CoordinatedOrderExecutionPort,
@@ -199,7 +197,6 @@ class LiveStrategyDaemon:
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
-        self._limits = limits
         self._state_machine = state_machine
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._entry_control = LiveEntryControlGate(
@@ -308,7 +305,6 @@ class LiveStrategyDaemon:
         )
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,
-            limits=self._limits,
             state_machine=self._state_machine,
             config=LiveSubmissionConfig(
                 run_id=config.run_id,

@@ -2,8 +2,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits, LiveLimitContext
 from crypto_momentum_lab.domain.risk.models import (
     RiskDecision,
     StrategyLiveState,
@@ -20,22 +23,28 @@ from tests.unit.domain.risk.test_models import _risk_config
 
 
 def test_gateway_rejects_missing_active_lease() -> None:
-    evaluation = RiskGateway().evaluate(_intent(), _context(active_lease=None))
+    evaluation = (
+        RiskGateway().evaluate(_intent(), _context(active_lease=None)).evaluation
+    )
 
     assert evaluation.decision is RiskDecision.REJECTED
     assert evaluation.reason == "missing_active_lease"
 
 
 def test_gateway_rejects_lease_fencing_mismatch() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(),
-        replace(
-            _context(),
-            required_lease_owner="another-worker",
-            required_lease_id="lease-2",
-            required_account_label="primary",
-            required_strategy_name="compression_breakout",
-        ),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(),
+            replace(
+                _context(),
+                required_lease_owner="another-worker",
+                required_lease_id="lease-2",
+                required_account_label="primary",
+                required_strategy_name="compression_breakout",
+            ),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.REJECTED
@@ -48,16 +57,20 @@ def test_gateway_rejects_stale_market_state() -> None:
         market_state=_market_state(0),
     )
 
-    evaluation = RiskGateway().evaluate(_intent(), context)
+    evaluation = RiskGateway().evaluate(_intent(), context).evaluation
 
     assert evaluation.decision is RiskDecision.REJECTED
     assert evaluation.reason == "stale_market_state"
 
 
 def test_gateway_rejects_account_not_ready() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(),
-        _context(account_state=ExecutionAccountStatus.DEGRADED),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(),
+            _context(account_state=ExecutionAccountStatus.DEGRADED),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.REJECTED
@@ -65,7 +78,7 @@ def test_gateway_rejects_account_not_ready() -> None:
 
 
 def test_gateway_approves_small_entry_when_all_limits_pass() -> None:
-    evaluation = RiskGateway().evaluate(_intent(), _context())
+    evaluation = RiskGateway().evaluate(_intent(), _context()).evaluation
 
     assert evaluation.decision is RiskDecision.APPROVED
     assert evaluation.reason == "approved"
@@ -82,9 +95,13 @@ def test_gateway_rejects_entry_with_unbounded_capacity_limits() -> None:
         ),
     )
 
-    evaluation = RiskGateway().evaluate(
-        _intent(desired_notional=Decimal("100")),
-        context,
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(desired_notional=Decimal("100")),
+            context,
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.REJECTED
@@ -92,9 +109,13 @@ def test_gateway_rejects_entry_with_unbounded_capacity_limits() -> None:
 
 
 def test_gateway_allows_reduce_only_while_draining() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(reduce_only=True),
-        _context(strategy_state=StrategyLiveState.DRAINING),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(reduce_only=True),
+            _context(strategy_state=StrategyLiveState.DRAINING),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.APPROVED
@@ -102,9 +123,13 @@ def test_gateway_allows_reduce_only_while_draining() -> None:
 
 
 def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(reduce_only=True, desired_notional=Decimal("500")),
-        _context(),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(reduce_only=True, desired_notional=Decimal("500")),
+            _context(),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.APPROVED
@@ -112,9 +137,13 @@ def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
 
 
 def test_gateway_allows_reduce_only_when_account_syncing() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(reduce_only=True),
-        _context(account_state=ExecutionAccountStatus.SYNCING),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(reduce_only=True),
+            _context(account_state=ExecutionAccountStatus.SYNCING),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.APPROVED
@@ -122,9 +151,13 @@ def test_gateway_allows_reduce_only_when_account_syncing() -> None:
 
 
 def test_gateway_rejects_reduce_only_when_account_stopped() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(reduce_only=True),
-        _context(account_state=ExecutionAccountStatus.STOPPED),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(reduce_only=True),
+            _context(account_state=ExecutionAccountStatus.STOPPED),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.REJECTED
@@ -132,13 +165,99 @@ def test_gateway_rejects_reduce_only_when_account_stopped() -> None:
 
 
 def test_gateway_blocks_entries_when_strategy_is_halted() -> None:
-    evaluation = RiskGateway().evaluate(
-        _intent(),
-        _context(strategy_state=StrategyLiveState.HALTED),
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(),
+            _context(strategy_state=StrategyLiveState.HALTED),
+        )
+        .evaluation
     )
 
     assert evaluation.decision is RiskDecision.HALTED
     assert evaluation.reason == "strategy_halted"
+
+
+def _entry_limit_context() -> LiveLimitContext:
+    return LiveLimitContext(
+        symbol="BTCUSDT",
+        requested_notional=Decimal("50"),
+        open_position_symbols=frozenset(),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        gross_exposure=Decimal("0"),
+        min_notional=Decimal("5"),
+        has_unresolved_order=False,
+    )
+
+
+def _fixed_limits() -> FixedLiveLimits:
+    return FixedLiveLimits(
+        notional_cap=Decimal("25"),
+        max_open_positions=2,
+        max_daily_loss=Decimal("10"),
+        max_gross_exposure=Decimal("100"),
+        max_concurrency_per_symbol=2,
+    )
+
+
+def test_gateway_applies_notional_cap_before_order_limit() -> None:
+    context = replace(
+        _context(),
+        risk_config=_risk_config(max_order_notional=Decimal("30")),
+    )
+    result = RiskGateway(limits=_fixed_limits()).evaluate(
+        _intent(),
+        context,
+        limit_context=_entry_limit_context(),
+    )
+    assert result.evaluation.decision is RiskDecision.APPROVED
+    assert result.candidate is not None
+    assert result.candidate.desired_notional == Decimal("25")
+    assert result.evaluation.details["desired_notional"] == "25"
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"gross_exposure": None}, "missing_gross_exposure"),
+        ({"gross_exposure": Decimal("100")}, "max_gross_exposure_reached"),
+        ({"realized_pnl": Decimal("-10")}, "max_daily_loss_reached"),
+        ({"has_unresolved_order": True}, "unresolved_order_uncertainty"),
+        ({"symbol_concurrency": 2}, "max_concurrency_per_symbol_exceeded"),
+    ],
+)
+def test_gateway_rejects_fixed_limit_failures(change, reason) -> None:
+    result = RiskGateway(limits=_fixed_limits()).evaluate(
+        _intent(),
+        _context(),
+        limit_context=replace(_entry_limit_context(), **change),
+    )
+    assert result.candidate is None
+    assert result.evaluation.decision is RiskDecision.REJECTED
+    assert result.evaluation.reason == reason
+
+
+def test_gateway_preserves_authority_rejection_after_limit_approval() -> None:
+    result = RiskGateway(limits=_fixed_limits()).evaluate(
+        _intent(),
+        _context(active_lease=None),
+        limit_context=_entry_limit_context(),
+    )
+    assert result.candidate is not None
+    assert result.evaluation.reason == "missing_active_lease"
+
+
+def test_gateway_reduce_only_bypasses_entry_limits() -> None:
+    intent = _intent(reduce_only=True, desired_notional=Decimal("500"))
+    result = RiskGateway(limits=_fixed_limits()).evaluate(intent, _context())
+    assert result.candidate is intent
+    assert result.evaluation.decision is RiskDecision.APPROVED
+
+
+def test_gateway_requires_limit_facts_for_configured_entry() -> None:
+    with pytest.raises(ValueError, match="entry limit context is required"):
+        RiskGateway(limits=_fixed_limits()).evaluate(_intent(), _context())
 
 
 def _context(

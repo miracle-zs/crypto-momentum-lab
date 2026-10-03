@@ -347,8 +347,8 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
     assert cmd.reduce_only is True
 
     from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
-    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-        TradeCommandExecutor,
+    from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+        plan_order_execution,
     )
 
     rules = SymbolTradingRules(
@@ -359,7 +359,7 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
         max_quantity=Decimal("100.0"),
         min_notional=Decimal("5.0"),
     )
-    exec_plan = TradeCommandExecutor.plan_execution(
+    exec_plan = plan_order_execution(
         cmd,
         rules,
         run_id="run-1",

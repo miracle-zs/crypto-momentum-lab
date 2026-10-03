@@ -15,6 +15,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
+from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     CoordinatedOrderExecutionPort,
@@ -26,14 +27,13 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
-from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
     LiveSubmissionConfig,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from tests.unit.live_rollout.test_daemon import _runtime_context
 from tests.fixtures.live_market import _intent, _state
+from tests.unit.live_rollout.test_daemon import _runtime_context
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
@@ -116,13 +116,14 @@ def _submission(
         clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
-        risk_gateway=RiskGateway(),
-        limits=limits
-        or FixedLiveLimits(
-            notional_cap=Decimal("25"),
-            max_open_positions=1,
-            max_daily_loss=Decimal("10"),
-            max_gross_exposure=Decimal("25"),
+        risk_gateway=RiskGateway(
+            limits=limits
+            or FixedLiveLimits(
+                notional_cap=Decimal("25"),
+                max_open_positions=1,
+                max_daily_loss=Decimal("10"),
+                max_gross_exposure=Decimal("25"),
+            ),
         ),
         state_machine=cast(CoordinatedOrderExecutionPort, state_machine),
         config=LiveSubmissionConfig(
@@ -365,18 +366,21 @@ async def test_submission_shadow_trade_command_evaluation(
     state = _state()
 
     shadow_calls: list[object] = []
-    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-        TradeCommandExecutor,
+    from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+        plan_order_execution,
     )
 
-    original_plan = TradeCommandExecutor.plan_execution
+    original_plan = plan_order_execution
 
     def fake_plan(*args: object, **kwargs: object) -> object:
         res = original_plan(*args, **kwargs)
         shadow_calls.append(res)
         return res
 
-    monkeypatch.setattr(TradeCommandExecutor, "plan_execution", staticmethod(fake_plan))
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.submission.plan_order_execution",
+        fake_plan,
+    )
 
     result = await submission.execute(
         candidate,

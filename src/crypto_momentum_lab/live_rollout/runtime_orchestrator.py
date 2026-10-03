@@ -50,6 +50,7 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
     compute_trading_rules_hash,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, TradingLease
+from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.runtime import (
     CapabilityEvaluator,
 )
@@ -108,7 +109,6 @@ from crypto_momentum_lab.live_rollout.execution_runtime import (
     LiveExecutionCallbacks,
     build_capability_evidence_provider,
     build_live_execution_runtime,
-    build_live_submission_fence,
     compile_live_runtime_plan,
 )
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
@@ -137,7 +137,6 @@ from crypto_momentum_lab.live_rollout.lease import (
 from crypto_momentum_lab.live_rollout.lease_recovery import (
     maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
 )
-from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.market_assembly import (
     LiveChannelSources,
     LiveStartupMarketAssembly,
@@ -146,7 +145,11 @@ from crypto_momentum_lab.live_rollout.market_assembly import (
     assemble_live_quote_volume,
     assemble_live_startup_market_buffer,
     build_live_market_state_stream,
+)
+from crypto_momentum_lab.live_rollout.market_assembly import (
     observe_market_states as _observe_market_states,
+)
+from crypto_momentum_lab.live_rollout.market_assembly import (
     run_risk_control_channel as _run_risk_control_channel,
 )
 from crypto_momentum_lab.live_rollout.market_cache import (
@@ -234,6 +237,7 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     is_retryable_live_startup_error as _is_retryable_live_startup_error,
 )
+from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
@@ -675,7 +679,8 @@ async def run_live_daemon(
             ),
         )
 
-        submission_fence = build_live_submission_fence(
+        submission_fence = LiveSubmissionFence(
+            environment="live",
             risk_state=heartbeat_risk_repository,
             account_label=account_label,
             strategy_name=strategy_name,
@@ -1184,13 +1189,14 @@ async def run_live_daemon(
             request_exit_recovery=order_reconciliation.request_exit_recovery,
             cached_context_provider=lambda: context_provider.cached_context,
             strategy=strategy,
-            risk_gateway=RiskGateway(),
-            limits=FixedLiveLimits(
-                notional_cap=notional_cap,
-                max_open_positions=max_positions,
-                max_daily_loss=max_loss,
-                max_gross_exposure=max_gross,
-                max_concurrency_per_symbol=max_concurrency_per_symbol,
+            risk_gateway=RiskGateway(
+                limits=FixedLiveLimits(
+                    notional_cap=notional_cap,
+                    max_open_positions=max_positions,
+                    max_daily_loss=max_loss,
+                    max_gross_exposure=max_gross,
+                    max_concurrency_per_symbol=max_concurrency_per_symbol,
+                ),
             ),
             submission_repository=submission_repository,
             persist_checkpoint=checkpoint_repository.save_checkpoint,

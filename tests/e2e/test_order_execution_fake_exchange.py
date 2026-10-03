@@ -2,11 +2,11 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
-from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
-from crypto_momentum_lab.execution_account.orders.state_machine import (
+from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeSubmissionTimeoutError,
 )
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,

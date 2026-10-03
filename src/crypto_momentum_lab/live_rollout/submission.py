@@ -48,30 +48,26 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision
+from crypto_momentum_lab.domain.risk.limits import (
+    LiveLimitContext,
+)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategySide,
 )
+from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_candidate
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     CoordinatedOrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
-from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-    TradeCommandExecutor,
+from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+    plan_order_execution,
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
-from crypto_momentum_lab.live_rollout.entry_lane import (
-    _prepare_entry_candidate_for_observation,
-)
 from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
-from crypto_momentum_lab.live_rollout.limits import (
-    FixedLiveLimits,
-    LiveLimitContext,
-    evaluate_fixed_live_limits,
-)
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
@@ -137,7 +133,6 @@ class LiveCandidateSubmission:
         self,
         *,
         risk_gateway: RiskGateway,
-        limits: FixedLiveLimits,
         state_machine: CoordinatedOrderExecutionPort,
         config: LiveSubmissionConfig,
         clock: Callable[[], datetime],
@@ -153,6 +148,9 @@ class LiveCandidateSubmission:
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
     ) -> None:
         self._risk_gateway = risk_gateway
+        limits = risk_gateway.limits
+        if limits is None:
+            raise ValueError("live submission requires configured risk limits")
         self._limits = limits
         self._state_machine = state_machine
         self._config = config
@@ -196,7 +194,7 @@ class LiveCandidateSubmission:
                 market_state_bucket_end=state.bucket_end,
             )
             return None
-        executable_candidate = _prepare_entry_candidate_for_observation(
+        executable_candidate = prepare_entry_candidate(
             candidate,
             state=state,
             execution_now=execution_now,
@@ -204,6 +202,7 @@ class LiveCandidateSubmission:
             limit_ttl_seconds=self._config.entry_limit_ttl_seconds,
         )
         risk_open_position_symbols = context.open_position_symbols or frozenset()
+        limit_context: LiveLimitContext | None = None
         if not candidate.reduce_only:
             pending_notional, pending_symbols = self._pending_entry_reservation(
                 context.unresolved_orders
@@ -216,51 +215,23 @@ class LiveCandidateSubmission:
                 managed_positions=managed_positions,
                 unresolved_orders=unresolved_orders,
             )
-            limit_decision = evaluate_fixed_live_limits(
-                self._limits,
-                LiveLimitContext(
-                    symbol=candidate.symbol,
-                    requested_notional=candidate.desired_notional,
-                    open_position_symbols=risk_open_position_symbols,
-                    realized_pnl=context.realized_pnl,
-                    unrealized_pnl=context.unrealized_pnl,
-                    gross_exposure=(
-                        None
-                        if context.gross_exposure is None
-                        else context.gross_exposure + pending_notional
-                    ),
-                    min_notional=_min_notional(
-                        context.trading_rules.get(candidate.symbol)
-                    ),
-                    has_unresolved_order=any(
-                        order_state_is_uncertain(item)
-                        for item in context.unresolved_order_states
-                    ),
-                    symbol_concurrency=symbol_concurrency,
+            limit_context = LiveLimitContext(
+                symbol=candidate.symbol,
+                requested_notional=candidate.desired_notional,
+                open_position_symbols=risk_open_position_symbols,
+                realized_pnl=context.realized_pnl,
+                unrealized_pnl=context.unrealized_pnl,
+                gross_exposure=(
+                    None
+                    if context.gross_exposure is None
+                    else context.gross_exposure + pending_notional
                 ),
-            )
-            if not limit_decision.allowed:
-                return None
-            executable_candidate = replace(
-                executable_candidate,
-                desired_notional=limit_decision.capped_notional,
-            )
-        else:
-            limit_decision = None
-        lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
-        if executable_candidate.reduce_only:
-            self._record_signal_candidate(
-                candidate=executable_candidate,
-                state=state,
-                recorded_at=self._clock(),
-                context=context,
-            )
-        if self._telemetry is not None:
-            await self._telemetry.candidate_accepted(
-                executable_candidate,
-                state=state,
-                occurred_at=self._clock(),
-                lane=lane,
+                min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
+                has_unresolved_order=any(
+                    order_state_is_uncertain(item)
+                    for item in context.unresolved_order_states
+                ),
+                symbol_concurrency=symbol_concurrency,
             )
         if not self._context_is_current(context):
             log.info(
@@ -270,7 +241,7 @@ class LiveCandidateSubmission:
                 symbol=executable_candidate.symbol,
             )
             return None
-        evaluation = self._risk_gateway.evaluate(
+        assessment = self._risk_gateway.evaluate(
             executable_candidate,
             RiskContext(
                 now=context.now,
@@ -291,7 +262,29 @@ class LiveCandidateSubmission:
                 required_account_label=context.gate_context.account_label,
                 required_strategy_name=context.gate_context.strategy_name,
             ),
+            limit_context=limit_context,
         )
+        if assessment.candidate is None:
+            return None
+        executable_candidate = assessment.candidate
+        evaluation = assessment.evaluation
+        lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
+        if executable_candidate.reduce_only:
+            self._record_signal_candidate(
+                candidate=executable_candidate,
+                state=state,
+                recorded_at=self._clock(),
+                context=context,
+            )
+        if self._telemetry is not None:
+            await self._telemetry.candidate_accepted(
+                executable_candidate,
+                state=state,
+                occurred_at=self._clock(),
+                lane=lane,
+            )
+        if not self._context_is_current(context):
+            return None
         if evaluation.decision is not RiskDecision.APPROVED:
             return None
         if self._telemetry is not None:
@@ -333,7 +326,7 @@ class LiveCandidateSubmission:
         if trade_command is None:
             return None
 
-        execution_result = TradeCommandExecutor.plan_execution(
+        execution_result = plan_order_execution(
             trade_command,
             rules,
             run_id=self._config.run_id,
@@ -458,7 +451,9 @@ class LiveCandidateSubmission:
                     else risk_open_position_symbols
                 ),
                 exposure_notional=(
-                    None if limit_decision is None else limit_decision.capped_notional
+                    None
+                    if executable_candidate.reduce_only
+                    else executable_candidate.desired_notional
                 ),
                 baseline_observed_at=context.account_observed_at,
                 context_token=context,

@@ -9,6 +9,11 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
+    ExchangeSubmissionTimeoutError,
+)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -26,6 +31,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
+from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -42,9 +48,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
-    ExchangeCancellationUnknownError,
-    ExchangeOrderAlreadyAbsentError,
-    ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
     SubmitPolicy,
 )
@@ -67,17 +70,10 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitOrderRequest,
     ManagedLivePosition,
 )
-from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from tests.unit.execution_account.orders.test_state_machine import (
-    FakeExchange,
-    FakeOrderRepository,
-    _snapshot,
-)
-from tests.unit.live_rollout.test_gates import _context as gate_context
 from tests.fixtures.live_market import (
     FakeStrategy,
     _intent,
@@ -86,6 +82,12 @@ from tests.fixtures.live_market import (
 from tests.fixtures.live_market import (
     _context as shadow_context,
 )
+from tests.unit.execution_account.orders.test_state_machine import (
+    FakeExchange,
+    FakeOrderRepository,
+    _snapshot,
+)
+from tests.unit.live_rollout.test_gates import _context as gate_context
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
@@ -2177,12 +2179,13 @@ def _daemon(
     return LiveStrategyDaemon(
         cached_context_provider=cached_context_provider,
         strategy=strategy or FakeStrategy(),
-        risk_gateway=RiskGateway(),
-        limits=FixedLiveLimits(
-            notional_cap=Decimal("25"),
-            max_open_positions=1,
-            max_daily_loss=Decimal("10"),
-            max_gross_exposure=max_gross_exposure,
+        risk_gateway=RiskGateway(
+            limits=FixedLiveLimits(
+                notional_cap=Decimal("25"),
+                max_open_positions=1,
+                max_daily_loss=Decimal("10"),
+                max_gross_exposure=max_gross_exposure,
+            ),
         ),
         submission_repository=submission_repository,
         persist_checkpoint=checkpoint_repository.save_checkpoint,
