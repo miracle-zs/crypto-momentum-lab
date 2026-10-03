@@ -831,8 +831,11 @@ def _facts_from_rows(
         [
             row
             for row in rows
-            if row.event_kind != "facts_state"
-            and row.event_kind not in {"fill", "late_fill"}
+            # Snapshots are observations, not position/batch reducers. The
+            # ledger already excludes observations covered by a usable
+            # checkpoint. Queued older snapshots must not poison that seed;
+            # divergent identities are still rejected by the grouping above.
+            if row.event_kind not in {"facts_state", "snapshot", "fill", "late_fill"}
             and row.occurred_at <= checkpoint.event_cut
             and row.source_revision > checkpoint.source_revision
         ]
