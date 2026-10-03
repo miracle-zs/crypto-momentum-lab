@@ -121,7 +121,7 @@ def live_account_status(
     if observed_at is not None and now is not None:
         if (now - observed_at).total_seconds() > max_age_seconds:
             return OperationalStatus.STALE
-    if state == "ready_readonly":
+    if state in ("running", "ready_readonly"):
         return OperationalStatus.READY
     if state == "syncing":
         return OperationalStatus.DEGRADED
@@ -447,8 +447,23 @@ class OverviewQueries:
                                      if not item.exit_gate_open), gates[0].exit_gate_reason)
             unmanaged_risk_clear = all(item.unmanaged_risk_clear for item in gates)
             has_halt = any(item.halt_active for item in gates)
-            mode = "HALTED" if has_halt else ("FULLY_TRADEABLE" if entry_gate_open else "EXIT_ONLY" if exit_gate_open else "DEGRADED")
-            status = OperationalStatus.READY if entry_gate_open else OperationalStatus.HALTED if has_halt else OperationalStatus.DEGRADED
+            if has_halt:
+                mode = "HALTED"
+            elif any(item.mode == "RUNNING" for item in gates):
+                mode = "RUNNING"
+            elif all(item.mode == "FULLY_TRADEABLE" for item in gates):
+                mode = "FULLY_TRADEABLE"
+            else:
+                mode = "RUNNING"
+            status = (
+                OperationalStatus.HALTED
+                if has_halt
+                else (
+                    OperationalStatus.READY
+                    if (entry_gate_open or any(item.mode == "RUNNING" for item in gates))
+                    else OperationalStatus.DEGRADED
+                )
+            )
         else:
             status = OperationalStatus.UNKNOWN
             mode = "UNKNOWN"

@@ -724,7 +724,7 @@ def evaluate_database_state(
 
     del now
     alerts: list[Alert] = []
-    if account_process_state != "ready_readonly" or (
+    if account_process_state not in ("running", "ready_readonly") or (
         account_process_age_seconds is None
         or account_process_age_seconds < 0
         or account_process_age_seconds > account_state_stale_after_seconds

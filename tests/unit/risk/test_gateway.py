@@ -77,6 +77,19 @@ def test_gateway_rejects_account_not_ready() -> None:
     assert evaluation.reason == "account_not_ready"
 
 
+def test_gateway_approves_when_account_state_is_running() -> None:
+    evaluation = (
+        RiskGateway()
+        .evaluate(
+            _intent(),
+            _context(account_state=ExecutionAccountStatus.RUNNING),
+        )
+        .evaluation
+    )
+
+    assert evaluation.decision is RiskDecision.APPROVED
+
+
 def test_gateway_approves_small_entry_when_all_limits_pass() -> None:
     evaluation = RiskGateway().evaluate(_intent(), _context()).evaluation
 

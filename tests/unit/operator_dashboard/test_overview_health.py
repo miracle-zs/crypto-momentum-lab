@@ -215,3 +215,51 @@ async def test_live_accounts_accepts_only_valid_runtime_identity(invalid):
         assert account.runtime_tradeability.entry_gate_reason == "strategy_warmup_incomplete"
     else:
         assert account.runtime_tradeability is None
+
+
+def test_live_account_status_accepts_running():
+    from crypto_momentum_lab.operator_dashboard.overview_queries import live_account_status
+    assert live_account_status("running", observed_at=NOW, now=NOW) == OperationalStatus.READY
+    assert live_account_status("ready_readonly", observed_at=NOW, now=NOW) == OperationalStatus.READY
+    assert live_account_status("syncing", observed_at=NOW, now=NOW) == OperationalStatus.DEGRADED
+    assert live_account_status("stopped", observed_at=NOW, now=NOW) == OperationalStatus.HALTED
+
+
+async def test_running_tradeability_reports_ready():
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=True,
+        entry_gate_reason="live_entry_prerequisites_ready",
+        exit_gate_open=True,
+        exit_gate_reason="normal",
+        unmanaged_risk_clear=True,
+        halt_active=False,
+    )
+    readiness = await queries.readiness()
+    assert readiness.status == OperationalStatus.READY
+    assert readiness.tradeability.mode == "RUNNING"
+    assert readiness.tradeability.entry_gate_open is True
+    assert readiness.tradeability.entry_gate_reason == "live_entry_prerequisites_ready"
+
+
+def test_account_overview_status_accepts_running():
+    from unittest.mock import MagicMock
+    from crypto_momentum_lab.operator_dashboard.account_queries import LiveAccountQueries
+    from crypto_momentum_lab.operator_dashboard.schemas import OperationalStatus
+
+    queries = LiveAccountQueries(
+        session_factory=MagicMock(),
+        clock=lambda: NOW,
+    )
+    process = MagicMock()
+    process.state = "running"
+    status = (
+        OperationalStatus.UNKNOWN
+        if process is None
+        else OperationalStatus.READY
+        if process.state in ("running", "ready_readonly")
+        else OperationalStatus.HALTED
+    )
+    assert status == OperationalStatus.READY

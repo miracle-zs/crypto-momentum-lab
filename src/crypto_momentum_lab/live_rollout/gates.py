@@ -48,7 +48,10 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
         reasons.append("submit_policy_not_live")
     _check_lease(context, reasons)
     _check_approval(context, reasons)
-    if context.account_state is not ExecutionAccountStatus.READY_READONLY:
+    if context.account_state not in (
+        ExecutionAccountStatus.RUNNING,
+        ExecutionAccountStatus.READY_READONLY,
+    ):
         reasons.append("account_not_ready")
     if context.active_halts:
         reasons.append("active_risk_halt")

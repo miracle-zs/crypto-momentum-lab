@@ -68,7 +68,7 @@ class FakeService:
         self.sync_include_fills.append(include_fills)
         self.sync_started.set()
         return ExecutionAccountSyncResult(
-            status=ExecutionAccountStatus.READY_READONLY,
+            status=ExecutionAccountStatus.RUNNING,
             reconciliation_id=f"reconciliation-{self.sync_calls}",
             mismatch_count=0,
             snapshot=self.snapshot,
@@ -77,7 +77,7 @@ class FakeService:
     async def persist_user_data_event(self, *, snapshot, event, fills=()):
         self.persisted.append((snapshot, event, fills))
         return ExecutionAccountSyncResult(
-            status=ExecutionAccountStatus.READY_READONLY,
+            status=ExecutionAccountStatus.RUNNING,
             reconciliation_id="event-reconciliation",
             mismatch_count=0,
             snapshot=snapshot,
@@ -149,41 +149,41 @@ async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up
     daemon._state = _snapshot()
     daemon._accept_events = True
 
-    # 1. Default without sync result -> publishes READY_READONLY
+    # 1. Default without sync result -> publishes RUNNING
     daemon._last_sync_result = None
     await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
-    # 2. Sync result with fills_catching_up=True -> publishes SYNCING
+    # 2. Sync result with fills_catching_up=True -> publishes RUNNING
     daemon._last_sync_result = SimpleNamespace(
         fills_catching_up=True,
-        status=ExecutionAccountStatus.READY_READONLY,
+        status=ExecutionAccountStatus.RUNNING,
     )
     await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
-    # 3. Sync result with status == SYNCING -> publishes SYNCING
+    # 3. Running daemon publishes RUNNING
     daemon._last_sync_result = SimpleNamespace(
         fills_catching_up=False,
-        status=ExecutionAccountStatus.SYNCING,
+        status=ExecutionAccountStatus.RUNNING,
     )
     await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
-    # 4. Sync result resolved -> publishes READY_READONLY
+    # 4. Sync result resolved -> publishes RUNNING
     daemon._last_sync_result = SimpleNamespace(
         fills_catching_up=False,
-        status=ExecutionAccountStatus.READY_READONLY,
+        status=ExecutionAccountStatus.RUNNING,
     )
     await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
     # An authoritative REST reconciliation may take much longer than a
-    # heartbeat interval. Continue publishing SYNCING while that work runs.
+    # heartbeat interval. Active service continues publishing RUNNING while that work runs.
     daemon._accept_events = False
     daemon._reconciliation_active = True
     await daemon._publish_heartbeat()
-    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
 
 async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> None:
@@ -206,7 +206,7 @@ async def test_run_keeps_heartbeat_alive_during_slow_rest_reconciliation() -> No
         await asyncio.sleep(0.04)
 
         assert len(service.heartbeats) > previous_heartbeat_count
-        assert ExecutionAccountStatus.SYNCING in service.heartbeat_states
+        assert ExecutionAccountStatus.RUNNING in service.heartbeat_states
     finally:
         service.release_reconciliation.set()
         stop_requested.set()
@@ -720,7 +720,7 @@ async def test_replayed_user_data_event_preserves_syncing_readiness() -> None:
     await daemon._process_event(event, replay=True)
 
     assert len(published) == 1
-    assert published[0].status is ExecutionAccountStatus.SYNCING
+    assert published[0].status is ExecutionAccountStatus.RUNNING
 
 
 async def test_persistence_failure_fails_closed_and_recovers_from_rest() -> None:
@@ -754,7 +754,7 @@ async def test_persistence_failure_fails_closed_and_recovers_from_rest() -> None
 
         result = await daemon._recover_pipeline()
 
-        assert result.status is ExecutionAccountStatus.READY_READONLY
+        assert result.status is ExecutionAccountStatus.RUNNING
         assert service.sync_calls == 2
         assert daemon._accept_events is True
         assert not daemon._pipeline_recovery_event.is_set()
@@ -926,7 +926,7 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
         await asyncio.sleep(0)
         assert not service.fetch_started.is_set()
         await daemon._publish_heartbeat()
-        assert service.heartbeat_states[-1] is ExecutionAccountStatus.SYNCING
+        assert service.heartbeat_states[-1] is ExecutionAccountStatus.RUNNING
         assert service.cursor_reads == 0
         service.release_journal.set()
         await asyncio.wait_for(receipt, timeout=1)
@@ -1092,7 +1092,7 @@ async def test_heartbeat_publishes_keepalive_snapshot_when_stream_idle() -> None
     daemon._state = AccountUserDataState(snapshot)
     daemon._accept_events = True
     daemon._last_sync_result = ExecutionAccountSyncResult(
-        status=ExecutionAccountStatus.READY_READONLY,
+        status=ExecutionAccountStatus.RUNNING,
         reconciliation_id="initial",
         mismatch_count=0,
         snapshot=snapshot,
@@ -1102,7 +1102,7 @@ async def test_heartbeat_publishes_keepalive_snapshot_when_stream_idle() -> None
 
     assert len(published) == 1
     result = published[0]
-    assert result.status == ExecutionAccountStatus.READY_READONLY
+    assert result.status == ExecutionAccountStatus.RUNNING
     assert result.snapshot is not None
     assert result.snapshot.config.observed_at == now
     assert result.reconciliation_id == f"heartbeat:{now.isoformat()}"

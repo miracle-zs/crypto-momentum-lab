@@ -2099,7 +2099,10 @@ async def _preflight_summary(
         checks: dict[str, bool] = {
             "approval_present": approval is not None,
             "lease_present": lease is not None,
-            "account_ready": account_state.value == "ready_readonly",
+            "account_ready": account_state in (
+                ExecutionAccountStatus.RUNNING,
+                ExecutionAccountStatus.READY_READONLY,
+            ),
             "runtime_strategy_config_matches_approval": (
                 approval is not None
                 and runtime_strategy_config_hash == approved_strategy_config_hash

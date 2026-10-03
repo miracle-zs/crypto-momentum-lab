@@ -167,12 +167,12 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
 
     result = await service.sync_once()
 
-    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.status is ExecutionAccountStatus.RUNNING
     assert repository.snapshot_calls == 1
     # Only the non-zero USDT balance is durable; the all-zero BNB row is
     # kept in the in-memory snapshot but not written every cycle.
     assert [item.asset for item in repository.balances] == ["USDT"]
-    assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
     assert repository.reconciliation_runs[-1].status == "ready"
     assert repository.reconciliation_runs[-1].details == {
         "source": "rest_reconciliation",
@@ -191,7 +191,7 @@ async def test_realtime_sync_publishes_before_durable_persistence() -> None:
 
     result = await service.sync_once_for_realtime()
 
-    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.status is ExecutionAccountStatus.RUNNING
     assert result.snapshot is not None
     assert repository.snapshot_calls == 0
     assert repository.process_states == []
@@ -203,7 +203,7 @@ async def test_realtime_sync_publishes_before_durable_persistence() -> None:
 
     assert repository.snapshot_calls == 1
     assert [item.asset for item in repository.balances] == ["USDT"]
-    assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
     assert repository.reconciliation_runs[-1].details == {
         "source": "rest_reconciliation",
         "position_state_schema_version": 1,
@@ -329,7 +329,7 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
         fills=update.fills,
     )
 
-    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.status is ExecutionAccountStatus.RUNNING
     assert repository.snapshot_calls == 2
     # BNB stays all-zero across both writes and is never durable.
     assert [item.asset for item in repository.balances] == ["USDT", "USDT"]
@@ -337,7 +337,7 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
     assert repository.configs[-1].observed_at != event.received_at
     assert repository.configs[-1].raw_payload == {"totalInitialMargin": "12.34"}
     assert repository.reconciliation_runs[-1].details["source"] == ("user_data_stream")
-    assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
 
 
 async def test_sync_once_halts_on_account_mode_mismatch() -> None:
@@ -518,7 +518,7 @@ async def test_sync_skips_zero_snapshot_fill_scan_with_empty_time_range() -> Non
         config=replace(_config(), observed_at=observed_at),
     ).sync_once()
 
-    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.status is ExecutionAccountStatus.RUNNING
     assert result.fills_catching_up is False
     assert result.fill_load_scans == ()
     assert client.provenance_calls == []
@@ -959,8 +959,8 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
 
     result = await service.sync_once(include_fills=True)
 
-    # When fill coverage is incomplete (catching up), status must NOT be READY_READONLY
-    assert result.status is ExecutionAccountStatus.SYNCING
+    # When fill coverage is incomplete (catching up), service remains RUNNING with progress reason
+    assert result.status is ExecutionAccountStatus.RUNNING
     assert result.fills_catching_up is True
     # But cursor must advance to continuation point so work is not lost
     assert len(result.fill_cursor_updates) == 1
@@ -974,8 +974,8 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
         "BTCUSDT"
     ]
 
-    # Persisted process state must be SYNCING, not READY_READONLY
-    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+    # Persisted process state is RUNNING with fills_catching_up reason, not a blocking SYNCING state
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
     event = parse_user_data_event(
@@ -994,14 +994,14 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
         snapshot=result.snapshot,
         event=event,
     )
-    assert event_result.status is ExecutionAccountStatus.SYNCING
-    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+    assert event_result.status is ExecutionAccountStatus.RUNNING
+    assert event_result.fills_catching_up is True
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
 
-    # Heartbeat during incomplete sync must preserve SYNCING and NOT
-    # overwrite with READY_READONLY
+    # Heartbeat during incomplete sync publishes RUNNING with fills_catching_up progress reason
     heartbeat_time = datetime(2026, 7, 4, 12, 1, tzinfo=UTC)
     await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
-    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
 

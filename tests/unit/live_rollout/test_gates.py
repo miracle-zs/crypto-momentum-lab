@@ -63,6 +63,34 @@ def test_live_gate_accepts_complete_preflight_context() -> None:
     assert decision.reasons == ()
 
 
+def test_live_gate_accepts_running_account_state() -> None:
+    decision = evaluate_live_gate(
+        replace(_context(), account_state=ExecutionAccountStatus.RUNNING)
+    )
+
+    assert decision.status is LiveGateStatus.APPROVED
+    assert decision.reasons == ()
+
+
+@pytest.mark.parametrize(
+    "blocked_state",
+    [
+        ExecutionAccountStatus.SYNCING,
+        ExecutionAccountStatus.DEGRADED,
+        ExecutionAccountStatus.STOPPED,
+        ExecutionAccountStatus.HALTED_READONLY,
+        ExecutionAccountStatus.STARTING,
+    ],
+)
+def test_live_gate_rejects_non_running_states(
+    blocked_state: ExecutionAccountStatus,
+) -> None:
+    decision = evaluate_live_gate(replace(_context(), account_state=blocked_state))
+
+    assert decision.status is LiveGateStatus.BLOCKED
+    assert "account_not_ready" in decision.reasons
+
+
 def test_live_gate_accepts_unlimited_approval_for_bounded_risk_config() -> None:
     approval = replace(
         _context().approval,

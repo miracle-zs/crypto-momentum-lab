@@ -31,9 +31,10 @@ log = structlog.get_logger()
 class TradeabilityMode(StrEnum):
     """Business execution safety mode for live operations."""
 
+    RUNNING = "RUNNING"
+    HALTED = "HALTED"
     FULLY_TRADEABLE = "FULLY_TRADEABLE"
     EXIT_ONLY = "EXIT_ONLY"
-    HALTED = "HALTED"
     DEGRADED = "DEGRADED"
 
 
@@ -62,12 +63,8 @@ class TradeabilitySnapshot:
     ) -> TradeabilitySnapshot:
         if halt_active or not exit_gate_open:
             mode = TradeabilityMode.HALTED
-        elif not unmanaged_risk_clear:
-            mode = TradeabilityMode.DEGRADED
-        elif not entry_gate_open:
-            mode = TradeabilityMode.EXIT_ONLY
         else:
-            mode = TradeabilityMode.FULLY_TRADEABLE
+            mode = TradeabilityMode.RUNNING
 
         return cls(
             mode=mode,
@@ -161,13 +158,18 @@ class TradeabilityAlertManager:
         now = self._clock()
         details_dict = dict(details) if details else {}
 
+        is_healthy = mode_str in (
+            TradeabilityMode.RUNNING.value,
+            TradeabilityMode.FULLY_TRADEABLE.value,
+        )
+
         if self._last_mode is None:
             self._last_mode = mode_str
             self._last_reason = reason
             self._last_severity = severity
             self._last_alerted_at = now
             self._alert_count = 1
-            if mode_str != TradeabilityMode.FULLY_TRADEABLE.value:
+            if not is_healthy:
                 self._emit_alert(
                     mode_str,
                     reason,
@@ -184,7 +186,7 @@ class TradeabilityAlertManager:
 
         is_heartbeat = False
         heartbeat_due = (
-            mode_str != TradeabilityMode.FULLY_TRADEABLE.value
+            not is_healthy
             and (now - self._last_alerted_at) >= self._fallback_heartbeat_seconds
         )
 
@@ -192,7 +194,7 @@ class TradeabilityAlertManager:
 
         if mode_changed:
             should_alert = True
-            if mode_str == TradeabilityMode.FULLY_TRADEABLE.value:
+            if is_healthy:
                 log.info(
                     "tradeability_recovered",
                     current_mode=mode_str,
@@ -213,7 +215,7 @@ class TradeabilityAlertManager:
             should_alert = True
             is_heartbeat = True
 
-        if should_alert and mode_str != TradeabilityMode.FULLY_TRADEABLE.value:
+        if should_alert and not is_healthy:
             self._alert_count += 1
             self._emit_alert(
                 mode_str,

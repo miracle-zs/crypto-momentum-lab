@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 
 class ExecutionAccountStatus(StrEnum):
     STARTING = "starting"
+    RUNNING = "running"
     SYNCING = "syncing"
     READY_READONLY = "ready_readonly"
     DEGRADED = "degraded"

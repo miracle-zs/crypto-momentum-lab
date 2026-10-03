@@ -71,6 +71,18 @@ def test_account_sync_state_accepts_ready_readonly() -> None:
     assert state.state is ExecutionAccountStatus.READY_READONLY
 
 
+def test_account_sync_state_accepts_running() -> None:
+    state = ExecutionAccountProcessState(
+        environment="live",
+        account_label="primary",
+        state=ExecutionAccountStatus.RUNNING,
+        occurred_at=datetime.now().astimezone(),
+        reason=None,
+    )
+
+    assert state.state is ExecutionAccountStatus.RUNNING
+
+
 def test_hedge_position_snapshots_have_distinct_ids() -> None:
     observed_at = datetime.now().astimezone()
     common = {

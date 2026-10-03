@@ -391,7 +391,7 @@ if not summaries:
 summary = summaries[-1]
 checks = summary.get("preflight_checks")
 retryable = (
-    summary.get("account_state") == "syncing"
+    summary.get("account_state") in ("syncing", "starting")
     and summary.get("preflight_ok") is False
     and summary.get("preflight_errors") == ["account_ready"]
     and isinstance(checks, dict)

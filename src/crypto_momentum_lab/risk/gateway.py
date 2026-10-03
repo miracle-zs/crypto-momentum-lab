@@ -195,7 +195,10 @@ class RiskGateway:
                 RiskDecision.APPROVED,
                 "reduce_only",
             )
-        if context.account_state is not ExecutionAccountStatus.READY_READONLY:
+        if context.account_state not in (
+            ExecutionAccountStatus.RUNNING,
+            ExecutionAccountStatus.READY_READONLY,
+        ):
             return _evaluation(
                 intent,
                 context,

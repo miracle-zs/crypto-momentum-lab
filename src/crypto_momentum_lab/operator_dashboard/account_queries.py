@@ -491,7 +491,7 @@ class LiveAccountQueries:
             status=OperationalStatus.UNKNOWN
             if process is None
             else OperationalStatus.READY
-            if process.state == "ready_readonly"
+            if process.state in ("running", "ready_readonly")
             else OperationalStatus.HALTED,
             observed_at=observed_at,
             environment=None if process is None else process.environment,

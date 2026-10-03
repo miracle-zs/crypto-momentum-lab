@@ -455,11 +455,7 @@ class ExecutionAccountSyncService:
                 self._remember_fill_key(key)
             self._has_completed_sync = not fills_catching_up
             result = ExecutionAccountSyncResult(
-                status=(
-                    ExecutionAccountStatus.SYNCING
-                    if fills_catching_up
-                    else ExecutionAccountStatus.READY_READONLY
-                ),
+                status=ExecutionAccountStatus.RUNNING,
                 reconciliation_id=reconciliation_id,
                 mismatch_count=0,
                 snapshot=AccountSnapshot(
@@ -526,6 +522,7 @@ class ExecutionAccountSyncService:
             if (
                 result.status
                 not in (
+                    ExecutionAccountStatus.RUNNING,
                     ExecutionAccountStatus.READY_READONLY,
                     ExecutionAccountStatus.SYNCING,
                 )
@@ -562,7 +559,11 @@ class ExecutionAccountSyncService:
             checkpoint = result.baseline_checkpoint
             if checkpoint is not None:
                 if (
-                    result.status is not ExecutionAccountStatus.READY_READONLY
+                    result.status
+                    not in (
+                        ExecutionAccountStatus.RUNNING,
+                        ExecutionAccountStatus.READY_READONLY,
+                    )
                     or result.fills_catching_up
                     or checkpoint.snapshot != snapshot
                     or (snapshot.config.environment, snapshot.config.account_label)
@@ -625,11 +626,7 @@ class ExecutionAccountSyncService:
             if result.fill_cursor_updates:
                 self._update_fill_cursors_monotonically(result.fill_cursor_updates)
             await self._save_state(
-                (
-                    ExecutionAccountStatus.SYNCING
-                    if result.fills_catching_up
-                    else ExecutionAccountStatus.READY_READONLY
-                ),
+                ExecutionAccountStatus.RUNNING,
                 reason="fills_catching_up" if result.fills_catching_up else None,
                 config=config,
             )
@@ -693,23 +690,11 @@ class ExecutionAccountSyncService:
                 snapshot.positions,
                 observed_at=event.received_at,
             )
-            event_state = (
-                ExecutionAccountStatus.SYNCING
-                if (
-                    not self._has_completed_sync
-                    or self._last_persisted_process_state
-                    is ExecutionAccountStatus.SYNCING
-                )
-                else ExecutionAccountStatus.READY_READONLY
-            )
+            event_state = ExecutionAccountStatus.RUNNING
             event_reason = (
-                self._last_persisted_process_state_reason
-                if event_state is self._last_persisted_process_state
-                else (
-                    "fills_catching_up"
-                    if event_state is ExecutionAccountStatus.SYNCING
-                    else None
-                )
+                "fills_catching_up"
+                if not self._has_completed_sync
+                else None
             )
             account_config = self._latest_rest_account_config or snapshot.config
             await self._repository.save_reconciliation_snapshot(
@@ -760,7 +745,7 @@ class ExecutionAccountSyncService:
                 new_fills=fills,
                 new_fill_keys=frozenset(account_fill_keys(fills)),
                 fill_count_by_symbol=fill_counts_by_symbol(fills),
-                fills_catching_up=event_state is ExecutionAccountStatus.SYNCING,
+                fills_catching_up=event_reason == "fills_catching_up",
             )
 
     def _positions_to_persist(
@@ -832,30 +817,23 @@ class ExecutionAccountSyncService:
         *,
         observed_at: datetime,
         state: ExecutionAccountStatus | None = None,
+        reason: str | None = None,
     ) -> None:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must be timezone-aware")
-        target_state = state
-        if target_state is None:
-            if (
-                not self._has_completed_sync
-                or self._last_persisted_process_state == ExecutionAccountStatus.SYNCING
-            ):
-                target_state = ExecutionAccountStatus.SYNCING
-            else:
-                target_state = ExecutionAccountStatus.READY_READONLY
-        reason = (
-            self._last_persisted_process_state_reason
-            if target_state == self._last_persisted_process_state
+        target_state = state or ExecutionAccountStatus.RUNNING
+        target_reason = reason if reason is not None else (
+            "fills_catching_up"
+            if not self._has_completed_sync
             else (
-                "fills_catching_up"
-                if target_state == ExecutionAccountStatus.SYNCING
+                self._last_persisted_process_state_reason
+                if target_state == self._last_persisted_process_state
                 else None
             )
         )
         await self._save_state(
             target_state,
-            reason=reason,
+            reason=target_reason,
             config=replace(self._config, observed_at=observed_at),
         )
 

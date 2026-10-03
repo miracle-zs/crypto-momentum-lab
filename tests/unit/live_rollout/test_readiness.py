@@ -163,7 +163,7 @@ def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> Non
 
 
 def test_tradeability_snapshot_mode_derivation() -> None:
-    # 1. Fully tradeable
+    # 1. Healthy operation is RUNNING
     snap1 = TradeabilitySnapshot.create(
         entry_gate_open=True,
         entry_gate_reason="live_entry_prerequisites_ready",
@@ -171,9 +171,10 @@ def test_tradeability_snapshot_mode_derivation() -> None:
         unmanaged_risk_clear=True,
         halt_active=False,
     )
-    assert snap1.mode is TradeabilityMode.FULLY_TRADEABLE
+    assert snap1.mode is TradeabilityMode.RUNNING
+    assert snap1.entry_gate_open is True
 
-    # 2. Exit only when entry gate closed
+    # 2. Entry gate closed does NOT synthesize EXIT_ONLY; remains RUNNING with entry_gate_open=False
     snap2 = TradeabilitySnapshot.create(
         entry_gate_open=False,
         entry_gate_reason="strategy_warmup_incomplete",
@@ -181,7 +182,9 @@ def test_tradeability_snapshot_mode_derivation() -> None:
         unmanaged_risk_clear=True,
         halt_active=False,
     )
-    assert snap2.mode is TradeabilityMode.EXIT_ONLY
+    assert snap2.mode is TradeabilityMode.RUNNING
+    assert snap2.entry_gate_open is False
+    assert snap2.entry_gate_reason == "strategy_warmup_incomplete"
 
     # 3. Halted when halt is active
     snap3 = TradeabilitySnapshot.create(
@@ -203,7 +206,7 @@ def test_tradeability_snapshot_mode_derivation() -> None:
     )
     assert snap4.mode is TradeabilityMode.HALTED
 
-    # 5. Degraded when unmanaged risk present
+    # 5. Unmanaged risk does NOT synthesize DEGRADED mode; remains RUNNING with fact preserved
     snap5 = TradeabilitySnapshot.create(
         entry_gate_open=True,
         entry_gate_reason="ready",
@@ -211,7 +214,8 @@ def test_tradeability_snapshot_mode_derivation() -> None:
         unmanaged_risk_clear=False,
         halt_active=False,
     )
-    assert snap5.mode is TradeabilityMode.DEGRADED
+    assert snap5.mode is TradeabilityMode.RUNNING
+    assert snap5.unmanaged_risk_clear is False
 
 
 def test_stream_readiness_snapshot_aggregation() -> None:
@@ -339,7 +343,7 @@ def test_readiness_publisher_layered_tradeability_and_stream_readiness(
     # Initial publish
     payload = json.loads(health.readiness_path.read_text())
     assert "tradeability" in payload
-    assert payload["tradeability"]["mode"] == "EXIT_ONLY"
+    assert payload["tradeability"]["mode"] == "RUNNING"
     assert payload["tradeability"]["entry_gate_open"] is False
     assert payload["tradeability"]["exit_gate_open"] is True
     assert payload["tradeability"]["unmanaged_risk_clear"] is True
@@ -353,14 +357,14 @@ def test_readiness_publisher_layered_tradeability_and_stream_readiness(
     publisher.update_stream_readiness("quote", "READY")
     publisher.update_stream_readiness("market_state", "READY")
 
-    # Update tradeability to fully tradeable
+    # Update tradeability with entry open
     publisher.update_tradeability(
         entry_enabled=True,
         entry_reason="live_entry_prerequisites_ready",
     )
 
     payload2 = json.loads(health.readiness_path.read_text())
-    assert payload2["tradeability"]["mode"] == "FULLY_TRADEABLE"
+    assert payload2["tradeability"]["mode"] == "RUNNING"
     assert payload2["tradeability"]["entry_gate_open"] is True
     assert payload2["tradeability"]["entry_gate_reason"] == (
         "live_entry_prerequisites_ready"
@@ -368,11 +372,17 @@ def test_readiness_publisher_layered_tradeability_and_stream_readiness(
     assert payload2["stream_readiness"]["overall"] == "READY"
     assert payload2["stream_readiness"]["streams"]["account"] == "READY"
 
-    # Induce unmanaged risk -> mode becomes DEGRADED
+    # Induce unmanaged risk -> mode remains RUNNING with fact preserved
     publisher.update_tradeability(unmanaged_risk_clear=False)
     payload3 = json.loads(health.readiness_path.read_text())
-    assert payload3["tradeability"]["mode"] == "DEGRADED"
+    assert payload3["tradeability"]["mode"] == "RUNNING"
     assert payload3["tradeability"]["unmanaged_risk_clear"] is False
+
+    # Explicit halt -> mode becomes HALTED
+    publisher.update_tradeability(halt_active=True)
+    payload4 = json.loads(health.readiness_path.read_text())
+    assert payload4["tradeability"]["mode"] == "HALTED"
+    assert payload4["tradeability"]["halt_active"] is True
 
 
 def test_readiness_compute_dynamic_market_age_and_published_at(

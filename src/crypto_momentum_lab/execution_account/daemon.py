@@ -54,6 +54,19 @@ def _accepts_state_kwarg(func: object) -> bool:
         return True
 
 
+def _accepts_reason_kwarg(func: object) -> bool:
+    try:
+        sig = inspect.signature(func)  # type: ignore[arg-type]
+        if "reason" in sig.parameters:
+            return True
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+        return False
+    except (ValueError, TypeError):
+        return True
+
+
 class AccountSyncCycle(Protocol):
     async def sync_once(
         self,
@@ -977,18 +990,26 @@ class UserDataAccountSyncDaemon:
                 or last_sync_result.status == ExecutionAccountStatus.SYNCING
             )
         )
-        target_state = (
-            ExecutionAccountStatus.SYNCING
-            if is_syncing
-            else ExecutionAccountStatus.READY_READONLY
+        target_state = ExecutionAccountStatus.RUNNING
+        reason = (
+            "reconciling"
+            if (self._reconciliation_active or self._pipeline_recovery_event.is_set())
+            else ("fills_catching_up" if is_syncing else None)
         )
         now = self._now()
         publish_heartbeat = self._service.publish_user_data_heartbeat
         if _accepts_state_kwarg(publish_heartbeat):
-            await publish_heartbeat(
-                observed_at=now,
-                state=target_state,
-            )
+            if _accepts_reason_kwarg(publish_heartbeat):
+                await publish_heartbeat(
+                    observed_at=now,
+                    state=target_state,
+                    reason=reason,
+                )
+            else:
+                await publish_heartbeat(
+                    observed_at=now,
+                    state=target_state,
+                )
         else:
             await publish_heartbeat(observed_at=now)
         self._notify_heartbeat()
@@ -1228,12 +1249,19 @@ def _metric_int(metrics: object, name: str) -> int | None:
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:
-    return result.status.value == "ready_readonly" and result.snapshot is not None
+    return (
+        result.status in (ExecutionAccountStatus.RUNNING, ExecutionAccountStatus.READY_READONLY)
+        and result.snapshot is not None
+    )
 
 
 def _is_usable_result(result: ExecutionAccountSyncResult) -> bool:
     return (
-        result.status.value in ("ready_readonly", "syncing")
+        result.status in (
+            ExecutionAccountStatus.RUNNING,
+            ExecutionAccountStatus.READY_READONLY,
+            ExecutionAccountStatus.SYNCING,
+        )
         and result.snapshot is not None
     )
 
@@ -1285,13 +1313,12 @@ def _event_readiness_status(
     last_sync_result: ExecutionAccountSyncResult | None,
 ) -> ExecutionAccountStatus:
     """User-data deltas inherit readiness from the last REST reconciliation."""
-    if (
-        last_sync_result is None
-        or last_sync_result.status is ExecutionAccountStatus.SYNCING
-        or last_sync_result.fills_catching_up
+    if last_sync_result is not None and last_sync_result.status in (
+        ExecutionAccountStatus.HALTED_READONLY,
+        ExecutionAccountStatus.STOPPED,
     ):
-        return ExecutionAccountStatus.SYNCING
-    return last_sync_result.status
+        return last_sync_result.status
+    return ExecutionAccountStatus.RUNNING
 
 
 def _fill_counts_by_symbol(

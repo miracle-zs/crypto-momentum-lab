@@ -171,11 +171,6 @@ class LiveEntryControlGate:
                 False,
                 reason=market_state_unavailable_reason,
             )
-        elif not account_snapshot_available:
-            self.set_entry_enabled(
-                False,
-                reason="account_snapshot_recovering",
-            )
         elif not self._entry_filter_cache_ready:
             self.set_entry_enabled(False, reason="entry_cache_warming")
         else:
