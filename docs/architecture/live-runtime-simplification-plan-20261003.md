@@ -256,7 +256,7 @@ rtk proxy env \
 
 | 批次 | 状态 | 提交 / 回归 / 未覆盖项 |
 | --- | --- | --- |
-| P0 启动清理与阶段 | 待实施 | S14 已有故障注入证据；尚未修复 |
+| P0 启动清理与阶段 | 已完成 | 修复 S14 (启动装配异常清理与异常保留) 与 S15 (session.run 运行期错误不再误判为启动重试)；单元测试回归 tests/unit/live_rollout/test_runtime_orchestrator_lifecycle.py 3 passed |
 | P1 通知与观测 | 待实施 | 复用 monitor；尚未验证实际 SendKey 配置与送达 |
 | P2 终态与恢复 | 待实施 | S06 已有表间不一致证据，传播缺口待复现 |
 | P3 局部准入 | 待实施 | 跨标的、多账户及风险上限回归待补 |

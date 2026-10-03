@@ -249,6 +249,7 @@ from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
 )
+from crypto_momentum_lab.market_data.hub import WebSocketMarketStateSource
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
     AsyncPostgresDecisionUnitOfWork,
 )
@@ -433,6 +434,7 @@ async def run_live_daemon(
     signal_recorder: LiveStrategySignalRecorder | None = None
     daemon: LiveStrategyDaemon | None = None
     startup_market_assembly: LiveStartupMarketAssembly | None = None
+    hub_source: WebSocketMarketStateSource | None = None
     startup_market_state_task: asyncio.Task[None] | None = None
     channel_sources: LiveChannelSources | None = None
     risk_control_task: asyncio.Task[None] | None = None
@@ -800,9 +802,15 @@ async def run_live_daemon(
                     environment="live" if active_lease is not None else None,
                     account_label=account_label,
                     strategy_name=strategy_name,
-                    required_lease_owner=lease_owner if active_lease is not None else None,
-                    required_lease_id=active_lease.lease_id if active_lease is not None else None,
-                    required_code_generation=git_commit_hash if active_lease is not None else None,
+                    required_lease_owner=(
+                        lease_owner if active_lease is not None else None
+                    ),
+                    required_lease_id=(
+                        active_lease.lease_id if active_lease is not None else None
+                    ),
+                    required_code_generation=(
+                        git_commit_hash if active_lease is not None else None
+                    ),
                     required_session_id=session_id,
                 ),
             )
@@ -1157,7 +1165,10 @@ async def run_live_daemon(
         def request_unknown_exit(order: PersistedExchangeOrder) -> bool:
             if daemon is None:
                 return False
-            state = next(iter(latest_market_states.for_symbols((order.plan.symbol,))), None)
+            state = next(
+                iter(latest_market_states.for_symbols((order.plan.symbol,))),
+                None,
+            )
             if state is None:
                 return False
             daemon.request_unknown_exit_recovery(order, state)
@@ -1701,6 +1712,7 @@ async def run_live_daemon(
             shutdown_budget_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         )
         ownership_registry.disarm()
+        startup_phase = False
         return await session.run()
 
     except Exception as exc:
@@ -1713,17 +1725,23 @@ async def run_live_daemon(
         if startup_phase and _is_retryable_live_startup_error(exc):
             raise _LiveStartupRetryableError(exc) from exc
         if session_lifecycle is not None and risk_config_hash:
-            await session_lifecycle.transition(
-                LiveSessionState.HALTED,
-                reason=str(exc),
-            )
+            try:
+                await session_lifecycle.transition(
+                    LiveSessionState.HALTED,
+                    reason=str(exc),
+                )
+            except Exception:
+                log.exception("session_lifecycle_halt_transition_failed")
         raise
     finally:
         if session is not None:
             await session.close()
         else:
             if hub_source is not None:
-                hub_source.stop()
+                try:
+                    hub_source.stop()
+                except Exception:
+                    log.exception("startup_hub_source_stop_failed")
             if (
                 startup_market_state_task is not None
                 and not startup_market_state_task.done()
@@ -1736,13 +1754,19 @@ async def run_live_daemon(
                             startup_market_state_task,
                             return_exceptions=True,
                         )
-                except (TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError, Exception):
                     pass
             if shutdown_task is not None and not shutdown_task.done():
                 shutdown_task.cancel()
             if shutdown_task is not None:
-                await asyncio.gather(shutdown_task, return_exceptions=True)
-            await ownership_registry.teardown_all()
+                try:
+                    await asyncio.gather(shutdown_task, return_exceptions=True)
+                except (TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            try:
+                await ownership_registry.teardown_all()
+            except Exception:
+                log.exception("ownership_registry_teardown_failed")
 
 
 async def _bootstrap_execution_position_facts(
