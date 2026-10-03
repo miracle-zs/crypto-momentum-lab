@@ -34,6 +34,7 @@ from crypto_momentum_lab.config import (
     ResolvedBinanceCredentials,
     resolve_role_credentials,
 )
+from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -2099,7 +2100,8 @@ async def _preflight_summary(
         checks: dict[str, bool] = {
             "approval_present": approval is not None,
             "lease_present": lease is not None,
-            "account_ready": account_state in (
+            "account_ready": account_state
+            in (
                 ExecutionAccountStatus.RUNNING,
                 ExecutionAccountStatus.READY_READONLY,
             ),
@@ -2237,4 +2239,3 @@ def _resolve_live_cli_credentials(
         )
     except CredentialResolutionError as error:
         raise typer.BadParameter(str(error)) from error
-

@@ -11,7 +11,9 @@ from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
+from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
+
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
@@ -1534,8 +1536,6 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
     assert set(seen["last_processed_at_by_symbol"]) == {"BTCUSDT", "4USDT"}
 
 
-
-
 def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:
     assert should_auto_reacquire_live_lease(
         lease_present=False,
@@ -2081,3 +2081,47 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
         if notify
         else [("failure", "BTCUSDT")]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,ready",
+    [
+        (ExecutionAccountStatus.RUNNING, True),
+        (ExecutionAccountStatus.READY_READONLY, True),
+        (ExecutionAccountStatus.STARTING, False),
+        (ExecutionAccountStatus.HALTED_READONLY, False),
+    ],
+)
+async def test_real_preflight_summary_checks_account_state(monkeypatch, status, ready):
+    from unittest.mock import AsyncMock
+
+    _set_live_profile_env(monkeypatch)
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(main, "create_execution_database_engine", lambda _: engine)
+    monkeypatch.setattr(main, "async_sessionmaker", lambda *a, **k: object())
+    monkeypatch.setattr(
+        main,
+        "PostgresLiveRolloutRepository",
+        lambda _: SimpleNamespace(load_active_approval=AsyncMock(return_value=None)),
+    )
+    monkeypatch.setattr(
+        main,
+        "PostgresRiskRepository",
+        lambda _: SimpleNamespace(load_active_lease=AsyncMock(return_value=None)),
+    )
+    monkeypatch.setattr(
+        main,
+        "PostgresOrderReadRepository",
+        lambda _: SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr(
+        main,
+        "_latest_risk_config",
+        AsyncMock(return_value=SimpleNamespace(config_hash="risk")),
+    )
+    monkeypatch.setattr(main, "_latest_account_state", AsyncMock(return_value=status))
+    result = await main._preflight_summary("test", "primary", "orderflow_impulse")
+    assert result["preflight_checks"]["account_ready"] is ready
+    assert result["account_state"] == status.value
+    engine.dispose.assert_awaited_once()
