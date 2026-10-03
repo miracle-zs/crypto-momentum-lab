@@ -1,12 +1,15 @@
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+import structlog
 
 from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
@@ -14,6 +17,8 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     MarketDataState,
 )
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +54,65 @@ class PendingManifestJournal:
             await asyncio.to_thread(_delete_journal_entry, path)
             count += 1
         return count
+
+    @asynccontextmanager
+    async def background_sink(
+        self,
+        save: Callable[[ArchiveManifest], Awaitable[None]],
+        *,
+        retry_seconds: float = 5.0,
+        shutdown_seconds: float = 5.0,
+    ) -> AsyncIterator[Callable[[ArchiveManifest], Awaitable[None]]]:
+        """Acknowledge durable local writes; replay database work independently.
+
+        Notifications coalesce in one Event, so producer memory is bounded.
+        Failed and interrupted saves retain their journal entries for replay.
+        """
+        if retry_seconds <= 0 or shutdown_seconds <= 0:
+            raise ValueError("journal retry and shutdown budgets must be positive")
+        wake = asyncio.Event()
+        stopping = False
+
+        async def append(manifest: ArchiveManifest) -> None:
+            await self.append(manifest)
+            wake.set()
+
+        async def worker() -> None:
+            while True:
+                wake.clear()
+                try:
+                    await self.replay(save)
+                except Exception:
+                    log.exception(
+                        "background_manifest_save_failed", journal=str(self._directory)
+                    )
+                    if stopping:
+                        return
+                if stopping and not wake.is_set():
+                    return
+                if stopping:
+                    continue
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=retry_seconds)
+                except TimeoutError:
+                    pass
+
+        task = asyncio.create_task(worker(), name="pending-manifest-replay")
+        try:
+            yield append
+        finally:
+            stopping = True
+            wake.set()
+            try:
+                await asyncio.wait_for(task, timeout=shutdown_seconds)
+            except TimeoutError:
+                log.warning(
+                    "background_manifest_shutdown_deferred",
+                    journal=str(self._directory),
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def oldest_age_seconds(
         self,

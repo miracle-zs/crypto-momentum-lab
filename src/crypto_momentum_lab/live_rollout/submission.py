@@ -67,7 +67,7 @@ from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
     plan_order_execution,
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
-from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
+from crypto_momentum_lab.live_rollout.gates import has_entry_order_conflict
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
@@ -235,20 +235,10 @@ class LiveCandidateSubmission:
                     else context.gross_exposure + pending_notional
                 ),
                 min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
-                has_unresolved_order=(
-                    any(
-                        order_state_is_uncertain(getattr(order, "state", None))
-                        for order in getattr(context, "unresolved_orders", ()) or ()
-                        if getattr(getattr(order, "plan", None), "symbol", None) == candidate.symbol
-                    )
-                    or any(
-                        order_state_is_uncertain(getattr(order, "state", None))
-                        and (
-                            getattr(getattr(order, "plan", None), "price", None) is None
-                            or getattr(getattr(order, "plan", None), "quantity", None) is None
-                        )
-                        for order in getattr(context, "unresolved_orders", ()) or ()
-                    )
+                has_unresolved_order=has_entry_order_conflict(
+                    candidate.symbol,
+                    context.unresolved_orders,
+                    context.unresolved_order_states,
                 ),
                 symbol_concurrency=symbol_concurrency,
             )

@@ -1,354 +1,302 @@
-"""Behavioral replay unit tests for S04 and S05 scenarios.
+"""Replay real candle decisions through Submission, Coordinator and exchange port."""
 
-Verifies:
-1. S04: IMX 07:15 candle deferred by position sync wait, other symbols evaluate
-   without blocking; at 07:18:44 facts advance, IMX re-evaluates at 07:18:44 with
-   fresh candidate identity and valid allocation, submitting successfully without
-   expired candidate and zero duplicate POST.
-2. S04 Expiration: Re-evaluation after strategy timeliness window (>= candle_end + 15m)
-   fails with explicit closed_candle_evaluation_expired, notifies operator, clears
-   pending event without silent drop or duplicate POST.
-3. S05: Stale projection version conflict yields pending_live_context, other symbols
-   unblocked; fresh context arrives with updated Book quantity, re-evaluates with new
-   candidate identity and new quantity, zero old-quantity POST, zero duplicate POST.
-4. Transient network error backoff for one symbol does not block evaluation of other symbols,
-   and fact updates do not clear network backoff.
-"""
-
-from collections.abc import AsyncIterable
-from datetime import UTC, datetime, timedelta
+import asyncio
+from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-import asyncio
+
 import pytest
 
-from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderProjectionConflictError,
+)
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    ClosedCandle15m,
+    PositionExitMode,
+    PositionExitPolicy,
+)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import ClosedCandle15mEvent
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
-from crypto_momentum_lab.live_rollout.exit_failure_policy import ORDER_IDENTITY_CONFLICT_REASON
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitConfig,
+    LiveExitManager,
+    ManagedLivePosition,
+)
+from tests.unit.live_rollout.test_daemon import (
+    NOW,
+    FakeLiveRepository,
+    PlanAwareExchange,
+    _daemon,
+    _runtime_context,
+)
 
 
-def _make_candle_event(
-    symbol: str,
-    candle_start: datetime,
-    candle_end: datetime,
-    received_at: datetime,
-) -> ClosedCandle15mEvent:
-    candle = ClosedCandle15m(
-        symbol=symbol,
-        candle_start=candle_start,
-        candle_end=candle_end,
-        open_price=Decimal("10.0"),
-        close_price=Decimal("9.5"),
-    )
+def _event():
+    end = NOW - timedelta(seconds=20)
     return ClosedCandle15mEvent(
-        candle=candle,
-        exchange_event_at=candle_end,
-        received_at=received_at,
+        candle=ClosedCandle15m(
+            symbol="BTCUSDT",
+            candle_start=end - timedelta(minutes=15),
+            candle_end=end,
+            open_price=Decimal("31000"),
+            close_price=Decimal("30000"),
+        ),
+        exchange_event_at=end,
+        received_at=NOW,
     )
 
 
-async def test_s04_replay_imx_deferred_at_0715_and_executed_at_071844():
-    """S04 replay: IMX candle at 07:15 deferred by position sync wait, BTC evaluates
+def _position():
+    return ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("31000"),
+        opened_at=NOW - timedelta(minutes=45),
+        batch_id="batch-1",
+        projection_version="pv1",
+    )
 
-    immediately; at 07:18:44 facts arrive, IMX re-evaluates with fresh candidate identity
-    and succeeds without expired candidate and zero repeat POST.
-    """
-    t_0700 = datetime(2026, 8, 4, 7, 0, 0, tzinfo=UTC)
-    t_0715 = datetime(2026, 8, 4, 7, 15, 0, tzinfo=UTC)
-    t_071844 = datetime(2026, 8, 4, 7, 18, 44, tzinfo=UTC)
 
-    imx_event = _make_candle_event("IMXUSDT", t_0700, t_0715, t_0715)
-    btc_event = _make_candle_event("BTCUSDT", t_0700, t_0715, t_0715)
+def _manager(ttl=60):
+    return LiveExitManager(
+        config=LiveExitConfig(
+            run_id="run-1",
+            strategy_name="compression_breakout",
+            strategy_version="v0",
+            strategy_config_hash="a" * 64,
+            policy=PositionExitPolicy(mode=PositionExitMode.CANDLE_15M),
+            candidate_ttl_seconds=ttl,
+        )
+    )
 
-    imx_facts_ready = False
-    current_time = t_0715
-    submissions: list[dict[str, object]] = []
-    failures: list[tuple[str, str | None]] = []
-    first_eval_done = asyncio.Event()
 
-    class Daemon:
-        async def process_closed_candle(self, event, *, latest_quote):
-            symbol = event.candle.symbol
-            if symbol == "IMXUSDT":
-                if not imx_facts_ready:
-                    first_eval_done.set()
-                    return "pending_live_positions:IMXUSDT"
-                # Facts ready at 07:18:44: evaluate with fresh candidate
-                is_reval = current_time > event.candle.candle_end
-                candidate_id = f"exit:{symbol}:{int(event.candle.candle_start.timestamp())}"
-                if is_reval:
-                    candidate_id += f":reval:{int(current_time.timestamp())}"
-                expires_at = current_time + timedelta(seconds=60)
-                # Ensure candidate has NOT expired
-                assert expires_at > current_time
-                submissions.append({
-                    "symbol": symbol,
-                    "candidate_id": candidate_id,
-                    "evaluated_at": current_time,
-                    "expires_at": expires_at,
-                    "is_reval": is_reval,
-                })
-                return None
-            elif symbol == "BTCUSDT":
-                submissions.append({
-                    "symbol": symbol,
-                    "candidate_id": f"exit:{symbol}:{int(event.candle.candle_start.timestamp())}",
-                    "evaluated_at": current_time,
-                    "expires_at": current_time + timedelta(seconds=60),
-                    "is_reval": False,
-                })
-                return None
-            return None
+@pytest.fixture
+def pending_signal(monkeypatch):
+    from crypto_momentum_lab.live_rollout import exit_channels
 
-    def on_failure(symbol, reason):
-        failures.append((symbol, reason))
+    pending = asyncio.Event()
+    original = exit_channels.log.warning
 
+    def warning(event, **details):
+        original(event, **details)
+        if event == "live_closed_candle_position_sync_pending":
+            pending.set()
+
+    monkeypatch.setattr(exit_channels.log, "warning", warning)
+    return pending
+
+
+@pytest.mark.parametrize(
+    "ttl, delay, expected_posts", [(60, 30, 1), (60, 224, 0), (300, 224, 1)]
+)
+async def test_original_candle_ttl_survives_wait_and_duplicate_delivery(
+    ttl, delay, expected_posts, pending_signal
+):
+    exchange = PlanAwareExchange()
+    now = NOW
+    context = replace(
+        _runtime_context(),
+        pending_position_symbols=frozenset({"BTCUSDT"}),
+        managed_positions=(_position(),),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+    )
+
+    async def provider(state):
+        return context
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=provider,
+        exit_manager=_manager(ttl),
+        clock=lambda: now,
+    )
+    failures = []
     runtime = LiveExitChannelRuntime(
-        daemon=Daemon(),
+        daemon=daemon,
         latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
         latest_market_states=SimpleNamespace(),
         is_transient_error=lambda error: False,
-        on_exit_failure=on_failure,
+        closed_candle_expires_at=daemon.closed_candle_expires_at,
+        clock=lambda: now,
+        on_exit_failure=lambda symbol, reason: failures.append(reason),
     )
 
     async def source():
-        yield imx_event
-        yield btc_event
+        yield _event()
+        yield _event()
 
     task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
     try:
-        # Wait until initial evaluation completes
-        await asyncio.wait_for(first_eval_done.wait(), 1.0)
-        await asyncio.sleep(0.05)
-
-        # BTC evaluated immediately at 07:15; IMX deferred
-        assert len(submissions) == 1
-        assert submissions[0]["symbol"] == "BTCUSDT"
-        assert ("IMXUSDT", t_0700) in runtime._pending_candles
-
-        # Advance facts and clock to 07:18:44
-        imx_facts_ready = True
-        current_time = t_071844
-        runtime.note_account_facts_changed(("IMXUSDT",))
-
-        # Channel should finish processing both events
-        await asyncio.wait_for(task, 1.0)
-
-        # IMX evaluated and submitted exactly once
-        assert len(submissions) == 2
-        imx_submission = submissions[1]
-        assert imx_submission["symbol"] == "IMXUSDT"
-        assert imx_submission["is_reval"] is True
-        assert ":reval:1785827924" in imx_submission["candidate_id"]
-        assert imx_submission["evaluated_at"] == t_071844
-        assert imx_submission["expires_at"] == t_071844 + timedelta(seconds=60)
-        assert not runtime._pending_candles
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_s04_replay_imx_expires_after_15m_timeliness_window():
-    """S04 replay: IMX candle deferred at 07:15, facts do not arrive until 07:31 (>15m window).
-
-    Re-evaluation is rejected under strategy timeliness rules, operator is notified,
-    pending event is cleared, and zero orders are submitted.
-    """
-    t_0700 = datetime(2026, 8, 4, 7, 0, 0, tzinfo=UTC)
-    t_0715 = datetime(2026, 8, 4, 7, 15, 0, tzinfo=UTC)
-    t_0731 = datetime(2026, 8, 4, 7, 31, 0, tzinfo=UTC)
-
-    imx_event = _make_candle_event("IMXUSDT", t_0700, t_0715, t_0715)
-    current_time = t_0715
-    submissions = []
-    failures: list[tuple[str, str | None]] = []
-    first_eval_done = asyncio.Event()
-
-    class Daemon:
-        async def process_closed_candle(self, event, *, latest_quote):
-            symbol = event.candle.symbol
-            if current_time >= event.candle.candle_end + timedelta(minutes=15):
-                return f"closed_candle_evaluation_expired:{symbol}"
-            first_eval_done.set()
-            return f"pending_live_positions:{symbol}"
-
-    def on_failure(symbol, reason):
-        failures.append((symbol, reason))
-
-    runtime = LiveExitChannelRuntime(
-        daemon=Daemon(),
-        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
-        latest_market_states=SimpleNamespace(),
-        is_transient_error=lambda error: False,
-        on_exit_failure=on_failure,
-    )
-
-    async def source():
-        yield imx_event
-
-    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
-    try:
-        await asyncio.wait_for(first_eval_done.wait(), 1.0)
-        assert ("IMXUSDT", t_0700) in runtime._pending_candles
-
-        # Advance past 15m window to 07:31:00
-        current_time = t_0731
-        runtime.note_account_facts_changed(("IMXUSDT",))
-
-        await asyncio.wait_for(task, 1.0)
-        assert not runtime._pending_candles
-        assert submissions == []
-        assert failures == [("IMXUSDT", "closed_candle_evaluation_expired:IMXUSDT")]
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_s05_replay_marscoin_stale_projection_conflict_then_fresh_allocation():
-    """S05 replay: MARSCOIN encounters stale projection conflict pv1, deferred without
-
-    blocking other symbols; fresh context arrives with pv2 and updated quantity,
-    re-evaluation uses new candidate identity and fresh quantity, zero duplicate POST.
-    """
-    t_0700 = datetime(2026, 8, 4, 7, 0, 0, tzinfo=UTC)
-    t_0715 = datetime(2026, 8, 4, 7, 15, 0, tzinfo=UTC)
-
-    marscoin_event = _make_candle_event("MARSCOINUSDT", t_0700, t_0715, t_0715)
-    sol_event = _make_candle_event("SOLUSDT", t_0700, t_0715, t_0715)
-
-    projection_version = "pv1"
-    submissions: list[dict[str, object]] = []
-    conflict_detected = asyncio.Event()
-
-    class Daemon:
-        async def process_closed_candle(self, event, *, latest_quote):
-            symbol = event.candle.symbol
-            if symbol == "MARSCOINUSDT":
-                if projection_version == "pv1":
-                    conflict_detected.set()
-                    return "pending_live_context:MARSCOINUSDT"
-                # Fresh context with pv2 arrived: allocate updated quantity
-                submissions.append({
-                    "symbol": symbol,
-                    "projection_version": projection_version,
-                    "quantity": Decimal("50"),
-                    "candidate_id": f"exit:{symbol}:{projection_version}",
-                })
-                return None
-            elif symbol == "SOLUSDT":
-                submissions.append({
-                    "symbol": symbol,
-                    "projection_version": "pv_sol_current",
-                    "quantity": Decimal("10"),
-                    "candidate_id": f"exit:{symbol}:pv_sol_current",
-                })
-                return None
-            return None
-
-    runtime = LiveExitChannelRuntime(
-        daemon=Daemon(),
-        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
-        latest_market_states=SimpleNamespace(),
-        is_transient_error=lambda error: False,
-    )
-
-    async def source():
-        yield marscoin_event
-        yield sol_event
-
-    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
-    try:
-        await asyncio.wait_for(conflict_detected.wait(), 1.0)
-        await asyncio.sleep(0.05)
-
-        # SOL evaluated immediately without delay; MARSCOIN pending
-        assert len(submissions) == 1
-        assert submissions[0]["symbol"] == "SOLUSDT"
-        assert ("MARSCOINUSDT", t_0700) in runtime._pending_candles
-
-        # Advance MARSCOIN projection to pv2
-        projection_version = "pv2"
-        runtime.note_account_facts_changed(("MARSCOINUSDT",))
-
-        await asyncio.wait_for(task, 1.0)
-
-        # MARSCOIN evaluated with pv2 and new quantity 50; pv1 had ZERO posts
-        assert len(submissions) == 2
-        marscoin_submission = submissions[1]
-        assert marscoin_submission["symbol"] == "MARSCOINUSDT"
-        assert marscoin_submission["projection_version"] == "pv2"
-        assert marscoin_submission["quantity"] == Decimal("50")
-        assert not runtime._pending_candles
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_symbol_isolation_during_transient_network_backoff():
-    """Transient network error backoff on BTCUSDT must not block ETHUSDT closed candle evaluation,
-
-    and facts changed on BTCUSDT must not clear its network backoff.
-    """
-    t_0700 = datetime(2026, 8, 4, 7, 0, 0, tzinfo=UTC)
-    t_0715 = datetime(2026, 8, 4, 7, 15, 0, tzinfo=UTC)
-
-    btc_event = _make_candle_event("BTCUSDT", t_0700, t_0715, t_0715)
-    eth_event = _make_candle_event("ETHUSDT", t_0700, t_0715, t_0715)
-
-    btc_attempts = 0
-    eth_evaluated = False
-    btc_first_failed = asyncio.Event()
-
-    class Daemon:
-        async def process_closed_candle(self, event, *, latest_quote):
-            nonlocal btc_attempts, eth_evaluated
-            symbol = event.candle.symbol
-            if symbol == "BTCUSDT":
-                btc_attempts += 1
-                if btc_attempts == 1:
-                    btc_first_failed.set()
-                    raise ConnectionResetError("network glitch")
-                return None
-            elif symbol == "ETHUSDT":
-                eth_evaluated = True
-                return None
-            return None
-
-    runtime = LiveExitChannelRuntime(
-        daemon=Daemon(),
-        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
-        latest_market_states=SimpleNamespace(),
-        is_transient_error=lambda err: isinstance(err, ConnectionResetError),
-    )
-
-    async def source():
-        yield btc_event
-        await btc_first_failed.wait()
-        yield eth_event
-
-    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
-    try:
-        await asyncio.wait_for(btc_first_failed.wait(), 1.0)
-        # Verify BTC entered retry backoff
-        assert "BTCUSDT" in runtime._candle_retries
-
-        # ETH should be evaluated immediately even while BTC is in network backoff
-        for _ in range(20):
-            if eth_evaluated:
-                break
-            await asyncio.sleep(0.05)
-        assert eth_evaluated is True
-
-        # Facts changed on BTCUSDT must NOT clear its network backoff
+        await asyncio.wait_for(pending_signal.wait(), 1)
+        assert exchange.plans == []
+        now += timedelta(seconds=delay)
+        context = replace(context, pending_position_symbols=frozenset())
         runtime.note_account_facts_changed(("BTCUSDT",))
-        assert "BTCUSDT" in runtime._candle_retries
-
-        # Wait for the network retry backoff to elapse and BTC to succeed
-        await asyncio.wait_for(task, 2.5)
-        assert btc_attempts == 2
-        assert not runtime._pending_candles
+        await asyncio.wait_for(task, 1)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    assert len(exchange.plans) == expected_posts
+    if expected_posts:
+        plan = exchange.plans[0]
+        assert plan.reduce_only
+        assert plan.quantity == Decimal("0.001")
+    else:
+        assert "closed_candle_evaluation_expired:BTCUSDT" in failures
+    assert not runtime._pending_candles
+    # Reconnection repeats the same official event; it must not POST twice.
+    await asyncio.wait_for(runtime.run_closed_candle_channel(source=source()), 1)
+    assert len(exchange.plans) == expected_posts
+
+
+async def test_projection_conflict_rebuilds_real_allocation_before_post(pending_signal):
+    attempted = []
+
+    class Repository(FakeLiveRepository):
+        async def prepare_submission(self, **kwargs):
+            plan = kwargs["plan"]
+            attempted.append(plan)
+            if plan.projection_version == "pv1":
+                raise OrderProjectionConflictError("projection advanced")
+            return await super().prepare_submission(**kwargs)
+
+    context = replace(
+        _runtime_context(),
+        managed_positions=(_position(),),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+    )
+
+    async def provider(state):
+        return context
+
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=provider,
+        repository=Repository(),
+        exit_manager=_manager(),
+        clock=lambda: NOW,
+    )
+    runtime = LiveExitChannelRuntime(
+        daemon=daemon,
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(),
+        is_transient_error=lambda error: False,
+        closed_candle_expires_at=daemon.closed_candle_expires_at,
+        clock=lambda: NOW,
+    )
+
+    async def source():
+        yield _event()
+
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    try:
+        await asyncio.wait_for(pending_signal.wait(), 1)
+        assert attempted and exchange.plans == []
+        old_id = attempted[0].client_order_id
+        assert len({plan.client_order_id for plan in attempted}) == 1
+        context = replace(
+            context,
+            managed_positions=(
+                replace(
+                    _position(), projection_version="pv2", quantity=Decimal("0.002")
+                ),
+            ),
+        )
+        runtime.note_account_facts_changed(("BTCUSDT",))
+        await asyncio.wait_for(task, 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(exchange.plans) == 1
+    plan = exchange.plans[0]
+    assert plan.projection_version == "pv2"
+    assert plan.quantity == Decimal("0.002")
+    assert sum(
+        allocation.allocated_quantity for allocation in plan.allocations
+    ) == Decimal("0.002")
+    assert plan.client_order_id != old_id
+    assert not runtime._pending_candles
+
+
+async def test_pending_candle_expires_without_another_account_event(pending_signal):
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    def clock():
+        return NOW + timedelta(seconds=loop.time() - started)
+
+    context = replace(
+        _runtime_context(),
+        pending_position_symbols=frozenset({"BTCUSDT"}),
+        managed_positions=(_position(),),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+    )
+    context_reads = []
+
+    async def provider(state):
+        context_reads.append(state)
+        return context
+
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=provider,
+        exit_manager=_manager(1),
+        clock=clock,
+    )
+    failures = []
+    runtime = LiveExitChannelRuntime(
+        daemon=daemon,
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(),
+        is_transient_error=lambda error: False,
+        closed_candle_expires_at=daemon.closed_candle_expires_at,
+        clock=clock,
+        on_exit_failure=lambda symbol, reason: failures.append(reason),
+    )
+
+    async def source():
+        yield _event()
+
+    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
+    try:
+        await asyncio.wait_for(pending_signal.wait(), 1)
+        reads_before_expiry = len(context_reads)
+        await asyncio.wait_for(task, 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(context_reads) == reads_before_expiry
+    assert exchange.plans == []
+    assert failures == ["closed_candle_evaluation_expired:BTCUSDT"]
+    assert not runtime._pending_candles
+
+
+async def test_one_failed_candle_produces_one_error_event(monkeypatch):
+    from crypto_momentum_lab.live_rollout import exit_channels
+
+    errors = []
+    monkeypatch.setattr(
+        exit_channels.log, "error", lambda event, **details: errors.append(event)
+    )
+
+    class Daemon:
+        async def process_closed_candle(self, event, *, latest_quote):
+            return "exit_submission_not_executed"
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
+        latest_market_states=SimpleNamespace(),
+        is_transient_error=lambda error: False,
+    )
+    event = _event()
+    key = (event.candle.symbol, event.candle.candle_start)
+    runtime._pending_candles[key] = event
+    await runtime._evaluate_candle(key)
+    assert errors == ["live_closed_candle_exit_degraded"]

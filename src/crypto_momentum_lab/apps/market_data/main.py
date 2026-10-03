@@ -1298,203 +1298,204 @@ async def build_market_data_runtime(
     if startup_timer is not None:
         startup_timer.mark("archive_retention_checked")
 
-    manifest_queue: asyncio.Queue[ArchiveManifest | None] = asyncio.Queue(maxsize=1024)
-
-    async def _manifest_worker() -> None:
-        while True:
-            item = await manifest_queue.get()
-            if item is None:
-                manifest_queue.task_done()
-                break
-            try:
-                await save_manifest(item)
-            except Exception:
-                log.exception("background_manifest_save_failed", path=str(item.path))
-            finally:
-                manifest_queue.task_done()
-
-    manifest_worker_task = asyncio.create_task(_manifest_worker())
-
-    async def async_save_manifest(manifest: ArchiveManifest) -> None:
-        try:
-            manifest_queue.put_nowait(manifest)
-        except asyncio.QueueFull:
-            await save_manifest(manifest)
-
-    archive = ZstdJsonlArchive(
-        root=archive_config.root,
-        environment=runtime.environment,
-        capture_version=capture_version,
-        manifest_sink=async_save_manifest,
-        known_gap_count_provider=lambda key: quality.known_gap_count(
-            connection_session_id=key.connection_session_id,
-            stream=key.stream,
-            symbol=key.symbol,
-        ),
-        zstd_level=archive_config.zstd_level,
-        rotation_uncompressed_bytes=archive_config.rotation_uncompressed_bytes,
-        max_open_writers=archive_config.max_open_writers,
-        group_commit_max_events=archive_config.group_commit_max_events,
-        group_commit_max_milliseconds=(archive_config.group_commit_max_milliseconds),
-    )
-    rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
-    agg_trade_recovery = AggTradeGapRecoverer(rest_client)
-    daily_open_prefetcher = DailyOpenPrefetcher(
-        rest_client,
-        universe_repository,
-    )
-    observer: CaptureUniverseObserver | None = None
-    quote_volume_publisher = Binance24hQuoteVolumePublisher(
-        rest_client,
-        publish=quote_hub.publish_volume,
-        symbols_filter=lambda: (
-            observer.monitored_symbols if observer is not None else None
-        ),
-        environment=runtime.environment,
-    )
-
-    async def handle_agg_trade_gap(gap: AggTradeGap) -> None:
-        await runtime_state_publisher.mark_incomplete(gap)
-        await capture_repository.save_quality_event(agg_trade_gap_quality_event(gap))
-
-    coordinator = CaptureCoordinator(
-        queue=queue,
-        archive=archive,
-        quality=quality,
-        repository=capture_repository,
-        acknowledgement_sink=None,
-        realtime_envelope_sink=runtime_state_publisher.observe,
-        envelope_recovery=agg_trade_recovery,
-        gap_sink=handle_agg_trade_gap,
-        archive_streams=archive_streams,
-    )
-
-    capture: MarketDataCaptureService
-
-    async def on_capture_envelope(envelope: RawEnvelope) -> None:
-        await capture.submit(envelope)
-
-    def connection_factory(group: SubscriptionGroup) -> BinanceWebSocketConnection:
-        base_url = (
-            str(runtime.capture.public_websocket_url)
-            if group.route is CaptureRoute.PUBLIC
-            else str(runtime.capture.market_websocket_url)
-        )
-        return BinanceWebSocketConnection(
-            base_url=base_url,
-            group_id=group.group_id,
-            route=group.route,
-            environment=runtime.environment,
-            desired_names=tuple(item.binance_name for item in group.subscriptions),
-            generation=1,
-            on_envelope=on_capture_envelope,
-            on_lifecycle=coordinator.observe_lifecycle,
-            reconnect_delays=(0.0, 1.0, 5.0),
-            connection_lifetime_seconds=(runtime.capture.connection_lifetime_seconds),
-            open_timeout_seconds=runtime.capture.open_timeout_seconds,
-            ping_interval_seconds=runtime.capture.ping_interval_seconds,
-            ping_timeout_seconds=runtime.capture.ping_timeout_seconds,
-            silence_timeout_seconds=runtime.capture.silence_timeout_seconds,
-            control_ack_timeout_seconds=(runtime.capture.control_ack_timeout_seconds),
-            control_messages_per_second=(runtime.capture.control_messages_per_second),
-            ingress_queue_max_events=(runtime.capture.ingress_queue_max_events),
-            symbol_filter=coordinator.accepts_symbol,
-            on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
-        )
-
-    connection_pool = BinanceConnectionPool(
-        connection_factory=connection_factory,
-        max_subscriptions_per_connection=(
-            runtime.capture.max_subscriptions_per_connection
-        ),
-        control_messages_per_second=(runtime.capture.control_messages_per_second),
-        max_subscriptions_per_connection_by_stream=(
-            {
-                CaptureStream.BOOK_TICKER: (
-                    runtime.capture.book_ticker_max_subscriptions_per_connection
-                )
-            }
-            if (
-                runtime.capture.book_ticker_max_subscriptions_per_connection is not None
-            )
-            else None
-        ),
-        use_all_book_ticker_stream=(runtime.capture.book_ticker_use_all_stream),
-    )
-    capture = MarketDataCaptureService(
-        queue=queue,
-        repository=capture_repository,
-        connection_pool=connection_pool,
-        disk_guard=DiskSpaceGuard(
-            warning_free_bytes=archive_config.warning_free_bytes,
-            halt_free_bytes=archive_config.halt_free_bytes,
-            recovery_free_bytes=archive_config.recovery_free_bytes,
-        ),
-        disk_free_bytes_provider=lambda: shutil.disk_usage(archive_config.root).free,
-        coordinator=coordinator,
-    )
-    promotion_backfiller = PromotionHistoryBackfiller(
-        client=rest_client,
-        publisher=state_hub,
-        environment=runtime.environment,
-    )
-    observer = CaptureUniverseObserver(
-        capture,
-        streams=enabled_streams,
-        initial_generation=1,
-        prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
-        full_stream_max_gainer_rank=(runtime.universe.full_stream_max_gainer_rank),
-        # TARGET / entry-adjacent band: T1→T0 must already have a full local
-        # 15s window, not merely be subscribed.
-        must_warm_max_gainer_rank=runtime.universe.top_count,
-        protected_symbol_loader=load_protected_symbols,
-        on_symbols_changed=runtime_state_publisher.set_expected_symbols,
-        on_trade_symbols_promoted=_ignore_backfill_result(
-            promotion_backfiller.backfill_symbols
-        ),
-    )
-    universe = UniverseRefreshService(
-        market_data=rest_client,
-        repository=universe_repository,
-        config=runtime.universe,
-        config_hash=capture_version,
-        observer=observer,
-        daily_open_prefetcher=daily_open_prefetcher,
-    )
-    if startup_timer is not None:
-        startup_timer.mark("runtime_components_built")
+    rest_client: BinanceUsdMRestClient | None = None
     try:
-        yield MarketDataRuntime(
-            capture=capture,
-            connection_pool=connection_pool,
-            capture_repository=capture_repository,
-            archive_root=archive_config.root,
-            archive_retention_days=archive_config.retention_days,
-            archive_retention_interval_seconds=(
-                archive_config.retention_check_interval_seconds
-            ),
-            universe=universe,
-            subscription_observer=observer,
-            runtime_state_publisher=runtime_state_publisher,
-            agg_trade_recovery=agg_trade_recovery,
-            state_hub=state_hub,
-            quote_hub=quote_hub,
-            quote_volume_publisher=quote_volume_publisher,
-            daily_open_prefetcher=daily_open_prefetcher,
-            universe_activation_minute=runtime.universe.activation_minute,
-            universe_refresh_interval_minutes=(
-                runtime.universe.refresh_interval_minutes
-            ),
-            enabled_streams=enabled_streams,
-            initial_symbols=initial_symbols,
-            maintenance_capture_repository=maintenance_capture_repository,
-            operational_retention=operational_retention,
-            maintenance_session_factory=maintenance_sessions,
-        )
+        async with manifest_journal.background_sink(
+            maintenance_capture_repository.save_manifest,
+        ) as async_save_manifest:
+            archive = ZstdJsonlArchive(
+                root=archive_config.root,
+                environment=runtime.environment,
+                capture_version=capture_version,
+                manifest_sink=async_save_manifest,
+                known_gap_count_provider=lambda key: quality.known_gap_count(
+                    connection_session_id=key.connection_session_id,
+                    stream=key.stream,
+                    symbol=key.symbol,
+                ),
+                zstd_level=archive_config.zstd_level,
+                rotation_uncompressed_bytes=archive_config.rotation_uncompressed_bytes,
+                max_open_writers=archive_config.max_open_writers,
+                group_commit_max_events=archive_config.group_commit_max_events,
+                group_commit_max_milliseconds=(
+                    archive_config.group_commit_max_milliseconds
+                ),
+            )
+            rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
+            agg_trade_recovery = AggTradeGapRecoverer(rest_client)
+            daily_open_prefetcher = DailyOpenPrefetcher(
+                rest_client,
+                universe_repository,
+            )
+            observer: CaptureUniverseObserver | None = None
+            quote_volume_publisher = Binance24hQuoteVolumePublisher(
+                rest_client,
+                publish=quote_hub.publish_volume,
+                symbols_filter=lambda: (
+                    observer.monitored_symbols if observer is not None else None
+                ),
+                environment=runtime.environment,
+            )
+
+            async def handle_agg_trade_gap(gap: AggTradeGap) -> None:
+                await runtime_state_publisher.mark_incomplete(gap)
+                await capture_repository.save_quality_event(
+                    agg_trade_gap_quality_event(gap)
+                )
+
+            coordinator = CaptureCoordinator(
+                queue=queue,
+                archive=archive,
+                quality=quality,
+                repository=capture_repository,
+                acknowledgement_sink=None,
+                realtime_envelope_sink=runtime_state_publisher.observe,
+                envelope_recovery=agg_trade_recovery,
+                gap_sink=handle_agg_trade_gap,
+                archive_streams=archive_streams,
+            )
+
+            capture: MarketDataCaptureService
+
+            async def on_capture_envelope(envelope: RawEnvelope) -> None:
+                await capture.submit(envelope)
+
+            def connection_factory(
+                group: SubscriptionGroup,
+            ) -> BinanceWebSocketConnection:
+                base_url = (
+                    str(runtime.capture.public_websocket_url)
+                    if group.route is CaptureRoute.PUBLIC
+                    else str(runtime.capture.market_websocket_url)
+                )
+                return BinanceWebSocketConnection(
+                    base_url=base_url,
+                    group_id=group.group_id,
+                    route=group.route,
+                    environment=runtime.environment,
+                    desired_names=tuple(
+                        item.binance_name for item in group.subscriptions
+                    ),
+                    generation=1,
+                    on_envelope=on_capture_envelope,
+                    on_lifecycle=coordinator.observe_lifecycle,
+                    reconnect_delays=(0.0, 1.0, 5.0),
+                    connection_lifetime_seconds=(
+                        runtime.capture.connection_lifetime_seconds
+                    ),
+                    open_timeout_seconds=runtime.capture.open_timeout_seconds,
+                    ping_interval_seconds=runtime.capture.ping_interval_seconds,
+                    ping_timeout_seconds=runtime.capture.ping_timeout_seconds,
+                    silence_timeout_seconds=runtime.capture.silence_timeout_seconds,
+                    control_ack_timeout_seconds=(
+                        runtime.capture.control_ack_timeout_seconds
+                    ),
+                    control_messages_per_second=(
+                        runtime.capture.control_messages_per_second
+                    ),
+                    ingress_queue_max_events=(runtime.capture.ingress_queue_max_events),
+                    symbol_filter=coordinator.accepts_symbol,
+                    on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
+                )
+
+            connection_pool = BinanceConnectionPool(
+                connection_factory=connection_factory,
+                max_subscriptions_per_connection=(
+                    runtime.capture.max_subscriptions_per_connection
+                ),
+                control_messages_per_second=(
+                    runtime.capture.control_messages_per_second
+                ),
+                max_subscriptions_per_connection_by_stream=(
+                    {
+                        CaptureStream.BOOK_TICKER: (
+                            runtime.capture.book_ticker_max_subscriptions_per_connection
+                        )
+                    }
+                    if (
+                        runtime.capture.book_ticker_max_subscriptions_per_connection
+                        is not None
+                    )
+                    else None
+                ),
+                use_all_book_ticker_stream=(runtime.capture.book_ticker_use_all_stream),
+            )
+            capture = MarketDataCaptureService(
+                queue=queue,
+                repository=capture_repository,
+                connection_pool=connection_pool,
+                disk_guard=DiskSpaceGuard(
+                    warning_free_bytes=archive_config.warning_free_bytes,
+                    halt_free_bytes=archive_config.halt_free_bytes,
+                    recovery_free_bytes=archive_config.recovery_free_bytes,
+                ),
+                disk_free_bytes_provider=lambda: (
+                    shutil.disk_usage(archive_config.root).free
+                ),
+                coordinator=coordinator,
+            )
+            promotion_backfiller = PromotionHistoryBackfiller(
+                client=rest_client,
+                publisher=state_hub,
+                environment=runtime.environment,
+            )
+            observer = CaptureUniverseObserver(
+                capture,
+                streams=enabled_streams,
+                initial_generation=1,
+                prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
+                full_stream_max_gainer_rank=(
+                    runtime.universe.full_stream_max_gainer_rank
+                ),
+                # TARGET / entry-adjacent band: T1→T0 must already have a full local
+                # 15s window, not merely be subscribed.
+                must_warm_max_gainer_rank=runtime.universe.top_count,
+                protected_symbol_loader=load_protected_symbols,
+                on_symbols_changed=runtime_state_publisher.set_expected_symbols,
+                on_trade_symbols_promoted=_ignore_backfill_result(
+                    promotion_backfiller.backfill_symbols
+                ),
+            )
+            universe = UniverseRefreshService(
+                market_data=rest_client,
+                repository=universe_repository,
+                config=runtime.universe,
+                config_hash=capture_version,
+                observer=observer,
+                daily_open_prefetcher=daily_open_prefetcher,
+            )
+            if startup_timer is not None:
+                startup_timer.mark("runtime_components_built")
+            yield MarketDataRuntime(
+                capture=capture,
+                connection_pool=connection_pool,
+                capture_repository=capture_repository,
+                archive_root=archive_config.root,
+                archive_retention_days=archive_config.retention_days,
+                archive_retention_interval_seconds=(
+                    archive_config.retention_check_interval_seconds
+                ),
+                universe=universe,
+                subscription_observer=observer,
+                runtime_state_publisher=runtime_state_publisher,
+                agg_trade_recovery=agg_trade_recovery,
+                state_hub=state_hub,
+                quote_hub=quote_hub,
+                quote_volume_publisher=quote_volume_publisher,
+                daily_open_prefetcher=daily_open_prefetcher,
+                universe_activation_minute=runtime.universe.activation_minute,
+                universe_refresh_interval_minutes=(
+                    runtime.universe.refresh_interval_minutes
+                ),
+                enabled_streams=enabled_streams,
+                initial_symbols=initial_symbols,
+                maintenance_capture_repository=maintenance_capture_repository,
+                operational_retention=operational_retention,
+                maintenance_session_factory=maintenance_sessions,
+            )
     finally:
-        await manifest_queue.put(None)
-        await manifest_worker_task
-        await rest_client.aclose()
+        if rest_client is not None:
+            await rest_client.aclose()
         await market_engine.dispose()
         await observability_engine.dispose()
         await maintenance_engine.dispose()

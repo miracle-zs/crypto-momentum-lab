@@ -45,6 +45,9 @@ class LiveExitChannelRuntime:
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
         on_order_identity_conflict: Callable[[str], None] | None = None,
+        closed_candle_expires_at: Callable[[ClosedCandle15mEvent], datetime | None]
+        | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._daemon = daemon
         self._latest_market_quotes = latest_market_quotes
@@ -55,6 +58,8 @@ class LiveExitChannelRuntime:
         )
         self._on_exit_failure = on_exit_failure
         self._on_order_identity_conflict = on_order_identity_conflict
+        self._closed_candle_expires_at = closed_candle_expires_at
+        self._clock = clock
         self._candle_facts_changed = asyncio.Event()
         self._quote_facts_changed = asyncio.Event()
         self._grace_facts_changed = asyncio.Event()
@@ -287,6 +292,18 @@ class LiveExitChannelRuntime:
                 timeout: float | None = None
                 if earliest_retry is not None:
                     timeout = max(0.0, earliest_retry - loop_time)
+                if self._closed_candle_expires_at is not None:
+                    for event in self._pending_candles.values():
+                        expires_at = self._closed_candle_expires_at(event)
+                        if expires_at is not None:
+                            remaining = max(
+                                0.0, (expires_at - self._clock()).total_seconds()
+                            )
+                            timeout = (
+                                remaining
+                                if timeout is None
+                                else min(timeout, remaining)
+                            )
 
                 waiting: set[
                     asyncio.Future[ClosedCandle15mEvent]
@@ -340,6 +357,16 @@ class LiveExitChannelRuntime:
                     self._pending_candles, key=lambda k: (k[1], k[0])
                 ):
                     symbol = key[0]
+                    event = self._pending_candles[key]
+                    expires_at = (
+                        self._closed_candle_expires_at(event)
+                        if self._closed_candle_expires_at is not None
+                        else None
+                    )
+                    if expires_at is not None and self._clock() >= expires_at:
+                        if key not in evaluate_keys:
+                            evaluate_keys.append(key)
+                        continue
                     if symbol in self._sync_waits["candle"]:
                         continue
                     if symbol in self._candle_retries:
@@ -368,6 +395,14 @@ class LiveExitChannelRuntime:
         generation = self._evaluation_generation(event.candle.symbol)
         for attempt in range(3):
             try:
+                expires_at = (
+                    self._closed_candle_expires_at(event)
+                    if self._closed_candle_expires_at is not None
+                    else None
+                )
+                if expires_at is not None and self._clock() >= expires_at:
+                    failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
+                    break
                 failure = await self._daemon.process_closed_candle(
                     event,
                     latest_quote=next(
@@ -459,11 +494,6 @@ class LiveExitChannelRuntime:
             self._candle_retries[event.candle.symbol] = (
                 loop_time + delay,
                 min(delay * 2, 60.0),
-            )
-            log.error(
-                "live_closed_candle_exit_degraded",
-                symbol=event.candle.symbol,
-                reason=failure,
             )
             log.error(
                 "live_closed_candle_exit_degraded",

@@ -1,6 +1,6 @@
 # 实盘运行简化与局部异常隔离改造计划
 
-- 状态：待实施。本次仅编写计划，没有修改交易代码、通知配置或服务器运行状态。
+- 状态：本地实施及复查修正完成；生产部署、Server 酱实际送达和同负载性能验收待完成。批次状态与证据见第 8 节及复查报告。
 - 日期：2026-10-03（Asia/Shanghai）。
 - 本地基线：`64c247a3`；交易代码基线为 `af7ba86a`，包含上一轮架构解耦及 `73f9b135` 的改动。
 - 生产证据基线：`040b4eaacf932901d53642669019cd1ed63506b0`，服务器 `43.167.191.253`。证据窗口为 2026-10-03 03:57:07–09:22:06 UTC；最终采样为 09:29:02 UTC。这里记录的是该次审计，不能代表实施时服务器仍运行同一版本。
@@ -180,11 +180,11 @@ graph TD
 - 按标的/方向和真实收盘事件身份保留待评估输入，沿用已有有界通道及重连补回。接收、排队、完成评估分别记录，不能在收到或开始等待时提前确认事件完成。
 - 某标的等待事实只挂起它的评估，不同步睡眠占住其他标的行情、报价或账户事实消费。
 - 事实到达/投影更新后唤醒重评；已有网络重试退避与事实等待分开，避免事实已更新仍被旧退避延后。
-- 不重发过期候选、不改旧候选 expires_at 来续命。依据原始事件、当前事实及现有策略时效规则重新评估；允许执行时产生新候选身份和有效分配，并证明不存在已提交的对应命令。
+- 不重发过期候选、不改旧候选 expires_at 来续命。沿用原始事件 received_at 和既有 candidate_ttl_seconds，重评不按当前时间续期。候选身份由原事件及数量/投影等事实决定，相同事实保持相同身份；事实变化时重新分配并派生相应身份。原 TTL 已到期则明确失效、告警和结束等待，不额外添加 15 分钟信号时效规则。
 - 如果现有策略已不允许该事件执行，记录明确失效原因并通知，不能静默跳过直到下一根 K 线。保留事件不等于允许无限期执行旧信号，不在本批暗改策略时效规则。
 - 不强平 S08 的正常 GTC 挂单来“清空异常”；订单期限和取消仍由原策略决定。
 
-完成条件：重放 S04 的 07:15→07:18:44 轨迹，以及 S05 旧投影场景；正常标的仍持续评估，等待事件最终有明确完成或失效结果，零重复 POST。
+完成条件：重放 S04 的等待轨迹，以及 S05 旧投影场景；原 TTL 内使用真实新事实评估，超期明确失效，不保证延迟 224 秒后仍能下单。正常标的仍持续评估，等待事件最终有明确完成或失效结果，零重复 POST。
 
 ### P6：性能与告警噪声收口
 
@@ -237,7 +237,7 @@ rtk proxy env \
 
 实施时先验证测试数据库身份和迁移，不能指向生产库。每批对修改文件运行适当范围的 Ruff/mypy 及 `rtk proxy git diff --check`，区分基线问题和新增问题。顶层包与 domain 子包的运行期、包含类型引用依赖图继续要求 0 环。
 
-此前 `3313 passed` 仅是旧基线结果。本计划还未实施，不能把该结果写成本计划已通过。
+此前 `3313 passed` 仅是旧基线结果；实施提交的历史测试记录和复查后重新运行结果分别列出，不代表生产验收。
 
 ## 7. 发布、回滚与完成条件
 
@@ -257,9 +257,15 @@ rtk proxy env \
 | 批次 | 状态 | 提交 / 回归 / 未覆盖项 |
 | --- | --- | --- |
 | P0 启动清理与阶段 | 已完成 | 修复 S14 (启动装配异常清理与异常保留) 与 S15 (session.run 运行期错误不再误判为启动重试)；单元测试回归 tests/unit/live_rollout/test_runtime_orchestrator_lifecycle.py 3 passed |
-| P1 通知与观测 | 已完成 | 复用 monitor 扩展 4 类标的级可观测告警（局部事实不一致、平仓评估延后、候选超期、订单命令终态失步），实现 unknown orders 分级与严重升级绕过冷却、聚合单次恢复通知（带累计频次）与 Server酱 32 字符标题适配及零密钥泄露重试；交易核心协程零通知网络请求；单元测试回归 tests/unit/ops/test_cml_ops_monitor.py 78 passed |
+| P1 通知与观测 | 本地完成，送达待验收 | 已有标的级 monitor 告警、去重、升级与恢复测试；交易协程零通知 HTTP。Server 酱真实送达和恢复通知未在本次验证。 |
 | P2 终态与恢复 | 已完成 | 修复 S06（exchange_orders 与 execution_commands 跨 epoch 及重复事件下终态收敛与预留释放）、S03（局部投影版本滞后时重新加载持久化 head，不再抛出裸 RuntimeError 误将账本标记为 persistence_failed）、S07（部分成交撤单按已成比例缩放 live_exposure_claims 并保留活跃敞口、释放未成交预留）；零周期性 REST 扫描；集成测试 tests/integration/persistence/test_order_terminal_convergence.py 4 passed，单元测试回归 232 passed |
-| P3 局部准入 | 已完成 | 移除 pending_position_symbols 与 exit_failure 对账户级 entry_enabled 的硬阻塞，收敛至 is_symbol_entry_allowed 标的级门禁（A 标的异常不影响 B 标的开仓）；将 UNKNOWN/未决订单的准入限制精确作用于同标的冲突或最坏风险不可界定（missing price/quantity）场景，已确认挂单（ACKNOWLEDGED）不作为不确定性阻塞；研究 collector 健康不作为实盘准入条件；LiveSubmissionFence 在查库等待后重新校验租约期限（expired lease fail-closed）；CapabilityEvidence 与决策事实在事实缺失时严格 fail-closed（market freshness inf, is_approval_valid False）；新增与更新单元测试 tests/unit/live_rollout/test_submission_admission.py、test_submission.py、test_submission_fence.py、test_entry_control.py、test_execution_runtime.py、test_daemon.py、tests/unit/runtime/test_capability_evaluator.py，3088 单元测试与 137 持久化集成测试全部通过 |
-| P4 RUNNING 与消费者 | 已完成 | 活跃实盘主状态收敛为 ExecutionAccountStatus.RUNNING，移除 SYNCING / READY_READONLY 控制性阻断状态；保留历史状态反序列化兼容；TradeabilityMode 收敛至 RUNNING（正常）与 HALTED（显式停机），不再将开仓门禁关闭合成 EXIT_ONLY 或 DEGRADED；移除 LiveEntryControlGate 中纯聚合软门禁 account_snapshot_available；更新 operator dashboard (overview_queries.py / account_queries.py)、cml_ops_monitor.py 与 update_server.sh 兼容 running 与历史 ready_readonly 状态；3099 单元测试与 137 持久化集成测试全部通过 |
-| P5 退出事件与等待 | 已完成 | 解耦收盘 K 线通道排队与退出评估执行，标的级网络重试退避与事实等待解耦，避免网络退避阻塞事件流与其他标的；禁止重发过期候选或就地篡改 expires_at，基于原触发事件、当前事实重新派生新候选身份（:reval:时间戳）和有效分配；超过 15m 策略时效窗口显式产生 closed_candle_evaluation_expired 告警并清理事件，零静默丢弃；回放并回归 S04（IMX 07:15 延迟至 07:18:44 重评执行、>15m 超期失效）与 S05（MARSCOIN 旧投影版本 pv1 冲突进入 pending_live_context，新投影 pv2 到达后重评使用新分配数量，旧分配零 POST、零重复 POST）；新增 tests/unit/live_rollout/test_closed_candle_decoupling_replay.py，3103 单元测试与 137 持久化集成测试全部通过 |
-| P6 性能与告警噪声 | 已完成 | 行情归档保存元数据 save_manifest 采用有界异步队列与后台工作协程解耦（优雅停机前自动刷新排队数据），消除写入 PostgreSQL 的 565ms 延迟阻塞主循环风险（S09）；行情健康监控采样事件循环延迟并计算 p50/p95/p99/max 分位数，消除历史最大值单向污染；执行账本无活跃预留的启动摘要迁移 execution_head_view_migrated 降级为 info（S13）；Binance 账户常规配置更新 account_config_update 恢复事件降级为 info 避免误报 error 假警报（S11）；研究采集历史桶内容冲突 warning 聚合限频（S10），单次批处理最多记录 3 条详细告警加 1 条聚合摘要，避免几百条刷屏；新增与更新单元测试 tests/unit/market_data/test_observability.py 与 tests/unit/live_rollout/test_phase_p6_performance_and_noise.py，3109 单元测试与 137 持久化集成测试全部通过 |
+| P3 局部准入 | 本地完成并复查修正 | 复查移除行情/启动前置全账户 UNKNOWN 门禁，将订单冲突和无法界定的新增风险交给候选准入；实际 MarketLoop→Submission→Coordinator 测试覆盖 A 未知/B 正常、同标的拒绝、无价格事实拒绝、占用导致额度不足及零重复旧身份 POST。单次计划执行保留关联冲突检查。 |
+| P4 RUNNING 与消费者 | 本地完成并复查修正 | 同步服务不再写 SYNCING/DEGRADED；成功装配后同步故障保留 RUNNING 并记录原因，初次装配失败仍为 STARTING。删除运行侧 TradeabilityMode/TradeabilitySnapshot/TradeabilityAlertManager；旧软状态不作为交易总开关。运行 JSON 与 Dashboard 保留 RUNNING，明确停止/权限事实单独显示；历史状态及无新鲜运行证据的 UNKNOWN 展示兼容。 |
+| P5 退出事件与等待 | 本地完成并复查修正 | 撤销未约定的 candle_end+15m 规则及 :reval: 当前时间身份/TTL 续期，保持原始 received_at+candidate_ttl_seconds。真实 ExitProcessor→ExitManager→Submission→Coordinator 测试覆盖 TTL 内恢复、原 TTL 超期、已有较长 TTL 下恢复、旧投影零 POST/新数量分配、重复事件零重发，以及没有后续账户事实时按截止时间告警并结束等待。默认 60s TTL 的 224s 延后会失效，不伪造可执行结果。 |
+| P6 性能与告警噪声 | 本地修正完成，性能待实测 | 删除易丢项的内存 manifest 队列，复用 PendingManifestJournal：先持久化本地记录，后台写库成功后删除，失败/取消/停机超时保留并可重启重放；慢数据库不进入生产者。修复重复退出错误事件，共享终态/预留判断和租约到期检查。保留分位数及噪声聚合。已有真实 journal 故障、慢库和停机测试；相同负载前后性能尚未实测，不宣称 p95/p99 改善。 |
+
+### 复查修正记录
+
+详见 [完成度复查及修正验证](live-runtime-simplification-completion-review-20261003.md)。本次修正是工作区改动，不代表服务器已经升级。P0/P2 的既有真实启动和 PostgreSQL 终态回归继续纳入全量验证。
+
+复查修正后的完整回归：**3365 passed, 1 deselected, 3 warnings in 65.47s**（本地 PostgreSQL + Hub，排除实际实盘测试）。静态依赖 0 环；静态检查没有新增诊断。生产送达及性能对比仍未验收。

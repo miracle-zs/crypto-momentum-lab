@@ -201,19 +201,16 @@ class ExecutionAccountSyncService:
             if observed_at is None
             else replace(self._config, observed_at=observed_at)
         )
-        if publish_transient_states and persist:
+        if (
+            publish_transient_states
+            and persist
+            and self._last_persisted_process_state is None
+        ):
             await self._save_state(
                 ExecutionAccountStatus.STARTING,
                 config=replace(
                     config,
                     observed_at=config.observed_at - timedelta(microseconds=2),
-                ),
-            )
-            await self._save_state(
-                ExecutionAccountStatus.SYNCING,
-                config=replace(
-                    config,
-                    observed_at=config.observed_at - timedelta(microseconds=1),
                 ),
             )
         try:
@@ -497,7 +494,8 @@ class ExecutionAccountSyncService:
             if persist:
                 try:
                     await self._save_state(
-                        ExecutionAccountStatus.DEGRADED,
+                        self._last_persisted_process_state
+                        or ExecutionAccountStatus.STARTING,
                         f"sync_failed:{type(error).__name__}",
                         config=config,
                     )

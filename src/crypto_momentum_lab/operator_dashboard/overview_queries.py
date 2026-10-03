@@ -437,6 +437,9 @@ class OverviewQueries:
 
         published = [published_tradeability(a, now) for a in accounts_resp.accounts]
         confirmed = bool(published) and all(item is not None for item in published)
+        runtime_running = confirmed and any(
+            item.mode == "RUNNING" for item in published if item is not None
+        )
         if confirmed:
             gates = [item for item in published if item is not None]
             blocked = next((item for item in gates if not item.entry_gate_open), gates[0])
@@ -447,10 +450,10 @@ class OverviewQueries:
                                      if not item.exit_gate_open), gates[0].exit_gate_reason)
             unmanaged_risk_clear = all(item.unmanaged_risk_clear for item in gates)
             has_halt = any(item.halt_active for item in gates)
-            if has_halt:
-                mode = "HALTED"
-            elif any(item.mode == "RUNNING" for item in gates):
+            if runtime_running:
                 mode = "RUNNING"
+            elif has_halt:
+                mode = "HALTED"
             elif all(item.mode == "FULLY_TRADEABLE" for item in gates):
                 mode = "FULLY_TRADEABLE"
             else:
@@ -478,7 +481,7 @@ class OverviewQueries:
 
         if observed_halt:
             status = OperationalStatus.HALTED
-            mode = "HALTED"
+            mode = "RUNNING" if runtime_running else "HALTED"
             has_halt = True
             entry_gate_open = exit_gate_open = unmanaged_risk_clear = False
             entry_gate_reason = exit_gate_reason = "halt_active"

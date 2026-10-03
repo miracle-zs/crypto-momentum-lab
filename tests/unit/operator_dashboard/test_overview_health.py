@@ -16,6 +16,34 @@ from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 NOW = datetime(2026, 9, 30, 2, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("durable_halt", [False, True])
+async def test_action_halt_preserves_published_running_mode(durable_halt):
+    queries = Queries(strategy_state="active")
+    queries.account.runtime_observed_at = NOW
+    queries.account.runtime_tradeability = TradeabilityDetailResponse(
+        mode="RUNNING",
+        entry_gate_open=False,
+        entry_gate_reason="halt_active",
+        exit_gate_open=False,
+        exit_gate_reason="operator_paused_exit",
+        unmanaged_risk_clear=True,
+        halt_active=True,
+    )
+    overview = await queries.overview()
+    overview.active_halt_count = int(durable_halt)
+
+    async def current_overview():
+        return overview
+
+    queries.overview = current_overview
+    result = await queries.readiness()
+    assert result.tradeability.mode == "RUNNING"
+    assert result.tradeability.halt_active
+    assert not result.tradeability.entry_gate_open
+    assert not result.tradeability.exit_gate_open
+    assert result.status is OperationalStatus.HALTED
+
+
 class Session:
     async def __aenter__(self):
         return self
@@ -218,7 +246,9 @@ async def test_live_accounts_accepts_only_valid_runtime_identity(invalid):
 
 
 def test_live_account_status_accepts_running():
-    from crypto_momentum_lab.operator_dashboard.overview_queries import live_account_status
+    from crypto_momentum_lab.operator_dashboard.overview_queries import (
+        live_account_status,
+    )
     assert live_account_status("running", observed_at=NOW, now=NOW) == OperationalStatus.READY
     assert live_account_status("ready_readonly", observed_at=NOW, now=NOW) == OperationalStatus.READY
     assert live_account_status("syncing", observed_at=NOW, now=NOW) == OperationalStatus.DEGRADED
@@ -246,7 +276,10 @@ async def test_running_tradeability_reports_ready():
 
 def test_account_overview_status_accepts_running():
     from unittest.mock import MagicMock
-    from crypto_momentum_lab.operator_dashboard.account_queries import LiveAccountQueries
+
+    from crypto_momentum_lab.operator_dashboard.account_queries import (
+        LiveAccountQueries,
+    )
     from crypto_momentum_lab.operator_dashboard.schemas import OperationalStatus
 
     queries = LiveAccountQueries(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -16,6 +16,7 @@ from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFenc
 async def test_submission_fence_accepts_matching_entry_state() -> None:
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     lease = SimpleNamespace(
+        expires_at=checked_at + timedelta(minutes=5),
         lease_id="lease-1",
         owner="worker-1",
         strategy_name="strategy-1",
@@ -88,6 +89,7 @@ async def test_submission_fence_allows_reduce_only_with_valid_lease() -> None:
     """
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     lease = SimpleNamespace(
+        expires_at=checked_at + timedelta(minutes=5),
         lease_id="lease-1",
         owner="worker-1",
         strategy_name="strategy-1",
@@ -124,6 +126,7 @@ async def test_submission_fence_blocks_reduce_only_when_lease_owner_changed() ->
     """Zombie/stale executor cannot issue reduce_only orders after lease handover."""
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     foreign_lease = SimpleNamespace(
+        expires_at=checked_at + timedelta(minutes=5),
         lease_id="lease-2",
         owner="worker-other",
         strategy_name="strategy-1",
@@ -187,6 +190,7 @@ async def test_submission_fence_blocks_entry_on_evaluator_reject() -> None:
 
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     lease = SimpleNamespace(
+        expires_at=checked_at + timedelta(minutes=5),
         lease_id="lease-1",
         owner="worker-1",
         strategy_name="strategy-1",
@@ -283,6 +287,7 @@ async def test_submission_fence_blocks_exit_on_discordance() -> None:
 
     checked_at = datetime(2026, 8, 4, tzinfo=UTC)
     lease = SimpleNamespace(
+        expires_at=checked_at + timedelta(minutes=5),
         lease_id="lease-1",
         owner="worker-1",
         strategy_name="strategy-1",

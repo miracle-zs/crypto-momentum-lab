@@ -716,6 +716,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
             price=Decimal("50000"),
             quantity=Decimal("0.001"),
             client_order_id="old_btc_cid",
+            reduce_only=False,
         ),
         state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
     )
@@ -749,6 +750,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
             price=None,
             quantity=Decimal("0.001"),
             client_order_id="unbounded_cid",
+            reduce_only=False,
         ),
         state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
     )
@@ -770,6 +772,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
             price=Decimal("50000"),
             quantity=Decimal("0.001"),
             client_order_id="resting_btc_cid",
+            reduce_only=False,
         ),
         state=ExchangeOrderState.ACKNOWLEDGED,
     )

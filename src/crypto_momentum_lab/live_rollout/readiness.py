@@ -9,12 +9,10 @@ entry gate currently admits new orders.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 import structlog
 
@@ -28,53 +26,8 @@ from crypto_momentum_lab.health import LocalHealthWriter
 log = structlog.get_logger()
 
 
-class TradeabilityMode(StrEnum):
-    """Business execution safety mode for live operations."""
-
-    RUNNING = "RUNNING"
-    HALTED = "HALTED"
-    FULLY_TRADEABLE = "FULLY_TRADEABLE"
-    EXIT_ONLY = "EXIT_ONLY"
-    DEGRADED = "DEGRADED"
 
 
-@dataclass(frozen=True, slots=True)
-class TradeabilitySnapshot:
-    """Explicit tradeability state separating business gates from process liveness."""
-
-    mode: TradeabilityMode
-    entry_gate_open: bool
-    entry_gate_reason: str
-    exit_gate_open: bool
-    exit_gate_reason: str
-    unmanaged_risk_clear: bool
-    halt_active: bool
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        entry_gate_open: bool,
-        entry_gate_reason: str,
-        exit_gate_open: bool = True,
-        exit_gate_reason: str = "normal",
-        unmanaged_risk_clear: bool = True,
-        halt_active: bool = False,
-    ) -> TradeabilitySnapshot:
-        if halt_active or not exit_gate_open:
-            mode = TradeabilityMode.HALTED
-        else:
-            mode = TradeabilityMode.RUNNING
-
-        return cls(
-            mode=mode,
-            entry_gate_open=entry_gate_open,
-            entry_gate_reason=entry_gate_reason,
-            exit_gate_open=exit_gate_open,
-            exit_gate_reason=exit_gate_reason,
-            unmanaged_risk_clear=unmanaged_risk_clear,
-            halt_active=halt_active,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,175 +55,6 @@ class StreamReadinessSnapshot:
         return cls(overall=overall, streams=dict(streams))
 
 
-class TradeabilityAlertManager:
-    """Edge-triggered logger for tradeability and readiness transitions.
-
-    Emits alerts on:
-    1. Mode change (edge trigger)
-    2. Reason change (edge trigger)
-    3. Severity change (edge trigger)
-    4. Fallback heartbeat interval for non-healthy states to prevent
-       silent stale states.
-    5. Clear recovery logging when transitioning back to FULLY_TRADEABLE.
-    """
-
-    def __init__(
-        self,
-        *,
-        fallback_heartbeat_seconds: float = 60.0,
-        clock: Callable[[], float] | None = None,
-    ) -> None:
-        if fallback_heartbeat_seconds <= 0:
-            raise ValueError("fallback_heartbeat_seconds must be positive")
-        self._fallback_heartbeat_seconds = fallback_heartbeat_seconds
-        self._clock = clock or time.monotonic
-        self._last_mode: str | None = None
-        self._last_reason: str | None = None
-        self._last_severity: str | None = None
-        self._last_alerted_at: float = 0.0
-        self._alert_count: int = 0
-
-    @property
-    def last_mode(self) -> str | None:
-        return self._last_mode
-
-    @property
-    def last_reason(self) -> str | None:
-        return self._last_reason
-
-    @property
-    def last_severity(self) -> str | None:
-        return self._last_severity
-
-    @property
-    def alert_count(self) -> int:
-        return self._alert_count
-
-    def observe(
-        self,
-        *,
-        mode: str | TradeabilityMode,
-        reason: str,
-        severity: str = "WARNING",
-        details: Mapping[str, Any] | None = None,
-    ) -> bool:
-        mode_str = getattr(mode, "value", str(mode))
-        now = self._clock()
-        details_dict = dict(details) if details else {}
-
-        is_healthy = mode_str in (
-            TradeabilityMode.RUNNING.value,
-            TradeabilityMode.FULLY_TRADEABLE.value,
-        )
-
-        if self._last_mode is None:
-            self._last_mode = mode_str
-            self._last_reason = reason
-            self._last_severity = severity
-            self._last_alerted_at = now
-            self._alert_count = 1
-            if not is_healthy:
-                self._emit_alert(
-                    mode_str,
-                    reason,
-                    severity,
-                    is_heartbeat=False,
-                    **details_dict,
-                )
-                return True
-            return False
-
-        mode_changed = mode_str != self._last_mode
-        reason_changed = reason != self._last_reason
-        severity_changed = severity != self._last_severity
-
-        is_heartbeat = False
-        heartbeat_due = (
-            not is_healthy
-            and (now - self._last_alerted_at) >= self._fallback_heartbeat_seconds
-        )
-
-        should_alert = False
-
-        if mode_changed:
-            should_alert = True
-            if is_healthy:
-                log.info(
-                    "tradeability_recovered",
-                    current_mode=mode_str,
-                    current_reason=reason,
-                    previous_mode=self._last_mode,
-                    previous_reason=self._last_reason,
-                    **details_dict,
-                )
-                self._last_mode = mode_str
-                self._last_reason = reason
-                self._last_severity = severity
-                self._last_alerted_at = now
-                self._alert_count += 1
-                return True
-        elif reason_changed or severity_changed:
-            should_alert = True
-        elif heartbeat_due:
-            should_alert = True
-            is_heartbeat = True
-
-        if should_alert and not is_healthy:
-            self._alert_count += 1
-            self._emit_alert(
-                mode_str,
-                reason,
-                severity,
-                is_heartbeat=is_heartbeat,
-                **details_dict,
-            )
-            self._last_mode = mode_str
-            self._last_reason = reason
-            self._last_severity = severity
-            self._last_alerted_at = now
-            return True
-
-        return False
-
-    def _emit_alert(
-        self,
-        mode: str,
-        reason: str,
-        severity: str,
-        *,
-        is_heartbeat: bool,
-        **details: Any,
-    ) -> None:
-        log_event = (
-            "tradeability_heartbeat" if is_heartbeat else "tradeability_state_changed"
-        )
-        if severity.upper() == "CRITICAL":
-            log.critical(
-                log_event,
-                mode=mode,
-                reason=reason,
-                severity=severity,
-                alert_count=self._alert_count,
-                **details,
-            )
-        elif severity.upper() == "INFO":
-            log.info(
-                log_event,
-                mode=mode,
-                reason=reason,
-                severity=severity,
-                alert_count=self._alert_count,
-                **details,
-            )
-        else:
-            log.warning(
-                log_event,
-                mode=mode,
-                reason=reason,
-                severity=severity,
-                alert_count=self._alert_count,
-                **details,
-            )
 
 
 class ReadinessStrategy(Protocol):
@@ -329,7 +113,6 @@ class LiveReadinessPublisher:
         migration_revision: str,
         entry_universe_target_count: int | None,
         warmup_required_buckets: int,
-        alert_manager: TradeabilityAlertManager | None = None,
         on_publish: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         for value, field_name in (
@@ -368,7 +151,6 @@ class LiveReadinessPublisher:
         self._unmanaged_risk_clear = True
         self._halt_active = False
         self._stream_states: dict[str, str] = {}
-        self._alert_manager = alert_manager or TradeabilityAlertManager()
         self.publish()
 
     @property
@@ -465,31 +247,7 @@ class LiveReadinessPublisher:
         self._entry_enabled = entry_enabled
         self._entry_enabled_reason = entry_enabled_reason
 
-        tradeability = self.current_tradeability()
-        severity = (
-            "CRITICAL" if self._halt_active or not self._exit_gate_open else "WARNING"
-        )
-        self._alert_manager.observe(
-            mode=tradeability.mode,
-            reason=tradeability.entry_gate_reason,
-            severity=severity,
-            details={"entry_universe_count": entry_universe_count},
-        )
         self.publish()
-
-    @property
-    def alert_manager(self) -> TradeabilityAlertManager:
-        return self._alert_manager
-
-    def current_tradeability(self) -> TradeabilitySnapshot:
-        return TradeabilitySnapshot.create(
-            entry_gate_open=self._entry_enabled,
-            entry_gate_reason=self._entry_enabled_reason,
-            exit_gate_open=self._exit_gate_open,
-            exit_gate_reason=self._exit_gate_reason,
-            unmanaged_risk_clear=self._unmanaged_risk_clear,
-            halt_active=self._halt_active,
-        )
 
     def current_stream_readiness(self) -> StreamReadinessSnapshot:
         return StreamReadinessSnapshot.from_streams(self._stream_states)
@@ -517,7 +275,7 @@ class LiveReadinessPublisher:
         unmanaged_risk_clear: bool | None = None,
         halt_active: bool | None = None,
     ) -> None:
-        """Update layered tradeability gates and trigger edge alerting."""
+        """Publish action-control facts without deriving a business run mode."""
         changed = False
         if entry_enabled is not None and entry_enabled != self._entry_enabled:
             self._entry_enabled = entry_enabled
@@ -540,28 +298,6 @@ class LiveReadinessPublisher:
         if halt_active is not None and halt_active != self._halt_active:
             self._halt_active = halt_active
             changed = True
-
-        tradeability = self.current_tradeability()
-        severity = (
-            "CRITICAL"
-            if self._halt_active
-            or not self._exit_gate_open
-            or not self._unmanaged_risk_clear
-            else "WARNING"
-        )
-        self._alert_manager.observe(
-            mode=tradeability.mode,
-            reason=(
-                "halt_active"
-                if self._halt_active
-                else self._exit_gate_reason
-                if not self._exit_gate_open
-                else "unmanaged_risk_present"
-                if not self._unmanaged_risk_clear
-                else self._entry_enabled_reason
-            ),
-            severity=severity,
-        )
 
         if changed:
             self.publish()
@@ -614,7 +350,6 @@ class LiveReadinessPublisher:
 
         if self._health is None and self._on_publish is None:
             return
-        tradeability = self.current_tradeability()
         streams = self.current_stream_readiness()
         now_utc = datetime.now(tz=UTC)
         payload: Mapping[str, object] = {
@@ -640,13 +375,13 @@ class LiveReadinessPublisher:
             "entry_enabled": self._entry_enabled,
             "entry_enabled_reason": self._entry_enabled_reason,
             "tradeability": {
-                "mode": tradeability.mode.value,
-                "entry_gate_open": tradeability.entry_gate_open,
-                "entry_gate_reason": tradeability.entry_gate_reason,
-                "exit_gate_open": tradeability.exit_gate_open,
-                "exit_gate_reason": tradeability.exit_gate_reason,
-                "unmanaged_risk_clear": tradeability.unmanaged_risk_clear,
-                "halt_active": tradeability.halt_active,
+                "mode": "RUNNING",
+                "entry_gate_open": self._entry_enabled,
+                "entry_gate_reason": self._entry_enabled_reason,
+                "exit_gate_open": self._exit_gate_open,
+                "exit_gate_reason": self._exit_gate_reason,
+                "unmanaged_risk_clear": self._unmanaged_risk_clear,
+                "halt_active": self._halt_active,
             },
             "stream_readiness": {
                 "overall": streams.overall,
@@ -681,7 +416,4 @@ __all__ = [
     "LiveWarmupStatus",
     "ReadinessStrategy",
     "StreamReadinessSnapshot",
-    "TradeabilityAlertManager",
-    "TradeabilityMode",
-    "TradeabilitySnapshot",
 ]

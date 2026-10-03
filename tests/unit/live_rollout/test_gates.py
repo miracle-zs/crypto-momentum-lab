@@ -35,9 +35,9 @@ def test_live_gate_rejects_when_live_submit_disabled() -> None:
     assert "live_submit_disabled" in decision.reasons
 
 
-def test_live_gate_rejects_without_ready_account_sync() -> None:
+def test_live_gate_rejects_before_account_startup() -> None:
     decision = evaluate_live_gate(
-        replace(_context(), account_state=ExecutionAccountStatus.DEGRADED)
+        replace(_context(), account_state=ExecutionAccountStatus.STARTING)
     )
 
     assert "account_not_ready" in decision.reasons
@@ -75,8 +75,6 @@ def test_live_gate_accepts_running_account_state() -> None:
 @pytest.mark.parametrize(
     "blocked_state",
     [
-        ExecutionAccountStatus.SYNCING,
-        ExecutionAccountStatus.DEGRADED,
         ExecutionAccountStatus.STOPPED,
         ExecutionAccountStatus.HALTED_READONLY,
         ExecutionAccountStatus.STARTING,
@@ -89,6 +87,13 @@ def test_live_gate_rejects_non_running_states(
 
     assert decision.status is LiveGateStatus.BLOCKED
     assert "account_not_ready" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    "state", [ExecutionAccountStatus.SYNCING, ExecutionAccountStatus.DEGRADED]
+)
+def test_historical_soft_status_does_not_replace_candidate_fact_checks(state) -> None:
+    assert evaluate_live_gate(replace(_context(), account_state=state)).approved
 
 
 def test_live_gate_accepts_unlimited_approval_for_bounded_risk_config() -> None:
@@ -162,7 +167,7 @@ def test_live_gate_allows_confirmed_resting_exit_order() -> None:
     assert decision.status is LiveGateStatus.APPROVED
 
 
-def test_live_gate_blocks_cancel_in_flight() -> None:
+def test_live_gate_leaves_order_uncertainty_to_candidate_admission() -> None:
     decision = evaluate_live_gate(
         replace(
             _context(),
@@ -170,8 +175,7 @@ def test_live_gate_blocks_cancel_in_flight() -> None:
         )
     )
 
-    assert decision.status is LiveGateStatus.BLOCKED
-    assert "unresolved_order_uncertainty" in decision.reasons
+    assert decision.status is LiveGateStatus.APPROVED
 
 
 def _context() -> LiveGateContext:

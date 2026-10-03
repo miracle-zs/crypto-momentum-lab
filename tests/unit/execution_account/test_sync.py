@@ -636,7 +636,9 @@ async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:
     assert "hedge_mode_mismatch" in repository.process_states[-1].reason
 
 
-async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
+async def test_initial_sync_failure_keeps_starting_without_publishing_soft_mode() -> (
+    None
+):
     repository = FakeRepository()
     service = ExecutionAccountSyncService(
         client=FailingClient(),
@@ -651,7 +653,7 @@ async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
     else:
         raise AssertionError("expected sync failure")
 
-    assert repository.process_states[-1].state is ExecutionAccountStatus.DEGRADED
+    assert repository.process_states[-1].state is ExecutionAccountStatus.STARTING
 
 
 async def test_realtime_rest_failure_does_not_publish_degraded_state() -> None:
@@ -664,6 +666,27 @@ async def test_realtime_rest_failure_does_not_publish_degraded_state() -> None:
     with pytest.raises(RuntimeError, match="temporary Binance failure"):
         await service.sync_once_for_realtime()
     assert repository.process_states == []
+
+
+async def test_running_sync_failure_retains_running_and_records_error() -> None:
+    repository = FakeRepository()
+    client = FakeClient()
+    service = ExecutionAccountSyncService(
+        client=client, repository=repository, config=_config()
+    )
+    await service.sync_once()
+    service._client = FailingClient()
+    with pytest.raises(RuntimeError, match="temporary Binance failure"):
+        await service.sync_once(
+            observed_at=_config().observed_at + timedelta(seconds=60)
+        )
+    assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
+    assert repository.process_states[-1].reason == "sync_failed:RuntimeError"
+    assert all(
+        state.state
+        not in (ExecutionAccountStatus.SYNCING, ExecutionAccountStatus.DEGRADED)
+        for state in repository.process_states
+    )
 
 
 def _config(

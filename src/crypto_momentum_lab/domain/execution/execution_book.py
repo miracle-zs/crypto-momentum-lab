@@ -146,6 +146,35 @@ class _AbortObservation(Exception):
         self.result = result
 
 
+def _is_unfilled_terminal_order(evidence: ExecutionEvidence) -> bool:
+    return (
+        evidence.order_event is not None
+        and evidence.order_event.state.terminal
+        and not evidence.settlement_fills
+        and not evidence.fills
+        and evidence.fill is None
+        and (
+            evidence.cumulative_order is None
+            or evidence.cumulative_order.cumulative_quantity == Decimal("0")
+        )
+    )
+
+
+def _reservations_held_by_terminal_order(
+    evidence: ExecutionEvidence,
+    reservations: tuple[PositionReservation, ...],
+) -> bool:
+    event = evidence.order_event
+    return (
+        _is_unfilled_terminal_order(evidence)
+        and event is not None
+        and all(
+            reservation.command_id == event.client_order_id
+            for reservation in reservations
+        )
+    )
+
+
 def _execution_head_payload(
     book: ExecutionBook,
     key: PositionKey,
@@ -2129,25 +2158,10 @@ class ExecutionBook:
             # of historical symbols on every refresh.
             current_scope = self._stream_scopes.get(canon)
             current_book = self._books.get(canon)
-            is_unfilled_terminal_order = (
-                evidence.order_event is not None
-                and evidence.order_event.state.terminal
-                and not evidence.settlement_fills
-                and not evidence.fills
-                and evidence.fill is None
-                and (
-                    evidence.cumulative_order is None
-                    or evidence.cumulative_order.cumulative_quantity == Decimal("0")
-                )
-            )
+            is_unfilled_terminal_order = _is_unfilled_terminal_order(evidence)
             active_res = self.get_active_reservations(key)
-            res_held_by_order = (
-                is_unfilled_terminal_order
-                and evidence.order_event is not None
-                and all(
-                    r.command_id == evidence.order_event.client_order_id
-                    for r in active_res
-                )
+            res_held_by_order = _reservations_held_by_terminal_order(
+                evidence, active_res
             )
             has_blocking_reservations = bool(active_res) and not res_held_by_order
             can_rollover = (
@@ -2647,17 +2661,7 @@ class ExecutionBook:
             )
 
         key = evidence.scope.to_position_key()
-        is_unfilled_terminal_order = (
-            evidence.order_event is not None
-            and evidence.order_event.state.terminal
-            and not evidence.settlement_fills
-            and not evidence.fills
-            and evidence.fill is None
-            and (
-                evidence.cumulative_order is None
-                or evidence.cumulative_order.cumulative_quantity == Decimal("0")
-            )
-        )
+        is_unfilled_terminal_order = _is_unfilled_terminal_order(evidence)
         if evidence.stream_id is not None and evidence.stream_epoch is not None:
             scope = AccountFactStreamScope.for_position_key(
                 key,
@@ -2668,13 +2672,8 @@ class ExecutionBook:
             if current_scope is not None and current_scope != scope:
                 current_book = self._books.get(key.canonical_id)
                 active_res = self.get_active_reservations(key)
-                res_held_by_order = (
-                    is_unfilled_terminal_order
-                    and evidence.order_event is not None
-                    and all(
-                        r.command_id == evidence.order_event.client_order_id
-                        for r in active_res
-                    )
+                res_held_by_order = _reservations_held_by_terminal_order(
+                    evidence, active_res
                 )
                 has_blocking_reservations = bool(active_res) and not res_held_by_order
                 can_rollover = (

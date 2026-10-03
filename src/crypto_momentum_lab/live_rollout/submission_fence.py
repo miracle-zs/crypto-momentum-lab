@@ -104,21 +104,7 @@ class LiveSubmissionFence:
             )
             if current_lease is None:
                 raise OrderPreSubmissionError("active lease disappeared")
-            now_utc = (
-                self._clock()
-                if self._clock is not None
-                else checked_at
-            )
-            lease_exp = getattr(current_lease, "expires_at", None)
-            if isinstance(lease_exp, datetime):
-                if lease_exp.tzinfo is None and now_utc.tzinfo is not None:
-                    lease_exp = lease_exp.replace(tzinfo=UTC)
-                elif lease_exp.tzinfo is not None and now_utc.tzinfo is None:
-                    now_utc = now_utc.replace(tzinfo=UTC)
-                if lease_exp <= now_utc:
-                    raise OrderPreSubmissionError(
-                        "active lease expired during pre-submission check"
-                    )
+            self._verify_lease_expiry(current_lease, checked_at)
             if current_lease.owner != self._lease_owner:
                 raise OrderPreSubmissionError("active lease owner changed")
             if current_lease.strategy_name != self._strategy_name:
@@ -185,21 +171,7 @@ class LiveSubmissionFence:
         )
         if current_lease is None:
             raise OrderPreSubmissionError("active lease disappeared")
-        now_utc = (
-            self._clock()
-            if self._clock is not None
-            else checked_at
-        )
-        lease_exp = getattr(current_lease, "expires_at", None)
-        if isinstance(lease_exp, datetime):
-            if lease_exp.tzinfo is None and now_utc.tzinfo is not None:
-                lease_exp = lease_exp.replace(tzinfo=UTC)
-            elif lease_exp.tzinfo is not None and now_utc.tzinfo is None:
-                now_utc = now_utc.replace(tzinfo=UTC)
-            if lease_exp <= now_utc:
-                raise OrderPreSubmissionError(
-                    "active lease expired during pre-submission check"
-                )
+        self._verify_lease_expiry(current_lease, checked_at)
         if current_lease.owner != self._lease_owner:
             raise OrderPreSubmissionError("active lease owner changed")
         if current_lease.strategy_name != self._strategy_name:
@@ -254,6 +226,18 @@ class LiveSubmissionFence:
                 raise OrderPreSubmissionError(
                     f"capability_evaluator_blocked: {decision.reason}"
                 )
+
+    def _verify_lease_expiry(self, lease: TradingLease, checked_at: datetime) -> None:
+        now = self._clock() if self._clock is not None else checked_at
+        expires_at = lease.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        if expires_at <= now:
+            raise OrderPreSubmissionError(
+                "active lease expired during pre-submission check"
+            )
 
 
 __all__ = ["LiveRiskStateReader", "LiveSubmissionFence"]

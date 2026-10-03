@@ -1,8 +1,12 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
@@ -51,14 +55,14 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
     if context.account_state not in (
         ExecutionAccountStatus.RUNNING,
         ExecutionAccountStatus.READY_READONLY,
+        ExecutionAccountStatus.SYNCING,
+        ExecutionAccountStatus.DEGRADED,
     ):
         reasons.append("account_not_ready")
     if context.active_halts:
         reasons.append("active_risk_halt")
-    if any(
-        order_state_is_uncertain(state) for state in context.unresolved_order_states
-    ):
-        reasons.append("unresolved_order_uncertainty")
+    # This gate authorizes the process. Order conflicts and occupied risk are
+    # evaluated against the actual candidate, not aggregated across symbols.
     return LiveGateDecision(
         status=LiveGateStatus.BLOCKED if reasons else LiveGateStatus.APPROVED,
         reasons=tuple(reasons),
@@ -75,12 +79,7 @@ def is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
 
 
 def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
-    """Known resting orders are safe; only ambiguous lifecycle states halt.
-
-    ACKNOWLEDGED/PARTIALLY_FILLED orders have a confirmed exchange state and
-    therefore must not trip the global unknown-outcome gate. Submission and
-    cancellation transitions remain fail-closed.
-    """
+    """Classify ambiguous outcomes for local conflicts and risk occupancy."""
     return state in {
         ExchangeOrderState.INTENT_APPROVED,
         ExchangeOrderState.CLAIMED,
@@ -89,6 +88,36 @@ def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
         ExchangeOrderState.CANCELING,
         ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
     }
+
+
+def has_entry_order_conflict(
+    symbol: str,
+    orders: Collection[PersistedExchangeOrder],
+    states: Collection[ExchangeOrderState] = (),
+) -> bool:
+    """Reject conflicting identities or risk without a finite priced bound.
+
+    A states-only view cannot locate or bound an uncertain order. Keep that
+    missing-evidence case closed rather than treating it as an empty account.
+    """
+    uncertain = tuple(
+        order for order in orders if order_state_is_uncertain(order.state)
+    )
+    if sum(order_state_is_uncertain(state) for state in states) > len(uncertain):
+        return True
+    for order in uncertain:
+        plan = order.plan
+        if plan.symbol == symbol:
+            return True
+        if not plan.reduce_only and (
+            plan.price is None
+            or not plan.price.is_finite()
+            or plan.price <= 0
+            or not plan.quantity.is_finite()
+            or plan.quantity <= 0
+        ):
+            return True
+    return False
 
 
 def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:

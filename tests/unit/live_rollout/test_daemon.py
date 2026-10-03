@@ -755,6 +755,80 @@ async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> No
     assert exchange.calls == ["submit"]
 
 
+@pytest.mark.parametrize(
+    "unknown_symbol, price, gross_cap, expected_posts",
+    [
+        ("ETHUSDT", Decimal("10"), Decimal("100"), 1),
+        ("BTCUSDT", Decimal("10"), Decimal("100"), 0),
+        ("ETHUSDT", None, Decimal("100"), 0),
+        ("ETHUSDT", Decimal("100"), Decimal("25"), 0),
+    ],
+)
+async def test_unknown_order_scope_through_market_loop_and_submission(
+    unknown_symbol,
+    price,
+    gross_cap,
+    expected_posts,
+) -> None:
+    exchange = PlanAwareExchange()
+    unknown = PersistedExchangeOrder(
+        plan=OrderExecutionPlan(
+            client_order_id="existing-unknown",
+            intent_id="old-intent",
+            run_id="run-1",
+            symbol=unknown_symbol,
+            side="BUY",
+            order_type="LIMIT",
+            quantity=Decimal("1"),
+            price=price,
+            reduce_only=False,
+            created_at=NOW,
+        ),
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        exchange_order_id=None,
+        updated_at=NOW,
+    )
+    context = _runtime_context()
+    config = replace(context.risk_config, max_open_positions=2)
+    context = replace(
+        context,
+        risk_config=config,
+        gate_context=replace(
+            context.gate_context,
+            risk_config=config,
+            approval=replace(
+                context.gate_context.approval,
+                risk_config_hash=config.config_hash,
+                approved_max_open_positions=2,
+            ),
+            unresolved_order_states=(unknown.state,),
+        ),
+        unresolved_orders=(unknown,),
+        unresolved_order_states=(unknown.state,),
+    )
+
+    async def provider(state):
+        return context
+
+    async def states():
+        yield _state()
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=provider,
+        max_gross_exposure=gross_cap,
+        max_open_positions=2,
+    )
+    result = await daemon.run(states())
+    assert result.halt_reason is None
+    assert result.processed_state_count == 1
+    assert result.submitted_order_count == expected_posts
+    assert exchange.calls == ["submit"] * expected_posts
+    assert all(
+        plan.client_order_id != unknown.plan.client_order_id for plan in exchange.plans
+    )
+
+
 async def test_live_daemon_checkpoints_while_reconciliation_is_pending() -> None:
     exchange = PlanAwareExchange()
     repository = SignalingLiveRepository()
@@ -2153,6 +2227,7 @@ def _daemon(
     require_price_above_ema10: bool = False,
     entry_order_type: EntryType = EntryType.LIMIT,
     max_gross_exposure: Decimal = Decimal("25"),
+    max_open_positions: int = 1,
     exit_recovery_client=None,
     clock=None,
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
@@ -2189,7 +2264,7 @@ def _daemon(
         risk_gateway=RiskGateway(
             limits=FixedLiveLimits(
                 notional_cap=Decimal("25"),
-                max_open_positions=1,
+                max_open_positions=max_open_positions,
                 max_daily_loss=Decimal("10"),
                 max_gross_exposure=max_gross_exposure,
             ),

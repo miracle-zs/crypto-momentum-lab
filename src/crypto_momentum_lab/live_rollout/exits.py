@@ -371,6 +371,10 @@ class LiveExitManager:
         key = symbol.strip().upper()
         self._grace_identity_epoch[key] = self._grace_identity_epoch.get(key, 0) + 1
 
+    def closed_candle_expires_at(self, received_at: datetime) -> datetime:
+        """Preserve the original candidate TTL across fact waits and replay."""
+        return received_at + timedelta(seconds=self._config.candidate_ttl_seconds)
+
     def _grace_identity_epoch_for(self, symbol: str) -> int:
         return self._grace_identity_epoch.get(symbol.strip().upper(), 0)
 
@@ -427,7 +431,6 @@ class LiveExitManager:
         *,
         latest_quote: RealtimeMarketQuote | None = None,
         received_at: datetime | None = None,
-        now: datetime | None = None,
     ) -> tuple[LiveExitRequest, ...]:
         """Evaluate one immutable 15m candle without loading market data.
 
@@ -442,9 +445,6 @@ class LiveExitManager:
             received_at = candle.candle_end
         if received_at.tzinfo is None or received_at.utcoffset() is None:
             raise ValueError("received_at must be timezone-aware")
-        if now is not None and (now.tzinfo is None or now.utcoffset() is None):
-            raise ValueError("now must be timezone-aware")
-        evaluation_now = now or received_at
         requests: list[LiveExitRequest] = []
         for position in _strategy_positions(positions):
             if (
@@ -486,7 +486,6 @@ class LiveExitManager:
                 quote=latest_quote,
                 side=position.side,
             )
-            reval_identity = evaluation_now > candle.candle_end
             if (
                 self._config.candle_grace_bars > 0
                 and self._config.candle_grace_profit_pct > 0
@@ -503,10 +502,9 @@ class LiveExitManager:
                             reason=reason,
                             trigger_at=candle.candle_end,
                             identity_trigger_at=candle.candle_end,
-                            created_at=evaluation_now,
+                            created_at=received_at,
                             reference_price=reference_price,
                             quantity=uncovered_quantity,
-                            reval_identity=reval_identity,
                         )
                     )
                 else:
@@ -517,9 +515,8 @@ class LiveExitManager:
                             reason=reason,
                             trigger_at=candle.candle_end,
                             reference_price=reference_price,
-                            created_at=evaluation_now,
+                            created_at=received_at,
                             quantity=uncovered_quantity,
-                            reval_identity=reval_identity,
                         )
                     )
                 continue
@@ -530,10 +527,9 @@ class LiveExitManager:
                     reason=reason,
                     trigger_at=candle.candle_end,
                     identity_trigger_at=candle.candle_end,
-                    created_at=evaluation_now,
+                    created_at=received_at,
                     reference_price=reference_price,
                     quantity=uncovered_quantity,
-                    reval_identity=reval_identity,
                 )
             )
         return tuple(requests)
@@ -787,7 +783,6 @@ class LiveExitManager:
         reference_price: Decimal,
         created_at: datetime | None = None,
         quantity: Decimal | None = None,
-        reval_identity: bool = False,
     ) -> LiveExitOrderRequest:
         target_price = _recovery_price(
             position,
@@ -803,7 +798,6 @@ class LiveExitManager:
             entry_type=EntryType.LIMIT,
             limit_price=target_price,
             quantity=quantity,
-            reval_identity=reval_identity,
         )
 
     def _build_grace_timeout_request(
@@ -895,7 +889,6 @@ class LiveExitManager:
         entry_type: EntryType = EntryType.MARKET,
         limit_price: Decimal | None = None,
         quantity: Decimal | None = None,
-        reval_identity: bool = False,
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
         order_quantity = (
@@ -912,17 +905,11 @@ class LiveExitManager:
         # exits of different sizes used to derive the same candidate/client order
         # ID.  The second one then failed the durable order-identity check and the
         # position could never be closed.
-        reval_component = (
-            f":reval:{int(created_at.timestamp())}"
-            if reval_identity and created_at is not None
-            else ""
-        )
         identity = (
             f"{self._config.run_id}:{position.symbol}:"
             f"{position.position_side.value}:{position.opened_at.isoformat()}"
             f"{batch_component}:"
             f"{reason}:{identity_trigger_at.isoformat()}"
-            f"{reval_component}"
             f":quantity:{order_quantity}"
             f":projection:{position.projection_version}"
         )

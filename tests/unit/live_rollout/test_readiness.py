@@ -8,9 +8,6 @@ from crypto_momentum_lab.live_rollout.readiness import (
     LiveReadinessPublisher,
     LiveWarmupStatus,
     StreamReadinessSnapshot,
-    TradeabilityAlertManager,
-    TradeabilityMode,
-    TradeabilitySnapshot,
 )
 
 
@@ -162,60 +159,6 @@ def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> Non
     assert call_count == 2
 
 
-def test_tradeability_snapshot_mode_derivation() -> None:
-    # 1. Healthy operation is RUNNING
-    snap1 = TradeabilitySnapshot.create(
-        entry_gate_open=True,
-        entry_gate_reason="live_entry_prerequisites_ready",
-        exit_gate_open=True,
-        unmanaged_risk_clear=True,
-        halt_active=False,
-    )
-    assert snap1.mode is TradeabilityMode.RUNNING
-    assert snap1.entry_gate_open is True
-
-    # 2. Entry gate closed does NOT synthesize EXIT_ONLY; remains RUNNING with entry_gate_open=False
-    snap2 = TradeabilitySnapshot.create(
-        entry_gate_open=False,
-        entry_gate_reason="strategy_warmup_incomplete",
-        exit_gate_open=True,
-        unmanaged_risk_clear=True,
-        halt_active=False,
-    )
-    assert snap2.mode is TradeabilityMode.RUNNING
-    assert snap2.entry_gate_open is False
-    assert snap2.entry_gate_reason == "strategy_warmup_incomplete"
-
-    # 3. Halted when halt is active
-    snap3 = TradeabilitySnapshot.create(
-        entry_gate_open=True,
-        entry_gate_reason="ready",
-        exit_gate_open=True,
-        unmanaged_risk_clear=True,
-        halt_active=True,
-    )
-    assert snap3.mode is TradeabilityMode.HALTED
-
-    # 4. Halted when exit gate is closed
-    snap4 = TradeabilitySnapshot.create(
-        entry_gate_open=True,
-        entry_gate_reason="ready",
-        exit_gate_open=False,
-        unmanaged_risk_clear=True,
-        halt_active=False,
-    )
-    assert snap4.mode is TradeabilityMode.HALTED
-
-    # 5. Unmanaged risk does NOT synthesize DEGRADED mode; remains RUNNING with fact preserved
-    snap5 = TradeabilitySnapshot.create(
-        entry_gate_open=True,
-        entry_gate_reason="ready",
-        exit_gate_open=True,
-        unmanaged_risk_clear=False,
-        halt_active=False,
-    )
-    assert snap5.mode is TradeabilityMode.RUNNING
-    assert snap5.unmanaged_risk_clear is False
 
 
 def test_stream_readiness_snapshot_aggregation() -> None:
@@ -242,97 +185,6 @@ def test_stream_readiness_snapshot_aggregation() -> None:
     assert disrupted.overall == "DISRUPTED"
 
 
-def test_tradeability_alert_manager_edge_triggered_and_heartbeat() -> None:
-    current_time = 100.0
-
-    def mock_clock() -> float:
-        return current_time
-
-    manager = TradeabilityAlertManager(
-        fallback_heartbeat_seconds=30.0,
-        clock=mock_clock,
-    )
-
-    # 1. Initial healthy state does not alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.FULLY_TRADEABLE,
-            reason="ready",
-        )
-        is False
-    )
-
-    # 2. State transition to EXIT_ONLY triggers edge alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="strategy_warmup_incomplete",
-        )
-        is True
-    )
-    assert manager.last_mode == "EXIT_ONLY"
-    assert manager.last_reason == "strategy_warmup_incomplete"
-
-    # 3. Duplicate steady-state call does NOT trigger alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="strategy_warmup_incomplete",
-        )
-        is False
-    )
-
-    # 4. Reason transition (even in same mode) triggers edge alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="lease_heartbeat_degraded",
-        )
-        is True
-    )
-    assert manager.last_reason == "lease_heartbeat_degraded"
-
-    # 5. Severity transition triggers edge alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="lease_heartbeat_degraded",
-            severity="CRITICAL",
-        )
-        is True
-    )
-    assert manager.last_severity == "CRITICAL"
-
-    # 6. Fallback heartbeat re-alerts after fallback interval
-    current_time += 15.0  # only 15s elapsed
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="lease_heartbeat_degraded",
-            severity="CRITICAL",
-        )
-        is False
-    )
-
-    current_time += 20.0  # 35s elapsed (> 30s threshold)
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.EXIT_ONLY,
-            reason="lease_heartbeat_degraded",
-            severity="CRITICAL",
-        )
-        is True
-    )
-
-    # 7. Recovery to FULLY_TRADEABLE emits recovery alert
-    assert (
-        manager.observe(
-            mode=TradeabilityMode.FULLY_TRADEABLE,
-            reason="live_entry_prerequisites_ready",
-        )
-        is True
-    )
-    assert manager.last_mode == "FULLY_TRADEABLE"
 
 
 def test_readiness_publisher_layered_tradeability_and_stream_readiness(
@@ -378,10 +230,10 @@ def test_readiness_publisher_layered_tradeability_and_stream_readiness(
     assert payload3["tradeability"]["mode"] == "RUNNING"
     assert payload3["tradeability"]["unmanaged_risk_clear"] is False
 
-    # Explicit halt -> mode becomes HALTED
+    # Explicit controls remain facts while the active process stays RUNNING
     publisher.update_tradeability(halt_active=True)
     payload4 = json.loads(health.readiness_path.read_text())
-    assert payload4["tradeability"]["mode"] == "HALTED"
+    assert payload4["tradeability"]["mode"] == "RUNNING"
     assert payload4["tradeability"]["halt_active"] is True
 
 

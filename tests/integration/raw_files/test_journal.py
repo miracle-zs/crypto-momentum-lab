@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,83 @@ from crypto_momentum_lab.persistence.raw_files.journal import (
 )
 
 fixture_now = datetime(2026, 6, 15, 2, 10, tzinfo=UTC)
+
+
+async def test_background_manifest_failure_survives_shutdown_and_restart(tmp_path):
+    directory = tmp_path / "pending"
+    failed = asyncio.Event()
+    manifest = _manifest(UUID(int=1), "a" * 64)
+
+    async def unavailable(item):
+        failed.set()
+        raise RuntimeError("database unavailable")
+
+    async with PendingManifestJournal(directory).background_sink(unavailable) as sink:
+        await sink(manifest)
+        await asyncio.wait_for(failed.wait(), 1)
+    assert len(list(directory.glob("*.json"))) == 1
+    saved = []
+
+    async def save(item):
+        saved.append(item)
+
+    assert await PendingManifestJournal(directory).replay(save) == 1
+    assert saved == [manifest]
+    assert list(directory.glob("*.json")) == []
+
+
+async def test_slow_manifest_database_does_not_backpressure_producer(tmp_path):
+    directory = tmp_path / "pending"
+    saving = asyncio.Event()
+    release = asyncio.Event()
+    saved = []
+
+    async def save(item):
+        saving.set()
+        await release.wait()
+        saved.append(item)
+
+    manifests = [
+        replace(
+            _manifest(UUID(int=index), "a" * 64),
+            relative_path=Path(f"{index}.jsonl.zst"),
+        )
+        for index in range(1, 21)
+    ]
+    async with PendingManifestJournal(directory).background_sink(save) as sink:
+        await sink(manifests[0])
+        await asyncio.wait_for(saving.wait(), 1)
+        for manifest in manifests[1:]:
+            await asyncio.wait_for(sink(manifest), 1)
+        assert saved == []
+        assert len(list(directory.glob("*.json"))) == 20
+        release.set()
+    assert saved == manifests
+    assert list(directory.glob("*.json")) == []
+
+
+async def test_manifest_shutdown_timeout_leaves_durable_work_and_no_worker(tmp_path):
+    saving = asyncio.Event()
+    canceled = asyncio.Event()
+    directory = tmp_path / "pending"
+
+    async def save(item):
+        saving.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.set()
+
+    async with PendingManifestJournal(directory).background_sink(
+        save, shutdown_seconds=0.02
+    ) as sink:
+        await sink(_manifest(UUID(int=1), "a" * 64))
+        await asyncio.wait_for(saving.wait(), 1)
+    assert canceled.is_set()
+    assert len(list(directory.glob("*.json"))) == 1
+    assert not any(
+        task.get_name() == "pending-manifest-replay" for task in asyncio.all_tasks()
+    )
 
 
 @pytest.fixture

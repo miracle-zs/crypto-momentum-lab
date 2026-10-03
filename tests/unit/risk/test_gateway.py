@@ -63,12 +63,12 @@ def test_gateway_rejects_stale_market_state() -> None:
     assert evaluation.reason == "stale_market_state"
 
 
-def test_gateway_rejects_account_not_ready() -> None:
+def test_gateway_rejects_account_not_started() -> None:
     evaluation = (
         RiskGateway()
         .evaluate(
             _intent(),
-            _context(account_state=ExecutionAccountStatus.DEGRADED),
+            _context(account_state=ExecutionAccountStatus.STARTING),
         )
         .evaluation
     )

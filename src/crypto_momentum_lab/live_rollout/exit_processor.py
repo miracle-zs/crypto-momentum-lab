@@ -220,24 +220,11 @@ class LiveExitProcessor:
                 )
             if not self._context_is_current(context):
                 return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
-            evaluation_now = self._clock()
-            candle_end = getattr(event.candle, "candle_end", None)
-            if candle_end is not None and evaluation_now >= candle_end + timedelta(minutes=15):
-                log.warning(
-                    "live_closed_candle_evaluation_expired",
-                    symbol=event.candle.symbol,
-                    candle_end=candle_end.isoformat(),
-                    evaluation_now=evaluation_now.isoformat(),
-                )
-                return ExitLaneOutcome(
-                    failure=f"closed_candle_evaluation_expired:{event.candle.symbol}"
-                )
             requests = await self._exit_manager.requests_for_closed_candle(
                 event.candle,
                 context.managed_positions,
                 latest_quote=latest_quote,
                 received_at=event.received_at,
-                now=evaluation_now,
             )
             approved, submitted, failure = await self._process_requests(
                 requests,
@@ -245,6 +232,8 @@ class LiveExitProcessor:
                 context=context,
                 invalidate_context=False,
             )
+        if failure == "candidate_expired":
+            failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
         return ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,

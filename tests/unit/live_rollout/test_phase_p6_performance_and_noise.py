@@ -8,16 +8,12 @@ Verifies:
 5. Research collector state conflicts are aggregated to avoid alert floods.
 """
 
-from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
-import asyncio
-import pytest
 
-from dataclasses import replace
+import pytest
 
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.position_recovery import RecoveredPosition
@@ -47,40 +43,14 @@ def test_event_loop_lag_percentiles_calculation():
     assert res["max"] == 100.0
 
 
-async def test_manifest_background_worker_decouples_and_flushes():
-    queue: asyncio.Queue[object | None] = asyncio.Queue(maxsize=10)
-    saved: list[object] = []
-
-    async def worker():
-        while True:
-            item = await queue.get()
-            if item is None:
-                queue.task_done()
-                break
-            await asyncio.sleep(0.01)  # simulate slow database write
-            saved.append(item)
-            queue.task_done()
-
-    task = asyncio.create_task(worker())
-
-    # Fast producer enqueues without awaiting DB
-    for i in range(5):
-        queue.put_nowait(f"manifest-{i}")
-
-    # Immediately after put_nowait, not all 5 are saved yet (non-blocking)
-    assert len(saved) < 5
-
-    # Shutdown cleanly drains
-    await queue.put(None)
-    await task
-    assert saved == [f"manifest-{i}" for i in range(5)]
 
 
 async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypatch):
     book = ExecutionBook()
+    from unittest.mock import AsyncMock
+
     from crypto_momentum_lab.domain.execution.command_models import PositionKey
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-    from unittest.mock import AsyncMock
 
     scope = SimpleNamespace(
         environment="live",
@@ -207,7 +177,10 @@ def test_research_collector_state_conflicts_aggregated(monkeypatch, tmp_path):
 
     # Create a batch with 5 conflicting states for the same symbol/bucket
     from crypto_momentum_lab.market_data.hub import MarketStateBatch
-    from crypto_momentum_lab.research_collector.models import CollectionBatch, SourceKind
+    from crypto_momentum_lab.research_collector.models import (
+        CollectionBatch,
+        SourceKind,
+    )
 
     conflicting_states = tuple(
         replace(state, close_price=Decimal(str(100 + i + 1)))

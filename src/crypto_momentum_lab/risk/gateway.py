@@ -198,6 +198,8 @@ class RiskGateway:
         if context.account_state not in (
             ExecutionAccountStatus.RUNNING,
             ExecutionAccountStatus.READY_READONLY,
+            ExecutionAccountStatus.SYNCING,
+            ExecutionAccountStatus.DEGRADED,
         ):
             return _evaluation(
                 intent,

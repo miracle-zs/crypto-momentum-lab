@@ -1469,6 +1469,7 @@ async def run_live_daemon(
         )
         exit_channel_runtime = LiveExitChannelRuntime(
             daemon=daemon,
+            closed_candle_expires_at=daemon.closed_candle_expires_at,
             latest_market_quotes=latest_market_quotes,
             latest_market_states=latest_market_states,
             is_transient_error=runtime_errors.is_transient_runtime_error,

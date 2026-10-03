@@ -29,7 +29,11 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
 )
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
+from crypto_momentum_lab.live_rollout.gates import (
+    LiveGateContext,
+    evaluate_live_gate,
+    has_entry_order_conflict,
+)
 from crypto_momentum_lab.live_rollout.resource_lifecycle import (
     LiveResourceLifecycle,
 )
@@ -129,6 +133,8 @@ async def run_live_plan(
         gate = evaluate_live_gate(context)
         if not gate.approved:
             raise RuntimeError(f"live gate blocked: {','.join(gate.reasons)}")
+        if not plan.reduce_only and has_entry_order_conflict(plan.symbol, unresolved):
+            raise RuntimeError("live plan blocked: unresolved_order_uncertainty")
         desired_notional = await order_read_repository.load_approved_intent_notional(
             plan.intent_id,
         )

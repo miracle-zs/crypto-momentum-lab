@@ -565,9 +565,19 @@ class LiveStrategyDaemon:
         *,
         latest_quote: RealtimeMarketQuote | None = None,
     ) -> str | None:
+        expires_at = self.closed_candle_expires_at(event)
+        if expires_at is not None and self._clock() >= expires_at:
+            return f"closed_candle_evaluation_expired:{event.candle.symbol}"
         return await self._exit_events.process_closed_candle(
             event,
             latest_quote=latest_quote,
+        )
+
+    def closed_candle_expires_at(self, event: ClosedCandle15mEvent) -> datetime | None:
+        return (
+            self._exit_manager.closed_candle_expires_at(event.received_at)
+            if self._exit_manager is not None
+            else None
         )
 
     async def process_grace_timeout(
