@@ -62,8 +62,14 @@ class LiveExitChannelRuntime:
         self._symbol_facts_generation: dict[str, int] = {}
         self._quote_retries: dict[str, tuple[float, float]] = {}
         self._grace_retries: dict[str, tuple[float, float]] = {}
-        self._sync_waits: dict[str, set[str]] = {"quote": set(), "grace": set()}
+        self._candle_retries: dict[str, tuple[float, float]] = {}
+        self._sync_waits: dict[str, set[str]] = {
+            "quote": set(),
+            "grace": set(),
+            "candle": set(),
+        }
         self._quote_ready: set[str] = set()
+        self._candle_ready: set[str] = set()
         self._pending_candles: dict[tuple[str, datetime], ClosedCandle15mEvent] = {}
         self._evaluated_candles: dict[tuple[str, datetime], None] = {}
 
@@ -243,16 +249,21 @@ class LiveExitChannelRuntime:
         for channel, retries in (
             ("quote", self._quote_retries),
             ("grace", self._grace_retries),
+            ("candle", self._candle_retries),
         ):
             waiting = self._sync_waits[channel]
             ready = set(waiting) if requested is None else waiting & requested
             for symbol in ready:
                 retries.pop(symbol, None)
+                waiting.discard(symbol)
             if channel == "quote" and ready:
                 self._quote_ready.update(ready)
                 self._quote_facts_changed.set()
             elif channel == "grace" and ready:
                 self._grace_facts_changed.set()
+            elif channel == "candle" and ready:
+                self._candle_ready.update(ready)
+                self._candle_facts_changed.set()
 
     async def run_closed_candle_channel(
         self,
@@ -266,21 +277,45 @@ class LiveExitChannelRuntime:
         changed = asyncio.create_task(self._candle_facts_changed.wait())
         try:
             while next_event is not None or self._pending_candles:
+                loop_time = asyncio.get_running_loop().time()
+                earliest_retry: float | None = None
+                for symbol, (retry_time, _) in self._candle_retries.items():
+                    if any(k[0] == symbol for k in self._pending_candles):
+                        if earliest_retry is None or retry_time < earliest_retry:
+                            earliest_retry = retry_time
+
+                timeout: float | None = None
+                if earliest_retry is not None:
+                    timeout = max(0.0, earliest_retry - loop_time)
+
                 waiting: set[
-                    asyncio.Future[ClosedCandle15mEvent] | asyncio.Task[bool]
+                    asyncio.Future[ClosedCandle15mEvent]
+                    | asyncio.Task[bool]
+                    | asyncio.Task[None]
                 ] = {changed}
                 if next_event is not None:
                     waiting.add(next_event)
-                done, _ = await asyncio.wait(
-                    waiting, return_when=asyncio.FIRST_COMPLETED
-                )
+
+                timer_task: asyncio.Task[None] | None = None
+                if timeout is not None:
+                    timer_task = asyncio.create_task(asyncio.sleep(timeout))
+                    waiting.add(timer_task)
+
+                try:
+                    done, _ = await asyncio.wait(
+                        waiting, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    if timer_task is not None:
+                        timer_task.cancel()
+
+                evaluate_keys: list[tuple[str, datetime]] = []
+
                 if changed in done:
                     self._candle_facts_changed.clear()
                     changed = asyncio.create_task(self._candle_facts_changed.wait())
-                    for key in sorted(
-                        self._pending_candles, key=lambda k: (k[1], k[0])
-                    ):
-                        await self._evaluate_candle(key)
+                    self._candle_ready.clear()
+
                 if next_event is not None and next_event in done:
                     try:
                         event = next_event.result()
@@ -290,18 +325,34 @@ class LiveExitChannelRuntime:
                         next_event = asyncio.ensure_future(anext(iterator))
                         key = (event.candle.symbol, event.candle.candle_start)
                         if (
-                            key in self._evaluated_candles
-                            or key in self._pending_candles
+                            key not in self._evaluated_candles
+                            and key not in self._pending_candles
                         ):
-                            continue
-                        # Bounded retention fails explicitly instead of discarding
-                        # an unevaluated official closing event.
-                        if len(self._pending_candles) >= _MAX_RETAINED_CANDLES:
-                            raise RuntimeError(
-                                "unevaluated closed-candle capacity exceeded"
-                            )
-                        self._pending_candles[key] = event
-                        await self._evaluate_candle(key)
+                            if len(self._pending_candles) >= _MAX_RETAINED_CANDLES:
+                                raise RuntimeError(
+                                    "unevaluated closed-candle capacity exceeded"
+                                )
+                            self._pending_candles[key] = event
+                            evaluate_keys.append(key)
+
+                loop_time = asyncio.get_running_loop().time()
+                for key in sorted(
+                    self._pending_candles, key=lambda k: (k[1], k[0])
+                ):
+                    symbol = key[0]
+                    if symbol in self._sync_waits["candle"]:
+                        continue
+                    if symbol in self._candle_retries:
+                        if (
+                            loop_time >= self._candle_retries[symbol][0]
+                            and key not in evaluate_keys
+                        ):
+                            evaluate_keys.append(key)
+                    elif key not in evaluate_keys:
+                        evaluate_keys.append(key)
+
+                for key in evaluate_keys:
+                    await self._evaluate_candle(key)
         finally:
             tasks = [changed] + ([] if next_event is None else [next_event])
             for task in tasks:
@@ -309,8 +360,12 @@ class LiveExitChannelRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _evaluate_candle(self, key: tuple[str, datetime]) -> None:
+        if key not in self._pending_candles:
+            return
         event = self._pending_candles[key]
         failure: str | None = None
+        loop_time = asyncio.get_running_loop().time()
+        generation = self._evaluation_generation(event.candle.symbol)
         for attempt in range(3):
             try:
                 failure = await self._daemon.process_closed_candle(
@@ -339,25 +394,77 @@ class LiveExitChannelRuntime:
                     break
                 if not self._is_transient_error(error) or attempt == 2:
                     raise
-                await asyncio.sleep(float(2**attempt))
+                delay = self._candle_retries.get(event.candle.symbol, (0.0, 1.0))[1]
+                self._candle_retries[event.candle.symbol] = (
+                    loop_time + delay,
+                    min(delay * 2, 60.0),
+                )
+                log.warning(
+                    "live_closed_candle_retry_scheduled",
+                    symbol=event.candle.symbol,
+                    reason=type(error).__name__,
+                    retry_delay_seconds=delay,
+                )
+                return
+
         if failure is None:
             del self._pending_candles[key]
             self._evaluated_candles[key] = None
+            self._candle_retries.pop(event.candle.symbol, None)
+            self._sync_waits["candle"].discard(event.candle.symbol)
             if len(self._evaluated_candles) > _MAX_RETAINED_CANDLES:
                 del self._evaluated_candles[next(iter(self._evaluated_candles))]
             if self._on_exit_failure is not None and not any(
                 pending[0] == event.candle.symbol for pending in self._pending_candles
             ):
                 self._on_exit_failure(event.candle.symbol, None)
-        elif is_pending_exit_evaluation(failure):
+        elif (
+            is_pending_exit_evaluation(failure)
+            or failure == ORDER_IDENTITY_CONFLICT_REASON
+        ):
+            self._sync_waits["candle"].add(event.candle.symbol)
+            self._candle_retries.pop(event.candle.symbol, None)
+            if (
+                failure == ORDER_IDENTITY_CONFLICT_REASON
+                and self._on_exit_failure is not None
+            ):
+                self._on_exit_failure(event.candle.symbol, failure)
+            if generation != self._evaluation_generation(event.candle.symbol):
+                self._wake_sync_waits((event.candle.symbol,))
             log.warning(
-                "live_closed_candle_position_sync_pending",
+                "live_closed_candle_position_sync_pending"
+                if failure != ORDER_IDENTITY_CONFLICT_REASON
+                else "live_closed_candle_exit_degraded",
+                symbol=event.candle.symbol,
+                reason=failure,
+            )
+        elif failure.startswith("closed_candle_evaluation_expired"):
+            del self._pending_candles[key]
+            self._evaluated_candles[key] = None
+            self._candle_retries.pop(event.candle.symbol, None)
+            self._sync_waits["candle"].discard(event.candle.symbol)
+            if len(self._evaluated_candles) > _MAX_RETAINED_CANDLES:
+                del self._evaluated_candles[next(iter(self._evaluated_candles))]
+            if self._on_exit_failure is not None:
+                self._on_exit_failure(event.candle.symbol, failure)
+            log.warning(
+                "live_closed_candle_evaluation_expired",
                 symbol=event.candle.symbol,
                 reason=failure,
             )
         else:
             if self._on_exit_failure is not None:
                 self._on_exit_failure(event.candle.symbol, failure)
+            delay = self._candle_retries.get(event.candle.symbol, (0.0, 1.0))[1]
+            self._candle_retries[event.candle.symbol] = (
+                loop_time + delay,
+                min(delay * 2, 60.0),
+            )
+            log.error(
+                "live_closed_candle_exit_degraded",
+                symbol=event.candle.symbol,
+                reason=failure,
+            )
             log.error(
                 "live_closed_candle_exit_degraded",
                 symbol=event.candle.symbol,

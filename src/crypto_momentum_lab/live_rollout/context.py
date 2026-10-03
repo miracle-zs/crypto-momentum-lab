@@ -104,11 +104,9 @@ def exit_position_block_reason(
 ) -> str | None:
     """Report position facts that block exit evaluation for this symbol."""
     if symbol in context.pending_position_symbols:
-        symbols = ",".join(sorted(context.pending_position_symbols))
-        return f"pending_live_positions:{symbols}"
+        return f"pending_live_positions:{symbol}"
     if symbol in context.unmanaged_position_symbols:
-        symbols = ",".join(sorted(context.unmanaged_position_symbols))
-        return f"unmanaged_live_positions:{symbols}"
+        return f"unmanaged_live_positions:{symbol}"
     return None
 
 

@@ -220,11 +220,24 @@ class LiveExitProcessor:
                 )
             if not self._context_is_current(context):
                 return ExitLaneOutcome(failure=f"pending_live_context:{state.symbol}")
+            evaluation_now = self._clock()
+            candle_end = getattr(event.candle, "candle_end", None)
+            if candle_end is not None and evaluation_now >= candle_end + timedelta(minutes=15):
+                log.warning(
+                    "live_closed_candle_evaluation_expired",
+                    symbol=event.candle.symbol,
+                    candle_end=candle_end.isoformat(),
+                    evaluation_now=evaluation_now.isoformat(),
+                )
+                return ExitLaneOutcome(
+                    failure=f"closed_candle_evaluation_expired:{event.candle.symbol}"
+                )
             requests = await self._exit_manager.requests_for_closed_candle(
                 event.candle,
                 context.managed_positions,
                 latest_quote=latest_quote,
                 received_at=event.received_at,
+                now=evaluation_now,
             )
             approved, submitted, failure = await self._process_requests(
                 requests,
@@ -879,8 +892,12 @@ class LiveExitProcessor:
                     )
                     return None, context, "order_identity_conflict"
                 raise
-            if result is not None or self._context_is_current(context):
+            if result is not None:
                 return result, context, None
+            if self._context_is_current(context):
+                if request.candidate.expires_at <= self._clock():
+                    return None, context, "candidate_expired"
+                return None, context, "exit_submission_not_executed"
             if attempt == 1:
                 break
             context, failure = await self._refresh_context_if_stale(
@@ -1057,7 +1074,9 @@ class LiveExitProcessor:
                         return approved, submitted, "order_identity_conflict"
                     raise
                 if result is None:
-                    continue
+                    if fallback_candidate.expires_at <= self._clock():
+                        return approved, submitted, "candidate_expired"
+                    return approved, submitted, "exit_fallback_not_executed"
                 if invalidate_context:
                     self._invalidate_context_cache()
                 approved += 1
@@ -1094,7 +1113,7 @@ class LiveExitProcessor:
             if context_failure is not None:
                 return approved, submitted, context_failure
             if result is None:
-                continue
+                return approved, submitted, "exit_submission_failed"
             if invalidate_context:
                 self._invalidate_context_cache()
             approved += 1
