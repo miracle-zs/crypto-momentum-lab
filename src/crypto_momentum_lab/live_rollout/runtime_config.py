@@ -84,7 +84,9 @@ def _live_strategy_config_hash(
                 config=_live_strategy_config(profile),
             ),
             "entry_filter": {
-                "entry_policy_mode": "enforce",
+                # Keep the approval identity stable across the policy-mode
+                # cleanup: the former `enforce` mode was hashed as True.
+                "entry_policy_enforce": True,
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,

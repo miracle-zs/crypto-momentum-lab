@@ -1287,6 +1287,30 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
     assert filtered != unfiltered
 
 
+def test_enforced_policy_hash_remains_stable_for_existing_live_approvals() -> None:
+    profile = main.LiveOrderFlowImpulseProfile(
+        impulse_window_buckets=2,
+        confirmation_buckets=1,
+        min_return_pct=Decimal("0.0075"),
+        min_aggressive_imbalance=Decimal("0.30"),
+        min_notional_intensity=Decimal("3.0"),
+        min_notional_5m_vs_30m=Decimal("1.25"),
+        cooldown_buckets=0,
+    )
+
+    strategy_hash = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        profile=profile,
+        entry_positive_gainer_top_count=30,
+        require_price_above_ema5=False,
+        require_price_above_ema10=False,
+        entry_order_type=main.EntryType.LIMIT,
+        entry_limit_ttl_seconds=900,
+    )
+
+    assert strategy_hash == "d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7"
+
+
 def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None:
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
