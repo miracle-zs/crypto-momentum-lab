@@ -131,6 +131,32 @@ def test_compile_live_runtime_plan_applies_overrides() -> None:
     assert plan.effective_policy.order_type == "limit"
     assert plan.effective_policy.max_open_positions == 5
 
+    # Exercise production approval evidence with the real compiled plan.
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from crypto_momentum_lab.live_rollout.execution_runtime import LIVE_APPROVAL_CONFIRMATION
+
+    now = datetime.now(UTC)
+    approval = SimpleNamespace(
+        approval_text=LIVE_APPROVAL_CONFIRMATION,
+        expires_at=None,
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+    )
+    provider = runtime.build_capability_evidence_provider(
+        account_label="primary",
+        runtime_plan=plan,
+        get_active_lease=lambda: None,
+        is_entry_enabled=lambda: True,
+        get_context=lambda: None,
+        get_market_age=lambda: 0.5,
+        has_api_key=lambda: True,
+        get_approval=lambda: approval,
+    )
+    assert provider(SimpleNamespace(symbol="BTCUSDT", client_order_id="cid"), now).is_approval_valid
+    approval.strategy_name = "different_strategy"
+    assert not provider(SimpleNamespace(symbol="BTCUSDT", client_order_id="cid"), now).is_approval_valid
+
 
 def test_capability_evidence_provider_evaluates_runtime_facts() -> None:
     from datetime import UTC, datetime, timedelta

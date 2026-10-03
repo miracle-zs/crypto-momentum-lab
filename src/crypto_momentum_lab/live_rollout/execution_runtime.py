@@ -248,7 +248,7 @@ def build_capability_evidence_provider(
                     approval.approval_text == LIVE_APPROVAL_CONFIRMATION
                     and (approval.expires_at is None or approval.expires_at > now_utc)
                     and (approval.account_label == account_label)
-                    and (not runtime_plan.strategy_name or approval.strategy_name == runtime_plan.strategy_name)
+                    and approval.strategy_name == runtime_plan.effective_policy.strategy_name
                 )
             else:
                 is_app_valid = False
