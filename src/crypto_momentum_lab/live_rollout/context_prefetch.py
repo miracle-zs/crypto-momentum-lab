@@ -17,18 +17,8 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
     LiveDaemonRuntimeContext,
+    PrefetchedContext,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class PrefetchedContext:
-    """One ordered state and the context read started for that state."""
-
-    state: MarketState15s
-    generation: int
-    received_at: datetime
-    context: LiveDaemonRuntimeContext | None
-    error: Exception | None
 
 
 @dataclass(slots=True)

@@ -33,22 +33,31 @@ from crypto_momentum_lab.execution_account.binance.client import (
 )
 
 
-def test_private_client_uses_explicit_request_timeout() -> None:
-    client = BinanceUsdMPrivateReadClient(
-        api_key="key",
-        api_secret="secret",
-        environment="live",
-        account_label="primary",
-        base_url="https://fapi.binance.com",
-    )
+async def test_private_request_has_finite_timeouts(monkeypatch) -> None:
+    sent_timeouts = []
+    create_client = httpx.AsyncClient
 
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent_timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json=[])
+
+    def transport_client(*args, **kwargs):
+        return create_client(*args, **kwargs, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr(httpx, "AsyncClient", transport_client)
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key", api_secret="secret", environment="live",
+        account_label="primary", base_url="https://fapi.binance.com",
+    )
     try:
-        assert client._client.timeout.read == 5.0
-        assert client._client.timeout.write == 5.0
-        assert client._client.timeout.connect == 5.0
-        assert client._client.timeout.pool == 5.0
+        assert await client.fetch_balances() == ()
+        assert sent_timeouts
+        assert all(
+            value is not None and 0 < value <= 5
+            for timeouts in sent_timeouts for value in timeouts.values()
+        )
     finally:
-        asyncio.run(client.aclose())
+        await client.aclose()
 
 
 async def test_command_pacer_prioritizes_reduce_only_waiter() -> None:
@@ -1934,14 +1943,6 @@ async def test_submit_order_retains_missing_price_when_query_remains_zero() -> N
         assert snapshot.average_price == Decimal("0")
     finally:
         await client.aclose()
-
-
-
-
-
-
-
-
 
 
 def test_trade_client_import_does_not_load_order_state_machine() -> None:

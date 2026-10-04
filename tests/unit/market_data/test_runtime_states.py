@@ -71,31 +71,6 @@ async def test_publisher_closes_only_buckets_behind_watermark() -> None:
     assert publisher.metrics.closed_state_count == 2
 
 
-async def test_set_expected_symbols_drops_last_state_for_removed_symbols() -> None:
-    repository = FakeRuntimeStateRepository()
-    publisher = ClosedMarketStatePublisher(
-        repository=repository,
-        config=ClosedMarketStatePublisherConfig(
-            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
-        ),
-    )
-    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
-
-    await publisher.observe(fixture_trade(0, price="100", sequence=1))
-    await publisher.observe(fixture_trade(0, price="200", sequence=2, symbol="ETHUSDT"))
-    await publisher.observe(fixture_trade(3, price="101", sequence=3))
-
-    assert ("research", "ETHUSDT") in publisher._last_state_by_symbol
-
-    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
-
-    assert ("research", "ETHUSDT") not in publisher._last_state_by_symbol
-    assert ("research", "BTCUSDT") in publisher._last_state_by_symbol
-    assert ("research", "ETHUSDT") not in (
-        publisher._last_materialized_bucket_by_symbol
-    )
-
-
 async def test_publisher_materializes_empty_bucket_for_expected_quiet_symbol() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
@@ -620,7 +595,7 @@ def fixture_book_ticker(bucket_index: int, *, sequence: int) -> RawEnvelope:
     )
 
 
-async def test_through_bucket_gating_and_invalidation() -> None:
+async def test_long_silent_symbol_has_continuous_buckets_with_last_known_price():
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
         repository=repository,
@@ -628,132 +603,17 @@ async def test_through_bucket_gating_and_invalidation() -> None:
             realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
         ),
     )
-    publisher.set_expected_symbols(["BTCUSDT", "ETHUSDT"])
-    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
-
-    # Observe initial events for BTCUSDT to establish baseline
-    await publisher.observe(fixture_trade(0, price="100", sequence=1, symbol="BTCUSDT"))
-    await publisher.observe(fixture_trade(1, price="101", sequence=2, symbol="BTCUSDT"))
-    # Verify gate skips re-scan
-    assert publisher._last_materialized_empty_buckets_through is not None
-    scan_count = 0
-
-    original_materialize = publisher._materialize_buckets_until
-
-    def count_materialize(*args, **kwargs):
-        nonlocal scan_count
-        scan_count += 1
-        return original_materialize(*args, **kwargs)
-
-    publisher._materialize_buckets_until = count_materialize
-
-    # Call with same watermark -> gate prevents scanning
-    publisher._materialize_empty_buckets_through(base + timedelta(seconds=1))
-    assert scan_count == 0
-
-    # Invalidate by changing expected_symbols
-    publisher.set_expected_symbols(["BTCUSDT", "SOLUSDT"])
-    assert publisher._last_materialized_empty_buckets_through is None
-
-    # Call with watermark -> gate allows scanning because it was invalidated
-    publisher._materialize_empty_buckets_through(base + timedelta(seconds=15))
-    assert scan_count > 0
-    assert publisher._last_materialized_empty_buckets_through is not None
-
-    # Invalidate by observing a newly seen symbol
-    publisher._last_materialized_empty_buckets_through = base + timedelta(seconds=15)
-    await publisher.observe(fixture_trade(2, price="200", sequence=3, symbol="SOLUSDT"))
-    assert publisher._last_materialized_empty_buckets_through is None
-
-
-async def test_materializing_many_buckets_looks_up_predecessor_once_per_symbol() -> (
-    None
-):
-    """Filling B buckets must not rescan the bucket table once per bucket."""
-    publisher = ClosedMarketStatePublisher(
-        repository=FakeRuntimeStateRepository(),
-        config=ClosedMarketStatePublisherConfig(
-            realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
-        ),
+    publisher.set_expected_symbols({"BTCUSDT", "ETHUSDT"})
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(fixture_trade(10, price="200", sequence=2, symbol="ETHUSDT"))
+    states = sorted(
+        (item for item in repository.saved_states if item.symbol == "BTCUSDT"),
+        key=lambda item: item.bucket_start,
     )
-    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
-    symbols = ["BTCUSDT", "ETHUSDT"]
-    publisher.set_expected_symbols(symbols)
-    publisher._observed_symbol_keys = {("research", symbol) for symbol in symbols}
-    publisher._exchange_by_symbol_key = {
-        ("research", symbol): "binance" for symbol in symbols
-    }
-    publisher._last_materialized_bucket_by_symbol = {
-        ("research", symbol): base for symbol in symbols
-    }
-
-    lookups: list[tuple[str, str]] = []
-    original = publisher._previous_state_for_symbol
-
-    def counting_lookup(symbol_key, *, before_bucket):
-        lookups.append(symbol_key)
-        return original(symbol_key, before_bucket=before_bucket)
-
-    publisher._previous_state_for_symbol = counting_lookup
-    through = base + timedelta(seconds=15 * 5)
-    for symbol in symbols:
-        publisher._materialize_buckets_until(
-            symbol_key=("research", symbol),
-            through_bucket=through,
-        )
-
-    assert len(publisher._accumulators_by_bucket) == 2 * 5
-    # One lookup per symbol instead of one per materialized bucket (10 buckets).
-    assert lookups == [("research", "BTCUSDT"), ("research", "ETHUSDT")]
-
-
-async def test_one_jump_fill_matches_bucket_by_bucket_fill() -> None:
-    """Carrying the predecessor forward must not change the materialized state."""
-    base = datetime(2026, 7, 3, 0, 0, tzinfo=UTC)
-    symbol_key = ("research", "BTCUSDT")
-
-    async def filled(step: int):
-        publisher = ClosedMarketStatePublisher(
-            repository=FakeRuntimeStateRepository(),
-            config=ClosedMarketStatePublisherConfig(
-                realtime_closure_delay_seconds=15, durable_closure_delay_seconds=15
-            ),
-        )
-        publisher.set_expected_symbols(["BTCUSDT"])
-        # Real ingest path so the predecessor state and the per-bucket book
-        # quote cache are populated the way production populates them.
-        await publisher.observe(fixture_book_ticker(0, sequence=1))
-        await publisher.observe(fixture_trade(1, price="101", sequence=2))
-        assert publisher._last_materialized_bucket_by_symbol.get(symbol_key) is not None
-
-        lookups: list[tuple[str, str]] = []
-        original = publisher._previous_state_for_symbol
-
-        def counting_lookup(key, *, before_bucket):
-            lookups.append(key)
-            return original(key, before_bucket=before_bucket)
-
-        publisher._previous_state_for_symbol = counting_lookup
-        for index in range(step, 6, step):
-            publisher._materialize_buckets_until(
-                symbol_key=symbol_key,
-                through_bucket=base + timedelta(seconds=15 * index),
-            )
-        return publisher, lookups
-
-    one_jump, jump_lookups = await filled(5)
-    stepped, stepped_lookups = await filled(1)
-
-    assert one_jump._last_materialized_bucket_by_symbol == (
-        stepped._last_materialized_bucket_by_symbol
-    )
-    assert set(one_jump._accumulators_by_bucket) == set(stepped._accumulators_by_bucket)
-    for key, accumulator in one_jump._accumulators_by_bucket.items():
-        assert accumulator.snapshot().state == (
-            stepped._accumulators_by_bucket[key].snapshot().state
-        )
-    assert one_jump._realtime_deadlines == stepped._realtime_deadlines
-    assert one_jump._durable_deadlines == stepped._durable_deadlines
-    # The jump path looks the predecessor up once; the stepped path once per call.
-    assert len(jump_lookups) == 1
-    assert len(stepped_lookups) > 1
+    base = datetime(2026, 7, 3, tzinfo=UTC)
+    assert [item.bucket_start for item in states] == [
+        base + timedelta(seconds=15 * index) for index in range(9)
+    ]
+    assert all(item.close_price == Decimal("100") for item in states)
+    assert all(item.source_event_count == 0 and item.trade_count == 0 for item in states[1:])
+    assert all(item.data_complete for item in states)

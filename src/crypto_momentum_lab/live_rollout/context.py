@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.domain.account.snapshot_models import (
         AccountSnapshot,
     )
-    from crypto_momentum_lab.live_rollout.context_prefetch import PrefetchedContext
     from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
     from crypto_momentum_lab.live_rollout.telemetry_ports import MarketAdmissionSink
 
@@ -174,9 +173,7 @@ class LiveContextRuntime:
         context_provider: LiveContextProvider,
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
         update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
-        on_managed_position_symbols: (
-            Callable[[frozenset[str]], None] | None
-        ) = None,
+        on_managed_position_symbols: (Callable[[frozenset[str]], None] | None) = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -229,7 +226,6 @@ class LiveContextRuntime:
             context=context,
             error=None,
         )
-
 
     @property
     def generation(self) -> int:
@@ -298,3 +294,14 @@ class LiveContextRuntime:
 
 
 _log = structlog.get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class PrefetchedContext:
+    """One ordered state and the context read started for that state."""
+
+    state: MarketState15s
+    generation: int
+    received_at: datetime
+    context: LiveDaemonRuntimeContext | None
+    error: Exception | None

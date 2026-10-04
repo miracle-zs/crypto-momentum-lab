@@ -148,8 +148,5 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
     assert bool(result.managed_positions) is owned
     assert result.pending_position_symbols == frozenset()
     assert result.unmanaged_position_symbols == expected_unmanaged
-    assert provider._cached_context.pending_position_symbols == frozenset()
-    assert provider._cached_context.unmanaged_position_symbols == expected_unmanaged
     provider.invalidate()
-    assert provider._cached_context is None
     assert not provider.is_current(result)

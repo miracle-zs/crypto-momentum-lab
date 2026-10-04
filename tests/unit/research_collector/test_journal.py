@@ -115,7 +115,6 @@ def test_resolution_cache_limit_falls_back_to_scoped_stream_scan(
     )
     journal.commit_materialization([receipt], resolutions=[{"record_id": "old-7"}])
     assert len(audit.read_text().splitlines()) == 8
-    assert journal._cached_resolution_identities is None
 
 
 def test_changed_corrupt_audit_preserves_pending_records(tmp_path: Path) -> None:
@@ -446,5 +445,3 @@ def test_recover_deformed_float_sequence_resolution_does_not_delete_pending_reco
 
     # 4. Critical: The legitimate pending record for sequence=1 MUST NOT HAVE BEEN DELETED!
     assert pending_file.exists()
-
-

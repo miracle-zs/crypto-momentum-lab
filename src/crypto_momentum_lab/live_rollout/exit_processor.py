@@ -144,53 +144,21 @@ class LiveExitProcessor:
         self._exit_recovery_attempts: dict[str, int] = {}
         self._exit_recovery_next_attempt_at: dict[str, datetime] = {}
 
-    async def process_state(
+    async def handle_trigger(
         self,
+        trigger: Literal["state", "closed_candle", "grace_timeout", "quote"],
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome:
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, state.symbol),
-            lambda: self._process_trigger("state", state, context),
-        )
-
-    async def process_closed_candle(
-        self,
-        event: ClosedCandle15mEvent,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitLaneOutcome:
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, event.candle.symbol),
-            lambda: self._process_trigger(
-                "closed_candle", state, context, event=event, quote=latest_quote
-            ),
-        )
-
-    async def process_grace_timeout(
-        self,
-        state: MarketState15s,
-        now: datetime,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
+        *,
+        event: ClosedCandle15mEvent | None = None,
+        quote: RealtimeMarketQuote | None = None,
+        now: datetime | None = None,
     ) -> ExitLaneOutcome:
         return await self._position_locks.run(
             live_symbol_position_key(self._account_label, state.symbol),
             lambda: self._process_trigger(
-                "grace_timeout", state, context, now=now, quote=latest_quote
+                trigger, state, context, event=event, quote=quote, now=now
             ),
-        )
-
-    async def process_quote(
-        self,
-        quote: RealtimeMarketQuote,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome:
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, quote.symbol),
-            lambda: self._process_trigger("quote", state, context, quote=quote),
         )
 
     async def _process_trigger(

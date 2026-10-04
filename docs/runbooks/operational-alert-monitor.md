@@ -1,4 +1,6 @@
-# Operational alert monitor
+# 告警、Server 酱与只读看板
+
+核对日期：2026-10-04。监控不参与交易准入；自动定向重启仅用于已说明的心跳失效策略。
 
 The single-host deployment runs a small host-side monitor instead of adding a
 Prometheus stack to the trading machine. It samples Docker lifecycle/memory
@@ -11,8 +13,8 @@ The monitor alerts on:
 
 - PostgreSQL/container OOM and high cgroup memory usage;
 - `live_runtime_telemetry_persist_failed` batches;
-- stale live checkpoint, session transition, or lease for the configured live
-  run (order-lifecycle telemetry is intentionally not used as a heartbeat);
+- stale live checkpoint, current session activity or local heartbeat for the configured live
+  run; expired leases and code-identity differences are not readiness evidence;
 - stale local heartbeat on a live strategy: the monitor raises an
   account-specific critical alert and, by default, restarts only that
   `live-strategy[-account]` service;
@@ -94,8 +96,9 @@ install -D -m 0644 deploy/ops/cml-ops-monitor.service \
   /etc/systemd/system/cml-ops-monitor.service
 install -d -m 0750 /etc/crypto-momentum-lab
 # Copy the example to ops-monitor.env, set SERVERCHAN_SENDKEY, then protect it:
-install -D -m 0600 deploy/ops/ops-monitor.env.example \
-  /etc/crypto-momentum-lab/ops-monitor.env
+test -e /etc/crypto-momentum-lab/ops-monitor.env || \
+  install -D -m 0600 deploy/ops/ops-monitor.env.example \
+    /etc/crypto-momentum-lab/ops-monitor.env
 # Edit the installed file and add the SendKey; do not put it in Git.
 systemctl daemon-reload
 systemctl enable --now cml-ops-monitor.service
@@ -196,10 +199,9 @@ Run the focused checks before a release:
   tests/unit/live_rollout/test_telemetry_source.py
 ```
 
-For a live session, treat a missing or stale response as an observability
-failure, not as permission to trade. The existing lease, hub fail-closed
-gates, durable intent barrier, and execution reconciliation remain the safety
-authority.
+A missing or stale SLO response is an observability failure. Telemetry is not
+a trading gate; order persistence, genuine quantity reservations and unknown
+order recovery retain their own responsibilities.
 
 ## Operator Dashboard
 
@@ -212,14 +214,8 @@ cml-operator-dashboard --database-url "$CML_DATABASE_URL" --host 127.0.0.1 --por
 Open `http://127.0.0.1:8765/`. The dashboard is anonymous unless both
 `CML_DASHBOARD_USERNAME` and `CML_DASHBOARD_PASSWORD` are configured. Review system freshness, the UTC+0 momentum
 universe, selected strategy, read-only account state, risk/execution state,
-ambiguous orders, and paper/shadow/live reports.
-
-The paper-account section displays the two active Orderflow accounts. Equity curves use a shared
-rolling 24-hour window and the latest snapshot from each UTC six-minute bucket,
-up to 240 points. Pair charts compare only buckets available to both accounts,
-normalize both accounts to zero at the common start, and use one y-axis. The
-closed-trade table shows the latest 30 rows; its total count and win rate are
-calculated from the full run history.
+ambiguous orders and current live reports. Retained Paper tables describe historical data;
+no Paper or Shadow runtime is active.
 
 The strategy section also exposes a `统一起点权益金额变化` panel. Its shared
 start is fixed at 2026-08-21 02:45 UTC (北京时间 10:45), carries each account's
@@ -240,18 +236,10 @@ view; it does not rewrite the underlying equity snapshots.
 The account page's `四账户资金与风险时序` panel anchors each selected range at
 the first daily 08:00 Asia/Shanghai boundary within that range. The API and
 browser use the same anchor for bucket alignment, so equity, margin, and
-drawdown comparisons share one time origin. An active trading lease also supplies
-the account's strategy binding when no `strategy_live_states` row is available;
-the card then shows the leased strategy and `租约有效` instead of reporting an
-unknown strategy. The lease is not treated as proof of a strategy heartbeat.
-
-Status meanings:
-
-- `UNKNOWN`: required telemetry is missing.
-- `STALE`: the last observation exceeds its freshness threshold.
-- `HALTED`: a risk halt, failed service, or ambiguous order blocks entry.
-- `SHADOW`: live data path is active but exchange writes are suppressed.
-- `LIVE`: an explicitly approved live session is enabled.
+drawdown comparisons share one time origin. Current status uses session/account identity, recent runtime observations and
+actual health. Historical leases or an image-commit mismatch do not override a
+fresh healthy runtime. Missing observations and stale observations remain
+visible; a current alarm is not a synchronized stop instruction.
 
 The dashboard browser never calls Binance directly and never receives API keys,
 secrets, or credential environment names. It reads only the local FastAPI API,
@@ -259,5 +247,4 @@ which reads PostgreSQL. Dashboard write actions remain disabled. The live CLI
 `disable-new-entries` path writes the durable transition first and then pushes
 a low-volume RiskControlHub notification. The `cancel-all-open-entries` and
 `request-flatten` CLI paths likewise write `live_rollback_commands` first and
-are executed by the live worker through its existing order/exit lanes; lease
-release remains a separate future command surface.
+are executed by the live worker through its existing order/exit lanes.

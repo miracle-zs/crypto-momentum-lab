@@ -266,6 +266,5 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
         assert decided[0].projection_version != decided[1].projection_version
         assert [plan.quantity for plan in posted] == [Decimal("0.5")]
         assert repository.prepare_submission_in_session.await_count == 1
-        assert key not in runtime._pending_candles
     finally:
         await coordinator.aclose()

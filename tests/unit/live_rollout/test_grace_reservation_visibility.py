@@ -235,7 +235,6 @@ async def test_startup_reconciliation_does_not_lock_submission_configuration():
     try:
         await coordinator.reconcile_order(plan)
         coordinator.configure_submission(repository)
-        assert coordinator._submission_repository is repository
         backend.submit.assert_not_awaited()
     finally:
         await coordinator.aclose()

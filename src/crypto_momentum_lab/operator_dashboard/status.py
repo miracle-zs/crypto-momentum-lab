@@ -9,7 +9,6 @@ class OperationalStatus(StrEnum):
     DEGRADED = "DEGRADED"
     READY = "READY"
     HALTED = "HALTED"
-    SHADOW = "SHADOW"
     LIVE = "LIVE"
     DOWN = "DOWN"
     NO_DATA = "NO DATA"

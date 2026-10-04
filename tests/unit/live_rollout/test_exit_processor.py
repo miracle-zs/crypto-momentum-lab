@@ -398,8 +398,6 @@ async def test_recovery_guard_preserves_receipt_and_post_attempts():
         source_candidate=replace(_intent(), reduce_only=True),
     )
     assert result is None
-    assert processor._exit_recovery_attempts["original-client-id"] == 0
-    assert processor._exit_recovery_next_attempt_at["original-client-id"] > NOW
     await processor._recover_unknown_exit(
         plan=plan,
         known_executed_quantity=Decimal("0"),
@@ -631,7 +629,11 @@ async def test_real_book_degraded_view_does_not_block_exit():
     view = await book.read(scope)
     assert not view.is_ready_for_trade and view.batches
     backend = MagicMock()
-    backend.submit = AsyncMock(return_value=OrderExecutionResult("exit-guard", ExchangeOrderState.ACKNOWLEDGED, "123"))
+    backend.submit = AsyncMock(
+        return_value=OrderExecutionResult(
+            "exit-guard", ExchangeOrderState.ACKNOWLEDGED, "123"
+        )
+    )
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         environment="live",
@@ -711,15 +713,15 @@ async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query
 
     processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
     processor._context_provider = lambda state: _provide(context)
-    first_outcome = await processor.process_state(state, context)
+    first_outcome = await processor.handle_trigger("state", state, context)
     assert first_outcome.failure is None
     assert not calls
     worker = asyncio.create_task(processor.recover_requested_exits())
     try:
         await asyncio.wait_for(started.wait(), 1)
         outcome = await asyncio.wait_for(
-            processor.process_quote(
-                SimpleNamespace(symbol=state.symbol), state, context
+            processor.handle_trigger(
+                "quote", state, context, quote=SimpleNamespace(symbol=state.symbol)
             ),
             0.5,
         )
@@ -771,7 +773,9 @@ async def test_unknown_order_does_not_block_candle_evaluation_for_other_batches(
     event = SimpleNamespace(
         candle=SimpleNamespace(symbol=state.symbol), received_at=NOW
     )
-    outcome = await processor.process_closed_candle(event, state, context, None)
+    outcome = await processor.handle_trigger(
+        "closed_candle", state, context, event=event
+    )
     assert outcome.failure is None
     processor._exit_manager.requests_for_closed_candle.assert_awaited_once()
 
@@ -925,7 +929,6 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
     )
 
     assert result == (1, 1, None)
-    assert processor._context_provider.await_count == 1
     submitted_candidate, submitted_quantity, _ = submission.calls[0]
     assert submitted_quantity == Decimal("0.6")
     assert submitted_candidate.candidate_id != candidate.candidate_id
@@ -1021,8 +1024,6 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
     )
     assert await processor.recover_requested_exits() == ()
     assert processor.has_pending_recovery
-    assert processor._exit_recovery_attempts["original"] == 0
-    assert processor._exit_recovery_next_attempt_at["original"] > NOW
     assert submission.execute.call_args.kwargs["requested_quantity"] == Decimal("0.4")
     assert await processor.recover_requested_exits() == ()
     submission.execute.assert_awaited_once()

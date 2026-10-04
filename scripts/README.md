@@ -1,37 +1,22 @@
-# Operational & Data Scripts (`scripts/`)
+# 运维、数据与诊断脚本
 
-本目录存放系统日常运维、离线数据获取与回补、巡检诊断工具。
+日常入口以本目录实际文件和各脚本 --help 为准；不会因保留历史脚本就重新启用已退役交易能力。
 
----
+|用途|入口|
+|---|---|
+|官方/辅助 15m K 线获取|download_official_15m_klines.py、download_tradingview_futures_15m_klines.py、fetch_official_15m_via_server.py|
+|行情回补与导出合并|backfill_binance_15s_from_aggtrades.py、merge_15m_kline_tail.py、merge_runtime_state_exports.py|
+|只读核对|build_daily_account_alignment.py、inspect_live_market_time_alignment.py、inspect_live_signal_feature_start.py|
+|前端 CSS 构建|bundle_dashboard_css.py|
+|行情 smoke / 压力测试|run_market_data_smoke.py、load_test_market_data_pipeline.py|
+|事故回归与历史采样|diagnostics/；[事故证据](../docs/diagnostics/incidents.md)|
 
-## 目录索引与工具职责
+部署和告警工具在 deploy/ops；本地研究流程在被 Git 忽略的 local_optimization，见[研究手册](../docs/runbooks/local-full-data-optimization.md)。materialize_server_paper_snapshot.py 面向历史模拟快照，不是当前 Paper 服务入口。
 
-| 脚本 | 职责分类 | 说明 |
-|---|---|---|
-| `download_official_15m_klines.py` | 数据获取 | 从 Binance 官方 REST API 拉取 15m K线历史 |
-| `download_tradingview_futures_15m_klines.py` | 数据获取 | 从 TradingView 获取合约 15m K线辅助校验 |
-| `fetch_official_15m_via_server.py` | 数据获取 | 通过生产服务器代理通道拉取 Binance 15m K线 |
-| `merge_15m_kline_tail.py` | 数据清洗 | 拼接合并增量 K线尾部数据，填补断点 |
-| `merge_runtime_state_exports.py` | 数据清洗 | 合并分散的运行时状态数据导出切片 |
-| `backfill_binance_15s_from_aggtrades.py` | 数据重构 | 从 aggTrades 高频归档生成 15s 级聚合行情 |
-| `materialize_server_paper_snapshot.py` | 生产运维 | 固化服务器模拟运行快照与日志 |
-| `build_daily_account_alignment.py` | 巡检对账 | 生成多账户每日对齐基线数据 |
-| `inspect_live_market_time_alignment.py` | 巡检对账 | 检查行情数据与服务器时钟时间戳的一致性 |
-| `inspect_live_signal_feature_start.py` | 巡检对账 | 检查实盘信号特征启动对齐点与数据连续性 |
-| `bundle_dashboard_css.py` | 前端构建 | 操作台 CSS 打包与依赖内联 |
-| `run_market_data_smoke.py` | 冒烟测试 | 行情服务 30 分钟稳定性与延迟冒烟脚本 |
-| `load_test_market_data_pipeline.py` | 压力测试 | 行情摄取管道高吞吐与消息压力测试 |
+## 历史工具
 
----
+- [research_archive](research_archive/README.md)：旧研究/回放；部分依赖退役代码。
+- [maintenance_archive](maintenance_archive/README.md)：固定日期的修复和身份审计，不直接重跑生产补丁。
+- [review_archive](review_archive/README.md)：手动复现；正式安全回归在当前测试中。
 
-## 历史研究归档 (`research_archive/`)
-
-早期课题阶段探索性研究脚本（Orderflow 特征分析、爆仓级联、K线边界回放、阶段性回测）已统一归档于 [`research_archive/`](research_archive/README.md)。
-正式参数寻优与对账分析请统一使用 [`local_optimization/`](../local_optimization/) 模块。
-
-## 非日常执行归档
-
-- [历史维护工具](maintenance_archive/README.md)：日期化事故修复与历史订单身份审计。
-- [审查复现脚本](review_archive/README.md)：已修复问题的手动复现与性能采样。
-
-这些目录不进入默认测试集，也不属于实盘或日常本地寻优入口。
+归档不进入默认测试集。旧运行源码可在基线 02e6581f3bc71feac0f91f84fa405460ea26730f 查看；本地研究源码和数据另需备份，Git 无法恢复被忽略文件。

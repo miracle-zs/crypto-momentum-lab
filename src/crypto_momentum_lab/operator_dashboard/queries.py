@@ -69,7 +69,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     CashFlowCorrectionRow,
     LiveSessionTransitionRow,
-    ShadowSessionRow,
     StrategyRuntimeCheckpointRow,
 )
 
@@ -193,7 +192,6 @@ def parse_common_equity_start_at(value: str | None = None) -> datetime:
 
 
 class DashboardQueries:
-
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -355,13 +353,6 @@ class DashboardQueries:
 
     async def reports(self) -> RunReportSummaryResponse:
         async with self._session_factory() as session:
-            shadow = (
-                await session.scalars(
-                    select(ShadowSessionRow)
-                    .order_by(ShadowSessionRow.started_at.desc())
-                    .limit(10)
-                )
-            ).all()
             live = (
                 await session.scalars(
                     select(LiveSessionTransitionRow)
@@ -370,18 +361,7 @@ class DashboardQueries:
                 )
             ).all()
         return RunReportSummaryResponse(
-            status=OperationalStatus.READY
-            if shadow or live
-            else OperationalStatus.NO_DATA,
-            shadow_sessions=[
-                {
-                    "run_id": row.run_id,
-                    "strategy_name": row.strategy_name,
-                    "state": row.state,
-                    "started_at": row.started_at.isoformat(),
-                }
-                for row in shadow
-            ],
+            status=OperationalStatus.READY if live else OperationalStatus.NO_DATA,
             live_sessions=[
                 {
                     "session_id": row.session_id,

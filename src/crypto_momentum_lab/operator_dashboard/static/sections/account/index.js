@@ -28,7 +28,7 @@ import {
   renderLiveAccounts as renderLiveAccountsInternal,
 } from "./render-fleet.js";
 
-/** Single section state holder (see frontend-decoupling-plan.md). */
+/** Account section state shared by rendering and event handlers. */
 const state = createAccountSectionState();
 
 export function renderLiveAccounts(data) {

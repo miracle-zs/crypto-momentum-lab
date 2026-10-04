@@ -317,8 +317,10 @@ async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
             res = await cache.get(f"key-{i}", loader)
             assert res == i
 
-        # Entries must be bounded to max_entries=10
-        assert len(cache._entries) <= 10
+        # An evicted response must be loaded again rather than returned stale.
+        async def replacement():
+            return "reloaded"
+        assert await cache.get("key-0", replacement) == "reloaded"
 
         # Now simulate 20 failing loaders with unique keys
         async def failing_loader():
@@ -330,10 +332,8 @@ async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
             except RuntimeError:
                 pass
 
-        # Locks must not leak for failed or non-cached keys!
-        active_keys = set(cache._entries) | set(cache._refresh_tasks)
-        assert set(cache._locks).issubset(active_keys)
-        assert len(cache._locks) <= len(cache._entries)
+        # A failed request must not leave the key permanently blocked.
+        assert await asyncio.wait_for(cache.get("fail-key-100", replacement), 1) == "reloaded"
     finally:
         await cache.aclose()
 
@@ -353,10 +353,18 @@ async def test_response_cache_refresh_concurrency_budget() -> None:
         await asyncio.sleep(0.02)
 
         release_hang = asyncio.Event()
+        active = 0
+        peak = 0
 
         async def hanging_loader():
-            await release_hang.wait()
-            return 999
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await release_hang.wait()
+                return 999
+            finally:
+                active -= 1
 
         # Request all 10 keys with stale_while_revalidate
         for i in range(10):
@@ -365,7 +373,8 @@ async def test_response_cache_refresh_concurrency_budget() -> None:
             )
 
         # Background tasks must be capped at max_refresh_tasks=3
-        assert len(cache._refresh_tasks) <= 3
+        await asyncio.sleep(0)
+        assert 0 < peak <= 3
         release_hang.set()
     finally:
         await cache.aclose()

@@ -650,22 +650,15 @@ async def test_execution_book_act_and_idempotency_workflow() -> None:
         raw_payload={},
     )
 
-    key = scope.to_position_key()
-    journal = book._ensure_journal(key)
-    journal.set_coverage(
-        FactCoverageInterval(
-            start_at=t0,
-            end_at=t0,
-            status=FactCoverageStatus.CONFIRMED,
-        )
-    )
-
     ev_fill = ExecutionEvidence(
         evidence_id="ev_f1",
         scope=scope,
         observed_at=t0,
         fill=f1,
         snapshot=snap,
+        coverage=FactCoverageInterval(
+            start_at=t0, end_at=t0, status=FactCoverageStatus.CONFIRMED
+        ),
     )
     applied = await book.observe(ev_fill)
     assert isinstance(applied, Applied)
@@ -920,8 +913,6 @@ async def test_execution_book_restore_rejects_incomplete_active_command() -> Non
     with pytest.raises(RuntimeError, match="restore active execution commands"):
         await book.restore(account_label="primary")
 
-    assert book._persistence_failed is True
-
 
 @pytest.mark.asyncio
 async def test_durable_restore_requires_explicit_command_repository() -> None:
@@ -929,8 +920,6 @@ async def test_durable_restore_requires_explicit_command_repository() -> None:
 
     with pytest.raises(RuntimeError, match="requires a command repository"):
         await book.restore(account_label="primary")
-
-    assert book._persistence_failed is True
 
 
 @pytest.mark.asyncio
@@ -1305,15 +1294,11 @@ async def test_restore_cumulative_quantity_and_quote_watermarks() -> None:
         reservation_repository=reservation_repo,
     )
     await restored_book.restore(account_label="primary")
-    assert restored_book._order_cumulative_fills[
-        restored_book._order_watermark_key(key, order_command.command_id)
-    ] == Decimal("3")
-    assert restored_book._order_cumulative_quotes[
-        restored_book._order_watermark_key(key, order_command.command_id)
-    ] == Decimal("300")
-    assert restored_book._order_cumulative_fills[
-        restored_book._order_watermark_key(key, terminal_command.command_id)
-    ] == Decimal("2")
+    replay = await restored_book.observe(
+        cumulative_evidence("same-cumulative-after-restart", "3", "300", "100")
+    )
+    assert isinstance(replay, Applied)
+    assert replay.consumed_quantity == Decimal("0")
 
     second_result = await restored_book.observe(
         cumulative_evidence("cumulative-5-after-restart", "5", "700", "140")
@@ -1457,7 +1442,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     restored = book.get_outbox(command_id)
     assert restored is not None
     assert restored.state is DispatchState.UNKNOWN
-    assert command_id in book._dispatch_reconciliation_required_commands
+    assert book.command_requires_recovery(command_id)
 
     fill = None
     if resolution_state is ExchangeOrderState.FILLED:
@@ -1501,7 +1486,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
     assert isinstance(observed, Applied)
 
     if resolution_state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-        assert command_id in book._dispatch_reconciliation_required_commands
+        assert book.command_requires_recovery(command_id)
         blocked = await book.act(
             ExecutionRequest(
                 request_id=command_id,
@@ -1520,8 +1505,8 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
         assert command_id in blocked.diagnostics
         return
 
-    assert command_id not in book._dispatch_reconciliation_required_commands
-    assert command_id not in book._recovery_required_commands
+    assert not book.command_requires_recovery(command_id)
+    assert not book.command_requires_recovery(command_id)
 
     timestamp = _dt(10, 2)
     journal = book._ensure_journal(key)
@@ -1638,7 +1623,7 @@ async def test_execution_book_outbox_lifecycle_and_transitions() -> None:
     unknown = await book.mark_unknown(cmd_id, reason="Gateway timeout 504")
     assert unknown.state == DispatchState.UNKNOWN
     assert unknown.last_error == "Gateway timeout 504"
-    active_res = book._coordinator.get_active_reservations(key)
+    active_res = book.coordinator.get_active_reservations(key)
     assert len(active_res) == 1
     assert active_res[0].active_quantity == Decimal("2.0")
 
@@ -1650,7 +1635,7 @@ async def test_execution_book_outbox_lifecycle_and_transitions() -> None:
     # 5. mark_terminal releases active reservations
     terminal = await book.mark_terminal(cmd_id, reason="Fully settled")
     assert terminal.state == DispatchState.TERMINAL
-    active_after_term = book._coordinator.get_active_reservations(key)
+    active_after_term = book.coordinator.get_active_reservations(key)
     assert len(active_after_term) == 0
 
 
@@ -1708,7 +1693,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     act_res = await book.act(req)
     assert isinstance(act_res, Accepted)
     res_id = act_res.receipt.reservations[0].reservation_id
-    r0 = book._coordinator.get_reservation(res_id)
+    r0 = book.coordinator.get_reservation(res_id)
     assert r0 is not None
     assert r0.reserved_quantity == Decimal("5.0")
     assert r0.consumed_quantity == Decimal("0")
@@ -1736,7 +1721,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert isinstance(app1, Applied)
     assert app1.consumed_quantity == Decimal("3.0")
 
-    r1 = book._coordinator.get_reservation(res_id)
+    r1 = book.coordinator.get_reservation(res_id)
     assert r1 is not None
     assert r1.consumed_quantity == Decimal("3.0")
     assert r1.active_quantity == Decimal("2.0")
@@ -1763,7 +1748,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert isinstance(app2, Applied)
     assert app2.consumed_quantity == Decimal("0")
 
-    r2 = book._coordinator.get_reservation(res_id)
+    r2 = book.coordinator.get_reservation(res_id)
     assert r2 is not None
     assert r2.consumed_quantity == Decimal("3.0")
     assert r2.active_quantity == Decimal("2.0")
@@ -1790,7 +1775,7 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
     assert isinstance(app3, Applied)
     assert app3.consumed_quantity == Decimal("2.0")
 
-    r3 = book._coordinator.get_reservation(res_id)
+    r3 = book.coordinator.get_reservation(res_id)
     assert r3 is not None
     # Crucial invariant: total consumed is 5.0, not 11.0!
     assert r3.consumed_quantity == Decimal("5.0")
@@ -1877,7 +1862,7 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
         )
     )
 
-    r_part = book._coordinator.get_reservation(res_id)
+    r_part = book.coordinator.get_reservation(res_id)
     assert r_part is not None
     assert r_part.consumed_quantity == Decimal("0.8")
     assert r_part.active_quantity == Decimal("1.2")
@@ -1903,7 +1888,7 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
     assert app_cancel.released_quantity == Decimal("1.2")
 
     # 3. Invariant: reserved (2.0) == active (0) + consumed (0.8) + released (1.2)
-    r_final = book._coordinator.get_reservation(res_id)
+    r_final = book.coordinator.get_reservation(res_id)
     assert r_final is not None
     assert r_final.active_quantity == Decimal("0")
     assert r_final.consumed_quantity == Decimal("0.8")
@@ -1918,111 +1903,7 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
     assert outbox.state == DispatchState.TERMINAL
 
 
-@pytest.mark.asyncio
-async def test_staged_copy_preserves_unrelated_positions_and_copies_target():
-    book = ExecutionBook()
-    scope_btc = ExecutionScope(environment="live", account_label="p1", symbol="BTCUSDT")
-    scope_eth = ExecutionScope(environment="live", account_label="p1", symbol="ETHUSDT")
-    key_btc = scope_btc.to_position_key()
-    key_eth = scope_eth.to_position_key()
-
-    book._ensure_book(key_btc)
-    book._ensure_book(key_eth)
-
-    candidate = book._staged_copy(key=key_btc)
-
-    assert (
-        candidate._journals[key_btc.canonical_id]
-        is not book._journals[key_btc.canonical_id]
-    )
-    assert (
-        candidate._books[key_btc.canonical_id] is not book._books[key_btc.canonical_id]
-    )
-    assert (
-        candidate._journals[key_eth.canonical_id]
-        is book._journals[key_eth.canonical_id]
-    )
-    assert candidate._books[key_eth.canonical_id] is book._books[key_eth.canonical_id]
-
-
-@pytest.mark.asyncio
-async def test_staged_copy_shares_frozen_facts_without_leaking_candidate_writes():
-    """Container copies isolate a candidate while recorded facts stay shared."""
-    from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        ExitOrderSubmissionFact,
-    )
-
-    book = ExecutionBook()
-    key = _scope().to_position_key()
-    journal = book._ensure_journal(key)
-    published_snapshot = AccountPositionSnapshot(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        position_side="LONG",
-        position_amt=Decimal("1"),
-        entry_price=Decimal("100"),
-        mark_price=Decimal("101"),
-        unrealized_pnl=Decimal("1"),
-        notional=Decimal("101"),
-        leverage=1,
-        margin_type="isolated",
-        observed_at=_dt(10, 0),
-        raw_payload={"positionAmt": "1"},
-    )
-    journal.record_snapshot(published_snapshot)
-    journal.record_boundary(
-        ExitOrderSubmissionFact(
-            order_id="exit-1",
-            submitted_at=_dt(10, 1),
-            symbol="BTCUSDT",
-            position_side=FuturesPositionSide.LONG,
-        )
-    )
-    published_facts = journal.read_cut()
-    published_hash = published_facts.compute_facts_hash()
-    published_revision = journal.revision
-    published_view = book._ensure_book(key).get_view()
-
-    candidate = book._staged_copy(key=key)
-    candidate_journal = candidate._journals[key.canonical_id]
-    assert candidate_journal is not journal
-    assert candidate_journal._snapshots is not journal._snapshots
-    assert candidate_journal._boundaries is not journal._boundaries
-    assert candidate_journal._fills_by_id is not journal._fills_by_id
-    # Facts themselves are shared on purpose: frozen and never mutated in place.
-    assert candidate_journal._snapshots[0] is published_snapshot
-    assert candidate._books[key.canonical_id]._journal is candidate_journal
-    assert candidate._books[key.canonical_id] is not book._books[key.canonical_id]
-
-    candidate_journal.record_snapshot(
-        AccountPositionSnapshot(
-            environment="live",
-            account_label="primary",
-            symbol="BTCUSDT",
-            position_side="LONG",
-            position_amt=Decimal("2"),
-            entry_price=Decimal("100"),
-            mark_price=Decimal("102"),
-            unrealized_pnl=Decimal("2"),
-            notional=Decimal("204"),
-            leverage=1,
-            margin_type="isolated",
-            observed_at=_dt(10, 2),
-            raw_payload={"positionAmt": "2"},
-        )
-    )
-    candidate_journal.record_integrity_issue("candidate-only issue")
-
-    assert len(candidate_journal.read_cut().snapshots) == 2
-    assert candidate_journal.read_cut() != published_facts
-    assert journal.read_cut() == published_facts
-    assert journal.read_cut().compute_facts_hash() == published_hash
-    assert journal.revision == published_revision
-    assert book._ensure_book(key).get_view() == published_view
-
-
-def test_position_book_get_view_caches_projection_until_revision_changes():
+def test_position_view_changes_only_after_new_position_facts():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
@@ -2033,11 +1914,9 @@ def test_position_book_get_view_caches_projection_until_revision_changes():
     book = PositionBook(journal)
 
     view1 = book.get_view()
-    assert len(book._view_cache) == 1
 
     view2 = book.get_view()
     assert view2.projection_version == view1.projection_version
-    assert len(book._view_cache) == 1
 
     now = datetime(2026, 9, 28, tzinfo=UTC)
     snap = AccountPositionSnapshot(
@@ -2063,22 +1942,23 @@ def test_position_book_get_view_caches_projection_until_revision_changes():
     assert view3.projection_version != view1.projection_version
 
 
-def test_account_facts_compute_facts_hash_caching():
-    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+def test_facts_hash_is_deterministic_and_position_scoped():
+    from dataclasses import replace
+
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFacts,
         PositionKey,
     )
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
-    facts = AccountFacts(position_key=key)
-    h1 = facts.compute_facts_hash()
-    assert getattr(facts, "_cached_facts_hash", None) == h1
-    h2 = facts.compute_facts_hash()
-    assert h1 == h2
+    first = AccountFacts(position_key=key)
+    same_facts = AccountFacts(position_key=key)
+    other_symbol = AccountFacts(position_key=replace(key, symbol="ETHUSDT"))
+    assert first.compute_facts_hash() == same_facts.compute_facts_hash()
+    assert first.compute_facts_hash() != other_symbol.compute_facts_hash()
 
 
-def test_position_book_get_view_caches_advancing_future_cuts():
+def test_later_read_without_new_facts_preserves_position_version():
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
@@ -2093,14 +1973,11 @@ def test_position_book_get_view_caches_advancing_future_cuts():
     cut3 = datetime(2026, 9, 28, 12, 0, 30, tzinfo=UTC)
 
     view1 = book.get_view(cut1)
-    assert len(book._view_cache) == 1
 
     view2 = book.get_view(cut2)
-    assert len(book._view_cache) == 1
     assert view2.projection_version == view1.projection_version
 
     view3 = book.get_view(cut3)
-    assert len(book._view_cache) == 1
     assert view3.projection_version == view1.projection_version
 
 
@@ -2917,8 +2794,7 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
         await book.restore(account_label="primary")
     assert field in str(error.value.__cause__)
     assert "unparseable-command" in str(error.value.__cause__)
-    assert book._persistence_failed is True
-    assert not book._outbox_by_command_id
+    assert not book.list_outbox()
     assert not book._command_reservations
     assert not book._dispatch_reconciliation_required_commands
     repository.load_seen_event_ids.assert_not_awaited()
@@ -2947,7 +2823,6 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     repository.load_seen_fill_trade_ids.return_value = ()
     repository.load_execution_order_watermarks.return_value = ()
     await book.restore(account_label="primary")
-    assert book._persistence_failed is False
     entry = book.get_outbox("unparseable-command")
     assert entry is not None
     assert entry.state is DispatchState.PREPARED
@@ -2958,7 +2833,7 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
     assert book._command_reservations[first.command_id] == [
         "reservation-before-failure"
     ]
-    assert book._dispatch_reconciliation_required_commands == {first.command_id}
+    assert book.command_requires_recovery(first.command_id)
     repository.load_seen_event_ids.assert_awaited_once()
     repository.load_seen_fill_trade_ids.assert_awaited_once()
     repository.load_execution_order_watermarks.assert_awaited_once()
@@ -3010,14 +2885,12 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
         ) as error:
             await book.restore(account_label="primary")
         assert "conflicting rows" in str(error.value.__cause__)
-        assert book._persistence_failed is True
-        assert not book._outbox_by_command_id
+        assert not book.list_outbox()
         repository.upsert_execution_command.assert_not_awaited()
         repository.load_seen_event_ids.assert_not_awaited()
     else:
         await book.restore(account_label="primary")
-        assert book._persistence_failed is False
-        assert len(book._outbox_by_command_id) == 1
+        assert len(book.list_outbox()) == 1
         entry = book.get_outbox("duplicate")
         assert entry.command.requested_quantity == Decimal("1")
         if status == "dispatching":

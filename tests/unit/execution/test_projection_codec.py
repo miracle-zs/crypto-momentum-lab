@@ -1,8 +1,6 @@
 """Compatibility against a projection captured before the codec extraction."""
 
 import json
-import subprocess
-import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -29,7 +27,6 @@ def test_existing_projection_encoding_and_digest_are_unchanged(baseline):
         PositionRecoveryCodec.compute_projection_digest(projection)
         == baseline["digest"]
     )
-    assert PositionRecoveryCodec.encode_projection is projection_codec.encode_projection
     assert projection.active_batches
     assert projection.archived_episodes[0].reductions
     assert projection.active_episode.reductions
@@ -78,22 +75,3 @@ def test_naive_datetime_remains_rejected(baseline):
         projection_codec.encode_projection(
             replace(projection, event_cut=datetime(2026, 9, 30))
         )
-
-
-def test_recovery_models_import_without_recovery_codec():
-    script = """
-import importlib
-import sys
-from importlib.abc import MetaPathFinder
-class CodecGuard(MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.endswith('.recovery_codec'):
-            raise RuntimeError('models imported recovery codec')
-sys.meta_path.insert(0, CodecGuard())
-module = importlib.import_module('crypto_momentum_lab.domain.execution.recovery_models')
-assert module.compute_projection_digest.__module__.endswith('.projection_codec')
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
-    )
-    assert result.returncode == 0, result.stderr

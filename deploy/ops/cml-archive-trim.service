@@ -1,6 +1,6 @@
 [Unit]
 Description=Crypto Momentum Lab archive and trim of cold PostgreSQL rows
-Documentation=file:///opt/crypto-momentum-lab/docs/postgres-capacity-and-retention-2026-09-14.md
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
 After=docker.service
 Requires=docker.service
 

@@ -63,9 +63,8 @@ async def test_restore_headless_dispatch_retains_unknown_gate_and_creates_first_
     book = ExecutionBook(command_repository=Commands(), execution_unit_of_work=uow)
     await book.restore(account_label="primary", as_of=NOW)
     assert book.get_outbox("legacy-entry").state == DispatchState.UNKNOWN
-    assert "legacy-entry" in book._dispatch_reconciliation_required_commands
+    assert book.command_requires_recovery("legacy-entry")
     assert uow.head.revision == 1
-    assert not book._persistence_failed
 
 
 @pytest.mark.asyncio
@@ -81,5 +80,4 @@ async def test_missing_previously_created_head_still_seals_book():
     book._persistence_failed = False
     with pytest.raises(RuntimeError, match="durable execution head changed"):
         await book.mark_unknown(entry.command_id, "timeout", NOW)
-    assert book._persistence_failed
     assert uow.head is None

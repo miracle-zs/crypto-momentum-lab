@@ -311,9 +311,12 @@ def test_account_event_source_requests_full_snapshot_after_sequence_gap() -> Non
     with pytest.raises(AccountEventHubSequenceGap):
         source._materialize_event(gap)
 
-    assert source._require_full_snapshot is True
-    assert source._last_sequence is None
-    assert source._account_snapshot is None
+    with pytest.raises(AccountEventHubSequenceGap, match="no local full snapshot"):
+        source._materialize_event(replace(gap, sequence=4, event_id="event-4"))
+    restored = source._materialize_event(replace(full, sequence=5, event_id="fresh-full"))
+    assert restored.account_snapshot == previous
+    resumed = source._materialize_event(replace(gap, sequence=6, event_id="event-6"))
+    assert resumed.account_snapshot == previous
 
 
 def test_account_event_hub_bootstraps_latest_state_and_replays_delta() -> None:
@@ -389,7 +392,6 @@ def test_account_event_hub_deduplicates_reconciled_fill_replays() -> None:
         )
     )
 
-    assert hub._sequences[("live", "primary")] == 1
     latest_message = hub._latest_messages[("live", "primary")]
     latest = decode_account_event(
         latest_message,
@@ -397,6 +399,7 @@ def test_account_event_hub_deduplicates_reconciled_fill_replays() -> None:
         expected_account_label="primary",
     )
     assert latest.has_fill is True
+    assert latest.sequence == 1
 
     hub.publish(replace(live_fill, event_id="live-fill-replayed"))
     replay_messages, _, _ = hub._subscription_messages(
@@ -1023,7 +1026,6 @@ async def test_account_event_source_silent_account_with_existing_state_resets_un
     events = source.__aiter__()
     received = await anext(events)
     assert received.account_snapshot == snapshot
-    assert source._account_snapshot is not None
 
     source.stop()
     await events.aclose()
@@ -1120,7 +1122,7 @@ async def test_account_event_source_separate_startup_vs_disruption_budgets(
         await anext(events)
 
 
-def test_account_event_hub_bootstrap_message_caching() -> None:
+def test_account_event_hub_bootstrap_is_account_scoped_and_updates_after_publication() -> None:
     snapshot_1 = _snapshot()
     hub = AccountEventHub()
     scope_primary = ("live", "primary")
@@ -1144,7 +1146,7 @@ def test_account_event_hub_bootstrap_message_caching() -> None:
 
     # Second call (e.g. for a second slow consumer): returns cached string identically
     msg2 = hub._bootstrap_message(scope_primary)
-    assert msg2 is msg1
+    assert msg2 == msg1
 
     # Publish snapshot for account-2
     snapshot_acc2 = replace(
@@ -1184,7 +1186,11 @@ def test_account_event_hub_bootstrap_message_caching() -> None:
     assert msg3 is not None
     assert msg3 != msg1
     # Subsequent call reuses the new cached message
-    assert hub._bootstrap_message(scope_primary) is msg3
+    refreshed = decode_account_event(
+        hub._bootstrap_message(scope_primary),
+        expected_environment="live", expected_account_label="primary",
+    )
+    assert refreshed.account_snapshot == snapshot_2
 
 
 def test_account_event_with_fills_roundtrip() -> None:

@@ -19,6 +19,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitConfig,
     LiveExitManager,
+    LiveExitOrderRequest,
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
@@ -289,7 +290,8 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
     assert requests[0].fallback_candidate.reason == "candle_15m_grace_timeout_1"
 
 
-async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
+@pytest.mark.parametrize("grace_bars", (1, 8))
+async def test_grace_timeout_timer_does_not_need_a_new_market_state(grace_bars: int) -> None:
     created_at = datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC)
     recovery_plan = OrderExecutionPlan(
         intent_id="recovery-intent",
@@ -315,7 +317,7 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     manager = LiveExitManager(
         config=_config(
             PositionExitMode.CANDLE_15M,
-            candle_grace_bars=1,
+            candle_grace_bars=grace_bars,
             candle_grace_profit_pct=Decimal("0.0088"),
         )
     )
@@ -326,7 +328,11 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
         close_price=Decimal("98"),
         mark_price=Decimal("98"),
     )
-    now = datetime(2026, 7, 4, 0, 30, 16, tzinfo=UTC)
+    deadline = created_at + timedelta(minutes=15 * grace_bars)
+    assert await manager.requests_for_grace_timeout(
+        now=deadline - timedelta(microseconds=1), state=state, positions=(position,)
+    ) == ()
+    now = deadline + timedelta(seconds=1)
 
     requests = await manager.requests_for_grace_timeout(
         now=now,
@@ -337,9 +343,10 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     assert len(requests) == 1
     assert isinstance(requests[0], LiveExitCancellationRequest)
     assert requests[0].fallback_candidate.created_at == now
-    assert requests[0].fallback_candidate.features["trigger_at"] == (
-        "2026-07-04T00:30:16+00:00"
-    )
+    assert requests[0].fallback_candidate.features["trigger_at"] == now.isoformat()
+    assert requests[0].fallback_candidate.reduce_only
+    assert requests[0].fallback_candidate.entry_type == EntryType.MARKET
+    assert requests[0].fallback_quantity == position.quantity
 
     retry_requests = await manager.requests_for_grace_timeout(
         now=now + timedelta(seconds=1),
@@ -662,21 +669,7 @@ def _long_position() -> ManagedLivePosition:
     )
 
 
-async def test_live_exit_manager_uses_exit_allocator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from crypto_momentum_lab.domain.execution.trade_command import ExitAllocator
-
-    shadow_allocations: list[object] = []
-    original_create = ExitAllocator.create_exit_command
-
-    def fake_create(*args: object, **kwargs: object) -> object:
-        cmd = original_create(*args, **kwargs)
-        shadow_allocations.append(cmd)
-        return cmd
-
-    monkeypatch.setattr(ExitAllocator, "create_exit_command", staticmethod(fake_create))
-
+async def test_losing_closed_candle_requests_full_reduce_only_market_exit() -> None:
     manager = LiveExitManager(
         config=_config(
             PositionExitMode.CANDLE_15M,
@@ -694,9 +687,12 @@ async def test_live_exit_manager_uses_exit_allocator(
 
     requests = await manager.requests_for_closed_candle(candle, (pos,))
     assert len(requests) == 1
-    assert len(shadow_allocations) == 1
-    assert shadow_allocations[0] is not None
-    assert shadow_allocations[0].requested_quantity == Decimal("1.25")
+    request = requests[0]
+    assert isinstance(request, LiveExitOrderRequest)
+    assert request.quantity == pos.quantity
+    assert request.candidate.symbol == pos.symbol
+    assert request.candidate.reduce_only
+    assert request.candidate.entry_type == EntryType.MARKET
 
 
 async def test_reallocated_exit_has_distinct_command_identity():

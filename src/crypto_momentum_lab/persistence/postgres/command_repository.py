@@ -284,7 +284,7 @@ class PostgresCommandRepository:
     ) -> tuple[dict[str, object], ...]:
         async with self._session_factory() as session:
             query = (
-                select(ExecutionCommandRow)
+                select(ExecutionCommandRow, ExchangeOrderRow)
                 .outerjoin(
                     ExchangeOrderRow,
                     (
@@ -321,15 +321,10 @@ class PostgresCommandRepository:
                     ExecutionCommandRow.details["scope"]["account_label"].astext == account_label
                 )
             rows = (
-                await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
+                await session.execute(query.order_by(ExecutionCommandRow.requested_at))
             ).all()
             result = []
-            orders = {order.client_order_id: order for order in (
-                await session.scalars(select(ExchangeOrderRow).where(
-                    ExchangeOrderRow.client_order_id.in_([r.client_order_id for r in rows])
-                ))
-            ).all()} if rows else {}
-            for r in rows:
+            for r, order in rows:
                 if getattr(r, "command", None) in (
                     "resolve_unknown_order",
                     "manual_reduce_only_recovery",
@@ -338,7 +333,7 @@ class PostgresCommandRepository:
                     continue
                 dtls = dict(r.details) if isinstance(r.details, dict) else {}
                 if dtls.get("external_order_id") is None:
-                    dtls["external_order_id"] = orders[r.client_order_id].exchange_order_id if r.client_order_id in orders else None
+                    dtls["external_order_id"] = order.exchange_order_id if order is not None else None
                 scope = dtls.get("scope")
                 acc = (
                     scope.get("account_label")
@@ -353,7 +348,7 @@ class PostgresCommandRepository:
                         "command_id": r.command_id,
                         "client_order_id": r.client_order_id,
                         "command": r.command,
-                        "status": _restored_dispatch_status(orders.get(r.client_order_id), r.status),
+                        "status": _restored_dispatch_status(order, r.status),
                         "requested_at": r.requested_at,
                         "details": dtls,
                     }

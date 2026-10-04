@@ -297,11 +297,12 @@ async def test_book_sql_failure_never_publishes_candidate(async_database_url):
         assert isinstance(await book.observe(first), Applied)
         failed_book = _book(factory, FailAfterWrites)
         await failed_book.restore(account_label=account)
-        published = failed_book._books[first.scope.to_position_key().canonical_id]
-        original = published.get_view()
+        original = await failed_book.read(first.scope)
         with pytest.raises(RuntimeError, match="injected"):
             await failed_book.observe(_evidence(account, "2"))
-        assert published.get_view().total_quantity == original.total_quantity
+        after_failure = await failed_book.read(first.scope)
+        assert after_failure.total_quantity == original.total_quantity
+        assert after_failure.projection_version == original.projection_version
         restored = _book(factory)
         await restored.restore(account_label=account)
         assert (

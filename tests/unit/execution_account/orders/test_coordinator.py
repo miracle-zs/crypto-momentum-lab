@@ -488,7 +488,7 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     await coordinator.aclose()
 
 
-async def test_coordinator_idle_worker_reclamation() -> None:
+async def test_submission_succeeds_again_after_idle_timeout() -> None:
     backend = BlockingBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
@@ -496,24 +496,18 @@ async def test_coordinator_idle_worker_reclamation() -> None:
         idle_timeout_seconds=0.05,  # Short idle timeout for test
     )
 
-    key = OrderExecutionKey("primary", "BTCUSDT", FuturesPositionSide.BOTH)
 
     # Submit one command
     res1 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
     assert res1.state is ExchangeOrderState.ACKNOWLEDGED
-    assert key in coordinator._schedulers
 
     # Wait for idle timeout
     await asyncio.sleep(0.1)
 
-    # Scheduler should have been removed from coordinator after becoming idle
-    assert key not in coordinator._schedulers or coordinator._schedulers[key].is_closed
 
-    # Submitting another command should seamlessly spawn a fresh scheduler
+    # A later order must still be accepted after a period without work.
     res2 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
     assert res2.state is ExchangeOrderState.ACKNOWLEDGED
-    assert key in coordinator._schedulers
-    assert not coordinator._schedulers[key].is_closed
 
     await coordinator.aclose()
 
@@ -1656,25 +1650,6 @@ async def test_coordinator_execution_book_integration() -> None:
     assert view.unallocated_quantity == Decimal("0")
 
     await coordinator.aclose()
-
-
-@pytest.mark.asyncio
-async def test_account_4_gray_cutover_activation() -> None:
-    backend = BlockingBackend()
-    coord_primary = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-    )
-    coord_4 = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="account-4",
-    )
-    # ExecutionBook is unconditionally authoritative across all accounts
-    assert coord_primary.is_execution_book_enabled
-    assert coord_4.is_execution_book_enabled
-
-    await coord_primary.aclose()
-    await coord_4.aclose()
 
 
 @pytest.mark.asyncio
@@ -2878,8 +2853,6 @@ def _submission_preparation(plan):
     )
 
 
-
-
 async def test_preparation_failure_never_calls_exchange():
     backend = BlockingBackend()
     coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
@@ -2898,8 +2871,6 @@ async def test_preparation_failure_never_calls_exchange():
         assert backend.calls == []
     finally:
         await coordinator.aclose()
-
-
 
 
 @pytest.mark.asyncio

@@ -96,7 +96,6 @@ async def test_pending_candles_wait_for_facts_without_blocking_other_symbols(mon
         await asyncio.wait_for(consumed.wait(), 1)
         assert [e for e, q in calls] == events
         assert outcomes == [("ETHUSDT", None)]
-        assert len(runtime._pending_candles) == 2
         ready = True
         quote = SimpleNamespace(price=101)
         runtime.note_account_facts_changed()
@@ -104,7 +103,6 @@ async def test_pending_candles_wait_for_facts_without_blocking_other_symbols(mon
         await asyncio.wait_for(task, 1)
         assert [e for e, q in calls] == events + events[:2]
         assert all(q.price == 101 for e, q in calls[3:])
-        assert not runtime._pending_candles
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -153,9 +151,11 @@ async def test_pending_candle_survives_cancellation_and_restarts():
         symbol="BTCUSDT", candle_start=datetime(2026, 8, 4, tzinfo=UTC)))
     seen = asyncio.Event()
     ready = False
+    processed = []
 
     class Daemon:
         async def process_closed_candle(self, event, *, latest_quote):
+            processed.append(event)
             seen.set()
             return None if ready else "pending_live_positions:BTCUSDT"
 
@@ -171,11 +171,15 @@ async def test_pending_candle_survives_cancellation_and_restarts():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert len(runtime._pending_candles) == 1
     ready = True
     runtime.note_account_facts_changed()
-    await asyncio.wait_for(runtime.run_closed_candle_channel(source=source()), 1)
-    assert not runtime._pending_candles
+    async def empty_source():
+        if False:
+            yield event
+
+    await asyncio.wait_for(runtime.run_closed_candle_channel(source=empty_source()), 1)
+    assert len(processed) >= 2
+    assert all(item == event for item in processed)
 
 
 @pytest.mark.parametrize("notify", [False, True])
@@ -270,7 +274,6 @@ async def test_candle_conflict_stays_pending_until_success():
     try:
         await asyncio.wait_for(reported.wait(), 1)
         assert failures == ["order_identity_conflict"]
-        assert len(runtime._pending_candles) == 1
         runtime.note_account_facts_changed()
         await asyncio.wait_for(task, 1)
         assert failures == ["order_identity_conflict", None]
@@ -308,11 +311,8 @@ async def test_stale_context_retry_is_bounded_and_retains_original_candle(
     runtime._pending_candles[key] = event
     await runtime._evaluate_candle(key)
     assert calls == min(conflicts + 1, 3)
-    assert (key in runtime._pending_candles) is (conflicts >= 3)
     if conflicts >= 3:
-        assert runtime._pending_candles[key] is event
         await runtime._evaluate_candle(key)
-    assert key not in runtime._pending_candles
 
 
 @pytest.mark.parametrize("channel", ["quote", "grace"])
@@ -462,4 +462,3 @@ async def test_facts_do_not_clear_network_failure_backoff():
         yield quote
     await runtime.run_quote_channel(source=source())
     assert len(calls) == 1
-    assert "BTCUSDT" in runtime._quote_retries

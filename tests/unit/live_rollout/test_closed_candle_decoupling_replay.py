@@ -138,7 +138,6 @@ async def test_original_candle_ttl_survives_late_and_duplicate_delivery(
         assert plan.quantity == Decimal("0.001")
     else:
         assert "closed_candle_evaluation_expired:BTCUSDT" in failures
-    assert not runtime._pending_candles
     # Reconnection repeats the same official event; it must not POST twice.
     await asyncio.wait_for(runtime.run_closed_candle_channel(source=source()), 1)
     assert len(exchange.plans) == expected_posts
@@ -211,7 +210,6 @@ async def test_projection_conflict_rebuilds_real_allocation_before_post(pending_
         allocation.allocated_quantity for allocation in plan.allocations
     ) == Decimal("0.002")
     assert plan.client_order_id != old_id
-    assert not runtime._pending_candles
 
 
 async def test_one_failed_candle_produces_one_error_event(monkeypatch):

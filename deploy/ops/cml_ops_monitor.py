@@ -202,9 +202,7 @@ _ALERT_IMPACTS = {
     "live_exit_evaluation_deferred": (
         "该标的退出评估延后等待事实同步，其他标的正常交易不受影响。"
     ),
-    "live_candidate_expired": (
-        "候选超期已放弃（零 POST），避免以旧信号成交。"
-    ),
+    "live_candidate_expired": ("候选超期已放弃（零 POST），避免以旧信号成交。"),
     "live_order_command_terminal_mismatch": (
         "订单终态已确认但执行命令未收敛，可能残留调度占用或无效预留。"
     ),
@@ -296,9 +294,7 @@ _ALERT_ACTIONS = {
     "live_heartbeat_stale": "主事件循环已失联；核对是否正在自动重启，若未自愈请人工排查阻塞或崩溃日志。",
     "ops_monitor_failed": "检查 cml-ops-monitor 自身运行日志与未捕获异常堆栈，必要时重启监控服务。",
 }
-_COMPOSE_SERVICE_HEADER = re.compile(
-    r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$"
-)
+_COMPOSE_SERVICE_HEADER = re.compile(r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$")
 
 
 def _live_strategy_service(account_label: str) -> str:
@@ -383,7 +379,6 @@ class DatabaseState:
     # alert can name the failing one.  Default True keeps older SQL output
     # (which omits them) from being read as "not ready".
     live_session_state_ready: bool = True
-    live_lease_active: bool = True
     live_checkpoint_present: bool = True
     latest_market_progress_age_seconds: float | None = None
     latest_market_delay_ms: float | None = None
@@ -489,9 +484,7 @@ def evaluate_signal_divergence(
         if len(account_values) < 2:
             continue
         outputs = tuple(account_values.values())
-        signal_outputs = {
-            (value.signal_count, value.fingerprint) for value in outputs
-        }
+        signal_outputs = {(value.signal_count, value.fingerprint) for value in outputs}
         if len(signal_outputs) <= 1:
             continue
         differences.append(
@@ -694,7 +687,6 @@ def evaluate_database_state(
     latest_checkpoint_age_seconds: float | None,
     live_session_ready: bool,
     live_session_state_ready: bool = True,
-    live_lease_active: bool = True,
     live_checkpoint_present: bool = True,
     pg_stat_statements_ready: bool,
     track_io_timing: bool,
@@ -754,9 +746,7 @@ def evaluate_database_state(
                 {
                     "status": latest_reconciliation_status,
                     "age_seconds": latest_reconciliation_age_seconds,
-                    "age_human": _human_seconds(
-                        latest_reconciliation_age_seconds
-                    ),
+                    "age_human": _human_seconds(latest_reconciliation_age_seconds),
                     "threshold_seconds": account_state_stale_after_seconds,
                     "threshold_human": _human_seconds(
                         account_state_stale_after_seconds
@@ -776,13 +766,9 @@ def evaluate_database_state(
                 "Durable market-state progress is missing or stale",
                 {
                     "age_seconds": latest_market_progress_age_seconds,
-                    "age_human": _human_seconds(
-                        latest_market_progress_age_seconds
-                    ),
+                    "age_human": _human_seconds(latest_market_progress_age_seconds),
                     "threshold_seconds": market_state_stale_after_seconds,
-                    "threshold_human": _human_seconds(
-                        market_state_stale_after_seconds
-                    ),
+                    "threshold_human": _human_seconds(market_state_stale_after_seconds),
                 },
             )
         )
@@ -795,9 +781,7 @@ def evaluate_database_state(
                     "Market-state receive delay exceeded the critical budget",
                     {
                         "delay_ms": round(latest_market_delay_ms, 3),
-                        "delay_human": _human_seconds(
-                            latest_market_delay_ms / 1000
-                        ),
+                        "delay_human": _human_seconds(latest_market_delay_ms / 1000),
                         "warning_threshold_ms": market_delay_warning_ms,
                         "warning_threshold_human": _human_seconds(
                             market_delay_warning_ms / 1000
@@ -817,9 +801,7 @@ def evaluate_database_state(
                     "Market-state receive delay exceeded the warning budget",
                     {
                         "delay_ms": round(latest_market_delay_ms, 3),
-                        "delay_human": _human_seconds(
-                            latest_market_delay_ms / 1000
-                        ),
+                        "delay_human": _human_seconds(latest_market_delay_ms / 1000),
                         "warning_threshold_ms": market_delay_warning_ms,
                         "warning_threshold_human": _human_seconds(
                             market_delay_warning_ms / 1000
@@ -872,11 +854,10 @@ def evaluate_database_state(
             Alert(
                 "live_session_not_ready",
                 "critical",
-                "Live session checkpoint or lease is not ready",
+                "Live session checkpoint or running state is not ready",
                 {
                     # Which of the three arms of live_ready actually failed.
                     "session_state_ready": live_session_state_ready,
-                    "lease_active": live_lease_active,
                     "checkpoint_present": live_checkpoint_present,
                     "checkpoint_age_seconds": (
                         None
@@ -965,8 +946,7 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
             left.telemetry_persist_failures + right.telemetry_persist_failures
         ),
         legacy_order_identity_conflicts=(
-            left.legacy_order_identity_conflicts
-            + right.legacy_order_identity_conflicts
+            left.legacy_order_identity_conflicts + right.legacy_order_identity_conflicts
         ),
         exit_processing_degraded_symbols=(
             *left.exit_processing_degraded_symbols,
@@ -1021,11 +1001,7 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 "live_legacy_order_identity_conflict",
                 "critical",
                 "Live order identity was reused across multiple exchange orders",
-                {
-                    "conflict_count": (
-                        signals.legacy_order_identity_conflicts
-                    )
-                },
+                {"conflict_count": (signals.legacy_order_identity_conflicts)},
             )
         )
     if signals.exit_processing_degraded_symbols:
@@ -1274,10 +1250,7 @@ def evaluate_container_memory_growth(
         Alert(
             "container_memory_growth",
             "warning",
-            (
-                f"Container {service} memory grew beyond the configured "
-                "trend window"
-            ),
+            (f"Container {service} memory grew beyond the configured trend window"),
             {
                 "service": service,
                 "baseline_bytes": baseline_bytes,
@@ -1500,9 +1473,7 @@ def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
             except ValueError:
                 last_start = None
     status_text = values.get("ExecMainStatus", "")
-    exec_main_status = (
-        int(status_text) if status_text.lstrip("-").isdigit() else None
-    )
+    exec_main_status = int(status_text) if status_text.lstrip("-").isdigit() else None
     return SystemdUnitState(
         unit=unit,
         active_state=values.get("ActiveState", "") or "unknown",
@@ -1700,9 +1671,7 @@ class MonitorConfig:
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
     # Cold-data retention schedule; an empty unit disables the check.
     retention_timer_unit: str = _DEFAULT_RETENTION_TIMER_UNIT
-    retention_timer_max_age_seconds: float = (
-        _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS
-    )
+    retention_timer_max_age_seconds: float = _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS
     # Empty means "the .service that the .timer activates".
     retention_service_unit: str = ""
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
@@ -1717,9 +1686,7 @@ class MonitorConfig:
     auto_restart_stale_live_services: bool = True
     live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
     live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
-    market_state_stale_after_seconds: float = (
-        _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
-    )
+    market_state_stale_after_seconds: float = _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
     market_delay_warning_ms: float = _DEFAULT_MARKET_DELAY_WARNING_MS
     market_delay_critical_ms: float = _DEFAULT_MARKET_DELAY_CRITICAL_MS
     account_state_stale_after_seconds: float = (
@@ -1747,9 +1714,7 @@ class OpsMonitor:
             raise ValueError("RSS thresholds are invalid")
         if config.memory_growth_required_samples <= 0:
             raise ValueError("memory_growth_required_samples must be positive")
-        if bool(config.external_heartbeat_url) != bool(
-            config.external_heartbeat_token
-        ):
+        if bool(config.external_heartbeat_url) != bool(config.external_heartbeat_token):
             raise ValueError(
                 "external heartbeat URL and token must be configured together"
             )
@@ -1765,9 +1730,7 @@ class OpsMonitor:
             raise ValueError("live_restart_max_attempts must be positive")
         if config.market_state_stale_after_seconds <= 0:
             raise ValueError("market_state_stale_after_seconds must be positive")
-        if not (
-            0 < config.market_delay_warning_ms < config.market_delay_critical_ms
-        ):
+        if not (0 < config.market_delay_warning_ms < config.market_delay_critical_ms):
             raise ValueError("market delay thresholds are invalid")
         if config.account_state_stale_after_seconds <= 0:
             raise ValueError("account_state_stale_after_seconds must be positive")
@@ -1837,9 +1800,7 @@ class OpsMonitor:
         )
         if timer is None:
             return None
-        service_unit = (
-            self._config.retention_service_unit or _service_unit_for(unit)
-        )
+        service_unit = self._config.retention_service_unit or _service_unit_for(unit)
         service = (
             read_systemd_unit_state(
                 service_unit,
@@ -1881,9 +1842,7 @@ class OpsMonitor:
                     rss_critical_fraction=self._config.rss_critical_fraction,
                 )
             )
-            alerts.extend(
-                self._memory_pressure_alerts(snapshot)
-            )
+            alerts.extend(self._memory_pressure_alerts(snapshot))
             pressure_bytes, pressure_source = _memory_pressure_reading(snapshot)
             alerts.extend(
                 self._memory_growth_alerts(
@@ -1897,9 +1856,7 @@ class OpsMonitor:
             )
             account_label = live_strategy_accounts.get(snapshot.service)
             if account_label is not None:
-                alerts.extend(
-                    self._live_heartbeat_alerts(snapshot, account_label, now)
-                )
+                alerts.extend(self._live_heartbeat_alerts(snapshot, account_label, now))
 
         market_id = self._container_id("market-data")
         strategy_services = tuple(
@@ -1928,9 +1885,7 @@ class OpsMonitor:
             None,
         )
         market_limit = (
-            market_snapshot.memory_limit_bytes
-            if market_snapshot is not None
-            else None
+            market_snapshot.memory_limit_bytes if market_snapshot is not None else None
         )
         if combined_signals.latest_rss_bytes is not None:
             alerts.extend(
@@ -1977,7 +1932,6 @@ class OpsMonitor:
                         live_session_state_ready=(
                             database_state.live_session_state_ready
                         ),
-                        live_lease_active=database_state.live_lease_active,
                         live_checkpoint_present=(
                             database_state.live_checkpoint_present
                         ),
@@ -2160,9 +2114,7 @@ class OpsMonitor:
         ):
             last_restart_at = None
         restart_attempts = state.get("restart_attempts", 0)
-        if not isinstance(restart_attempts, int) or isinstance(
-            restart_attempts, bool
-        ):
+        if not isinstance(restart_attempts, int) or isinstance(restart_attempts, bool):
             restart_attempts = 0
 
         details: dict[str, object] = {
@@ -2527,18 +2479,18 @@ class OpsMonitor:
                     (
                         "for name in memory.current memory.peak "
                         "memory.max memory.swap.current; do "
-                        "if [ -r \"/sys/fs/cgroup/$name\" ]; then "
+                        'if [ -r "/sys/fs/cgroup/$name" ]; then '
                         "printf '%s=%s\\n' \"$name\" "
-                        "\"$(cat \"/sys/fs/cgroup/$name\")\"; fi; "
+                        '"$(cat "/sys/fs/cgroup/$name")"; fi; '
                         "done; "
                         "if [ -r /sys/fs/cgroup/memory.events ]; then "
                         "while read -r key value _; do "
-                        "if [ \"$key\" = max ]; then "
+                        'if [ "$key" = max ]; then '
                         "printf 'memory.events.max=%s\\n' \"$value\"; "
                         "fi; done < /sys/fs/cgroup/memory.events; fi; "
                         "if [ -r /sys/fs/cgroup/memory.stat ]; then "
                         "while read -r key value _; do "
-                        "if [ \"$key\" = anon ]; then "
+                        'if [ "$key" = anon ]; then '
                         "printf 'memory.stat.anon=%s\\n' \"$value\"; "
                         "fi; done < /sys/fs/cgroup/memory.stat; fi"
                     ),
@@ -2556,14 +2508,18 @@ class OpsMonitor:
                 value = int(raw_value.strip())
             except ValueError:
                 continue
-            if key in {
-                "memory.current",
-                "memory.peak",
-                "memory.max",
-                "memory.swap.current",
-                "memory.events.max",
-                "memory.stat.anon",
-            } and value >= 0:
+            if (
+                key
+                in {
+                    "memory.current",
+                    "memory.peak",
+                    "memory.max",
+                    "memory.swap.current",
+                    "memory.events.max",
+                    "memory.stat.anon",
+                }
+                and value >= 0
+            ):
                 values[key] = value
         return values
 
@@ -2642,9 +2598,7 @@ class OpsMonitor:
                 ):
                     acc = str(record.get("account_label") or "")
                     sym = str(record.get("symbol") or "")
-                    reason = str(
-                        record.get("reason") or record.get("detail") or event
-                    )
+                    reason = str(record.get("reason") or record.get("detail") or event)
                     if sym:
                         deferred_exits.append((acc, sym, reason))
                 elif event == "live_candidate_expired_before_execution":
@@ -2676,9 +2630,6 @@ class OpsMonitor:
         account_label = _sql_literal(
             live_account_label or self._config.live_account_label
         )
-        lease_owner = _sql_literal(
-            live_lease_owner or self._config.live_lease_owner
-        )
         sql = f"""
 SELECT 'checkpoint_age' || E'\\t' || COALESCE(
   EXTRACT(EPOCH FROM (clock_timestamp() - max(saved_at)))::text, '-1'
@@ -2689,14 +2640,6 @@ SELECT 'live_ready' || E'\\t' || (
     SELECT 1 FROM live_session_transitions
     WHERE session_id = {run_id}
       AND state IN ('live_enabled', 'draining')
-  )
-  AND EXISTS (
-    SELECT 1 FROM trading_leases
-    WHERE environment = 'live'
-      AND account_label = {account_label}
-      AND owner = {lease_owner}
-      AND state = 'active'
-      AND expires_at > now()
   )
   AND EXISTS (
     SELECT 1 FROM strategy_runtime_checkpoints
@@ -2710,16 +2653,6 @@ SELECT 'live_ready' || E'\\t' || (
       SELECT 1 FROM live_session_transitions
       WHERE session_id = {run_id}
         AND state IN ('live_enabled', 'draining')
-    )
-  )::text;
-  SELECT 'live_lease_active' || E'\t' || (
-    EXISTS (
-      SELECT 1 FROM trading_leases
-      WHERE environment = 'live'
-        AND account_label = {account_label}
-        AND owner = {lease_owner}
-        AND state = 'active'
-        AND expires_at > now()
     )
   )::text;
   SELECT 'live_checkpoint_present' || E'\t' || (
@@ -2850,9 +2783,7 @@ WHERE o.run_id = {run_id}
         market_delay_ms = _parse_float(values.get("market_delay_ms"))
         account_process_age = _parse_float(values.get("account_process_age"))
         reconciliation_age = _parse_float(values.get("reconciliation_age"))
-        oldest_unknown_order_age = _parse_float(
-            values.get("oldest_unknown_order_age")
-        )
+        oldest_unknown_order_age = _parse_float(values.get("oldest_unknown_order_age"))
         terminal_state_mismatch_count = (
             _parse_int(values.get("terminal_state_mismatch_count")) or 0
         )
@@ -2864,9 +2795,6 @@ WHERE o.run_id = {run_id}
             live_session_ready=_parse_bool(values.get("live_ready")),
             live_session_state_ready=_parse_bool_default(
                 values.get("live_session_state_ready"), True
-            ),
-            live_lease_active=_parse_bool_default(
-                values.get("live_lease_active"), True
             ),
             live_checkpoint_present=_parse_bool_default(
                 values.get("live_checkpoint_present"), True
@@ -2893,9 +2821,7 @@ WHERE o.run_id = {run_id}
                 if account_process_age is None or account_process_age < 0
                 else account_process_age
             ),
-            latest_reconciliation_status=(
-                values.get("reconciliation_status") or None
-            ),
+            latest_reconciliation_status=(values.get("reconciliation_status") or None),
             latest_reconciliation_age_seconds=(
                 None
                 if reconciliation_age is None or reconciliation_age < 0
@@ -3075,12 +3001,9 @@ LEFT JOIN (
             timeout_seconds=self._config.command_timeout_seconds,
         )
         account_by_run_id = {
-            run_id: account_label
-            for account_label, run_id, _ in accounts
+            run_id: account_label for account_label, run_id, _ in accounts
         }
-        signals_by_key: dict[
-            tuple[str, str, str, str], SignalObservation
-        ] = {}
+        signals_by_key: dict[tuple[str, str, str, str], SignalObservation] = {}
         positions: list[PositionObservation] = []
         order_intents: list[OrderIntentObservation] = []
         config_by_account: dict[str, str] = {}
@@ -3120,13 +3043,9 @@ LEFT JOIN (
                     symbol=parts[2],
                     bucket_start=parts[3],
                     strategy_config_hash=parts[4],
-                    signal_count=(
-                        0 if previous is None else previous.signal_count
-                    ),
+                    signal_count=(0 if previous is None else previous.signal_count),
                     candidate_count=int(parts[6]),
-                    fingerprint=(
-                        None if previous is None else previous.fingerprint
-                    ),
+                    fingerprint=(None if previous is None else previous.fingerprint),
                 )
                 continue
             if parts[0] == "position" and len(parts) == 7:
@@ -3279,10 +3198,7 @@ LEFT JOIN (
             Alert(
                 "container_memory_pressure",
                 "warning",
-                (
-                    f"Container {snapshot.service} pushed anonymous memory "
-                    "into swap"
-                ),
+                (f"Container {snapshot.service} pushed anonymous memory into swap"),
                 {
                     "service": snapshot.service,
                     "memory_bytes": snapshot.memory_bytes,
@@ -3330,9 +3246,7 @@ LEFT JOIN (
             )
             if not isinstance(sample_container_ids, dict):
                 sample_container_ids = {}
-                self._state["memory_sample_container_ids"] = (
-                    sample_container_ids
-                )
+                self._state["memory_sample_container_ids"] = sample_container_ids
             if sample_container_ids.get(service) != container_id:
                 samples_by_service[service] = []
                 growth_breaches[service] = 0
@@ -3357,9 +3271,7 @@ LEFT JOIN (
 
         baseline = retained[0] if retained else None
         baseline_bytes = int(baseline[1]) if baseline is not None else None
-        baseline_age_seconds = (
-            now - baseline[0] if baseline is not None else None
-        )
+        baseline_age_seconds = now - baseline[0] if baseline is not None else None
         previous_breaches = growth_breaches.get(service, 0)
         if not isinstance(previous_breaches, int) or isinstance(
             previous_breaches, bool
@@ -3376,10 +3288,7 @@ LEFT JOIN (
             retained.append([now, current_bytes])
         sample_limit = max(
             120,
-            int(
-                self._config.rss_growth_window_seconds
-                / self._config.interval_seconds
-            )
+            int(self._config.rss_growth_window_seconds / self._config.interval_seconds)
             + 2,
         )
         samples_by_service[service] = retained[-sample_limit:]
@@ -3568,9 +3477,7 @@ LEFT JOIN (
 
             previous = active.get(name)
             duration_seconds = (
-                round(now - previous, 3)
-                if isinstance(previous, (int, float))
-                else None
+                round(now - previous, 3) if isinstance(previous, (int, float)) else None
             )
             context = contexts.get(name) if isinstance(contexts, dict) else None
             context = context if isinstance(context, Mapping) else {}
@@ -3840,9 +3747,7 @@ def _fingerprint_feature_value_sql(key: str) -> str:
     """
 
     if key in _SIGNAL_FINGERPRINT_NUMERIC_KEYS:
-        return (
-            f"trim_scale((features->>{_sql_literal(key)})::numeric)"
-        )
+        return f"trim_scale((features->>{_sql_literal(key)})::numeric)"
     return f"features->{_sql_literal(key)}"
 
 
@@ -3948,11 +3853,7 @@ def build_deadman_heartbeat_payload(
         alert.name for alert in alerts if alert.severity.lower() == "warning"
     )
     status = (
-        "critical"
-        if critical_alerts
-        else "warning"
-        if warning_alerts
-        else "healthy"
+        "critical" if critical_alerts else "warning" if warning_alerts else "healthy"
     )
     return {
         "event": "ops_heartbeat",
@@ -4063,8 +3964,7 @@ def _serverchan_endpoint(sendkey: str) -> str:
     if sc3_match is not None:
         uid = sc3_match.group(1)
         return (
-            f"https://{uid}.push.ft07.com/send/"
-            f"{urllib.parse.quote(key, safe='')}.send"
+            f"https://{uid}.push.ft07.com/send/{urllib.parse.quote(key, safe='')}.send"
         )
     return f"https://sctapi.ftqq.com/{urllib.parse.quote(key, safe='')}.send"
 
@@ -4209,13 +4109,9 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
             "数量与价格；排查完毕前暂停扩仓。"
         )
     if base_name == "live_position_divergence":
-        return (
-            "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
-        )
+        return "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
     if base_name == "live_signal_divergence":
-        return (
-            "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
-        )
+        return "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
     if base_name == "container_memory_pressure":
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
@@ -4230,9 +4126,13 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
     if base_name == "live_market_state_delay":
         delay = details.get("delay_ms")
         delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
-        return f"行情延迟过高{delay_str}，检查交易所网络往返延迟（RTT）及数据库写入排队。"
+        return (
+            f"行情延迟过高{delay_str}，检查交易所网络往返延迟（RTT）及数据库写入排队。"
+        )
     if base_name == "live_unknown_orders":
-        return "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
+        return (
+            "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
+        )
     return _ALERT_ACTIONS.get(
         base_name,
         "已记录告警，建议结合技术详情检查相关服务。",
@@ -4267,8 +4167,8 @@ def _trim_decimal(val: object) -> str:
     if val is None:
         return "0"
     s = str(val).strip()
-    s = re.sub(r'(\.\d*?[1-9])0+$', r'\1', s)
-    s = re.sub(r'\.0+$', r'', s)
+    s = re.sub(r"(\.\d*?[1-9])0+$", r"\1", s)
+    s = re.sub(r"\.0+$", r"", s)
     return s
 
 
@@ -4276,17 +4176,17 @@ def _format_order_intent_items(raw_summary: str | None) -> list[str]:
     """Parse and normalize order intent items into clean Chinese strings."""
     if not raw_summary:
         return []
-    items = [x.strip() for x in re.split(r'[\x1e,]', raw_summary) if x.strip()]
+    items = [x.strip() for x in re.split(r"[\x1e,]", raw_summary) if x.strip()]
     formatted: list[str] = []
     for item in items:
         # Strip trailing zeros from decimals (e.g. 684.000000000000000000 -> 684, 0.146040000000000000 -> 0.14604)
-        normalized = re.sub(r'(\.\d*?[1-9])0+(?=[^\d]|$)', r'\1', item)
-        normalized = re.sub(r'\.0+(?=[^\d]|$)', r'', normalized)
-        if re.search(r'（(限价|市价)）$', normalized):
+        normalized = re.sub(r"(\.\d*?[1-9])0+(?=[^\d]|$)", r"\1", item)
+        normalized = re.sub(r"\.0+(?=[^\d]|$)", r"", normalized)
+        if re.search(r"（(限价|市价)）$", normalized):
             formatted.append(normalized)
             continue
         m = re.match(
-            r'^(BUY|SELL|买入|卖出)\s+(LIMIT|MARKET|限价|市价)?\s*(.*?)$',
+            r"^(BUY|SELL|买入|卖出)\s+(LIMIT|MARKET|限价|市价)?\s*(.*?)$",
             normalized,
             re.IGNORECASE,
         )
@@ -4343,10 +4243,14 @@ def _format_alert_human_details(
                         cnt = acc.get("order_count", 0)
                         summary = acc.get("intent_summary")
                         if cnt == 0:
-                            lines.append(f"| `{acc_lbl}` | **未下单** (0 笔) | *(无委托)* |")
+                            lines.append(
+                                f"| `{acc_lbl}` | **未下单** (0 笔) | *(无委托)* |"
+                            )
                         else:
                             order_items = _format_order_intent_items(summary)
-                            order_str = "<br>".join(order_items) if order_items else "未知"
+                            order_str = (
+                                "<br>".join(order_items) if order_items else "未知"
+                            )
                             lines.append(
                                 f"| `{acc_lbl}` | 已下单 (**{cnt}** 笔) | {order_str} |"
                             )
@@ -4445,9 +4349,7 @@ def _format_alert_human_details(
         ):
             pct = (curr_mb / limit_mb) * 100
             peak_str = (
-                f"，峰值 {peak_mb:.1f} MB"
-                if isinstance(peak_mb, (int, float))
-                else ""
+                f"，峰值 {peak_mb:.1f} MB" if isinstance(peak_mb, (int, float)) else ""
             )
             lines.append(
                 f"- **物理内存用量**：`{curr_mb:.1f} MB` / `{limit_mb:.1f} MB`"
@@ -4546,8 +4448,7 @@ def _format_alert_human_details(
         restart_cnt = details.get("restart_count")
         if svc:
             lines.append(
-                f"- **异常服务容器**：`{svc}`"
-                + (f" (`{cid[:12]}`)" if cid else "")
+                f"- **异常服务容器**：`{svc}`" + (f" (`{cid[:12]}`)" if cid else "")
             )
         if health:
             lines.append(f"- **健康状态**：`{health}`")
@@ -4579,7 +4480,9 @@ def _format_alert_human_details(
             lines.append(f"- **对账状态**：`{status}`")
         if age_human:
             thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(f"- **对账停滞时长**：距上次对账已 **{age_human}**{thresh_str}")
+            lines.append(
+                f"- **对账停滞时长**：距上次对账已 **{age_human}**{thresh_str}"
+            )
 
     # 11. Market state stale & checkpoint stale
     elif base_name == "live_market_state_stale":
@@ -4600,7 +4503,9 @@ def _format_alert_human_details(
             lines.append(f"- **责任账户**：`{acc}`")
         if age_human:
             thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
-            lines.append(f"- **状态停滞时长**：距上次写入已 **{age_human}**{thresh_str}")
+            lines.append(
+                f"- **状态停滞时长**：距上次写入已 **{age_human}**{thresh_str}"
+            )
 
     # 12. Live session not ready
     elif base_name == "live_session_not_ready":
@@ -4736,9 +4641,7 @@ def _format_alert_human_details(
     return lines
 
 
-def _alert_conclusion(
-    alert_name: str, details: Mapping[str, object]
-) -> str | None:
+def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | None:
     """Provide a one-line executive takeaway for the alert header."""
 
     base_name, _scope = _split_alert_name(alert_name)
@@ -4756,9 +4659,7 @@ def _alert_conclusion(
                     f"物理内存充足（仅占 {pct:.1f}%），系 Linux 内核置换低频冷页入 Swap，"
                     "**服务运行正常，无需人工干预**。"
                 )
-            return (
-                f"物理内存占用偏高（{pct:.1f}%）且持续换出，**建议关注内存增长趋势与慢查询**。"
-            )
+            return f"物理内存占用偏高（{pct:.1f}%）且持续换出，**建议关注内存增长趋势与慢查询**。"
     if base_name == "container_memory_high":
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
@@ -4790,7 +4691,9 @@ def _alert_conclusion(
                                 return "检测到单边漏单（主/从账户下单意图分叉），**执行与风控路径已失步**。"
         return "同配置账户向交易所下达了不同的订单参数，**下单意图已分叉**。"
     if base_name == "live_position_divergence":
-        return "可比账户在交易所的实际持仓数量不一致，**存在单边未平仓或对账失步风险**。"
+        return (
+            "可比账户在交易所的实际持仓数量不一致，**存在单边未平仓或对账失步风险**。"
+        )
     if base_name == "live_signal_divergence":
         return "同配置账户信号指纹不一致，**策略计算已失步**。"
     if base_name in ("container_oom_killed",):
@@ -4844,7 +4747,9 @@ def _alert_conclusion(
     if base_name == "database_check_failed":
         return "PostgreSQL 状态检查查询失败，**暂无法确认数据库读写是否健康**。"
     if base_name == "database_query_stats_unavailable":
-        return "pg_stat_statements 扩展未载入，**慢查询与 SQL 分析受限（不影响交易）**。"
+        return (
+            "pg_stat_statements 扩展未载入，**慢查询与 SQL 分析受限（不影响交易）**。"
+        )
     if base_name == "database_io_timing_disabled":
         return "PostgreSQL I/O 耗时跟踪未开启，**数据库磁盘 I/O 延迟定位能力受限**。"
     if base_name == "database_parallel_maintenance_enabled":
@@ -5127,9 +5032,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         or "live-worker"
     )
     compose_file_values = tuple(
-        item.strip()
-        for item in str(args.compose_file).split(",")
-        if item.strip()
+        item.strip() for item in str(args.compose_file).split(",") if item.strip()
     )
     compose_files = tuple(Path(item) for item in compose_file_values)
     profile_values = tuple(
@@ -5154,11 +5057,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         services = _monitor_services_for_accounts(live_accounts)
     return MonitorConfig(
         project_directory=Path(args.project_directory),
-        compose_file=(
-            compose_files[0]
-            if compose_files
-            else Path(args.compose_file)
-        ),
+        compose_file=(compose_files[0] if compose_files else Path(args.compose_file)),
         compose_files=compose_files,
         compose_profiles=profile_values,
         compose_env_file=compose_env_file,
@@ -5312,9 +5211,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         ),
         state_path=Path(args.state_path),
         crash_log_directory=(
-            Path(crash_log_directory_value)
-            if crash_log_directory_value
-            else None
+            Path(crash_log_directory_value) if crash_log_directory_value else None
         ),
         webhook_url=os.environ.get("CML_ALERT_WEBHOOK_URL") or None,
         serverchan_sendkey=(

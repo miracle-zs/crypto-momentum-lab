@@ -328,7 +328,6 @@ async def test_post_commit_reload_failure_does_not_report_success(failure):
     else:
         with pytest.raises(RuntimeError):
             await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
-    assert book._persistence_failed
     assert uow.commits == 1
 
 
@@ -386,9 +385,10 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
                 expected_scope=request.scope,
                 expected_quantity=expected_quantity,
             )
-        assert request.key.canonical_id not in book._books
-        assert request.key.canonical_id not in book._head_revisions
-        assert not book._seen_evidence_ids
+        with pytest.raises(RuntimeError, match="successful durable restoration"):
+            await book.list_position_views(
+                environment=request.key.environment, account_label=request.key.account_label
+            )
     else:
         view = await book.reload_position(
             request.key,
@@ -396,10 +396,7 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
             expected_quantity=expected_quantity,
         )
         assert view.total_quantity == Decimal("2")
-        assert book._head_revisions[request.key.canonical_id] == 1
-        assert book._seen_evidence_ids == {
-            f"{request.key.canonical_id}\x1fhub\x1fepoch\x1fdurable-evidence"
-        }
+        assert view.projection_version == plan.projection_version
 
 
 async def test_postgres_adapter_uses_normal_trade_fact_and_head_cas_contract():

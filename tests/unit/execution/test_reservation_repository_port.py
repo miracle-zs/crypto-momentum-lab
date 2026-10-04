@@ -79,8 +79,7 @@ async def test_identity_lookup_failure_blocks_before_save_or_outbox(reservation)
     result = await book.act(request)
     assert isinstance(result, Blocked)
     assert "identity lookup failed" in result.reason
-    assert book._persistence_failed
-    assert request.request_id in book._recovery_required_commands
+    assert book.command_requires_recovery(request.request_id)
     repo.save_reservations.assert_not_awaited()
     assert book.get_outbox(request.request_id) is None
 

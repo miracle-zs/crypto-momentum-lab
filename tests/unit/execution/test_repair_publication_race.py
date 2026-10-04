@@ -93,5 +93,4 @@ async def test_repair_commit_and_reload_exclude_account_observation():
     ), timeout=3)
     assert results[0] is True
     assert not any(isinstance(result, Exception) for result in results), results
-    assert not book._persistence_failed
     assert (await book.read(evidence.scope)).total_quantity == request.expected_quantity

@@ -30,7 +30,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
         "invalid_bool",
     ],
 )
-async def test_published_gate_is_account_scoped_and_requires_current_proof(
+async def test_published_gate_is_account_scoped_and_requires_current_runtime_identity(
     async_database_url, tmp_path, condition
 ):
     engine = create_async_database_engine(async_database_url)
@@ -118,7 +118,7 @@ async def test_published_gate_is_account_scoped_and_requires_current_proof(
         by_account = {account.account_label: account for account in result.accounts}
         assert by_account[accounts[0]].runtime_tradeability.entry_gate_open
         other = by_account[accounts[1]]
-        if condition == "valid":
+        if condition in {"valid", "wrong_commit", "missing_lease"}:
             assert not other.runtime_tradeability.entry_gate_open
             assert (
                 other.runtime_tradeability.entry_gate_reason

@@ -126,8 +126,7 @@ export function globalReadinessModel(now = Date.now()) {
     detail = `${staleSafetySections} 个关键分区刷新失败 · 尚未确认安全`;
   } else if (liveMode === "LIVE") {
     detail = "实盘链路运行中 · 关键读数正常";
-  } else if (liveMode === "SHADOW") {
-    detail = "影子路径运行中 · 关键读数正常";
+
   } else {
     detail = "无实盘会话 · 只读安全";
   }

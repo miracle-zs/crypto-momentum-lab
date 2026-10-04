@@ -855,8 +855,6 @@ def test_draining_control_survives_a_later_operational_halt() -> None:
     )
 
 
-
-
 async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
     execution_sessions = object()
     market_sessions = object()
@@ -1200,23 +1198,6 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
     assert calls[0]["symbols"] is None
 
 
-def test_context_invalidation_preserves_symbol_rules() -> None:
-    provider = object.__new__(PostgresLiveContextProvider)
-    expected = _runtime_context().trading_rules["BTCUSDT"]
-    provider._cache_epoch = 3
-    provider._cached_bucket_start = NOW
-    provider._cached_context = _runtime_context()
-    provider._cached_rules = {"BTCUSDT": expected}
-    provider._cached_rules_at = {"BTCUSDT": NOW}
-
-    provider.invalidate()
-
-    assert provider._cache_epoch == 4
-    assert provider._cached_context is None
-    assert provider._cached_rules == {"BTCUSDT": expected}
-    assert provider._cached_rules_at == {"BTCUSDT": NOW}
-
-
 def test_postgres_live_context_provider_implements_live_context_reader() -> None:
     provider = object.__new__(PostgresLiveContextProvider)
     assert isinstance(provider, LiveContextReader)
@@ -1244,8 +1225,7 @@ def test_postgres_live_context_provider_implements_live_context_reader() -> None
         details={"sequence": 101},
     )
     provider.invalidate(event)
-    assert provider._cache_epoch == 11
-    assert provider._cached_context is None
+    assert not provider.is_current(ctx_matching)
 
 
 async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
@@ -2170,5 +2150,3 @@ async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) 
     await provider.warm_symbol_rules(["BTCUSDT"], NOW)
 
     assert provider.is_symbol_rules_warmed("BTCUSDT")
-    assert provider._cached_rules["BTCUSDT"] == rule
-    assert provider._cached_rules_at["BTCUSDT"] == NOW

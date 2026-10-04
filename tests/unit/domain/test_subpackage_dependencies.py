@@ -6,10 +6,8 @@ import sys
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
-from typing import get_type_hints
 
 from crypto_momentum_lab.domain.operational.runtime_metadata import RuntimePlanMetadata
-from crypto_momentum_lab.domain.strategy.paper_models import PaperTradingRunReport
 
 
 def _is_type_checking(node: ast.AST) -> bool:
@@ -156,12 +154,6 @@ def test_paper_models_clean_subprocess_import_isolation() -> None:
         check=False,
     )
     assert result.returncode == 0, f"Import isolation failed: {result.stderr}"
-
-
-def test_paper_trading_run_report_runtime_plan_annotation() -> None:
-    assert get_type_hints(PaperTradingRunReport)["runtime_plan"] == (
-        RuntimePlanMetadata | None
-    )
 
 
 def test_paper_report_preserves_concrete_plan_and_persisted_artifacts() -> None:

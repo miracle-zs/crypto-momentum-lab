@@ -50,7 +50,6 @@ async def test_assemble_live_quote_volume_success() -> None:
             consumer_id="live-volume:sess_123",
         )
         mock_provider.start.assert_awaited_once()
-        assert any(res.name == "volume_cache" for res in ownership._resources)
 
 
 @pytest.mark.asyncio
@@ -111,10 +110,6 @@ def test_assemble_live_candle_sources_exit_mode_15m() -> None:
         assert assembly.candle_source is mock_src
         assert assembly.closed_candle_feed is mock_feed
         assert assembly.ema_provider is None
-        assert any(res.name == "candle_source" for res in ownership._resources)
-        assert any(
-            res.name == "closed_candle_feed" for res in ownership._resources
-        )
 
 
 def test_assemble_live_candle_sources_ema_only() -> None:
@@ -146,7 +141,6 @@ def test_assemble_live_candle_sources_ema_only() -> None:
         assert assembly.candle_source is mock_src
         assert assembly.closed_candle_feed is None
         assert assembly.ema_provider is mock_ema
-        assert any(res.name == "candle_source" for res in ownership._resources)
 
 
 @pytest.mark.asyncio

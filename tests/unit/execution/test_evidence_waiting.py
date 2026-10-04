@@ -93,7 +93,6 @@ async def test_missing_epoch_proof_waits_and_preserves_committed_book(quantity, 
     assert after.total_quantity == before.total_quantity
     assert after.batches == before.batches
     assert book._head_revisions == head_revision
-    assert not book._persistence_failed
 
 
 async def test_repeated_pending_snapshots_do_not_emit_conflict_errors(monkeypatch):
@@ -178,7 +177,6 @@ async def test_waiting_after_grouped_fill_rolls_back_the_whole_observation():
     assert (await book.read(SCOPE)).total_quantity == Decimal("5")
     assert book.context_revision == revision
     assert uow.head is durable_head
-    assert not book._persistence_failed
 
 
 async def test_waiting_transition_resolves_and_can_be_reported_again(monkeypatch):

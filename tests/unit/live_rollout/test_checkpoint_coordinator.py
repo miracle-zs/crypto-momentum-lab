@@ -567,7 +567,6 @@ async def test_coordinator_save_final_waits_for_unpersisted_token() -> None:
     await persist_started.wait()
 
     assert coordinator.dirty is False
-    assert coordinator._last_submitted_token == 1
     assert writer.last_persisted_token == 0
     # Durable age should still reflect unpersisted age even though dirty is False
     coordinator._last_persisted_monotonic -= 20.0

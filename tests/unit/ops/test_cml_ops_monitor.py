@@ -131,7 +131,6 @@ def test_database_state_reports_which_live_ready_arm_failed() -> None:
         latest_checkpoint_age_seconds=12,
         live_session_ready=False,
         live_session_state_ready=True,
-        live_lease_active=False,
         live_checkpoint_present=True,
         pg_stat_statements_ready=True,
         track_io_timing=True,
@@ -148,7 +147,6 @@ def test_database_state_reports_which_live_ready_arm_failed() -> None:
 
     assert [alert.name for alert in alerts] == ["live_session_not_ready"]
     assert alerts[0].details["session_state_ready"] is True
-    assert alerts[0].details["lease_active"] is False
     assert alerts[0].details["checkpoint_present"] is True
     assert alerts[0].details["checkpoint_age_seconds"] == 12
     assert alerts[0].details["stale_after_seconds"] == 900
@@ -231,12 +229,8 @@ def test_merge_log_signals_keeps_every_field() -> None:
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
     assert merged.latest_rss_bytes == 100
     assert merged.rss_observed_at is not None
-    assert merged.fact_inconsistencies == (
-        ("primary", "BTCUSDT", "repair_blocked"),
-    )
-    assert merged.deferred_exits == (
-        ("primary", "ETHUSDT", "deferred_until_ready"),
-    )
+    assert merged.fact_inconsistencies == (("primary", "BTCUSDT", "repair_blocked"),)
+    assert merged.deferred_exits == (("primary", "ETHUSDT", "deferred_until_ready"),)
     assert merged.expired_candidates == (("primary", "SOLUSDT"),)
 
     # Any field added to LogSignals must be merged above; keep this list honest.
@@ -993,7 +987,7 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
     assert state.oldest_unknown_order_age_seconds is None
 
 
-def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
+def test_database_state_uses_checkpoint_without_retired_lease(
     tmp_path,
 ) -> None:
     class Runner:
@@ -1026,7 +1020,7 @@ def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
     sql = str(runner.last_args[-1])
 
     assert "strategy_runtime_checkpoints" in sql
-    assert "trading_leases" in sql
+    assert "trading_leases" not in sql
     assert "live_session_transitions" in sql
     assert "strategy_runtime_events" in sql
     assert "market_state_progress" in sql
@@ -1943,7 +1937,9 @@ def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) 
 
 @pytest.mark.parametrize("maintenance", [False, True])
 def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
-    tmp_path, monkeypatch, maintenance,
+    tmp_path,
+    monkeypatch,
+    maintenance,
 ) -> None:
     class Runner:
         def __init__(self) -> None:
@@ -2021,15 +2017,14 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
             clear_maintenance_window,
             write_maintenance_window,
         )
+
         marker = tmp_path / "maintenance.json"
         monkeypatch.setenv("CML_MAINTENANCE_WINDOW_FILE", str(marker))
         write_maintenance_window(
             marker, started_at=datetime.now(UTC), expected_seconds=900
         )
         monitor.run_once()
-        assert not [
-            call for call in runner.calls if call[:2] == ["docker", "compose"]
-        ]
+        assert not [call for call in runner.calls if call[:2] == ["docker", "compose"]]
         assert not monitor._state.get("live_restart_state")
         clear_maintenance_window(marker)
     first_alerts = monitor.run_once()
@@ -2468,9 +2463,7 @@ def test_evaluate_log_signals_deferred_exits() -> None:
     )
     assert len(evaluate_log_signals(signals_few)) == 0
 
-    signals_warn = LogSignals(
-        deferred_exits=(("primary", "IMXUSDT", "sync_wait"),) * 3
-    )
+    signals_warn = LogSignals(deferred_exits=(("primary", "IMXUSDT", "sync_wait"),) * 3)
     alerts_warn = evaluate_log_signals(signals_warn)
     assert len(alerts_warn) == 1
     assert alerts_warn[0].name == "live_exit_evaluation_deferred:primary:IMXUSDT"
@@ -2485,22 +2478,16 @@ def test_evaluate_log_signals_deferred_exits() -> None:
 
 
 def test_evaluate_log_signals_expired_candidates() -> None:
-    signals_one = LogSignals(
-        expired_candidates=(("primary", "MARSCOINUSDT"),)
-    )
+    signals_one = LogSignals(expired_candidates=(("primary", "MARSCOINUSDT"),))
     assert len(evaluate_log_signals(signals_one)) == 0
 
-    signals_warn = LogSignals(
-        expired_candidates=(("primary", "MARSCOINUSDT"),) * 2
-    )
+    signals_warn = LogSignals(expired_candidates=(("primary", "MARSCOINUSDT"),) * 2)
     alerts_warn = evaluate_log_signals(signals_warn)
     assert len(alerts_warn) == 1
     assert alerts_warn[0].name == "live_candidate_expired:primary:MARSCOINUSDT"
     assert alerts_warn[0].severity == "warning"
 
-    signals_crit = LogSignals(
-        expired_candidates=(("primary", "MARSCOINUSDT"),) * 5
-    )
+    signals_crit = LogSignals(expired_candidates=(("primary", "MARSCOINUSDT"),) * 5)
     alerts_crit = evaluate_log_signals(signals_crit)
     assert len(alerts_crit) == 1
     assert alerts_crit[0].severity == "critical"
@@ -2533,10 +2520,7 @@ def test_evaluate_database_state_terminal_mismatch_and_unknown_orders() -> None:
     assert "live_order_command_terminal_mismatch" in alert_map
     assert alert_map["live_order_command_terminal_mismatch"].severity == "critical"
     assert (
-        alert_map["live_order_command_terminal_mismatch"].details[
-            "mismatch_count"
-        ]
-        == 2
+        alert_map["live_order_command_terminal_mismatch"].details["mismatch_count"] == 2
     )
 
     alerts_escalated = evaluate_database_state(
@@ -2762,9 +2746,7 @@ def test_serverchan_formatting_new_alerts() -> None:
     assert "累计频次**：故障期间共触发 **5** 次" in form_res["desp"]
 
 
-def test_deliver_serverchan_bounded_retry_and_no_leak(
-    monkeypatch, capsys
-) -> None:
+def test_deliver_serverchan_bounded_retry_and_no_leak(monkeypatch, capsys) -> None:
     attempts: list[int] = []
 
     class MockResponse:

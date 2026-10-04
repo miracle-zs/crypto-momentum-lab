@@ -92,45 +92,17 @@ class _Processor:
         self.outcome = outcome or ExitLaneOutcome()
         self.calls: list[tuple[object, ...]] = []
 
-    async def process_state(
-        self,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome:
-        self.calls.append(("state", state, context))
-        return self.outcome
-
-    async def process_quote(
-        self,
-        quote: RealtimeMarketQuote,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome:
-        self.calls.append(("quote", quote, state, context))
-        return self.outcome
-
-    async def process_closed_candle(
-        self,
-        event: ClosedCandle15mEvent,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitLaneOutcome:
-        self.calls.append(
-            ("candle", event, state, context, latest_quote),
-        )
-        return self.outcome
-
-    async def process_grace_timeout(
-        self,
-        state: MarketState15s,
-        now: datetime,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitLaneOutcome:
-        self.calls.append(
-            ("grace", state, now, context, latest_quote),
-        )
+    async def handle_trigger(
+        self, trigger, state, context, *, event=None, quote=None, now=None
+    ):
+        if trigger == "state":
+            self.calls.append(("state", state, context))
+        elif trigger == "quote":
+            self.calls.append(("quote", quote, state, context))
+        elif trigger == "closed_candle":
+            self.calls.append(("candle", event, state, context, quote))
+        else:
+            self.calls.append(("grace", state, now, context, quote))
         return self.outcome
 
 
@@ -373,13 +345,10 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
     )
 
     class Processor(_Processor):
-        async def process_state(self, state, context):
+        async def handle_trigger(self, trigger, state, context, **kwargs):
             started.set()
             await release.wait()
             return ExitLaneOutcome(failure="exit_recovery_failed")
-
-        async def process_quote(self, quote, state, context):
-            return await self.process_state(state, context)
 
     processor = Processor()
     lane = ExitExecutionLane(

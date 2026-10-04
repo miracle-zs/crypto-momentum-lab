@@ -308,7 +308,8 @@ async def test_observe_persists_only_facts_recorded_since_the_last_commit() -> N
     # cleared by _publish_candidate and only the new fill is re-sent.
     deltas = [call["delta"].fills for call in uow.tx.persist_calls]
     assert deltas == [(_fill(1),), (_fill(2),)]
-    assert book._journals[
-        scope.to_position_key().canonical_id
-    ].pending_fact_delta().fills == ()
-
+    await book.observe(ExecutionEvidence(
+        evidence_id="ev-3", scope=scope, observed_at=START + timedelta(seconds=2),
+        fill=_fill(2), stream_id="trade-source", stream_epoch="one", sequence=3,
+    ))
+    assert uow.tx.persist_calls[-1]["delta"].fills == ()

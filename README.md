@@ -5,11 +5,6 @@ strategies on Binance USD-M perpetual futures.
 
 The current implementation is summarized in [docs/current-state.md](docs/current-state.md).
 See the [documentation index](docs/README.md) for contracts, runbooks, and research designs.
-The [system refactoring blueprint](docs/architecture/system-refactor-blueprint-20260925.md)
-is a dated design and implementation record; its production claims apply only to
-the snapshots identified in that document. Check `docs/current-state.md` for the
-repository baseline and the dates and limits of production observations.
-
 ## Local Setup
 
 ```bash
@@ -71,16 +66,16 @@ See [the local research runbook](docs/runbooks/local-full-data-optimization.md).
 The old Research, Replay/Paper, and standalone Shadow CLIs were retired on
 2026-10-03. Historical implementations are available at Git baseline
 `02e6581f3bc71feac0f91f84fa405460ea26730f`; they are no longer installed commands.
-See [the cleanup plan and verification](docs/plans/2026-10-03-dormant-code-cleanup.md).
+Current execution and retirement boundaries are described in
+[the execution contracts](docs/architecture/execution-contracts.md).
 
 ## Server Deployment
 
 The base server stack contains PostgreSQL, migration/bootstrap jobs, public
 market data, the research collector, and the read-only operator dashboard.
 No Paper runner is deployed. The explicit `live` profile adds the primary
-account synchronizer and gated Orderflow strategy; `compose.live.accounts.yaml`
+account synchronizer and Orderflow strategy; `compose.live.accounts.yaml`
 adds accounts 2–4.
 
-See [server deployment and updates](docs/runbooks/server-paper-deployment.md)
-and [the Live runbook](docs/runbooks/small-capital-live-session.md) for release
-identity, approval, preflight, account isolation, and verification.
+See [server deployment and updates](docs/runbooks/server-deployment.md)
+and [the Live runbook](docs/runbooks/small-capital-live-session.md) for updates, account isolation, trade configuration, shutdown, and verification.

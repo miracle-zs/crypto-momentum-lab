@@ -61,7 +61,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
-def published_tradeability(account: LiveAccountSummaryResponse, now: datetime) -> TradeabilityDetailResponse | None:
+def published_tradeability(
+    account: LiveAccountSummaryResponse, now: datetime
+) -> TradeabilityDetailResponse | None:
     observed = account.runtime_observed_at
     if observed is None or not 0 <= (now - observed).total_seconds() <= 180:
         return None
@@ -310,7 +312,8 @@ class OverviewQueries:
 
             runtime_gate = published_tradeability(acc, now)
             capability_reason = (
-                runtime_gate.entry_gate_reason if runtime_gate is not None
+                runtime_gate.entry_gate_reason
+                if runtime_gate is not None
                 else "runtime_readiness_missing_or_stale"
             )
             cap_ok = runtime_gate is not None and runtime_gate.entry_gate_open
@@ -442,12 +445,16 @@ class OverviewQueries:
         )
         if confirmed:
             gates = [item for item in published if item is not None]
-            blocked = next((item for item in gates if not item.entry_gate_open), gates[0])
+            blocked = next(
+                (item for item in gates if not item.entry_gate_open), gates[0]
+            )
             entry_gate_open = all(item.entry_gate_open for item in gates)
             exit_gate_open = all(item.exit_gate_open for item in gates)
             entry_gate_reason = blocked.entry_gate_reason
-            exit_gate_reason = next((item.exit_gate_reason for item in gates
-                                     if not item.exit_gate_open), gates[0].exit_gate_reason)
+            exit_gate_reason = next(
+                (item.exit_gate_reason for item in gates if not item.exit_gate_open),
+                gates[0].exit_gate_reason,
+            )
             unmanaged_risk_clear = all(item.unmanaged_risk_clear for item in gates)
             has_halt = any(item.halt_active for item in gates)
             if runtime_running:
@@ -463,7 +470,9 @@ class OverviewQueries:
                 if has_halt
                 else (
                     OperationalStatus.READY
-                    if (entry_gate_open or any(item.mode == "RUNNING" for item in gates))
+                    if (
+                        entry_gate_open or any(item.mode == "RUNNING" for item in gates)
+                    )
                     else OperationalStatus.DEGRADED
                 )
             )
@@ -552,22 +561,34 @@ class OverviewQueries:
         )
         async with self._session_factory() as session:
             for account in accounts:
-                row = await session.scalar(select(StrategyRuntimeEventRow).where(
-                    StrategyRuntimeEventRow.event_type == "runtime_readiness",
-                    StrategyRuntimeEventRow.occurred_at >= now - timedelta(seconds=180),
-                    StrategyRuntimeEventRow.occurred_at <= now,
-                    StrategyRuntimeEventRow.details["account_label"].astext == account.account_label,
-                ).order_by(StrategyRuntimeEventRow.occurred_at.desc()).limit(1))
+                row = await session.scalar(
+                    select(StrategyRuntimeEventRow)
+                    .where(
+                        StrategyRuntimeEventRow.event_type == "runtime_readiness",
+                        StrategyRuntimeEventRow.occurred_at
+                        >= now - timedelta(seconds=180),
+                        StrategyRuntimeEventRow.occurred_at <= now,
+                        StrategyRuntimeEventRow.details["account_label"].astext
+                        == account.account_label,
+                    )
+                    .order_by(StrategyRuntimeEventRow.occurred_at.desc())
+                    .limit(1)
+                )
                 if row is None:
                     continue
                 payload = row.details
-                lease = next((l for l in leases if l.account_label == account.account_label), None)
-                if (payload.get("schema_version") != 1 or lease is None
-                        or payload.get("code_commit") != lease.code_generation
-                        or payload.get("session_id") != row.run_id):
+                if (
+                    payload.get("schema_version") != 1
+                    or payload.get("account_label") != account.account_label
+                    or payload.get("session_id") != row.run_id
+                ):
                     continue
                 try:
-                    account.runtime_tradeability = TradeabilityDetailResponse.model_validate(payload["tradeability"], strict=True)
+                    account.runtime_tradeability = (
+                        TradeabilityDetailResponse.model_validate(
+                            payload["tradeability"], strict=True
+                        )
+                    )
                     account.runtime_observed_at = row.occurred_at
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -686,7 +707,7 @@ class OverviewQueries:
                 if live.state == "live_enabled"
                 else OperationalStatus.HALTED
                 if live.state == "halted"
-                else OperationalStatus.SHADOW
+                else OperationalStatus.UNKNOWN
             )
             live_observed_at, heartbeat_source = live_observation(
                 state=live.state,

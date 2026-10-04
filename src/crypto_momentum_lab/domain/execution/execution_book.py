@@ -642,6 +642,9 @@ class ExecutionBook:
                 canon: book.copy_for_transaction(candidate._journals.get(canon))
                 for canon, book in self._books.items()
             }
+        candidate._transaction_journal_keys = (
+            (key.canonical_id,) if key is not None else tuple(candidate._journals)
+        )
         candidate._requests_by_id = dict(self._requests_by_id)
         candidate._receipts_by_id = dict(self._receipts_by_id)
         candidate._seen_evidence_ids = set(self._seen_evidence_ids)
@@ -701,8 +704,10 @@ class ExecutionBook:
         # The candidate's append-only delta is now durable, so it must not be
         # re-sent by the next observation. A candidate that rolled back is
         # never published, which keeps its pending events queued for retry.
-        for journal in self._journals.values():
-            journal.mark_facts_persisted()
+        for canon in candidate._transaction_journal_keys:
+            journal = self._journals.get(canon)
+            if journal is not None:
+                journal.mark_facts_persisted()
 
     def _journal_for_scope(
         self,

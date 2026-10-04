@@ -690,7 +690,6 @@ async def test_slow_recovery_family_does_not_starve_other_families():
     task = asyncio.create_task(worker.run_requested())
     try:
         await asyncio.wait_for(completed.wait(), 1)
-        assert "positions" in worker._retry_at
         assert not task.done()
     finally:
         task.cancel()

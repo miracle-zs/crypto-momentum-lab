@@ -62,82 +62,65 @@ def _position(
     )
 
 
-def test_identical_position_snapshots_coalesce_within_window() -> None:
+async def _publish(service, positions, observed_at):
+    from crypto_momentum_lab.domain.account import AccountConfigSnapshot
+    from crypto_momentum_lab.domain.account.snapshot_models import AccountSnapshot
+    from crypto_momentum_lab.execution_account.binance.user_data_parser import (
+        parse_user_data_event,
+    )
+
+    config = AccountConfigSnapshot(
+        environment="live", account_label="primary", multi_assets_mode=False,
+        hedge_mode=True, fee_tier=0, observed_at=observed_at, raw_payload={},
+    )
+    event = parse_user_data_event(
+        {"e": "ACCOUNT_UPDATE", "E": int(observed_at.timestamp() * 1000),
+         "a": {"B": [], "P": []}}, received_at=observed_at,
+    )
+    result = await service.persist_user_data_event(
+        snapshot=AccountSnapshot(config=config, balances=(), positions=positions, open_orders=()),
+        event=event,
+    )
+    assert result.snapshot.positions == positions
+
+
+async def test_identical_position_events_preserve_live_view_without_repeating_history():
     repo = _RecordingRepo()
-    service = ExecutionAccountSyncService(
-        client=_NoopClient(),  # type: ignore[arg-type]
-        repository=repo,  # type: ignore[arg-type]
-        config=_config(datetime(2026, 9, 16, 23, 45, tzinfo=UTC)),
-    )
-    t0 = datetime(2026, 9, 16, 23, 45, 0, tzinfo=UTC)
-    burst = tuple(
-        _position("266", entry="0.2317431", observed_at=t0 + timedelta(milliseconds=i))
-        for i in range(10)
-    )
-    kept = service._positions_to_persist(burst, observed_at=t0)
-    assert len(kept) == 1
-
-    service._remember_position_signatures(kept, observed_at=t0)
-    later = _position(
-        "266",
-        entry="0.2317431",
-        observed_at=t0 + timedelta(seconds=1),
-    )
-    assert service._positions_to_persist((later,), observed_at=later.observed_at) == ()
-
-    after_window = _position(
-        "266",
-        entry="0.2317431",
-        observed_at=t0 + timedelta(seconds=3),
-    )
-    assert (
-        len(
-            service._positions_to_persist(
-                (after_window,), observed_at=after_window.observed_at
-            )
-        )
-        == 1
-    )
+    t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
+    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    first = _position("266", entry="0.2317431", observed_at=t0)
+    await _publish(service, (first,), t0)
+    for offset in (1, 10, 50, 1000):
+        at = t0 + timedelta(milliseconds=offset)
+        await _publish(service, (_position("266", entry="0.2317431", observed_at=at),), at)
+    assert repo.positions == [first]
+    at = t0 + timedelta(seconds=3)
+    later = _position("266", entry="0.2317431", observed_at=at)
+    await _publish(service, (later,), at)
+    assert repo.positions == [first, later]
 
 
-def test_zero_position_persisted_only_as_close_transition() -> None:
+async def test_zero_event_records_a_real_close_without_creating_unknown_positions():
     repo = _RecordingRepo()
-    service = ExecutionAccountSyncService(
-        client=_NoopClient(),  # type: ignore[arg-type]
-        repository=repo,  # type: ignore[arg-type]
-        config=_config(datetime(2026, 9, 16, 23, 45, tzinfo=UTC)),
-    )
-    t0 = datetime(2026, 9, 16, 23, 45, 0, tzinfo=UTC)
-    # Never seen this symbol: a zero row is noise.
-    assert (
-        service._positions_to_persist(
-            (_position("0", entry="0", observed_at=t0),),
-            observed_at=t0,
-        )
-        == ()
-    )
-
-    open_pos = _position("266", entry="0.23", observed_at=t0)
-    assert service._positions_to_persist((open_pos,), observed_at=t0) == (open_pos,)
-    service._remember_position_signatures((open_pos,), observed_at=t0)
-
-    closed = _position("0", entry="0", observed_at=t0 + timedelta(seconds=8))
-    assert service._positions_to_persist((closed,), observed_at=closed.observed_at) == (
-        closed,
-    )
+    t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
+    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    await _publish(service, (_position("0", entry="0", observed_at=t0),), t0)
+    assert repo.positions == []
+    opening = _position("266", entry="0.23", observed_at=t0)
+    await _publish(service, (opening,), t0)
+    at = t0 + timedelta(seconds=8)
+    closing = _position("0", entry="0", observed_at=at)
+    await _publish(service, (closing,), at)
+    assert repo.positions == [opening, closing]
 
 
-def test_changed_amount_is_always_persisted() -> None:
+async def test_partial_close_is_persisted_even_within_the_history_coalescing_window():
     repo = _RecordingRepo()
-    service = ExecutionAccountSyncService(
-        client=_NoopClient(),  # type: ignore[arg-type]
-        repository=repo,  # type: ignore[arg-type]
-        config=_config(datetime(2026, 9, 16, 23, 45, tzinfo=UTC)),
-    )
-    t0 = datetime(2026, 9, 16, 23, 45, 0, tzinfo=UTC)
-    open_266 = _position("266", entry="0.23", observed_at=t0)
-    service._remember_position_signatures((open_266,), observed_at=t0)
-    partial = _position("17", entry="0.23", observed_at=t0 + timedelta(milliseconds=50))
-    assert service._positions_to_persist(
-        (partial,), observed_at=partial.observed_at
-    ) == (partial,)
+    t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
+    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    opening = _position("266", entry="0.23", observed_at=t0)
+    await _publish(service, (opening,), t0)
+    at = t0 + timedelta(milliseconds=50)
+    partial = _position("17", entry="0.23", observed_at=at)
+    await _publish(service, (partial,), at)
+    assert repo.positions == [opening, partial]

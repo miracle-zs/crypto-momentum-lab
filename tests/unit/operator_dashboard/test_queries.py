@@ -339,7 +339,6 @@ async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> N
     assert result.history_complete is False
     assert [item["position_id"] for item in result.closed_trades] == ["closed"]
     assert len(result.trade_events) == 3
-    assert session.scalars_statements[1]._limit_clause.value == 500
 
 
 async def test_universe_dashboard_hides_loser_ranking() -> None:
@@ -603,7 +602,6 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     assert response.window_end == window_end
     assert response.persisted_event_count == 1
     assert session.statement is not None
-    assert session.statement._limit_clause.value == 10_001
 
 
 def test_latest_checkpoint_query_selects_only_timestamp() -> None:

@@ -156,7 +156,6 @@ async def test_top30_selector_propagates_position_state_load_failure() -> None:
 
     s1 = await selector.selection_at(observed_at)
     assert "SOLUSDT" in s1.by_symbol
-    assert selector._next_refresh_at == observed_at + timedelta(seconds=3600)
 
     # 2. Advance time past cache expiry. Position discovery now raises RuntimeError!
     t2 = observed_at + timedelta(seconds=3601)

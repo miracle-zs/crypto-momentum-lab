@@ -46,9 +46,7 @@ class LiveExitEventCoordinator:
         exit_enabled: Callable[[], bool],
         run_active: Callable[[], bool],
         context_provider: LiveContextProvider,
-        apply_context: Callable[
-            [LiveDaemonRuntimeContext], None
-        ],
+        apply_context: Callable[[LiveDaemonRuntimeContext], None],
         invalidate_context_cache: Callable[[], None],
         exit_processor: ExitEventProcessor,
         exit_lane: ExitEventLane,
@@ -87,7 +85,9 @@ class LiveExitEventCoordinator:
             if quote is None
             else await self.process_quote_work(quote, state)
         )
-        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
+        if outcome.failure is not None and not is_pending_exit_evaluation(
+            outcome.failure
+        ):
             log.error(
                 "live_account_event_exit_failed",
                 run_id=self._run_id,
@@ -112,7 +112,9 @@ class LiveExitEventCoordinator:
             await self._exit_lane.submit_quote(quote, state)
             return None
         outcome = await self.process_quote_work(quote, state)
-        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
+        if outcome.failure is not None and not is_pending_exit_evaluation(
+            outcome.failure
+        ):
             log.error(
                 "live_quote_exit_failed",
                 run_id=self._run_id,
@@ -126,7 +128,7 @@ class LiveExitEventCoordinator:
         if not self._exit_enabled():
             return ExitLaneOutcome()
         context = await self._load_context(state)
-        return await self._exit_processor.process_state(state, context)
+        return await self._exit_processor.handle_trigger("state", state, context)
 
     async def process_quote_work(
         self,
@@ -136,7 +138,9 @@ class LiveExitEventCoordinator:
         if not self._exit_enabled() or quote.symbol != state.symbol:
             return ExitLaneOutcome()
         context = await self._load_context(state)
-        return await self._exit_processor.process_quote(quote, state, context)
+        return await self._exit_processor.handle_trigger(
+            "quote", state, context, quote=quote
+        )
 
     async def process_closed_candle(
         self,
@@ -154,13 +158,16 @@ class LiveExitEventCoordinator:
             quote=latest_quote,
         )
         context = await self._load_context(state)
-        outcome = await self._exit_processor.process_closed_candle(
-            event,
+        outcome = await self._exit_processor.handle_trigger(
+            "closed_candle",
             state,
             context,
-            latest_quote,
+            event=event,
+            quote=latest_quote,
         )
-        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
+        if outcome.failure is not None and not is_pending_exit_evaluation(
+            outcome.failure
+        ):
             log.error(
                 "live_closed_candle_exit_failed",
                 run_id=self._run_id,
@@ -181,13 +188,16 @@ class LiveExitEventCoordinator:
         if not self._exit_enabled():
             return None
         context = await self._load_context(state)
-        outcome = await self._exit_processor.process_grace_timeout(
+        outcome = await self._exit_processor.handle_trigger(
+            "grace_timeout",
             state,
-            now,
             context,
-            latest_quote,
+            now=now,
+            quote=latest_quote,
         )
-        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
+        if outcome.failure is not None and not is_pending_exit_evaluation(
+            outcome.failure
+        ):
             log.error(
                 "live_grace_timeout_exit_failed",
                 run_id=self._run_id,

@@ -69,9 +69,7 @@ export function createPoller({ renderers, onAfterRender }) {
         ? "LIVE"
         : live?.status === "HALTED"
           ? "HALTED"
-          : live?.status === "SHADOW"
-            ? "SHADOW"
-            : "UNKNOWN";
+          : "UNKNOWN";
     setLiveService(live || null);
     if (getLiveMode() === "LIVE" && mode !== "LIVE") {
       ["risk", "account"].forEach((id) => expireSectionReading(id));

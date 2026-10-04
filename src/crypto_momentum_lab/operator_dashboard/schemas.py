@@ -310,7 +310,6 @@ class RiskExecutionResponse(DashboardSchema):
 
 class RunReportSummaryResponse(DashboardSchema):
     status: OperationalStatus
-    shadow_sessions: list[dict[str, JsonValue]]
     live_sessions: list[dict[str, JsonValue]]
 
 

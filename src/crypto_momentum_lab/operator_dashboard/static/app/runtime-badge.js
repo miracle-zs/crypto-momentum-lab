@@ -27,8 +27,7 @@ export function renderLiveRuntime() {
       : "运行时间未知";
   } else if (mode === "HALTED") {
     duration = "已停止";
-  } else if (mode === "SHADOW") {
-    duration = "未启用";
+
   }
   stamp.className = `mode-badge runtime-line ${statusClass(mode)}`;
   stamp.setAttribute("aria-label", `执行模式：${mode} · ${duration}`);
