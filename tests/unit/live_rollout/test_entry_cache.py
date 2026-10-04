@@ -46,8 +46,8 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
                 ema10=Decimal("99"),
             )
 
-    async def load_symbols(_: datetime) -> frozenset[str]:
-        return frozenset({"BTCUSDT", "ETHUSDT"})
+    async def load_symbols(_: datetime) -> LiveEntryUniverseData:
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT", "ETHUSDT"}), snapshot=None)
 
     def on_ready(value: bool) -> None:
         assert value is True
@@ -55,7 +55,7 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
 
     cache = LiveEntryFilterCache(
         ema_provider=Provider(),
-        symbol_loader=load_symbols,
+        universe_loader=load_symbols,
         clock=lambda: now,
         on_ready=on_ready,
     )
@@ -94,16 +94,16 @@ async def test_entry_symbol_cache_refreshes_pool_without_blocking_reads() -> Non
     ready = asyncio.Event()
     calls: list[datetime] = []
 
-    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+    async def load_symbols(observed_at: datetime) -> LiveEntryUniverseData:
         calls.append(observed_at)
-        return frozenset({"BTCUSDT"})
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     def on_ready(value: bool) -> None:
         assert value is True
         ready.set()
 
     cache = LiveEntrySymbolCache(
-        symbol_loader=load_symbols,
+        universe_loader=load_symbols,
         clock=lambda: now,
         on_ready=on_ready,
     )
@@ -195,11 +195,11 @@ async def test_entry_symbol_cache_stop_tolerates_pre_cancelled_task() -> None:
     now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
     ready = asyncio.Event()
 
-    async def load_symbols(observed_at: datetime) -> frozenset[str]:
-        return frozenset({"BTCUSDT"})
+    async def load_symbols(observed_at: datetime) -> LiveEntryUniverseData:
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     cache = LiveEntrySymbolCache(
-        symbol_loader=load_symbols,
+        universe_loader=load_symbols,
         clock=lambda: now,
         on_ready=lambda _: ready.set(),
     )
@@ -217,12 +217,12 @@ async def test_entry_symbol_cache_stop_tolerates_pre_cancelled_task() -> None:
 async def test_entry_symbol_cache_stop_propagates_external_cancellation() -> None:
     now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
 
-    async def slow_load(observed_at: datetime) -> frozenset[str]:
+    async def slow_load(observed_at: datetime) -> LiveEntryUniverseData:
         await asyncio.sleep(10)
-        return frozenset({"BTCUSDT"})
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     cache = LiveEntrySymbolCache(
-        symbol_loader=slow_load,
+        universe_loader=slow_load,
         clock=lambda: now,
     )
     task = asyncio.create_task(cache.run())
@@ -259,12 +259,12 @@ async def test_entry_filter_cache_stop_tolerates_pre_cancelled_task() -> None:
                 ema10=Decimal("99"),
             )
 
-    async def load_symbols(_: datetime) -> frozenset[str]:
-        return frozenset({"BTCUSDT"})
+    async def load_symbols(_: datetime) -> LiveEntryUniverseData:
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     cache = LiveEntryFilterCache(
         ema_provider=Provider(),
-        symbol_loader=load_symbols,
+        universe_loader=load_symbols,
         clock=lambda: now,
         on_ready=lambda _: ready.set(),
     )
@@ -297,13 +297,13 @@ async def test_entry_filter_cache_stop_propagates_external_cancellation() -> Non
                 ema10=Decimal("99"),
             )
 
-    async def slow_symbols(_: datetime) -> frozenset[str]:
+    async def slow_symbols(_: datetime) -> LiveEntryUniverseData:
         await asyncio.sleep(10)
-        return frozenset({"BTCUSDT"})
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     cache = LiveEntryFilterCache(
         ema_provider=SlowProvider(),
-        symbol_loader=slow_symbols,
+        universe_loader=slow_symbols,
         clock=lambda: now,
     )
     task = asyncio.create_task(cache.run())

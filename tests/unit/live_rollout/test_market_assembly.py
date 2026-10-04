@@ -17,7 +17,7 @@ from crypto_momentum_lab.live_rollout.market_assembly import (
     assemble_live_startup_market_buffer,
     build_live_market_state_stream,
 )
-from crypto_momentum_lab.live_rollout.session import ResourceOwnershipRegistry
+from crypto_momentum_lab.live_rollout.runtime_session import ResourceOwnershipRegistry
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,9 @@ class FakeQuoteVolumeProvider:
     def __init__(self, snapshot: QuoteVolume24hSnapshot) -> None:
         self._snapshot = snapshot
 
+    def metrics_snapshot(self, *, now=None) -> dict[str, object]:
+        return {}
+
     def snapshot(
         self,
         symbol: str,

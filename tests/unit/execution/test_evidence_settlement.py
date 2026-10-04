@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.execution.evidence_settlement import (
     cumulative_fill_delta,
     cumulative_order_delta,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
@@ -144,7 +145,7 @@ def test_order_quantity_increase_requires_quote_increase():
 
 
 def test_identity_binds_epoch_and_canonical_digest_excludes_transport_observation(fill):
-    scope = ExecutionScope("live", "account-3", "TESTUSDT", "LONG")
+    scope = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
     evidence = ExecutionEvidence(
         "event-1", scope, NOW, fill=fill, stream_id="hub", stream_epoch="epoch-1"
     )

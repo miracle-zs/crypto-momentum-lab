@@ -44,7 +44,13 @@ async def test_book_owned_context_never_rebuilds_legacy_order_and_fill_history(
     ]
     session.scalars.return_value = SimpleNamespace(all=lambda: (position,))
     sessions = Mock(return_value=session)
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._sessions = sessions
     provider._execution_book = object()
     provider._account_label = "primary"
@@ -81,11 +87,13 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
     from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
@@ -120,7 +128,13 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         )
     )
     book = ExecutionBook(books_by_key={key.canonical_id: PositionBook(journal)})
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = book
     provider._cache_epoch = 7
@@ -131,13 +145,14 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         pending_position_symbols=frozenset({"BTCUSDT"}),
         unmanaged_position_symbols=frozenset({"BTCUSDT"}),
         account_snapshot=SimpleNamespace(
+            sequence=0,
             positions=(
                 SimpleNamespace(
                     symbol="BTCUSDT",
                     position_side="LONG",
                     position_amt=Decimal("0.5"),
                 ),
-            )
+            ),
         ),
     )
     provider._cached_context = context

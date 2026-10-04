@@ -24,3 +24,24 @@ def jsonable(value: object) -> JsonValue:
     if isinstance(value, str | int | float | bool) or value is None:
         return value
     return str(value)
+
+
+def normalize_for_compare(value: object) -> object:
+    if isinstance(value, Decimal):
+        return format(value.normalize(), "f")
+    if isinstance(value, datetime):
+        return (
+            value.astimezone(UTC).isoformat()
+            if value.tzinfo is not None and value.utcoffset() is not None
+            else value.isoformat()
+        )
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, dict):
+        return {
+            str(key): normalize_for_compare(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list | tuple):
+        return [normalize_for_compare(item) for item in value]
+    return value

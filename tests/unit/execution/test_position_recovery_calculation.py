@@ -8,6 +8,7 @@ import pytest
 
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.evidence_digest import view_projection_digest
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
     DurableExecutionPositionState,
     ExecutionHeadSnapshot,
@@ -15,7 +16,6 @@ from crypto_momentum_lab.domain.execution.ports import (
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     PositionKey,
 )
@@ -23,12 +23,15 @@ from crypto_momentum_lab.domain.execution.position_recovery import (
     recover_durable_position,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
-from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 
 
 @pytest.fixture
 def state():
-    key = PositionKey("live", "recovery-account", "TESTUSDT", "LONG")
+    key = PositionKey("live", "recovery-account", "TESTUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="hub", stream_epoch="epoch"
     )

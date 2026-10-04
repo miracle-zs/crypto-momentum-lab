@@ -254,10 +254,9 @@ class BinanceWebSocketConnection:
                     # service in its persisted HALTED state instead of
                     # creating a reconnect storm that drops more events.
                     self._stopping = True
-                close_code = getattr(error, "code", None)
                 self._last_close_code = (
-                    close_code if isinstance(close_code, int) else None
-                )
+                    error.rcvd.code if error.rcvd is not None else 1006
+                ) if isinstance(error, ConnectionClosed) else None
                 log.warning(
                     "binance_websocket_session_ended",
                     group_id=self._group_id,
@@ -664,8 +663,6 @@ class BinanceWebSocketConnection:
             self._realtime_queue_events = realtime_queue.qsize()
             try:
                 await self._on_realtime_envelope(envelope)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.exception(
                     "binance_websocket_realtime_sink_failed",

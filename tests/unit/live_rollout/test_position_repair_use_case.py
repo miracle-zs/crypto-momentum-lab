@@ -1,3 +1,4 @@
+
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -8,13 +9,13 @@ import pytest
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
     ExecutionHeadSnapshot,
 )
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     PositionKey,
 )
@@ -27,7 +28,10 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
     PositionRepairReceipt,
     PositionRepairRequest,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 from crypto_momentum_lab.live_rollout.position_self_healing import (
     auto_heal_unmanaged_position,
 )
@@ -123,7 +127,7 @@ async def test_repair_survives_refresh_but_rejects_changed_exposure(change):
 
 
 def repair_case():
-    key = PositionKey("live", "account-3", "TESTUSDT", "LONG")
+    key = PositionKey("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
         key, stream_id="hub", stream_epoch="epoch"
     )

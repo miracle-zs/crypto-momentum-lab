@@ -5,6 +5,7 @@ from decimal import Decimal
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from typer import BadParameter
@@ -192,8 +193,6 @@ accounts:
             str(manifest_path),
             "--git-commit-hash",
             "a" * 40,
-            "--migration-revision",
-            "20260911_0040",
             "--entry-leverage",
             "7",
             "--i-understand-this-places-real-orders",
@@ -211,9 +210,7 @@ accounts:
     config = captured["config"]
     assert isinstance(config, runtime_config.LiveRuntimeConfig)
     assert config.identity.session_id == "live-account-2-v1"
-    assert config.identity.lease_owner == "live-worker-account-2"
     assert config.identity.git_commit_hash == "a" * 40
-    assert config.identity.migration_revision == "20260911_0040"
     assert config.identity.strategy_config_hash == expected_hash
     profile = config.strategy.profile
     assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
@@ -248,8 +245,6 @@ accounts:
             str(manifest_path),
             "--git-commit-hash",
             "a" * 40,
-            "--migration-revision",
-            "20260911_0040",
             "--entry-leverage",
             "8",
             "--i-understand-this-places-real-orders",
@@ -281,7 +276,6 @@ def test_live_cli_exposes_required_commands() -> None:
         "renew-lease",
         "resolve-missing-order",
         "run",
-        "submit-plan",
         "status",
         "disable-new-entries",
         "cancel-all-open-entries",
@@ -1014,8 +1008,8 @@ def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
     cfg = runtime_config._live_strategy_config(_TEST_PROFILE)
-    assert cfg["order_flow_impulse_min_aggressive_imbalance"] == Decimal("0.30")
-    assert cfg["order_flow_impulse_min_notional_5m_vs_30m"] == Decimal("1.25")
+    assert cfg["order_flow_impulse"].min_aggressive_imbalance == Decimal("0.30")
+    assert cfg["order_flow_impulse"].min_notional_5m_vs_30m == Decimal("1.25")
 
 
 def test_strategy_config_hash_includes_account_scoped_profile() -> None:
@@ -1227,8 +1221,6 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
 
     assert set(warmed) == {"BTCUSDT", "4USDT"}
     assert set(seen["last_processed_at_by_symbol"]) == {"BTCUSDT", "4USDT"}
-
-
 
 
 async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> None:
@@ -1596,7 +1588,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot() -> No
         latest_market_states=latest_market_states,
         latest_market_quotes=None,
         order_reconciliation=Reconciliation(),
-        on_account_snapshot=publish_snapshot,
+        on_account_snapshot=AsyncMock(side_effect=publish_snapshot),
     )
 
     assert ordering == ["reconcile", "snapshot"]

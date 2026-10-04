@@ -217,7 +217,7 @@ class PostgresMarketBookRepository:
             row = session.get(DatasetManifestRow, manifest_id)
             if row is None:
                 return None
-            rev_ids = row.revision_ids or []
+            rev_ids = row.revision_ids
             # Batch load revision rows in chunks to prevent exceeding
             # PostgreSQL parameter limit (65535) and load_only to exclude payload
             rev_rows: dict[str, MarketRevisionRefRow] = {}
@@ -272,7 +272,7 @@ class PostgresMarketBookRepository:
 
             hole_pairs: list[tuple[str, str]] = [
                 (str(hole[0]), str(hole[1]))  # type: ignore[index]
-                for hole in (row.holes or [])
+                for hole in row.holes
             ]
             holes = tuple(
                 (
@@ -351,15 +351,11 @@ class PostgresMarketBookRepository:
             hasher.update(manifest_row.interval.encode())
             hasher.update(manifest_row.start_time.isoformat().encode())
             hasher.update(manifest_row.end_time.isoformat().encode())
-            vis_mode = (
-                manifest_row.visibility_mode.value
-                if hasattr(manifest_row.visibility_mode, "value")
-                else str(manifest_row.visibility_mode)
-            )
+            vis_mode = manifest_row.visibility_mode
             hasher.update(vis_mode.encode())
             hasher.update(manifest_row.feature_algorithm_version.encode())
 
-            rev_ids = manifest_row.revision_ids or []
+            rev_ids = manifest_row.revision_ids
             chunk_size = 5000
             for i in range(0, len(rev_ids), chunk_size):
                 chunk = rev_ids[i : i + chunk_size]
@@ -440,7 +436,7 @@ class PostgresMarketBookRepository:
             row = session.get(DecisionTraceRow, decision_id)
             if row is None:
                 return None
-            rev_ids = row.evaluated_revision_ids or []
+            rev_ids = row.evaluated_revision_ids
             rev_rows: dict[str, MarketRevisionRefRow] = {}
             chunk_size = 5000
             for i in range(0, len(rev_ids), chunk_size):
@@ -490,7 +486,7 @@ class PostgresMarketBookRepository:
                     )
                 )
 
-            payload = row.trace_payload or {}
+            payload = row.trace_payload
             input_hash = str(payload.get("input_hash", ""))
             frame_digest = str(payload.get("frame_digest", ""))
 
@@ -596,7 +592,7 @@ class PostgresMarketBookRepository:
                             datetime.fromisoformat(str(h[0])),  # type: ignore[index]
                             datetime.fromisoformat(str(h[1])),  # type: ignore[index]
                         )
-                        for h in (row.holes or [])
+                        for h in row.holes
                     ),
                 )
                 for row in rows

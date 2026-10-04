@@ -294,7 +294,6 @@ async def prepare_runtime_state_partition(
             await _create_shadow_indexes(session)
             shadow_rows = int(
                 await session.scalar(text(f"SELECT count(*)::bigint FROM {shadow}"))
-                or 0
             )
             if shadow_rows != source_rows:
                 raise RuntimeError(
@@ -364,11 +363,9 @@ async def cutover_runtime_state_partition(
             copied = max(inserted.rowcount or 0, 0)
             source_rows = int(
                 await session.scalar(text(f"SELECT count(*)::bigint FROM {source}"))
-                or 0
             )
             shadow_rows = int(
                 await session.scalar(text(f"SELECT count(*)::bigint FROM {shadow}"))
-                or 0
             )
             if shadow_rows < source_rows:
                 raise RuntimeError(

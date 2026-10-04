@@ -69,28 +69,12 @@ class StreamAvailabilityClock:
         self._has_ever_been_ready = False
         now = self._clock()
         self._startup_since: float = now
-        self._disrupted_since: float | None = None
+        self._disrupted_since: float = now
         self._recovering_since: float | None = None
-        self._last_state_change: float = now
 
     @property
     def state(self) -> StreamAvailabilityState:
         return self._state
-
-    @property
-    def has_ever_been_ready(self) -> bool:
-        return self._has_ever_been_ready
-
-    @property
-    def config(self) -> StreamAvailabilityConfig:
-        return self._config
-
-    @property
-    def stream_name(self) -> str:
-        return self._stream_name
-
-    def elapsed_in_current_state(self) -> float:
-        return self._clock() - self._last_state_change
 
     def mark_connecting(self) -> None:
         """Record attempt to connect."""
@@ -101,7 +85,6 @@ class StreamAvailabilityClock:
         self,
         *,
         needs_recovery: bool = False,
-        reason: str | None = None,
     ) -> None:
         """Record that transport connection was established.
 
@@ -109,45 +92,31 @@ class StreamAvailabilityClock:
         or stays in CONNECTING (if initial startup awaiting initial ready artifact).
         Otherwise transitions directly to READY.
         """
-        now = self._clock()
-        self._disrupted_since = None
-        if not self._has_ever_been_ready:
-            if needs_recovery:
-                self._state = StreamAvailabilityState.CONNECTING
-                self._last_state_change = now
-            else:
-                self.mark_ready()
+        if not needs_recovery:
+            self.mark_ready()
+        elif self._has_ever_been_ready:
+            self.mark_recovering()
         else:
-            if needs_recovery:
-                self.mark_recovering(reason=reason)
-            else:
-                self.mark_ready()
+            self._state = StreamAvailabilityState.CONNECTING
 
-    def mark_recovering(self, reason: str | None = None) -> None:
+    def mark_recovering(self) -> None:
         """Record that stream is connected but resynchronizing state."""
         now = self._clock()
         self._state = StreamAvailabilityState.RECOVERING
-        self._disrupted_since = None
         if self._recovering_since is None:
             self._recovering_since = now
-        self._last_state_change = now
 
     def mark_ready(self) -> None:
         """Record that stream is fully synchronized and ready for normal consumption."""
-        now = self._clock()
         self._has_ever_been_ready = True
         self._state = StreamAvailabilityState.READY
-        self._disrupted_since = None
         self._recovering_since = None
-        self._last_state_change = now
 
-    def mark_disrupted(self, reason: str | None = None) -> None:
+    def mark_disrupted(self) -> None:
         """Record transport disconnect or network/protocol error."""
-        now = self._clock()
+        if self._state != StreamAvailabilityState.DISRUPTED:
+            self._disrupted_since = self._clock()
         self._state = StreamAvailabilityState.DISRUPTED
-        if self._disrupted_since is None:
-            self._disrupted_since = now
-        self._last_state_change = now
 
     def check_timeout(
         self,
@@ -156,49 +125,29 @@ class StreamAvailabilityClock:
         custom_message: str | None = None,
     ) -> None:
         """Raise an exception if the current state has exceeded its timeout budget."""
-        now = self._clock()
+        if self.remaining_budget() > 0:
+            return
         if not self._has_ever_been_ready:
-            elapsed = now - self._startup_since
-            if elapsed >= self._config.startup_timeout_seconds:
-                msg = (
-                    custom_message
-                    or f"{self._stream_name} unavailable beyond timeout "
-                    f"(startup timeout of "
-                    f"{self._config.startup_timeout_seconds:.1f}s exceeded in "
-                    f"{self._state.value})"
-                )
-                if error_factory:
-                    raise error_factory(msg)
-                raise StreamAvailabilityTimeoutError(msg)
+            detail = (
+                f"startup timeout of {self._config.startup_timeout_seconds:.1f}s "
+                f"exceeded in {self._state.value}"
+            )
+        elif self._state == StreamAvailabilityState.DISRUPTED:
+            detail = (
+                f"disruption timeout of {self._config.disrupted_timeout_seconds:.1f}s "
+                "exceeded"
+            )
         else:
-            if self._state == StreamAvailabilityState.DISRUPTED:
-                disrupted_since = self._disrupted_since if self._disrupted_since is not None else now
-                elapsed = now - disrupted_since
-                if elapsed >= self._config.disrupted_timeout_seconds:
-                    msg = (
-                        custom_message
-                        or f"{self._stream_name} unavailable beyond timeout "
-                        f"(disruption timeout of "
-                        f"{self._config.disrupted_timeout_seconds:.1f}s "
-                        "exceeded)"
-                    )
-                    if error_factory:
-                        raise error_factory(msg)
-                    raise StreamAvailabilityTimeoutError(msg)
-            elif self._state == StreamAvailabilityState.RECOVERING:
-                recovering_since = self._recovering_since if self._recovering_since is not None else now
-                elapsed = now - recovering_since
-                if elapsed >= self._config.recovery_timeout_seconds:
-                    msg = (
-                        custom_message
-                        or f"{self._stream_name} unavailable beyond timeout "
-                        f"(recovery timeout of "
-                        f"{self._config.recovery_timeout_seconds:.1f}s "
-                        "exceeded)"
-                    )
-                    if error_factory:
-                        raise error_factory(msg)
-                    raise StreamAvailabilityTimeoutError(msg)
+            detail = (
+                f"recovery timeout of {self._config.recovery_timeout_seconds:.1f}s "
+                "exceeded"
+            )
+        message = custom_message or (
+            f"{self._stream_name} unavailable beyond timeout ({detail})"
+        )
+        if error_factory is not None:
+            raise error_factory(message)
+        raise StreamAvailabilityTimeoutError(message)
 
     def remaining_budget(self) -> float:
         """
@@ -213,13 +162,14 @@ class StreamAvailabilityClock:
                 0.0, self._config.startup_timeout_seconds - (now - self._startup_since)
             )
         if self._state == StreamAvailabilityState.DISRUPTED:
-            disrupted_since = self._disrupted_since if self._disrupted_since is not None else now
             return max(
                 0.0,
-                self._config.disrupted_timeout_seconds - (now - disrupted_since),
+                self._config.disrupted_timeout_seconds - (now - self._disrupted_since),
             )
         if self._state == StreamAvailabilityState.RECOVERING:
-            recovering_since = self._recovering_since if self._recovering_since is not None else now
+            recovering_since = (
+                self._recovering_since if self._recovering_since is not None else now
+            )
             return max(
                 0.0,
                 self._config.recovery_timeout_seconds - (now - recovering_since),

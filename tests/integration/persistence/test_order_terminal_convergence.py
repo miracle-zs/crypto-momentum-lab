@@ -38,9 +38,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
 )
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFactStreamScope,
-)
 from crypto_momentum_lab.domain.execution.trade_command import (
     PositionReservation,
     TradeCommand,
@@ -476,6 +473,7 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
     reconciliation = LiveOrderReconciliation(
         order_repository=order_reads,
         state_machine=coordinator,
+        execution_book=book,
         run_id="run-1",
     )
 
@@ -503,18 +501,10 @@ async def test_duplicate_terminal_event_when_outbox_unresolved_converges(
             recover_restored_commands,
         )
 
-        async def no_network_query(_plan):
-            pytest.fail(
-                "durable terminal receipt must recover without a new exchange request"
-            )
-
         for _ in range(2):
-            assert not await recover_restored_commands(
-                book=book,
-                coordinator=coordinator,
-                orders=order_reads,
-                reconcile_order=no_network_query,
-            )
+            assert await recover_restored_commands(
+                book=book, coordinator=coordinator, orders=order_reads
+            ) == (False, ())
     else:
         # A repeat WS event also repairs the unaccepted Book observation.
         await reconciliation.reconcile_account_event(MockUpdateEvent())
@@ -554,7 +544,6 @@ async def test_transient_projection_version_mismatch_reloads_and_does_not_fail_b
     ) = await _setup_book_and_repos(factory, account)
 
     scope = ExecutionScope("live", account, "SOLUSDT", FuturesPositionSide.LONG)
-    pos_key = scope.to_position_key()
     book.register_active_stream(
         environment="live",
         account_label=account,

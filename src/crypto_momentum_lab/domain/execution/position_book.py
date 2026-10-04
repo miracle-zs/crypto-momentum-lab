@@ -17,7 +17,6 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     FactCoverageInterval,
     FactCoverageStatus,
@@ -27,7 +26,10 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
     PositionView,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,19 +137,14 @@ class PositionBook:
         now: datetime | None = None,
     ) -> PositionView:
         """Projects the authoritative PositionView at an explicit event cut."""
-        latest = getattr(self._journal, "latest_event_at", None)
-        cov = getattr(self._journal, "_coverage", None)
-        cov_end = cov.end_at if cov is not None else None
-        max_ts = latest
-        if cov_end is not None:
-            max_ts = max(max_ts, cov_end) if max_ts is not None else cov_end
+        max_ts = self._journal.latest_event_at
 
         effective_cut = None if (cut is not None and (max_ts is None or cut >= max_ts)) else cut
         cache_key = (
-            getattr(self._journal, "revision", 0),
+            self._journal.revision,
             # Applying a recovery checkpoint changes the facts without moving the
             # revision, so the generation must be part of the identity.
-            getattr(self._journal, "facts_generation", 0),
+            self._journal.facts_generation,
             effective_cut,
             self._policy_version,
             self._schema_version,
@@ -171,7 +168,7 @@ class PositionBook:
                 and self._durable_projection_facts_hash == facts_hash
             ):
                 version_id = self._durable_projection_version
-            input_revision = getattr(self._journal, "revision", 0)
+            input_revision = self._journal.revision
 
             health_status = projection.health_status
             is_comparable = projection.is_comparable

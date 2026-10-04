@@ -1,20 +1,18 @@
 """Runtime context contract shared by live decision lanes.
 
-The context provider is deliberately a small asynchronous seam.  The
-PostgreSQL implementation may add cache invalidation and currentness helpers,
-but the daemon and decision lanes only require a fresh context for a market
-state.
+Decision lanes load context asynchronously. The daemon requires the full
+reader contract so one provider owns invalidation generations and currentness.
+A plain loader cannot participate in runtime freshness tracking.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
@@ -108,9 +106,7 @@ def exit_position_block_reason(
 
 class ContextInvalidationReason(StrEnum):
     ACCOUNT_UPDATE = "account_update"
-    LEASE_CHANGE = "lease_change"
     CONTROL_CHANGE = "control_change"
-    RULES_CHANGE = "rules_change"
     RECOVERY = "recovery"
     MANUAL = "manual"
 
@@ -126,14 +122,6 @@ class ContextInvalidation:
             raise ValueError("occurred_at must be timezone-aware")
 
 
-@dataclass(frozen=True, slots=True)
-class ContextToken:
-    generation: int
-    context_epoch: int | None = None
-    account_snapshot_version: int | None = None
-    created_at: datetime | None = None
-
-
 class LiveContextProvider(Protocol):
     """Load the runtime context required by a live decision lane."""
 
@@ -143,9 +131,11 @@ class LiveContextProvider(Protocol):
     ) -> Awaitable[LiveDaemonRuntimeContext]: ...
 
 
-@runtime_checkable
 class LiveContextReader(LiveContextProvider, Protocol):
     """Explicit interface for reading live runtime context."""
+
+    @property
+    def generation(self) -> int: ...
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool: ...
 
@@ -170,7 +160,7 @@ class LiveContextRuntime:
         run_id: str,
         telemetry: MarketAdmissionSink | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
-        context_provider: LiveContextProvider,
+        context_provider: LiveContextReader,
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
         update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
         on_managed_position_symbols: (Callable[[frozenset[str]], None] | None) = None,
@@ -180,14 +170,11 @@ class LiveContextRuntime:
         self._context_provider = context_provider
         self._telemetry = telemetry
         self._clock = clock
-        resolved = context_provider
         self._run_id = run_id
-        self._currentness_check = getattr(resolved, "is_current", None)
-        self._context_invalidator = getattr(resolved, "invalidate", None)
+        self._reader = context_provider
         self._sync_pending_entry_plans = sync_pending_entry_plans
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
-        self._generation = 0
         self._managed_position_symbols: frozenset[str] = frozenset()
 
     async def prepare(
@@ -206,8 +193,6 @@ class LiveContextRuntime:
                 if prefetched.context is None:
                     raise RuntimeError("prefetched live context is missing")
                 context = prefetched.context
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             return ContextReadResult(
                 context=None,
@@ -229,7 +214,7 @@ class LiveContextRuntime:
 
     @property
     def generation(self) -> int:
-        return self._generation
+        return self._reader.generation
 
     @property
     def managed_position_symbols(self) -> frozenset[str]:
@@ -237,13 +222,7 @@ class LiveContextRuntime:
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
         try:
-            if self._currentness_check is not None:
-                return bool(self._currentness_check(context))
-            if context.account_observed_at is None:
-                return False
-            now = context.now or datetime.now(tz=UTC)
-            age = (now - context.account_observed_at).total_seconds()
-            return age <= 60.0
+            return self._reader.is_current(context)
         except Exception as error:
             _log.warning(
                 "live_context_currentness_check_failed",
@@ -253,11 +232,8 @@ class LiveContextRuntime:
             return False
 
     def invalidate(self, event: ContextInvalidation | None = None) -> None:
-        self._generation += 1
-        invalidator = self._context_invalidator
         try:
-            if invalidator is not None:
-                invalidator(event)
+            self._reader.invalidate(event)
         except Exception as error:
             _log.warning(
                 "live_context_invalidation_failed",

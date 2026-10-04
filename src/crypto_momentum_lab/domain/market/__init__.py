@@ -28,9 +28,6 @@ from crypto_momentum_lab.domain.market.models import (
     transition_market_data_state,
 )
 from crypto_momentum_lab.domain.market.ports import (
-    ArchiveAcknowledgementSink,
-    ArchiveManifestSink,
-    CaptureRepository,
     RawArchive,
 )
 from crypto_momentum_lab.domain.market.revision_models import (
@@ -43,10 +40,7 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 
 __all__ = [
-    "ArchiveAcknowledgementSink",
     "ArchiveManifest",
-    "ArchiveManifestSink",
-    "CaptureRepository",
     "CaptureRoute",
     "CaptureStream",
     "ConnectionLifecycleEvent",

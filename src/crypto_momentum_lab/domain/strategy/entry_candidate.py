@@ -8,10 +8,6 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy.models import EntryType, OrderIntentCandidate
 
 
-def _enum_text(value: object) -> str:
-    return str(getattr(value, "value", value))
-
-
 def entry_limit_price(
     candidate: OrderIntentCandidate,
     *,
@@ -20,7 +16,7 @@ def entry_limit_price(
     if candidate.limit_price is not None:
         return candidate.limit_price, "candidate.limit_price"
     if (
-        _enum_text(candidate.side) == "long"
+        candidate.side.value == "long"
         and state.last_ask_price is not None
         and state.close_price is not None
     ):
@@ -28,7 +24,7 @@ def entry_limit_price(
             min(state.last_ask_price, state.close_price),
             "min(state.last_ask_price,state.close_price)",
         )
-    if _enum_text(candidate.side) == "long" and state.last_ask_price is not None:
+    if candidate.side.value == "long" and state.last_ask_price is not None:
         return state.last_ask_price, "state.last_ask_price"
     if state.close_price is not None:
         return state.close_price, "state.close_price"

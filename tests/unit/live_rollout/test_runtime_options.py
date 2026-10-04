@@ -45,10 +45,8 @@ def _options(**overrides: object) -> LiveRunOptions:
         "risk_control_hub_url": "ws://execution-account-live:8769",
         "session_id": None,
         "operator": "",
-        "lease_owner": None,
         "strategy_config_hash": "",
         "git_commit_hash": "",
-        "migration_revision": "",
         "max_runtime_seconds": 3600,
         "poll_interval_seconds": 0.25,
         "checkpoint_every_states": 100,
@@ -90,7 +88,6 @@ def test_manual_options_resolve_to_grouped_runtime_config() -> None:
     )
 
     assert config.identity.session_id == "live-manual"
-    assert config.identity.lease_owner == "live-worker"
     assert config.strategy.entry_positive_gainer_top_count == 30
     assert config.execution.exit_mode is PositionExitMode.CANDLE_15M
     assert config.lifecycle.checkpoint_every_seconds == 60.0
@@ -116,7 +113,6 @@ def test_manifest_options_resolve_identity_and_derive_strategy_hash() -> None:
     )
 
     assert config.identity.session_id == "live-primary-v1"
-    assert config.identity.lease_owner == "live-worker"
     assert config.identity.git_commit_hash == "a" * 40
     assert len(config.identity.strategy_config_hash) == 64
     assert config.execution.entry_leverage == 5

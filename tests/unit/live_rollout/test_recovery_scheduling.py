@@ -15,9 +15,6 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
-from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
-    recover_restored_commands,
-)
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
@@ -41,13 +38,14 @@ async def test_normal_account_events_do_not_start_order_or_exit_recovery() -> No
     )
     cache = SimpleNamespace(for_symbols=lambda _symbols: ())
     channel = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=SimpleNamespace(),
         latest_market_states=cache,
         latest_market_quotes=cache,
         order_reconciliation=recovery,
         is_transient_error=lambda _error: False,
         # Match the runtime's account-fact publication callback.
-        on_account_snapshot=lambda _event: recovery.notify_account_facts_changed(),
+        on_account_snapshot=AsyncMock(side_effect=lambda _event: recovery.notify_account_facts_changed()),
     )
     event = SimpleNamespace(
         event_type="ACCOUNT_UPDATE",
@@ -101,12 +99,7 @@ async def test_restored_command_and_unresolved_order_share_one_lookup_per_pass(
         orders,
         coordinator,
         order.plan.run_id,
-        recover_commands=lambda reconcile_order: recover_restored_commands(
-            book=book,
-            coordinator=coordinator,
-            orders=orders,
-            reconcile_order=reconcile_order,
-        ),
+        execution_book=book,
     )
 
     if lookup_failure:

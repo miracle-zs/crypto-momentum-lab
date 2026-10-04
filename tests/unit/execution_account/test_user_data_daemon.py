@@ -31,6 +31,11 @@ class FakeStream:
     def __init__(self) -> None:
         self.handler = None
         self.stop_count = 0
+        self.continuity_token = 1
+        self.metrics = SimpleNamespace(event_queue_overflow_count=0)
+
+    async def request_reconnect(self, reason: str) -> None:
+        return None
 
     def set_handler(self, on_event) -> None:
         self.handler = on_event
@@ -56,6 +61,15 @@ class FakeService:
         self.heartbeat_states = []
         self.sync_include_fills = []
         self.sync_started = asyncio.Event()
+
+    async def sync_once_for_realtime(self, **kwargs):
+        return await self.sync_once(**kwargs)
+
+    async def persist_reconciliation_result(self, result) -> None:
+        return None
+
+    async def record_user_data_event(self, **receipt) -> int:
+        return 1
 
     async def sync_once(
         self,
@@ -148,7 +162,7 @@ async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up
         stream=BlockingStream(),
         config=UserDataAccountSyncConfig(),
     )
-    daemon._state = _snapshot()
+    daemon._state = AccountUserDataState(_snapshot())
     daemon._accept_events = True
 
     # 1. Default without sync result -> publishes RUNNING
@@ -233,7 +247,7 @@ async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
         stream=BlockingStream(),
         config=UserDataAccountSyncConfig(),
     )
-    daemon._state = _snapshot()
+    daemon._state = AccountUserDataState(_snapshot())
     daemon._accept_events = True
 
     import pytest

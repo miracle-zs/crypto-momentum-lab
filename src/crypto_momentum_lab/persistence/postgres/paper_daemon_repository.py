@@ -1,9 +1,8 @@
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from time import perf_counter
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -11,8 +10,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import structlog
 from sqlalchemy import case, event, func, select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.pool import Pool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import (
@@ -42,30 +41,15 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyRuntimeEventRow,
     StrategySignalRow,
 )
+from crypto_momentum_lab.persistence.postgres.serialization import (
+    jsonable,
+    normalize_for_compare,
+)
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     order_intent_candidate_row,
     paper_fill_row,
     strategy_signal_row,
 )
-
-_NEW_EXECUTION_FIELDS = {
-    "fills": ("require_market_quote",),
-    "entry_filter": (
-        "allow_long",
-        "allow_short",
-        "max_abs_aggressive_imbalance",
-        "max_cluster_trade_count",
-        "require_price_above_ema5",
-        "require_price_above_ema10",
-    ),
-    "portfolio": (
-        "require_executable_quote",
-        "candle_minimum_holding_buckets",
-        "candle_confirmation_count",
-        "candle_grace_bars",
-        "candle_grace_profit_pct",
-    ),
-}
 
 log = structlog.get_logger()
 
@@ -81,14 +65,14 @@ def checkpoint_row_values(
     _require_aware(saved_at, "saved_at")
     return {
         "run_id": run_id,
-        "last_processed_at_by_symbol": _jsonable(
+        "last_processed_at_by_symbol": jsonable(
             checkpoint.last_processed_at_by_symbol
         ),
-        "warmup_buckets_by_symbol": _jsonable(checkpoint.warmup_buckets_by_symbol),
-        "cooldown_buckets_remaining_by_symbol": _jsonable(
+        "warmup_buckets_by_symbol": jsonable(checkpoint.warmup_buckets_by_symbol),
+        "cooldown_buckets_remaining_by_symbol": jsonable(
             checkpoint.cooldown_buckets_remaining_by_symbol
         ),
-        "payload": _jsonable(checkpoint.payload),
+        "payload": jsonable(checkpoint.payload),
         "saved_at": saved_at,
     }
 
@@ -140,7 +124,7 @@ def runtime_event_row(
         "occurred_at": occurred_at,
         "symbol": symbol,
         "bucket_start": bucket_start,
-        "details": _jsonable(dict(details)),
+        "details": jsonable(dict(details)),
     }
 
 
@@ -165,9 +149,9 @@ def paper_live_run_row(
         "source_paths": list(identity.source_paths),
         "source_description": source_description,
         "execution_config": {
-            "fills": _jsonable(asdict(execution)),
-            "entry_filter": _jsonable(asdict(entry_filter)),
-            "portfolio": _jsonable(asdict(portfolio)),
+            "fills": jsonable(asdict(execution)),
+            "entry_filter": jsonable(asdict(entry_filter)),
+            "portfolio": jsonable(asdict(portfolio)),
         },
         "input_state_count": 0,
         "processed_symbol_count": 0,
@@ -260,20 +244,6 @@ def paper_position_from_row(row: PaperPositionRow) -> PaperPosition:
     )
 
 
-def _extract_pool(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> Pool | None:
-    try:
-        bind = session_factory.kw.get("bind")
-        if bind is None:
-            bind = getattr(session_factory, "bind", None)
-        sync_engine = getattr(bind, "sync_engine", bind)
-        pool = getattr(sync_engine, "pool", None)
-        return pool if isinstance(pool, Pool) else None
-    except Exception:
-        return None
-
-
 class PostgresPaperDaemonRepository:
     def __init__(
         self,
@@ -281,13 +251,10 @@ class PostgresPaperDaemonRepository:
     ) -> None:
         self._session_factory = session_factory
         self._portfolio_stats: dict[str, _PortfolioStats] = {}
-        self._pool = _extract_pool(session_factory)
+        engine = cast(AsyncEngine, session_factory.kw["bind"])
+        self._pool = engine.sync_engine.pool
         self._connect_count = 0
-        if self._pool is not None:
-            try:
-                event.listen(self._pool, "connect", self._on_pool_connect)
-            except Exception:
-                pass
+        event.listen(self._pool, "connect", self._on_pool_connect)
 
     def _on_pool_connect(
         self,
@@ -338,7 +305,7 @@ class PostgresPaperDaemonRepository:
                     )
                 }
                 actual = {key: getattr(existing, key) for key in expected}
-                if _normalize_for_compare(actual) != _normalize_for_compare(expected):
+                if normalize_for_compare(actual) != normalize_for_compare(expected):
                     raise ValueError("paper live run conflict")
         self._portfolio_stats.pop(identity.run_id, None)
 
@@ -595,16 +562,8 @@ class PostgresPaperDaemonRepository:
         event_loop_lag_ms = round((perf_counter() - lag_start) * 1000, 3)
 
         pool = self._pool
-        pool_checked_in = (
-            pool.checkedin()
-            if pool is not None and hasattr(pool, "checkedin")
-            else None
-        )
-        pool_checked_out = (
-            pool.checkedout()
-            if pool is not None and hasattr(pool, "checkedout")
-            else None
-        )
+        pool_checked_in = pool.checkedin() if isinstance(pool, QueuePool) else None
+        pool_checked_out = pool.checkedout() if isinstance(pool, QueuePool) else None
         connects_before = self._connect_count
 
         async with self._session_factory() as session:
@@ -680,132 +639,6 @@ class PostgresPaperDaemonRepository:
         log.info(
             "strategy_checkpoint_persisted",
             run_id=run_id,
-            prepare_ms=round((values_ready_at - started) * 1000, 3),
-            event_loop_lag_ms=event_loop_lag_ms,
-            pool_acquire_ms=round(
-                (pool_acquired_at - pool_acquire_started) * 1000,
-                3,
-            ),
-            is_new_connection=is_new_connection,
-            pool_checked_in=pool_checked_in,
-            pool_checked_out=pool_checked_out,
-            sql_execute_ms=round(
-                (execute_finished_at - execute_started) * 1000,
-                3,
-            ),
-            commit_ms=commit_ms,
-            total_ms=total_ms,
-        )
-
-    async def save_checkpoints(
-        self,
-        checkpoints: Sequence[tuple[str, StrategyCheckpoint, datetime]],
-    ) -> None:
-        """Persist several independent run checkpoints in one transaction."""
-        if not checkpoints:
-            return
-        started = perf_counter()
-        values = tuple(
-            checkpoint_row_values(
-                run_id=run_id,
-                checkpoint=checkpoint,
-                saved_at=saved_at,
-            )
-            for run_id, checkpoint, saved_at in checkpoints
-        )
-        values_ready_at = perf_counter()
-
-        lag_start = perf_counter()
-        await asyncio.sleep(0)
-        event_loop_lag_ms = round((perf_counter() - lag_start) * 1000, 3)
-
-        pool = self._pool
-        pool_checked_in = (
-            pool.checkedin()
-            if pool is not None and hasattr(pool, "checkedin")
-            else None
-        )
-        pool_checked_out = (
-            pool.checkedout()
-            if pool is not None and hasattr(pool, "checkedout")
-            else None
-        )
-        connects_before = self._connect_count
-
-        async with self._session_factory() as session:
-            pool_acquire_started = perf_counter()
-            await session.connection()
-            pool_acquired_at = perf_counter()
-            is_new_connection = bool(self._connect_count > connects_before)
-            statement = insert(StrategyRuntimeCheckpointRow).values(values)
-            execute_started = perf_counter()
-            await session.execute(
-                statement.on_conflict_do_update(
-                    index_elements=["run_id"],
-                    set_={
-                        key: statement.excluded[key]
-                        for key in values[0]
-                        if key != "run_id"
-                    },
-                    where=(
-                        StrategyRuntimeCheckpointRow.saved_at
-                        <= statement.excluded.saved_at
-                    ),
-                )
-            )
-            execute_finished_at = perf_counter()
-            await session.commit()
-            committed_at = perf_counter()
-            commit_ms = round((committed_at - execute_finished_at) * 1000, 3)
-            total_ms = round((committed_at - started) * 1000, 3)
-
-            checkpoint_events = [
-                {
-                    "event_id": f"ckpt-{uuid4()}",
-                    "run_id": run_id,
-                    "event_type": "strategy_checkpoint_persisted",
-                    "occurred_at": saved_at,
-                    "symbol": None,
-                    "bucket_start": None,
-                    "details": {
-                        "prepare_ms": round((values_ready_at - started) * 1000, 3),
-                        "event_loop_lag_ms": event_loop_lag_ms,
-                        "pool_acquire_ms": round(
-                            (pool_acquired_at - pool_acquire_started) * 1000,
-                            3,
-                        ),
-                        "is_new_connection": is_new_connection,
-                        "pool_checked_in": pool_checked_in,
-                        "pool_checked_out": pool_checked_out,
-                        "sql_execute_ms": round(
-                            (execute_finished_at - execute_started) * 1000,
-                            3,
-                        ),
-                        "pre_commit_ms": round(
-                            (execute_finished_at - started) * 1000, 3
-                        ),
-                        "commit_ms": commit_ms,
-                        "total_ms": total_ms,
-                    },
-                }
-                for run_id, _checkpoint, saved_at in checkpoints
-            ]
-            try:
-                await session.execute(
-                    insert(StrategyRuntimeEventRow)
-                    .values(checkpoint_events)
-                    .on_conflict_do_nothing(index_elements=["event_id", "occurred_at"])
-                )
-                await session.commit()
-            except Exception:
-                log.warning(
-                    "strategy_checkpoints_event_persist_failed",
-                    run_count=len(values),
-                    exc_info=True,
-                )
-        log.info(
-            "strategy_checkpoints_persisted",
-            run_count=len(values),
             prepare_ms=round((values_ready_at - started) * 1000, 3),
             event_loop_lag_ms=event_loop_lag_ms,
             pool_acquire_ms=round(
@@ -911,7 +744,7 @@ async def _insert_idempotent(
     )
     if existing is not None:
         existing_values = {key: getattr(existing, key) for key in values}
-        if _normalize_for_compare(existing_values) != _normalize_for_compare(values):
+        if normalize_for_compare(existing_values) != normalize_for_compare(values):
             raise ValueError(conflict_message)
         return False
     raise RuntimeError(
@@ -942,7 +775,7 @@ class _PortfolioStats:
         multiplier: int,
     ) -> None:
         status = position.status
-        status_value = getattr(status, "value", status)
+        status_value = str(status)
         if status_value == PaperPositionStatus.CLOSED.value:
             self.realized_pnl += (position.realized_pnl or Decimal("0")) * multiplier
         elif status_value == PaperPositionStatus.OPEN.value:
@@ -1000,11 +833,11 @@ async def _load_portfolio_stats(
     ).where(PaperPositionRow.run_id == run_id)
     values = (await session.execute(statement)).one()
     return _PortfolioStats(
-        realized_pnl=Decimal(values[0] or 0),
-        unrealized_pnl=Decimal(values[1] or 0),
-        entry_fees=Decimal(values[2] or 0),
-        exit_fees=Decimal(values[3] or 0),
-        open_position_count=int(values[4] or 0),
+        realized_pnl=Decimal(values[0]),
+        unrealized_pnl=Decimal(values[1]),
+        entry_fees=Decimal(values[2]),
+        exit_fees=Decimal(values[3]),
+        open_position_count=int(values[4]),
     )
 
 
@@ -1042,45 +875,8 @@ def _parse_datetime(value: object) -> datetime:
     return parsed
 
 
-def _jsonable(value: object) -> JsonValue:
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
 
 
-def _normalize_for_compare(value: object) -> object:
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, dict):
-        return {
-            str(key): _normalize_for_compare(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, list | tuple):
-        return [_normalize_for_compare(item) for item in value]
-    return value
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

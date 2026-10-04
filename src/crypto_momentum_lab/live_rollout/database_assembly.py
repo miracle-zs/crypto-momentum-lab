@@ -16,9 +16,6 @@ from crypto_momentum_lab.persistence.postgres.order_adoption_repository import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
 )
@@ -71,7 +68,6 @@ class LiveRepositories:
     risk_repository: PostgresRiskRepository
     heartbeat_live_repository: PostgresLiveRolloutRepository
     heartbeat_risk_repository: PostgresRiskRepository
-    order_repository: PostgresOrderPlanRepository
     order_adoption_repository: PostgresOrderAdoptionRepository
     order_read_repository: PostgresOrderReadRepository
     order_event_repository: PostgresOrderEventRepository
@@ -159,7 +155,6 @@ def assemble_live_persistence(
     risk_repository = PostgresRiskRepository(execution_factory)
     heartbeat_live_repository = PostgresLiveRolloutRepository(heartbeat_factory)
     heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
-    order_repository = PostgresOrderPlanRepository(execution_factory)
     order_adoption_repository = PostgresOrderAdoptionRepository(execution_factory)
     order_read_repository = PostgresOrderReadRepository(execution_factory)
     order_event_repository = PostgresOrderEventRepository(execution_factory)
@@ -188,7 +183,6 @@ def assemble_live_persistence(
         risk_repository=risk_repository,
         heartbeat_live_repository=heartbeat_live_repository,
         heartbeat_risk_repository=heartbeat_risk_repository,
-        order_repository=order_repository,
         order_adoption_repository=order_adoption_repository,
         order_read_repository=order_read_repository,
         order_event_repository=order_event_repository,

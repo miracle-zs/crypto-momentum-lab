@@ -222,16 +222,8 @@ class LiveRiskControlRuntime:
         self._reconcile_retry_max_seconds = reconcile_retry_max_seconds
 
     @property
-    def stream_available(self) -> bool:
-        return self._stream_available
-
-    @property
     def state_ready(self) -> bool:
         return self._state_ready
-
-    @property
-    def entry_blocked(self) -> bool:
-        return self._entry_blocked
 
     @property
     def entry_block_reason(self) -> str:
@@ -297,8 +289,6 @@ class LiveRiskControlRuntime:
         if event.action in self._ONE_SHOT_ACTIONS:
             try:
                 failure = await self._dispatch(event)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 failure = f"risk_control_action_dispatch_failed:{type(error).__name__}"
                 log.exception(
@@ -337,8 +327,6 @@ class LiveRiskControlRuntime:
         async with self._reconcile_lock:
             try:
                 draining, active_halt = await self._load_durable_state()
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._state_ready = False
                 self._entry_blocked = True

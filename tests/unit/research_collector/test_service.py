@@ -151,6 +151,15 @@ async def _empty_batches():
 
 
 class _IdleSource:
+    def stop(self) -> None:
+        self.stopped = True
+
+    def set_resume_cursor(self, *, stream_id, sequence) -> None:
+        self.cursor = (stream_id, sequence)
+
+    def resume_after_recovery(self, *, stream_id, sequence) -> None:
+        self.cursor = (stream_id, sequence)
+
     def batches(self):
         return _empty_batches()
 

@@ -12,25 +12,26 @@ from typing import Literal
 import structlog
 
 from crypto_momentum_lab.domain.execution.command_models import DispatchState
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
-)
-from crypto_momentum_lab.domain.execution.order_read_repository import (
-    OrderReadRepository,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.ports import (
+    OrderReadRepository,
 )
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     order_snapshot_from_update,
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
+    CoordinatedOrderExecutionPort,
 )
 from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
-    OrderRecoveryLookup,
+    recover_restored_commands,
 )
 
 log = structlog.get_logger()
@@ -51,14 +52,14 @@ class LiveOrderReconciliation:
     """
 
     order_repository: OrderReadRepository
-    state_machine: OrderExecutionPort
+    state_machine: CoordinatedOrderExecutionPort
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
     max_order_lookups_per_pass: int = 32
     family_timeout_seconds: float = 30.0
     on_unknown_order: Callable[[str], None] | None = None
     recover_exits: Callable[[], Awaitable[bool]] | None = None
-    recover_commands: Callable[[OrderRecoveryLookup], Awaitable[bool]] | None = None
+    execution_book: ExecutionBook | None = None
     repair_positions: Callable[[], Awaitable[bool]] | None = None
     request_unknown_exit: Callable[[PersistedExchangeOrder], bool] | None = None
     _requested: asyncio.Event = field(
@@ -137,9 +138,7 @@ class LiveOrderReconciliation:
             ):
                 raise ValueError("WS order update conflicts with its durable identity")
             is_outbox_terminal = True
-            book = getattr(self.state_machine, "execution_book", None)
-            if callable(book):
-                book = book()
+            book = self.execution_book
             if book is not None:
                 entry = book.get_outbox(event.client_order_id)
                 if entry is not None and entry.state not in (
@@ -165,9 +164,7 @@ class LiveOrderReconciliation:
                 return
 
             if not is_outbox_terminal and persisted.state.terminal:
-                if persisted.terminal_receipt is not None and hasattr(
-                    self.state_machine, "observe_recovered_receipt"
-                ):
+                if persisted.terminal_receipt is not None:
                     await self.state_machine.observe_recovered_receipt(
                         persisted.plan, persisted.terminal_receipt
                     )
@@ -219,9 +216,6 @@ class LiveOrderReconciliation:
         pending = False
         plans: dict[str, OrderExecutionPlan] = {}
 
-        async def reconcile_once(plan: OrderExecutionPlan) -> None:
-            plans.setdefault(plan.client_order_id, plan)
-
         try:
             cancel_batch = tuple(self._orphan_cancels.values())[
                 : self.max_order_lookups_per_pass
@@ -243,8 +237,14 @@ class LiveOrderReconciliation:
                 if result.state.terminal:
                     self._orphan_cancels.pop(plan.client_order_id, None)
             pending = bool(self._orphan_cancels)
-            if self.recover_commands is not None:
-                pending = await self.recover_commands(reconcile_once) or pending
+            if self.execution_book is not None:
+                command_pending, command_plans = await recover_restored_commands(
+                    book=self.execution_book,
+                    coordinator=self.state_machine,
+                    orders=self.order_repository,
+                )
+                pending = command_pending or pending
+                plans.update((plan.client_order_id, plan) for plan in command_plans)
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
                     if not include_confirmed and order.state in {
@@ -263,7 +263,7 @@ class LiveOrderReconciliation:
                         continue
                     pending = True
                     self._requested_runs.add(run_id)
-                    await reconcile_once(order.plan)
+                    plans.setdefault(order.plan.client_order_id, order.plan)
             ordered = list(plans.values())
             ids = list(plans)
             if self._last_lookup_id in ids:

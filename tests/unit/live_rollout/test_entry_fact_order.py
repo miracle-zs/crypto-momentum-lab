@@ -1,3 +1,5 @@
+from crypto_momentum_lab.domain.strategy import StrategySide
+
 """Real Book/context/exit scheduling regressions for the MAGIC entry race."""
 
 from dataclasses import replace
@@ -7,10 +9,12 @@ import pytest
 
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     FactCoverageInterval,
     PositionHealthStatus,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
 )
 from scripts.diagnostics.cml_entry_fact_order_20261002 import (
     probe_context,
@@ -106,7 +110,7 @@ async def test_recovery_scope_does_not_block_unrelated_exit(gate):
         TradeCommand,
         TradeCommandType,
     )
-    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+    from crypto_momentum_lab.domain.strategy import EntryType
     from tests.unit.execution.test_terminal_settlement import NOW, evidence, fill
 
     book = ExecutionBook()
@@ -161,7 +165,6 @@ async def test_recovery_scope_does_not_block_unrelated_exit(gate):
         "eth-exit",
         scope,
         "trend",
-        "1",
         "run",
         "decision",
         view.projection_version,
@@ -169,14 +172,19 @@ async def test_recovery_scope_does_not_block_unrelated_exit(gate):
         Decimal(1),
         reduce_only=True,
         target_batch_ids=tuple(batch.batch_id for batch in view.batches),
+        side=StrategySide.LONG,
     )
     result = await book.act(request)
     assert isinstance(result, Accepted)
     same_view = await book.read(SCOPE)
     same_scope = replace(
-        request, request_id="btc-exit", scope=SCOPE,
+        request,
+        request_id="btc-exit",
+        scope=SCOPE,
         expected_view_token=same_view.projection_version,
-        action=TradeCommandType.ENTRY, reduce_only=False, target_batch_ids=(),
+        action=TradeCommandType.ENTRY,
+        reduce_only=False,
+        target_batch_ids=(),
     )
     assert isinstance(await book.act(same_scope), Accepted)
     same_order = replace(same_scope, request_id="waiting")

@@ -1,22 +1,18 @@
 """Reconcile restored commands even when the order read model is terminal."""
 
-from collections.abc import Awaitable, Callable
-
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     OutboxEntry,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-from crypto_momentum_lab.domain.execution.order_read_repository import (
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.ports import (
     OrderReadRepository,
 )
-from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
+    CoordinatedOrderExecutionPort,
 )
-
-OrderRecoveryLookup = Callable[[OrderExecutionPlan], Awaitable[object]]
 
 
 def _synthesize_order_plan_from_outbox(entry: OutboxEntry) -> OrderExecutionPlan:
@@ -42,11 +38,12 @@ def _synthesize_order_plan_from_outbox(entry: OutboxEntry) -> OrderExecutionPlan
 async def recover_restored_commands(
     *,
     book: ExecutionBook,
-    coordinator: OrderExecutionCoordinator,
+    coordinator: CoordinatedOrderExecutionPort,
     orders: OrderReadRepository,
-    reconcile_order: OrderRecoveryLookup,
-) -> bool:
+) -> tuple[bool, tuple[OrderExecutionPlan, ...]]:
+    """Apply durable receipts and return uncertainty for the worker to query."""
     pending = False
+    plans: list[OrderExecutionPlan] = []
     for entry in book.list_outbox():
         requires_recovery = book.command_requires_recovery(entry.command_id)
         if (
@@ -62,7 +59,7 @@ async def recover_restored_commands(
                 )
             elif persisted.state.terminal or requires_recovery:
                 # Missing priced facts require exchange lookup, never a new submit.
-                await reconcile_order(persisted.plan)
+                plans.append(persisted.plan)
         else:
             # Command exists in outbox but has no persisted order record.
             if entry.state == DispatchState.PREPARED and not entry.attempt_count:
@@ -76,6 +73,6 @@ async def recover_restored_commands(
                 or entry.attempt_count > 0
             ):
                 plan = _synthesize_order_plan_from_outbox(entry)
-                await reconcile_order(plan)
+                plans.append(plan)
         pending = book.command_requires_recovery(entry.command_id) or pending
-    return pending
+    return pending, tuple(plans)

@@ -103,7 +103,7 @@ def is_exit_fill(
         or bool(raw.get("reduce_only"))
         or (
             order_event is not None
-            and bool((order_event.details or {}).get("is_reduce_only"))
+            and bool(order_event.details.get("is_reduce_only"))
         )
         or (episode_side == StrategySide.LONG and fill.side.upper() == "SELL")
         or (episode_side == StrategySide.SHORT and fill.side.upper() == "BUY")

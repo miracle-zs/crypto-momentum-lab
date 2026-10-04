@@ -19,6 +19,9 @@ from crypto_momentum_lab.domain.market.models import (
     QualityEvent,
     RawEnvelope,
 )
+from crypto_momentum_lab.domain.market.runtime_state_models import (
+    RuntimeStateSequenceRange,
+)
 from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
 )
@@ -29,9 +32,6 @@ from crypto_momentum_lab.market_data.quality.tracker import StreamQualityTracker
 from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
-    RuntimeStateSequenceRange,
 )
 
 
@@ -67,9 +67,8 @@ class _NoopRepository:
     def __init__(self) -> None:
         self.quality_event_count = 0
 
-    async def save_quality_event(self, event: QualityEvent) -> None:
-        del event
-        self.quality_event_count += 1
+    async def save_quality_events(self, events: tuple[QualityEvent, ...]) -> None:
+        self.quality_event_count += len(events)
 
     async def save_process_state(
         self,

@@ -77,7 +77,7 @@ class LiveControlPlaneRuntime:
         notify_market_state_gap: Callable[[str], None],
         refresh_entry_gate: Callable[[], None],
         telemetry: ConsumerHealthSink | None = None,
-        clock: Clock | None = None,
+        clock: Clock = lambda: datetime.now(UTC),
         strategy_warmup_ready: bool = False,
     ) -> None:
         if not session_id.strip():
@@ -89,7 +89,7 @@ class LiveControlPlaneRuntime:
         self._notify_market_state_gap = notify_market_state_gap
         self._refresh_entry_gate = refresh_entry_gate
         self._telemetry = telemetry
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._account_snapshot_available = True
         self._market_state_available = market_state_available
         self._market_state_unavailable_reason = (

@@ -25,7 +25,6 @@ class MetricFamily(StrEnum):
     MONEY_WEIGHTED_RETURN = "money_weighted_return"
     MODIFIED_DIETZ = "modified_dietz"
     MAX_DRAWDOWN = "max_drawdown"
-    SHARPE_RATIO = "sharpe_ratio"
 
 
 class MetricStatus(StrEnum):
@@ -36,18 +35,6 @@ class MetricStatus(StrEnum):
     INSUFFICIENT_COVERAGE = "insufficient_coverage"
     STALE = "stale"
     UNKNOWN = "unknown"
-
-
-class CashFlowType(StrEnum):
-    """Authoritative cash flow classification categories (R6)."""
-
-    DEPOSIT = "deposit"
-    WITHDRAWAL = "withdrawal"
-    TRADING_FEE = "trading_fee"
-    FUNDING_FEE = "funding_fee"
-    REALIZED_PNL = "realized_pnl"
-    AUDIT_ADJUSTMENT = "audit_adjustment"
-    FEE_REBATE = "fee_rebate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,14 +82,6 @@ class CashFlowFact:
         if not self.source.strip():
             raise ValueError("source must not be empty")
 
-    def to_live_adjustment(self) -> LiveCashFlowAdjustment:
-        return LiveCashFlowAdjustment(
-            account_label=self.account_label,
-            effective_at=self.effective_at,
-            amount=self.amount,
-            cash_flow_type=self.cash_flow_type,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class ValuationPoint:
@@ -128,7 +107,6 @@ class CoverageReceipt:
     interval_end: datetime
     source: str
     cursor_boundary: datetime | str | None = None
-    end_condition: str = "cursor_exhausted"
     gaps: tuple[tuple[datetime, datetime], ...] = ()
     is_gapless: bool = True
     is_empty_proven: bool = False
@@ -165,8 +143,6 @@ class AccountEquityCut:
     valuation_points: tuple[ValuationPoint, ...] = ()
     realized_pnl: Decimal = Decimal("0.00")
     unrealized_pnl: Decimal = Decimal("0.00")
-    fees_paid: Decimal = Decimal("0.00")
-    funding_fees: Decimal = Decimal("0.00")
     has_unknown_cash_flows: bool = False
     valuation_basis: str = "wallet"
     asset: str = "USDT"
@@ -216,10 +192,8 @@ class MetricSpec:
 
     name: str
     family: MetricFamily
-    version: str = "v1"
-    unit: str = "USDT"
-    benchmark: str | None = None
-    annualization_factor: int = 365
+    version: str = field(default="v1", kw_only=True)
+    unit: str = field(default="USDT", kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.name.strip():

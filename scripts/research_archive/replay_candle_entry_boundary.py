@@ -933,9 +933,6 @@ async def load_and_replay() -> dict[str, Any]:
         "generated_at": datetime.now(UTC),
         "b1_position_rows": len(b1_positions),
         "live_entry_order_rows": len(live_positions),
-        # Kept as a compatibility alias for consumers of the first report;
-        # unlike the old version it now has the corrected entry-order count.
-        "live_reconstructed_rows": len(live_positions),
         "candle_source": "binance_fapi_15m",
         "candle_cutoff": cutoff,
         "candle_count": sum(len(values) for values in candles_by_symbol.values()),

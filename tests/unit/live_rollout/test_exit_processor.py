@@ -4,11 +4,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
@@ -23,12 +28,20 @@ from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
     LiveExitProcessor,
 )
-from crypto_momentum_lab.live_rollout.exits import LiveExitOrderRequest
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitOrderRequest,
+    ManagedLivePosition,
+)
 from crypto_momentum_lab.live_rollout.order_identity_errors import (
     is_durable_order_identity_conflict,
 )
+from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
+from tests.fixtures.async_reservations import (
+    InMemoryPositionReservationRepository as MemoryReservations,
+)
 from tests.fixtures.live_market import _intent, _state
+from tests.fixtures.prepared_submission import submit_prepared
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
@@ -59,7 +72,6 @@ async def test_exit_recovery_keeps_inspecting_after_previous_replacement_attempt
         plan=plan,
         known_executed_quantity=Decimal("0"),
         state=_state(),
-        context=_context(),
     )
     assert result is None
     inspector.assert_awaited_once_with(plan)
@@ -126,7 +138,7 @@ async def test_one_batch_cancel_failure_does_not_stop_another_batch_exit(cancel_
     ("message", "expected"),
     [
         ("client order ID is already bound to a different order", True),
-        ("order already exists in terminal status", True),
+        ("execution command cml_1 is in non-dispatchable state terminal", True),
         ("active lease disappeared", False),
         ("exit order was allocated from stale position", False),
     ],
@@ -188,6 +200,17 @@ def _context() -> LiveDaemonRuntimeContext:
         SimpleNamespace(
             pending_position_symbols=frozenset(),
             unmanaged_position_symbols=frozenset(),
+            managed_positions=(
+                ManagedLivePosition(
+                    symbol=_intent().symbol,
+                    side=StrategySide.LONG,
+                    position_side=FuturesPositionSide.LONG,
+                    quantity=Decimal("1"),
+                    entry_price=Decimal("100"),
+                    opened_at=NOW,
+                    account_label="primary",
+                ),
+            ),
         ),
     )
 
@@ -202,6 +225,8 @@ def _processor(
         return None
 
     return LiveExitProcessor(
+        position_locks=PositionLifecycleLocks(),
+        account_label="primary",
         config=ExitProcessorConfig(run_id="run-1"),
         exit_manager=None,
         exit_recovery_client=None,
@@ -213,6 +238,7 @@ def _processor(
         context_provider=cast(LiveContextProvider, provide_context),
         apply_context=publish_positions,
         invalidate_context_cache=lambda: None,
+        request_recovery=Mock(),
     )
 
 
@@ -238,7 +264,12 @@ async def test_process_requests_delegates_one_exit_and_reports_submission_counts
     )
 
     assert (approved, submitted, failure) == (1, 1, None)
-    assert submission.calls == [(candidate, Decimal("0.001"), state)]
+    assert len(submission.calls) == 1
+    submitted_candidate, quantity, submitted_state = submission.calls[0]
+    assert submitted_candidate.candidate_id == candidate.candidate_id
+    assert submitted_candidate.reduce_only
+    assert quantity == Decimal("0.001")
+    assert submitted_state == state
 
 
 @pytest.mark.asyncio
@@ -394,7 +425,6 @@ async def test_recovery_guard_preserves_receipt_and_post_attempts():
         plan=plan,
         known_executed_quantity=Decimal("0"),
         state=_state(),
-        context=_context(),
         source_candidate=replace(_intent(), reduce_only=True),
     )
     assert result is None
@@ -402,7 +432,6 @@ async def test_recovery_guard_preserves_receipt_and_post_attempts():
         plan=plan,
         known_executed_quantity=Decimal("0"),
         state=_state(),
-        context=_context(),
     )
     recovery.inspect_exit_order.assert_awaited_once()
 
@@ -436,14 +465,13 @@ async def test_stale_exit_projection_defers_before_post_and_invalidates_context(
         _submission_preparation,
     )
 
-    book = ExecutionBook()
+    book = ExecutionBook(reservation_repository=MemoryReservations())
     backend, repository = AsyncMock(), AsyncMock()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=AsyncMock(),
     )
     coordinator.configure_submission(repository)
     plan = OrderExecutionPlan(
@@ -594,7 +622,7 @@ async def test_real_book_degraded_view_does_not_block_exit():
     )
 
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
-    book = ExecutionBook()
+    book = ExecutionBook(reservation_repository=MemoryReservations())
     fill = AccountFillEvent(
         "live",
         "primary",
@@ -639,7 +667,6 @@ async def test_real_book_degraded_view_does_not_block_exit():
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=MagicMock(),
     )
     plan = OrderExecutionPlan(
         intent_id="exit",
@@ -659,7 +686,7 @@ async def test_real_book_degraded_view_does_not_block_exit():
 
     class GuardedSubmission:
         async def execute(self, *_args, **_kwargs):
-            return await coordinator.submit(plan)
+            return await submit_prepared(coordinator, plan)
 
     processor = _processor(GuardedSubmission())
     result = await processor.process_requests(
@@ -824,8 +851,9 @@ async def test_cancel_fallback_continues_when_context_read_temporarily_fails():
                 symbol=plan.symbol,
                 position_side=plan.position_side,
                 quantity=plan.quantity,
-                side="long",
+                side=StrategySide.LONG,
                 batches=(),
+                projection_version=None,
             ),
         )
     )
@@ -1043,14 +1071,13 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
 
 async def test_recovery_batch_rotates_failed_reads_without_starving_later_orders():
     processor = _processor(RecordingSubmission(None))
-    processor._exit_recovery_client = object()
     reads = []
 
-    async def load(state):
-        reads.append(state.symbol)
-        raise OSError("account storage temporarily unavailable")
+    async def inspect(plan):
+        reads.append(plan.symbol)
+        raise OSError("exchange inspection temporarily unavailable")
 
-    processor._context_provider = load
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
     for i in range(6):
         state = replace(_state(), symbol=f"SYMBOL{i}USDT")
         processor.request_exit_recovery(
@@ -1112,7 +1139,6 @@ async def test_durable_recovery_attempt_does_not_stop_inspection_after_restart(a
         plan=plan,
         known_executed_quantity=Decimal("0.2"),
         state=_state(),
-        context=_context(),
     )
     assert result is None
     inspector.assert_awaited_once_with(plan)
@@ -1151,7 +1177,6 @@ async def test_committed_flat_receipt_invalidates_context_without_replacement():
         plan=plan,
         known_executed_quantity=Decimal("0"),
         state=_state(),
-        context=_context(),
     )
     assert observed == result
     invalidate.assert_called_once()

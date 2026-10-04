@@ -81,7 +81,7 @@ def _recover_execution_watermark(
 ) -> tuple[Decimal, Decimal]:
     event_pairs: list[tuple[Decimal, Decimal]] = []
     for event in events:
-        details = event.details if isinstance(event.details, Mapping) else {}
+        details = event.details
         raw_quantity = details.get(
             "executed_quantity", details.get("cumulative_filled_quantity")
         )
@@ -325,13 +325,13 @@ class PostgresCommandRepository:
             ).all()
             result = []
             for r, order in rows:
-                if getattr(r, "command", None) in (
+                if r.command in (
                     "resolve_unknown_order",
                     "manual_reduce_only_recovery",
                     "manual_recovery_result",
                 ):
                     continue
-                dtls = dict(r.details) if isinstance(r.details, dict) else {}
+                dtls = dict(r.details)
                 if dtls.get("external_order_id") is None:
                     dtls["external_order_id"] = order.exchange_order_id if order is not None else None
                 scope = dtls.get("scope")
@@ -380,13 +380,13 @@ class PostgresCommandRepository:
 
             candidate_client_ids: set[str] = set()
             for row in rows:
-                if getattr(row, "command", None) in (
+                if row.command in (
                     "resolve_unknown_order",
                     "manual_reduce_only_recovery",
                     "manual_recovery_result",
                 ):
                     continue
-                details = dict(row.details) if isinstance(row.details, dict) else {}
+                details = dict(row.details)
                 scope = details.get("scope")
                 if (
                     account_label is not None
@@ -431,13 +431,13 @@ class PostgresCommandRepository:
 
         result: list[dict[str, object]] = []
         for row in rows:
-            if getattr(row, "command", None) in (
+            if row.command in (
                 "resolve_unknown_order",
                 "manual_reduce_only_recovery",
                 "manual_recovery_result",
             ):
                 continue
-            details = dict(row.details) if isinstance(row.details, dict) else {}
+            details = dict(row.details)
             raw_scope = details.get("scope")
             scope = dict(raw_scope) if isinstance(raw_scope, Mapping) else {}
             status = str(row.status)
@@ -459,9 +459,7 @@ class PostgresCommandRepository:
 
             order_events = events_by_client.get(client_order_id, [])
             for event in order_events:
-                event_details = (
-                    event.details if isinstance(event.details, Mapping) else {}
-                )
+                event_details = event.details
                 for field_name in (
                     "environment",
                     "account_label",

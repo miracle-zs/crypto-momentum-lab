@@ -83,8 +83,9 @@ def _classify_live_positions_detailed(
     orders: list[OrderObservation],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
     *,
+    environment: str,
+    account_label: str,
     entry_fill_times: Mapping[str, datetime] | None = None,
-    entry_fill_prices: Mapping[str, Decimal] | None = None,
     exit_batch_ids: Mapping[str, str] | None = None,
     order_identity_events: Mapping[
         str,
@@ -103,7 +104,6 @@ def _classify_live_positions_detailed(
 ]:
     resolved_since = since_time or _resolve_symbol_fill_horizon(orders, positions)
     fill_times = entry_fill_times or {}
-    fill_prices = entry_fill_prices or {}
     identity_events = order_identity_events or {}
     fill_quantities = account_fill_quantities or {}
     ambiguous_identity_ids = frozenset(
@@ -191,7 +191,7 @@ def _classify_live_positions_detailed(
             log.critical(
                 "live_position_batch_attribution_blocked",
                 symbol=position.symbol,
-                account_label=getattr(position, "account_label", None),
+                account_label=account_label,
                 ambiguous_client_order_ids=sorted(
                     {
                         order.client_order_id
@@ -223,7 +223,6 @@ def _classify_live_positions_detailed(
             if _has_recent_pending_entry_order(
                 position,
                 matching_orders,
-                fill_times,
                 side=side,
             ):
                 pending.add(position.symbol)
@@ -256,7 +255,7 @@ def _classify_live_positions_detailed(
                 key=lambda o: (o.updated_at, o.created_at),
                 default=None,
             )
-            observed_at = getattr(position, "observed_at", None)
+            observed_at = position.observed_at
             if isinstance(observed_at, datetime) and latest_closing_order is not None:
                 # The snapshot was observed after the exit order was submitted
                 # (allowing minor clock skew) and before settlement window expires.
@@ -275,11 +274,11 @@ def _classify_live_positions_detailed(
         batches = (
             _build_position_batches(
                 position=position,
+                environment=environment,
+                account_label=account_label,
                 side=side,
                 position_side=position_side,
                 matching_orders=matching_orders,
-                fill_times=fill_times,
-                fill_prices=fill_prices,
                 account_fills=account_fills,
                 since_time=resolved_since,
                 coverage_evidence=((coverage_by_symbol or {}).get(position.symbol)),
@@ -299,7 +298,6 @@ def _classify_live_positions_detailed(
             if _has_recent_pending_entry_order(
                 position,
                 matching_orders,
-                fill_times,
                 side=side,
             ):
                 pending.add(position.symbol)
@@ -326,6 +324,7 @@ def _classify_live_positions_detailed(
         aggregate_closing_filled = closing_filled and not batches
         managed.append(
             ManagedLivePosition(
+                account_label=account_label,
                 symbol=position.symbol,
                 side=side,
                 position_side=position_side,
@@ -374,7 +373,6 @@ def _classify_live_positions_detailed(
 def _has_recent_pending_entry_order(
     position: AccountPositionSnapshot | PositionObservation,
     matching_orders: Sequence[_PositionOrder],
-    fill_times: Mapping[str, datetime],
     *,
     side: StrategySide,
 ) -> bool:
@@ -385,9 +383,7 @@ def _has_recent_pending_entry_order(
     recent, non-terminal entry order from this run qualifies as pending;
     unknown positions and stale orders remain fail-closed as unmanaged.
     """
-    observed_at = getattr(position, "observed_at", None)
-    if not isinstance(observed_at, datetime):
-        return False
+    observed_at = position.observed_at
     for order in matching_orders:
         if (
             order.reduce_only
@@ -395,11 +391,8 @@ def _has_recent_pending_entry_order(
             or order.state not in _PENDING_ENTRY_STATES
         ):
             continue
-        try:
-            pending_since = min(order.created_at, order.updated_at)
-            age_seconds = (observed_at - pending_since).total_seconds()
-        except TypeError:
-            return False
+        pending_since = min(order.created_at, order.updated_at)
+        age_seconds = (observed_at - pending_since).total_seconds()
         if 0 <= age_seconds <= _PENDING_POSITION_MAX_AGE_SECONDS:
             return True
     return False
@@ -412,15 +405,14 @@ def _normalise_position_orders(
     order_identity_events: Mapping[
         str,
         Sequence[OrderIdentityEvent],
-    ]
-    | None = None,
-    account_fill_quantities: Mapping[str, Decimal] | None = None,
+    ],
+    account_fill_quantities: Mapping[str, Decimal],
 ) -> tuple[_PositionOrder, ...]:
     unresolved_by_client_id = {item.plan.client_order_id: item for item in unresolved}
     normalised: list[_PositionOrder] = []
     seen_keys: set[str] = set()
     for row in orders:
-        client_order_id = _optional_text(getattr(row, "client_order_id", None))
+        client_order_id = _optional_text(row.client_order_id)
         persisted = (
             None
             if client_order_id is None
@@ -428,7 +420,7 @@ def _normalise_position_orders(
         )
         legacy_events = (
             ()
-            if client_order_id is None or order_identity_events is None
+            if client_order_id is None
             else order_identity_events.get(client_order_id, ())
         )
         expanded_orders = _expand_legacy_order_row(
@@ -439,7 +431,7 @@ def _normalise_position_orders(
                 None if persisted is None else persisted.executed_quantity
             ),
             events=legacy_events,
-            account_fill_quantities=account_fill_quantities or {},
+            account_fill_quantities=account_fill_quantities,
         )
         if expanded_orders is not None:
             for expanded in expanded_orders:
@@ -560,25 +552,3 @@ def _strategy_side(
 
 def _opening_order_matches_side(order_side: str, side: StrategySide) -> bool:
     return (order_side == "BUY") is (side is StrategySide.LONG)
-
-
-def _filled_order_quantity(order: object) -> Decimal:
-    executed_quantity = getattr(order, "executed_quantity", None)
-    if executed_quantity is not None:
-        try:
-            executed = Decimal(str(executed_quantity))
-        except (ArithmeticError, TypeError, ValueError):
-            executed = Decimal("0")
-        if executed > 0:
-            return executed
-
-    # FILLED rows written before cumulative executed_quantity was persisted
-    # still carry the planned quantity, which is the safest fallback for the
-    # account-sync-lag suppression path.
-    quantity = getattr(order, "quantity", None)
-    if quantity is None:
-        return Decimal("0")
-    try:
-        return max(Decimal("0"), Decimal(str(quantity)))
-    except (ArithmeticError, TypeError, ValueError):
-        return Decimal("0")

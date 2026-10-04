@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -68,6 +69,7 @@ def _state() -> MarketState15s:
 
 
 class _Risk:
+    config_hash = "risk-test-config"
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
 
 
@@ -168,10 +170,15 @@ def test_missing_position_view_yields_none() -> None:
     assert out is None
 
 
-@pytest.mark.parametrize("diagnostic", ["none", "pending_position_symbols", "unmanaged_position_symbols"])
+@pytest.mark.parametrize(
+    "diagnostic", ["none", "pending_position_symbols", "unmanaged_position_symbols"]
+)
 def test_unready_position_view_remains_available_for_decisions(diagnostic) -> None:
     out = frozen_decision_inputs_from_context(
-        _Ctx(account_snapshot=_snapshot(), **({diagnostic: frozenset({"BTCUSDT"})} if diagnostic != "none" else {})),
+        _Ctx(
+            account_snapshot=_snapshot(),
+            **({diagnostic: frozenset({"BTCUSDT"})} if diagnostic != "none" else {}),
+        ),
         _state(),
         account_label="primary",
         position_view=_position_view(health_status=PositionHealthStatus.CATCHING_UP),
@@ -208,7 +215,7 @@ def test_real_cash_and_versions_are_used() -> None:
 
 
 async def test_fact_source_requires_bound_context() -> None:
-    src = LiveDecisionFactSource("primary")
+    src = LiveDecisionFactSource("primary", request_exit_recovery=Mock())
     assert await src.build(_state()) is None
 
 
@@ -226,7 +233,10 @@ def test_account_stream_registration_is_explicit_and_rebound_with_book() -> None
     initial = Mock()
     replacement = Mock()
     source = LiveDecisionFactSource(
-        "primary", execution_book=Reader(), register_account_stream=initial
+        "primary",
+        execution_book=Reader(),
+        register_account_stream=initial,
+        request_exit_recovery=Mock(),
     )
     source.bind_account_stream(stream_id="accounts", stream_epoch="epoch", sequence=2)
     initial.assert_called_once_with(
@@ -263,7 +273,10 @@ async def test_fact_source_degrades_only_mismatched_restored_stream(hedge_mode) 
             )
 
     src = LiveDecisionFactSource(
-        "primary", execution_book=FakeBook(), hedge_mode=hedge_mode
+        "primary",
+        execution_book=FakeBook(),
+        hedge_mode=hedge_mode,
+        request_exit_recovery=Mock(),
     )
     src.bind_context(_Ctx(account_snapshot=_snapshot()))
     src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
@@ -284,7 +297,9 @@ async def test_hedge_side_discovery_reads_only_the_candidate_symbol() -> None:
             raise AssertionError("hedge side discovery scanned every historical symbol")
 
     book = FakeBook()
-    src = LiveDecisionFactSource("primary", execution_book=book, hedge_mode=True)
+    src = LiveDecisionFactSource(
+        "primary", execution_book=book, hedge_mode=True, request_exit_recovery=Mock()
+    )
     src.bind_context(_Ctx(account_snapshot=_snapshot()))
     src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
 
@@ -298,7 +313,10 @@ async def test_fact_source_does_not_hide_other_book_errors() -> None:
             raise ValueError("corrupt projection")
 
     src = LiveDecisionFactSource(
-        "primary", execution_book=FakeBook(), hedge_mode=False
+        "primary",
+        execution_book=FakeBook(),
+        hedge_mode=False,
+        request_exit_recovery=Mock(),
     )
     src.bind_context(_Ctx(account_snapshot=_snapshot()))
     src.bind_account_stream(stream_id="current", stream_epoch="epoch-2", sequence=1)
@@ -311,12 +329,15 @@ async def test_fact_source_commit_decision_updates_policy_state() -> None:
     class FakeUoW:
         async def commit_decision(self, commit):
             return SimpleNamespace(
+                is_replay=False,
                 policy_revision=commit.expected_policy_revision + 1,
                 next_state_digest="digest_test",
                 decision_id="dec_test",
             )
 
-    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    src = LiveDecisionFactSource(
+        "primary", decision_unit_of_work=FakeUoW(), request_exit_recovery=Mock()
+    )
     assert src.current_policy_state.policy_version == 1
 
     next_st = PolicyState(policy_version=7)
@@ -393,6 +414,7 @@ def _pending_exit_case(*, request_exit_recovery=lambda: None):
     uow.mark_exit_dispatched.return_value = True
     book = create_autospec(ExecutionBook, instance=True, spec_set=True)
     view = SimpleNamespace(
+        total_quantity=Decimal("1"),
         stream_scope=scope,
         is_ready_for_trade=True,
         projection_version="pv_expected",
@@ -577,12 +599,15 @@ async def test_fact_source_commit_decision_heals_diverged_prior_digest() -> None
     class FakeUoW:
         async def commit_decision(self, commit):
             return SimpleNamespace(
+                is_replay=False,
                 policy_revision=commit.expected_policy_revision + 1,
                 next_state_digest="digest_healed",
                 decision_id="dec_heal",
             )
 
-    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    src = LiveDecisionFactSource(
+        "primary", decision_unit_of_work=FakeUoW(), request_exit_recovery=Mock()
+    )
     # Fabricate a diverged in-memory policy digest
     src._policy_digest = "diverged_in_memory_digest"
 
@@ -618,12 +643,15 @@ async def test_fact_source_commit_decision_heals_skipped_revision() -> None:
         async def commit_decision(self, commit):
             # UoW returns a revision ahead by 5
             return SimpleNamespace(
+                is_replay=False,
                 policy_revision=commit.expected_policy_revision + 5,
                 next_state_digest="digest_advanced",
                 decision_id="dec_skip",
             )
 
-    src = LiveDecisionFactSource("primary", decision_unit_of_work=FakeUoW())
+    src = LiveDecisionFactSource(
+        "primary", decision_unit_of_work=FakeUoW(), request_exit_recovery=Mock()
+    )
     next_st = PolicyState(policy_version=3)
     res = DecisionResult(
         decision_id="dec_skip",
@@ -665,18 +693,23 @@ async def test_obsolete_pending_timeout_uses_receipt_recovery_without_resubmissi
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.decision.ports import ExitRecoveryDisposition
+
     source, uow, _, view, handler, command = _pending_exit_case()
     source._obsolete_exit_reasons = frozenset({"max_holding_period"})
     command = replace(command, reason="max_holding_period")
     uow.load_pending_exits.return_value = (("incident-decision", command),)
     view.total_quantity = Decimal("1")
-    recovery = AsyncMock(return_value=ExitRecoveryDisposition("SUPERSEDED", "verified_unsubmitted"))
+    recovery = AsyncMock(
+        return_value=ExitRecoveryDisposition("SUPERSEDED", "verified_unsubmitted")
+    )
     source.set_exit_recovery_handler(recovery)
     await source.recover_pending_exits()
     handler.assert_not_awaited()
     recovery.assert_awaited_once_with(command)
     uow.mark_exit_superseded.assert_awaited_once_with(
-        "incident-decision", command.command_id, "verified_unsubmitted",
+        "incident-decision",
+        command.command_id,
+        "verified_unsubmitted",
     )
 
 

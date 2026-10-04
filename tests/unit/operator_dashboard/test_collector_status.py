@@ -201,9 +201,7 @@ def test_collector_status_alerts_on_injected_disk_warning(tmp_path) -> None:
     response = read_research_collector_status(
         root,
         now=now,
-        disk_usage_fn=lambda _path: _Usage(
-            warning_free * 2, warning_free, warning_free
-        ),
+        disk_free_bytes_fn=lambda _path: warning_free,
     )
 
     assert response.status is OperationalStatus.DEGRADED
@@ -227,7 +225,7 @@ def test_collector_status_alerts_on_injected_disk_paused(tmp_path) -> None:
     response = read_research_collector_status(
         root,
         now=now,
-        disk_usage_fn=lambda _path: _Usage(pause_free * 2, pause_free, pause_free),
+        disk_free_bytes_fn=lambda _path: pause_free,
     )
 
     assert response.status is OperationalStatus.HALTED

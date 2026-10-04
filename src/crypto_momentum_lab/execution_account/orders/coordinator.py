@@ -1,4 +1,3 @@
-
 """Priority-aware coordination for live order commands.
 
 The coordinator is the live execution seam.  It keeps commands for one
@@ -13,7 +12,8 @@ import asyncio
 import hashlib
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -79,7 +79,9 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionRepository,
     PreparedOrderSubmission,
 )
-from crypto_momentum_lab.domain.execution.ports import ExecutionTransactionPort
+from crypto_momentum_lab.domain.execution.ports import (
+    ExecutionTransactionPort,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     PositionKey,
@@ -87,15 +89,13 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
 )
-from crypto_momentum_lab.domain.execution.reservation_repository import (
-    ReservationRepository,
-)
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitPolicyMode,
     PositionReservation,
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
     coverage_from_scan,
 )
@@ -116,7 +116,7 @@ class OrderExecutionPort(Protocol):
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: PreparedOrderSubmission,
     ) -> OrderExecutionResult: ...
 
     async def reconcile_order(
@@ -149,6 +149,12 @@ class OrderExecutionPort(Protocol):
 
 
 class CoordinatedOrderExecutionPort(OrderExecutionPort, Protocol):
+    async def wait_for_entry_submissions_idle(self) -> None: ...
+
+    async def observe_recovered_receipt(
+        self, plan: OrderExecutionPlan, receipt: PersistedOrderReceipt
+    ) -> None: ...
+
     def block_entry_submissions(self) -> None: ...
 
     def unblock_entry_submissions(self) -> None: ...
@@ -343,7 +349,9 @@ class _KeyCommandScheduler:
                 future.cancel()
             else:
                 # Cancellation of the waiter cannot erase an in-flight POST.
-                future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                future.add_done_callback(
+                    lambda done: done.exception() if not done.cancelled() else None
+                )
             raise
 
     async def close(self) -> None:
@@ -483,12 +491,9 @@ class OrderExecutionCoordinator:
         exit_headroom: int = 16,
         max_queue_wait_seconds: float = 30.0,
         idle_timeout_seconds: float = 120.0,
-        domain_coordinator: ExecutionCoordinator | None = None,
-        reservation_repository: ReservationRepository | None = None,
-        execution_book: ExecutionBook | None = None,
-        initial_reservations: Iterable[PositionReservation] | None = None,
+        execution_book: ExecutionBook,
         submission_repository: OrderSubmissionRepository | None = None,
-        submission_clock: Callable[[], datetime] | None = None,
+        submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -502,7 +507,7 @@ class OrderExecutionCoordinator:
             )
         self._submission_repository = submission_repository
         self._submission_configuration_locked = False
-        self._submission_clock = submission_clock or (lambda: datetime.now(UTC))
+        self._submission_clock = submission_clock
         self._backend = backend
         self._environment = environment.strip()
         self._account_label = account_label.strip()
@@ -510,18 +515,7 @@ class OrderExecutionCoordinator:
         self._exit_headroom = exit_headroom
         self._max_queue_wait_seconds = max_queue_wait_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
-        self._domain_coordinator = domain_coordinator
-        self._reservation_repository = reservation_repository
-        self._execution_book = execution_book or ExecutionBook(
-            coordinator=self._domain_coordinator,
-            reservation_repository=self._reservation_repository,
-        )
-        if self._domain_coordinator is None and self._execution_book is not None:
-            self._domain_coordinator = self._execution_book.coordinator
-        if initial_reservations:
-            for r in initial_reservations:
-                if self._domain_coordinator is not None:
-                    self._domain_coordinator.register_reservation(r)
+        self._execution_book = execution_book
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
@@ -540,28 +534,18 @@ class OrderExecutionCoordinator:
         self._active_stream: tuple[str, str] | None = None
 
     @property
-    def domain_coordinator(self) -> ExecutionCoordinator | None:
-        return self._domain_coordinator
+    def domain_coordinator(self) -> ExecutionCoordinator:
+        return self._execution_book.coordinator
 
     @property
     def execution_book(self) -> ExecutionBook:
         return self._execution_book
 
-    @property
-    def reservation_repository(self) -> ReservationRepository | None:
-        return self._reservation_repository
-
-    @property
-    def is_execution_book_enabled(self) -> bool:
-        return True
-
     def get_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
         """Returns currently tracked active reservations."""
-        if self._execution_book is not None:
-            return self._execution_book.get_active_reservations(key)
-        return ()
+        return self._execution_book.get_active_reservations(key)
 
     def block_entry_submissions(self) -> None:
         """Reject queued/future entries and drain the one already in flight."""
@@ -582,7 +566,6 @@ class OrderExecutionCoordinator:
     async def observe_account_snapshot(
         self,
         snapshot: AccountPositionSnapshot | AccountSnapshot | None,
-        symbols: tuple[str, ...] | frozenset[str] = (),
         *,
         fills: tuple[AccountFillEvent, ...] = (),
         fill_load_scans: tuple[AccountFillLoadScan, ...] = (),
@@ -593,8 +576,6 @@ class OrderExecutionCoordinator:
         hedge_mode: bool | None = None,
     ) -> None:
         """Feed authoritative exchange account snapshot into ExecutionBook."""
-        if self._execution_book is None:
-            return
         if self._execution_book.has_execution_unit_of_work and (
             not stream_id or not stream_epoch or sequence is None or sequence <= 0
         ):
@@ -888,10 +869,10 @@ class OrderExecutionCoordinator:
             )
 
     async def _build_execution_request(
-        self, plan: OrderExecutionPlan
+        self, plan: OrderExecutionPlan, *, strategy_name: str
     ) -> ExecutionRequest:
         if plan.reduce_only:
-            batch_str = getattr(plan, "batch_id", None)
+            batch_str = plan.batch_id
             if batch_str and (
                 str(batch_str).startswith(f"batch_{plan.symbol}_")
                 or str(batch_str) in ("batch_default", "batch_synthetic")
@@ -911,21 +892,20 @@ class OrderExecutionCoordinator:
             raise OrderPreSubmissionError(
                 f"{'exit' if plan.reduce_only else 'entry'} {plan.client_order_id} has no Book projection token"
             )
-        strategy_name = (plan.strategy_name or "").strip() or "orderflow_impulse"
-        strategy_version = (plan.strategy_version or "").strip() or "v0"
+        opening_buy = (plan.side == "BUY") != plan.reduce_only
+        side = StrategySide.LONG if opening_buy else StrategySide.SHORT
 
         if not plan.reduce_only:
             return ExecutionRequest(
                 request_id=plan.client_order_id,
                 scope=scope,
                 strategy_name=strategy_name,
-                strategy_version=strategy_version,
                 run_id=plan.run_id,
                 decision_ref=plan.client_order_id,
                 expected_view_token=proj_ver,
-                expected_projection_version=proj_ver,
                 action=TradeCommandType.ENTRY,
                 requested_quantity=plan.quantity,
+                side=side,
                 order_type=plan.order_type,
                 limit_price=plan.price,
                 reduce_only=False,
@@ -935,17 +915,12 @@ class OrderExecutionCoordinator:
             )
 
         allocations = plan.allocations
-        batch_quantities = plan.batch_quantities
         if allocations:
             target_batch_ids = tuple(a.batch_id for a in allocations)
-            if batch_quantities is None:
-                batch_quantities = {
-                    a.batch_id: a.allocated_quantity for a in allocations
-                }
+            batch_quantities = {a.batch_id: a.allocated_quantity for a in allocations}
         elif plan.batch_id:
             target_batch_ids = (str(plan.batch_id),)
-            if batch_quantities is None:
-                batch_quantities = {str(plan.batch_id): plan.quantity}
+            batch_quantities = {str(plan.batch_id): plan.quantity}
         else:
             raise OrderPreSubmissionError(
                 f"Exit order {plan.client_order_id} has no allocated batches "
@@ -956,13 +931,12 @@ class OrderExecutionCoordinator:
             request_id=plan.client_order_id,
             scope=scope,
             strategy_name=strategy_name,
-            strategy_version=strategy_version,
             run_id=plan.run_id,
             decision_ref=plan.client_order_id,
             expected_view_token=proj_ver,
-            expected_projection_version=proj_ver,
             action=TradeCommandType.EXIT,
             requested_quantity=plan.quantity,
+            side=side,
             order_type=plan.order_type,
             limit_price=plan.price,
             reduce_only=True,
@@ -1020,10 +994,14 @@ class OrderExecutionCoordinator:
             )
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
-        if self._reservation_repository is None or self._execution_book is None:
+        if not self._execution_book.has_reservation_repository:
             return
         try:
-            req = await self._build_execution_request(plan)
+            if plan.strategy_name is None:
+                raise OrderPreSubmissionError("new order plan requires strategy_name")
+            req = await self._build_execution_request(
+                plan, strategy_name=plan.strategy_name
+            )
             act_res = await self._execution_book.act(req)
         except OrderProjectionConflictError:
             raise
@@ -1051,7 +1029,9 @@ class OrderExecutionCoordinator:
         if self._submission_repository is None:
             raise OrderPreSubmissionError("submission repository is not configured")
         if not self._execution_book.has_execution_unit_of_work:
-            raise OrderPreSubmissionError("order submission requires an execution transaction")
+            raise OrderPreSubmissionError(
+                "order submission requires an execution transaction"
+            )
         submission_values = {
             "plan": plan,
             "intent": preparation.intent,
@@ -1071,7 +1051,9 @@ class OrderExecutionCoordinator:
 
         async def in_tx(tx: ExecutionTransactionPort | None) -> PreparedOrderSubmission:
             if tx is None or tx.session is None:
-                raise OrderPreSubmissionError("order submission requires an execution transaction")
+                raise OrderPreSubmissionError(
+                    "order submission requires an execution transaction"
+                )
             prepared = await self._submission_repository.prepare_submission_in_session(
                 tx.session,
                 **submission_values,
@@ -1082,7 +1064,9 @@ class OrderExecutionCoordinator:
             return prepared
 
         try:
-            req = await self._build_execution_request(plan)
+            req = await self._build_execution_request(
+                plan, strategy_name=preparation.intent.strategy_name
+            )
             act_res = await self._execution_book.act(req, prepare_submission=in_tx)
             self._handle_act_result(plan, act_res)
         except OrderProjectionConflictError:
@@ -1130,7 +1114,7 @@ class OrderExecutionCoordinator:
         *,
         settlement_fills: tuple[AccountFillEvent, ...] = (),
     ) -> None:
-        if not self.is_execution_book_enabled or res is None:
+        if res is None:
             return
         scope = ExecutionScope(
             environment=self._environment,
@@ -1158,11 +1142,7 @@ class OrderExecutionCoordinator:
                 "execution facts require recovery"
             )
         cumulative_quote = cumulative_quantity * average_price
-        position_side = (
-            plan.position_side.value
-            if hasattr(plan.position_side, "value")
-            else str(plan.position_side)
-        )
+        position_side = plan.position_side.value
         identity = "\x1f".join(
             (
                 self._account_label,
@@ -1246,9 +1226,7 @@ class OrderExecutionCoordinator:
             )
             if isinstance(result, WaitingForEvidence):
                 if res.state.terminal:
-                    self._execution_book._recovery_required_commands.add(
-                        res.client_order_id
-                    )
+                    self._execution_book.require_command_recovery(res.client_order_id)
                     log.warning(
                         "order_terminal_evidence_waiting_for_recovery",
                         client_order_id=res.client_order_id,
@@ -1280,12 +1258,12 @@ class OrderExecutionCoordinator:
                         f"{transition_err}"
                     ) from transition_err
             raise
-        if getattr(result, "recovery_required", False):
-            self._execution_book._recovery_required_commands.add(res.client_order_id)
+        if isinstance(result, Applied) and result.recovery_required:
+            self._execution_book.require_command_recovery(res.client_order_id)
             log.warning(
                 "order_facts_applied_reservation_recovery_required",
                 client_order_id=res.client_order_id,
-                diagnostics=getattr(result, "diagnostics", ()),
+                diagnostics=result.diagnostics,
             )
 
     async def _record_submission_failure(
@@ -1295,8 +1273,6 @@ class OrderExecutionCoordinator:
         *,
         before_exchange_post: bool,
     ) -> None:
-        if not self.is_execution_book_enabled:
-            return
         if self._execution_book.get_outbox(plan.client_order_id) is None:
             return
         if before_exchange_post or isinstance(
@@ -1319,19 +1295,17 @@ class OrderExecutionCoordinator:
         )
 
     async def _mark_dispatching_if_accepted(self, plan: OrderExecutionPlan) -> None:
-        if not self.is_execution_book_enabled:
-            return
         entry = self._execution_book.get_outbox(plan.client_order_id)
         if entry is None:
             if (
                 self._execution_book.has_command_repository
-                or self._reservation_repository
+                or self._execution_book.has_reservation_repository
             ):
                 raise OrderPreSubmissionError(
                     f"execution command {plan.client_order_id} has no accepted outbox"
                 )
             # In-memory coordinators are used by isolated scheduler tests and
-            # shadow adapters. Durable live wiring must supply both repositories.
+            # adapters. Durable live wiring must supply both repositories.
             return
         if entry.state == DispatchState.PREPARED:
             await self._execution_book.mark_dispatching(plan.client_order_id)
@@ -1384,7 +1358,7 @@ class OrderExecutionCoordinator:
         except Exception as error:
             # The exchange result is authoritative. A secondary projection
             # failure must not turn a successful POST into a failed order.
-            self._execution_book._recovery_required_commands.add(result.client_order_id)
+            self._execution_book.require_command_recovery(result.client_order_id)
             log.error(
                 "order_projection_recovery_required",
                 account_label=self._account_label,
@@ -1420,23 +1394,19 @@ class OrderExecutionCoordinator:
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: PreparedOrderSubmission | None = None,
+        prepared_submission: PreparedOrderSubmission,
     ) -> OrderExecutionResult:
         self._submission_configuration_locked = True
         priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
 
         async def operation() -> OrderExecutionResult:
-            async def submit() -> OrderExecutionResult:
+            async with self._entry_submission(plan):
                 await self._ensure_reservation(plan)
                 await self._mark_dispatching_if_accepted(plan)
                 try:
-                    res = (
-                        await self._backend.submit(
-                            plan,
-                            prepared_submission=prepared_submission,
-                        )
-                        if prepared_submission is not None
-                        else await self._backend.submit(plan)
+                    res = await self._backend.submit(
+                        plan,
+                        prepared_submission=prepared_submission,
                     )
                 except BaseException as sub_err:
                     await self._record_submission_failure(
@@ -1456,11 +1426,6 @@ class OrderExecutionCoordinator:
                     raise
                 await self._observe_returned_order_result(plan, res)
                 return res
-
-            return cast(
-                OrderExecutionResult,
-                await self._run_entry_submission(plan, submit),
-            )
 
         return cast(
             OrderExecutionResult,
@@ -1499,59 +1464,60 @@ class OrderExecutionCoordinator:
         return cast(
             OrderExecutionResult | None,
             await self._schedule(
-                plan, priority=priority,
-                operation=partial(
-                    self._run_entry_submission, plan,
-                    partial(self._execute_prepared_submission, plan, preparation),
-                ),
+                plan,
+                priority=priority,
+                operation=partial(self._execute_prepared_submission, plan, preparation),
             ),
         )
 
     async def _execute_prepared_submission(
-        self, plan: OrderExecutionPlan, preparation: OrderSubmissionPreparation,
+        self,
+        plan: OrderExecutionPlan,
+        preparation: OrderSubmissionPreparation,
     ) -> OrderExecutionResult | None:
-        try:
-            prepared = await self._atomic_prepare_submission(plan, preparation)
-        except Exception as prepare_err:
-            await self._record_submission_failure(
-                plan,
-                prepare_err,
-                before_exchange_post=True,
-            )
-            raise
-        if prepared is None:
-            return None
-        try:
-            res = await self._backend.submit(
-                plan,
-                prepared_submission=prepared,
-            )
-        except BaseException as sub_err:
-            await self._record_submission_failure(
-                plan,
-                sub_err,
-                before_exchange_post=isinstance(
+        async with self._entry_submission(plan):
+            try:
+                prepared = await self._atomic_prepare_submission(plan, preparation)
+            except Exception as prepare_err:
+                await self._record_submission_failure(
+                    plan,
+                    prepare_err,
+                    before_exchange_post=True,
+                )
+                raise
+            if prepared is None:
+                return None
+            try:
+                res = await self._backend.submit(
+                    plan,
+                    prepared_submission=prepared,
+                )
+            except BaseException as sub_err:
+                await self._record_submission_failure(
+                    plan,
                     sub_err,
-                    (
-                        OrderAlreadyPreparedError,
-                        OrderPreSubmissionError,
-                        ExchangeOrderRejectedError,
-                        LiveSubmissionDisabledError,
-                        ValueError,
+                    before_exchange_post=isinstance(
+                        sub_err,
+                        (
+                            OrderAlreadyPreparedError,
+                            OrderPreSubmissionError,
+                            ExchangeOrderRejectedError,
+                            LiveSubmissionDisabledError,
+                            ValueError,
+                        ),
                     ),
-                ),
-            )
-            raise
-        if (
-            plan.reduce_only
-            and self._execution_book.has_execution_unit_of_work
-            and res.state is ExchangeOrderState.ACKNOWLEDGED
-            and res.executed_quantity == Decimal("0")
-        ):
-            self._defer_order_projection(plan, res)
-        else:
-            await self._observe_returned_order_result(plan, res)
-        return replace(res, prepared_at=prepared.submitting_event.occurred_at)
+                )
+                raise
+            if (
+                plan.reduce_only
+                and self._execution_book.has_execution_unit_of_work
+                and res.state is ExchangeOrderState.ACKNOWLEDGED
+                and res.executed_quantity == Decimal("0")
+            ):
+                self._defer_order_projection(plan, res)
+            else:
+                await self._observe_returned_order_result(plan, res)
+            return replace(res, prepared_at=prepared.submitting_event.occurred_at)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
         key = OrderExecutionKey(
@@ -1562,10 +1528,7 @@ class OrderExecutionCoordinator:
         async with self._scheduler_lock:
             scheduler = self._schedulers.get(key)
         if scheduler is not None and scheduler.cancel_queued(plan.client_order_id):
-            if (
-                self.is_execution_book_enabled
-                and self._execution_book.get_outbox(plan.client_order_id) is not None
-            ):
+            if self._execution_book.get_outbox(plan.client_order_id) is not None:
                 await self._execution_book.mark_rejected(
                     plan.client_order_id,
                     reason="cancelled_before_submission",
@@ -1634,7 +1597,10 @@ class OrderExecutionCoordinator:
         return result
 
     async def mark_absent_reconciled(
-        self, plan: OrderExecutionPlan, *, details: dict[str, JsonValue],
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        details: dict[str, JsonValue],
     ) -> OrderExecutionResult:
         if self._closed:
             raise RuntimeError("Order execution coordinator is closed")
@@ -1693,19 +1659,17 @@ class OrderExecutionCoordinator:
             client_order_id=plan.client_order_id,
         )
 
-    async def _run_entry_submission(
-        self,
-        plan: OrderExecutionPlan,
-        operation: Callable[[], Awaitable[Any]],
-    ) -> Any:
+    @asynccontextmanager
+    async def _entry_submission(self, plan: OrderExecutionPlan) -> AsyncIterator[None]:
         if plan.reduce_only:
-            return await operation()
+            yield
+            return
         if self._entry_submissions_blocked:
             raise OrderPreSubmissionError("entry submissions are blocked")
         self._active_entry_submissions += 1
         self._entry_submissions_idle.clear()
         try:
-            return await operation()
+            yield
         finally:
             self._active_entry_submissions -= 1
             if self._active_entry_submissions == 0:

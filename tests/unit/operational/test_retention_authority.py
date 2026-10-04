@@ -14,9 +14,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from crypto_momentum_lab.domain.operational.retention_authority import (
+    InMemoryRetentionRepository,
     RetentionAuthority,
 )
 from crypto_momentum_lab.domain.operational.retention_models import (
+    PruneOutcome,
     PrunePlanStatus,
     PruneReceiptStatus,
     RecoverySpec,
@@ -50,7 +52,7 @@ def test_recovery_spec_validation() -> None:
 
 
 def test_retention_authority_dependency_registration_and_versioning() -> None:
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t0 = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
 
     v0 = authority.compute_dependency_version("account_position_snapshots")
@@ -85,7 +87,7 @@ def test_retention_authority_dependency_registration_and_versioning() -> None:
 
 
 def test_plan_prune_unconstrained_when_no_dependencies() -> None:
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     requested = datetime(2026, 9, 24, 0, 0, tzinfo=UTC)
 
     plan = authority.plan_prune(
@@ -99,7 +101,7 @@ def test_plan_prune_unconstrained_when_no_dependencies() -> None:
 
 
 def test_plan_prune_constrained_by_active_consumer_watermark() -> None:
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t_needed = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
     spec = RecoverySpec(
         source_dataset="account_position_snapshots",
@@ -125,7 +127,7 @@ def test_plan_prune_constrained_by_active_consumer_watermark() -> None:
 
 
 def test_execute_prune_success_when_dependency_version_matches() -> None:
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
     spec = RecoverySpec(
         source_dataset="account_position_snapshots",
@@ -145,9 +147,9 @@ def test_execute_prune_success_when_dependency_version_matches() -> None:
     assert plan.expected_dependency_version == dep_version
 
     # Executor dummy callback
-    def dummy_executor(p) -> tuple[int, int]:
+    def dummy_executor(p) -> PruneOutcome:
         assert p.effective_cutoff == t_needed
-        return (100, 100)
+        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
 
     receipt = authority.execute_prune(
         plan=plan,
@@ -163,7 +165,7 @@ def test_execute_prune_success_when_dependency_version_matches() -> None:
 
 def test_execute_prune_rejects_when_new_dependency_registered_after_plan() -> None:
     """Invariant 5 & R1: Fail-closed if new dependency registered before execution."""
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
     spec1 = RecoverySpec(
         source_dataset="account_position_snapshots",
@@ -194,10 +196,10 @@ def test_execute_prune_rejects_when_new_dependency_registered_after_plan() -> No
     # Now attempt to execute the old plan
     executed = False
 
-    def dummy_executor(p) -> tuple[int, int]:
+    def dummy_executor(p) -> PruneOutcome:
         nonlocal executed
         executed = True
-        return (100, 100)
+        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
 
     receipt = authority.execute_prune(
         plan=plan,
@@ -212,7 +214,7 @@ def test_execute_prune_rejects_when_new_dependency_registered_after_plan() -> No
 
 
 def test_unregister_dependency_requires_explicit_retired_by() -> None:
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     spec = RecoverySpec(
         source_dataset="account_position_snapshots",
         earliest_needed_watermark=datetime(2026, 9, 22, 0, 0, tzinfo=UTC),
@@ -244,7 +246,7 @@ def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_pla
     None
 ):
     """Regression test: Stale PrunePlan cannot bypass dependency fencing."""
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
     spec1 = RecoverySpec(
         source_dataset="account_position_snapshots",
@@ -274,10 +276,10 @@ def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_pla
 
     executed = False
 
-    def dummy_executor(p) -> tuple[int, int]:
+    def dummy_executor(p) -> PruneOutcome:
         nonlocal executed
         executed = True
-        return (100, 100)
+        return PruneOutcome(rows_archived=100, rows_deleted=100, batches=1, status=PruneReceiptStatus.SUCCESS)
 
     # Caller tries to pass latest_version with stale_plan
     receipt = authority.execute_prune(
@@ -296,7 +298,7 @@ def test_bind_manifest_locks_effective_cutoff_and_rejects_version_change() -> No
         DependencyVersionConflictError,
     )
 
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     spec = RecoverySpec(
         source_dataset="market_data",
         earliest_needed_watermark=datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
@@ -363,7 +365,7 @@ def test_cross_dataset_dependency_resolution() -> None:
     """Proves that a dependency on a child table (e.g. account_position_snapshots)
     is observed and constrains a plan for account_snapshots_binance_prod.
     """
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     t_needed = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
     spec = RecoverySpec(
         source_dataset="account_position_snapshots",
@@ -391,7 +393,7 @@ def test_cross_dataset_dependency_resolution() -> None:
 def test_execute_prune_with_structured_prune_outcome() -> None:
     from crypto_momentum_lab.domain.operational.retention_models import PruneOutcome
 
-    authority = RetentionAuthority()
+    authority = RetentionAuthority(InMemoryRetentionRepository())
     plan = authority.plan_prune(
         dataset_name="market_data",
         requested_cutoff=datetime(2026, 9, 24, 0, 0, tzinfo=UTC),

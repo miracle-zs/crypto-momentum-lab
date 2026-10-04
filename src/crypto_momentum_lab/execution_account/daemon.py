@@ -1,13 +1,13 @@
 import asyncio
-import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
-from typing import Protocol, TypeVar, cast
+from typing import Protocol, TypeVar
 from uuid import uuid4
 
+import httpx
 import structlog
 
 from crypto_momentum_lab.domain.account import (
@@ -17,7 +17,11 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
+from crypto_momentum_lab.execution_account.binance.response_rules import (
+    retry_after_seconds,
+)
 from crypto_momentum_lab.execution_account.binance.user_data import (
+    BinanceUserDataStreamMetrics,
     UserDataEventSink,
 )
 from crypto_momentum_lab.execution_account.binance.user_data_models import (
@@ -51,129 +55,27 @@ class AccountSyncCycle(Protocol):
     ) -> ExecutionAccountSyncResult: ...
 
 
-@dataclass(frozen=True, slots=True)
-class ContinuousAccountSyncConfig:
-    interval_seconds: float = 5.0
-    fill_interval_seconds: float = 60.0
-    failure_backoff_initial_seconds: float = 10.0
-    failure_backoff_max_seconds: float = 300.0
-
-    def __post_init__(self) -> None:
-        if self.interval_seconds <= 0:
-            raise ValueError("interval_seconds must be positive")
-        if self.fill_interval_seconds < self.interval_seconds:
-            raise ValueError("fill_interval_seconds must not be below interval_seconds")
-        if self.failure_backoff_initial_seconds <= 0:
-            raise ValueError("failure_backoff_initial_seconds must be positive")
-        if self.failure_backoff_max_seconds < self.failure_backoff_initial_seconds:
-            raise ValueError(
-                "failure_backoff_max_seconds must not be below "
-                "failure_backoff_initial_seconds"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class ContinuousAccountSyncResult:
-    cycle_count: int
-    failure_count: int
-    last_sync: ExecutionAccountSyncResult | None
-
-
-class ContinuousAccountSyncDaemon:
-    def __init__(
-        self,
-        *,
-        service: AccountSyncCycle,
-        config: ContinuousAccountSyncConfig,
-        clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        on_error: Callable[[Exception], None] | None = None,
-    ) -> None:
-        self._service = service
-        self._config = config
-        self._clock = clock
-        self._sleep = sleep
-        self._on_error = on_error
-
-    async def run(
-        self,
-        *,
-        max_cycles: int | None = None,
-    ) -> ContinuousAccountSyncResult:
-        if max_cycles is not None and max_cycles <= 0:
-            raise ValueError("max_cycles must be positive when present")
-        cycle_count = 0
-        failure_count = 0
-        consecutive_failures = 0
-        last_sync: ExecutionAccountSyncResult | None = None
-        last_fill_sync_at: datetime | None = None
-        publish_transient_states = True
-        while max_cycles is None or cycle_count < max_cycles:
-            observed_at = self._now()
-            include_fills = (
-                last_fill_sync_at is None
-                or observed_at
-                >= last_fill_sync_at
-                + timedelta(seconds=self._config.fill_interval_seconds)
-            )
-            try:
-                last_sync = await self._service.sync_once(
-                    observed_at=observed_at,
-                    publish_transient_states=publish_transient_states,
-                    include_fills=include_fills,
-                )
-                if include_fills:
-                    last_fill_sync_at = observed_at
-                consecutive_failures = 0
-                retry_after_seconds = None
-            except Exception as error:
-                failure_count += 1
-                consecutive_failures += 1
-                retry_after_seconds = _retry_after_seconds(error)
-                if self._on_error is not None:
-                    self._on_error(error)
-            publish_transient_states = False
-            cycle_count += 1
-            if max_cycles is None or cycle_count < max_cycles:
-                await self._sleep_for_interval(
-                    consecutive_failures=consecutive_failures,
-                    retry_after_seconds=retry_after_seconds,
-                )
-        return ContinuousAccountSyncResult(
-            cycle_count=cycle_count,
-            failure_count=failure_count,
-            last_sync=last_sync,
-        )
-
-    def _now(self) -> datetime:
-        value = self._clock()
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("clock must return timezone-aware datetime")
-        return value
-
-    async def _sleep_for_interval(
-        self,
-        *,
-        consecutive_failures: int,
-        retry_after_seconds: float | None,
-    ) -> None:
-        if consecutive_failures == 0:
-            delay = self._config.interval_seconds
-        else:
-            exponent = min(consecutive_failures - 1, 30)
-            delay = min(
-                self._config.failure_backoff_initial_seconds * (2**exponent),
-                self._config.failure_backoff_max_seconds,
-            )
-            if retry_after_seconds is not None:
-                delay = min(
-                    max(delay, retry_after_seconds),
-                    self._config.failure_backoff_max_seconds,
-                )
-        await self._sleep(delay)
-
-
 class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
+    async def sync_once_for_realtime(
+        self,
+        *,
+        observed_at: datetime,
+        publish_transient_states: bool,
+        include_fills: bool,
+    ) -> ExecutionAccountSyncResult: ...
+
+    async def persist_reconciliation_result(
+        self, result: ExecutionAccountSyncResult
+    ) -> None: ...
+
+    async def record_user_data_event(
+        self,
+        *,
+        event: BinanceUserDataEvent,
+        receiver_session_id: str,
+        stream_token: int | None,
+    ) -> int: ...
+
     async def publish_user_data_heartbeat(
         self,
         *,
@@ -210,6 +112,9 @@ UserDataAccountReconciledFillCallback = Callable[
 
 
 class UserDataAccountEventStream(Protocol):
+    @property
+    def continuity_token(self) -> int | None: ...
+
     def set_handler(self, on_event: UserDataEventSink) -> None:
         pass
 
@@ -220,7 +125,7 @@ class UserDataAccountEventStream(Protocol):
         pass
 
     @property
-    def metrics(self) -> object:
+    def metrics(self) -> BinanceUserDataStreamMetrics:
         pass
 
     async def request_reconnect(self, reason: str) -> None:
@@ -524,7 +429,7 @@ class UserDataAccountSyncDaemon:
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
         receipt = _ReceivedUserDataEvent(
             event,
-            getattr(self._stream, "continuity_token", None),
+            self._stream.continuity_token,
         )
         queue = self._event_queue
         if queue is None:
@@ -537,20 +442,18 @@ class UserDataAccountSyncDaemon:
             self._request_pipeline_recovery("event_queue_overflow", origin_event=event)
 
     async def _record_received_event(self, receipt: _ReceivedUserDataEvent) -> None:
-        record = getattr(self._service, "record_user_data_event", None)
-        if callable(record):
-            try:
-                await record(
-                    event=receipt.event,
-                    receiver_session_id=self._receiver_session_id,
-                    stream_token=receipt.stream_token,
-                )
-            except Exception as error:
-                self._report_error(error)
-                self._request_pipeline_recovery(
-                    "user_data_journal_failed", origin_event=receipt.event
-                )
-                raise
+        try:
+            await self._service.record_user_data_event(
+                event=receipt.event,
+                receiver_session_id=self._receiver_session_id,
+                stream_token=receipt.stream_token,
+            )
+        except Exception as error:
+            self._report_error(error)
+            self._request_pipeline_recovery(
+                "user_data_journal_failed", origin_event=receipt.event
+            )
+            raise
 
     async def _process_event(
         self,
@@ -623,8 +526,6 @@ class UserDataAccountSyncDaemon:
                             fills=update.fills,
                         )
                         self._notify_persisted(event, result)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self._report_error(error)
             if self._event_queue is None:
@@ -658,8 +559,6 @@ class UserDataAccountSyncDaemon:
                     self._defer_event(event)
                 else:
                     await self._process_event(event, replay=True)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._report_error(error)
                 self._request_pipeline_recovery(
@@ -686,8 +585,6 @@ class UserDataAccountSyncDaemon:
                     fills=pending.fills,
                 )
                 self._notify_persisted(pending.event, result)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._report_error(error)
                 self._request_pipeline_recovery(
@@ -755,16 +652,12 @@ class UserDataAccountSyncDaemon:
         self._accept_events = False
         recovery_generation = self._pipeline_recovery_generation
         reason = self._pipeline_recovery_reason or "unspecified"
-        request_reconnect = getattr(self._stream, "request_reconnect", None)
-        if callable(request_reconnect):
-            try:
-                reconnect_result = request_reconnect(
-                    f"account_event_pipeline_recovery:{reason}"
-                )
-                if inspect.isawaitable(reconnect_result):
-                    await reconnect_result
-            except Exception as error:
-                self._report_error(error)
+        try:
+            await self._stream.request_reconnect(
+                f"account_event_pipeline_recovery:{reason}"
+            )
+        except Exception as error:
+            self._report_error(error)
         if self._event_queue is not None and not await self._wait_for_queue_drain(
             self._event_queue,
             "event recovery",
@@ -895,15 +788,8 @@ class UserDataAccountSyncDaemon:
         self,
         result: ExecutionAccountSyncResult,
     ) -> None:
-        persist = getattr(
-            self._service,
-            "persist_reconciliation_result",
-            None,
-        )
-        if not callable(persist):
-            return
         task = asyncio.create_task(
-            self._persist_reconciliation_result(persist, result),
+            self._persist_reconciliation_result(result),
             name="account-reconciliation-persistence",
         )
         self._reconciliation_persistence_tasks.add(task)
@@ -911,13 +797,10 @@ class UserDataAccountSyncDaemon:
 
     async def _persist_reconciliation_result(
         self,
-        persist: Callable[[ExecutionAccountSyncResult], Awaitable[None]],
         result: ExecutionAccountSyncResult,
     ) -> None:
         try:
-            await persist(result)
-        except asyncio.CancelledError:
-            raise
+            await self._service.persist_reconciliation_result(result)
         except Exception as error:
             self._report_error(error)
 
@@ -979,19 +862,10 @@ class UserDataAccountSyncDaemon:
             reason=reason,
         )
         self._notify_heartbeat()
-        stream_token = getattr(self._stream, "continuity_token", 1)
+        stream_token = self._stream.continuity_token
         is_stream_open = stream_token is not None
         if not is_syncing and self._accept_events and is_stream_open:
-            snapshot_fn = getattr(self._state, "snapshot", None)
-            if callable(snapshot_fn):
-                snapshot = snapshot_fn(now)
-            elif isinstance(self._state, AccountSnapshot):
-                snapshot = replace(
-                    self._state,
-                    config=replace(self._state.config, observed_at=now),
-                )
-            else:
-                snapshot = None
+            snapshot = self._state.snapshot(now) if self._state is not None else None
             if snapshot is not None:
                 heartbeat_result = ExecutionAccountSyncResult(
                     status=target_state,
@@ -1006,8 +880,6 @@ class UserDataAccountSyncDaemon:
             await self._sleep(self._config.heartbeat_interval_seconds)
             try:
                 await self._publish_heartbeat()
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._report_error(error)
 
@@ -1061,24 +933,9 @@ class UserDataAccountSyncDaemon:
                 )
         async with self._state_lock:
             async with self._rest_sync_lock:
-                realtime_sync = getattr(
-                    self._service,
-                    "sync_once_for_realtime",
-                    None,
-                )
-                realtime_sync_callable = (
-                    cast(
-                        Callable[..., Awaitable[ExecutionAccountSyncResult]],
-                        realtime_sync,
-                    )
-                    if callable(realtime_sync)
-                    else None
-                )
-                use_realtime_sync = (
-                    self._state is not None and realtime_sync_callable is not None
-                )
-                if realtime_sync_callable is not None and use_realtime_sync:
-                    result = await realtime_sync_callable(
+                use_realtime_sync = self._state is not None
+                if use_realtime_sync:
+                    result = await self._service.sync_once_for_realtime(
                         observed_at=self._now(),
                         publish_transient_states=False,
                         include_fills=include_fills,
@@ -1133,10 +990,7 @@ class UserDataAccountSyncDaemon:
             self._report_error(error)
 
     def _check_stream_queue_health(self) -> None:
-        metrics = getattr(self._stream, "metrics", None)
-        overflow_count = _metric_int(metrics, "event_queue_overflow_count")
-        if overflow_count is None:
-            return
+        overflow_count = self._stream.metrics.event_queue_overflow_count
         if overflow_count <= self._observed_stream_queue_overflow_count:
             return
         self._observed_stream_queue_overflow_count = overflow_count
@@ -1200,18 +1054,11 @@ class UserDataAccountSyncDaemon:
 
 
 def _retry_after_seconds(error: Exception) -> float | None:
-    value = getattr(error, "retry_after_seconds", None)
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        if value >= 0:
-            return float(value)
-    return None
-
-
-def _metric_int(metrics: object, name: str) -> int | None:
-    value = getattr(metrics, name, None)
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
+    return (
+        retry_after_seconds(error.response)
+        if isinstance(error, httpx.HTTPStatusError)
+        else None
+    )
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:
@@ -1232,12 +1079,6 @@ def _is_usable_result(result: ExecutionAccountSyncResult) -> bool:
         )
         and result.snapshot is not None
     )
-
-
-def _ready_snapshot(result: ExecutionAccountSyncResult) -> AccountSnapshot:
-    if not _is_ready_result(result) or result.snapshot is None:
-        raise ValueError("execution account result does not contain a ready snapshot")
-    return result.snapshot
 
 
 async def _cancel_task(task: asyncio.Future[None]) -> None:

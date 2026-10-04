@@ -4,7 +4,7 @@ from collections.abc import (
     Callable,
     Mapping,
 )
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -19,7 +19,6 @@ from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
-    ExchangeOrderEvent,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
@@ -33,6 +32,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyDecision,
 )
+from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     CoordinatedOrderExecutionPort,
 )
@@ -50,7 +50,7 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
 from crypto_momentum_lab.live_rollout.context import (
-    LiveContextProvider,
+    LiveContextReader,
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
 )
@@ -88,7 +88,6 @@ from crypto_momentum_lab.live_rollout.position_lifecycle import (
 )
 from crypto_momentum_lab.live_rollout.runtime_cache import (
     LiveRuntimeCacheMaintenance,
-    StrategyCacheMetrics,
 )
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
@@ -124,7 +123,7 @@ class LiveDaemonConfig(EntryLaneConfig):
     decision_filter: (
         Callable[
             [StrategyDecision, MarketState15s],
-            Awaitable[StrategyDecision] | StrategyDecision,
+            Awaitable[StrategyDecision],
         ]
         | None
     ) = None
@@ -152,19 +151,19 @@ class LiveStrategyDaemon:
     def __init__(
         self,
         *,
-        strategy: market_runtime_contracts.LiveRuntimeStrategy,
+        strategy: RuntimeStrategy,
         risk_gateway: RiskGateway,
         submission_repository: OrderSubmissionRepository,
         persist_checkpoint: PersistCheckpoint,
         state_machine: CoordinatedOrderExecutionPort,
-        context_provider: LiveContextProvider,
+        context_provider: LiveContextReader,
         config: LiveDaemonConfig,
         exit_manager: LiveExitManager | None = None,
         exit_recovery_client: ExitRecoveryClient | None = None,
         telemetry: LiveTelemetrySink | None = None,
         signal_recorder: LiveSignalRecorderPort | None = None,
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_managed_position_symbols: (Callable[[frozenset[str]], None] | None) = None,
         cancel_unfilled_entry_orders: (
             Callable[[tuple[OrderExecutionPlan, ...]], Awaitable[int]] | None
@@ -178,17 +177,17 @@ class LiveStrategyDaemon:
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         on_checkpoint_saved: Callable[[], None] | None = None,
-        request_exit_recovery: Callable[[], None] = lambda: None,
+        request_exit_recovery: Callable[[], None],
         request_order_cleanup: Callable[
             [tuple[OrderExecutionPlan, ...]], None
-        ] = lambda plans: None,
+        ],
         is_symbol_warmed: Callable[[str], bool] | None = None,
         on_unwarmed_symbol: Callable[[str], None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
         self._state_machine = state_machine
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._entry_control = LiveEntryControlGate(
             run_id=config.run_id,
             state_machine=self._state_machine,
@@ -199,15 +198,6 @@ class LiveStrategyDaemon:
         )
         self._context_provider = context_provider
         self._config = config
-        if (
-            exit_manager is not None
-            and getattr(exit_manager, "_config", None) is not None
-        ):
-            if getattr(exit_manager._config, "account_label", None) is None:
-                exit_manager._config = replace(
-                    exit_manager._config,
-                    account_label=config.account_label,
-                )
         self._exit_manager = exit_manager
         self._exit_recovery_client = exit_recovery_client
         self._checkpoint_coordinator = LiveCheckpointCoordinator(
@@ -232,23 +222,12 @@ class LiveStrategyDaemon:
         self._exit_enabled = True
         self._position_locks = PositionLifecycleLocks()
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
-        strategy_protected_symbols = getattr(strategy, "cache_protected_symbols", None)
-        strategy_pruner = getattr(strategy, "prune_inactive_symbols", None)
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
-            strategy_metrics_provider=lambda: StrategyCacheMetrics(
-                buffered_symbol_count=getattr(strategy, "buffered_symbol_count", None),
-                buffered_state_count=getattr(strategy, "buffered_state_count", None),
-            ),
+            strategy=strategy,
             pending_entry_symbols=self._pending_entries.pending_symbols,
-            strategy_protected_symbols=(
-                strategy_protected_symbols
-                if callable(strategy_protected_symbols)
-                else None
-            ),
-            strategy_pruner=strategy_pruner if callable(strategy_pruner) else None,
             volume_metrics_provider=(
-                (lambda: getattr(self._signal_recorder, "volume_metrics", {}))
+                (lambda: self._signal_recorder.volume_metrics)
                 if self._signal_recorder is not None
                 else None
             ),
@@ -327,11 +306,6 @@ class LiveStrategyDaemon:
             exit_processor=self._exit_processor,
             exit_lane=self._exit_lane,
         )
-        entry_submission_waiter = getattr(
-            self._state_machine, "wait_for_entry_submissions_idle", None
-        )
-        if not callable(entry_submission_waiter):
-            entry_submission_waiter = None
         self._scheduled_controller = ScheduledRiskWindowController(
             config=ScheduledRiskWindowControllerConfig(
                 run_id=config.run_id,
@@ -348,14 +322,14 @@ class LiveStrategyDaemon:
             cancel_unfilled_entry_orders=self._cancel_unfilled_entry_orders,
             fetch_exchange_positions=self._fetch_exchange_positions,
             clock=self._clock,
-            wait_for_entry_submissions_idle=entry_submission_waiter,
+            wait_for_entry_submissions_idle=self._state_machine.wait_for_entry_submissions_idle,
         )
         self._entry_lane = EntryExecutionLane(
             config=config,
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
-            execute_candidate=self._submission.execute_entry,
+            execute_candidate=self._submission.execute,
             invalidate_context=self._context_runtime.invalidate,
             telemetry=self._telemetry,
             signal_recorder=self._signal_recorder,
@@ -478,19 +452,9 @@ class LiveStrategyDaemon:
                 run_id=self._config.run_id,
             )
 
-    def observe_entry_order_event(
-        self,
-        plan: OrderExecutionPlan,
-        event: ExchangeOrderEvent,
-    ) -> None:
-        """Release an in-memory reservation after a terminal entry event.
-
-        The exchange/order callback can arrive before the next database
-        context refresh.  Removing the reservation here prevents a filled or
-        canceled limit entry from consuming gross-exposure capacity for the
-        remainder of its 15-minute lifetime.
-        """
-        self._pending_entries.observe_order_event(plan, event)
+    @property
+    def pending_entries(self) -> LivePendingEntryRegistry:
+        return self._pending_entries
 
     def notify_market_state_gap(self, *, reason: str) -> None:
         """Force each symbol to rebuild indicators after a skipped batch."""

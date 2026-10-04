@@ -12,6 +12,7 @@ from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -29,7 +30,7 @@ NOW = datetime(2026, 10, 1, tzinfo=UTC)
 def case():
     command = TradeCommand(
         "exit-test",
-        PositionKey("live", "primary", "BTCUSDT", "LONG"),
+        PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG),
         TradeCommandType.EXIT,
         StrategySide.LONG,
         EntryType.MARKET,
@@ -146,7 +147,7 @@ async def test_unconfirmed_receipts_remain_pending(condition):
         command = replace(command, created_at=NOW - timedelta(days=3))
     else:
         command = replace(
-            command, position_key=PositionKey("live", "other", "BTCUSDT", "LONG")
+            command, position_key=PositionKey("live", "other", "BTCUSDT", FuturesPositionSide.LONG)
         )
     assert (await recovery(command)).status == "PENDING"
 

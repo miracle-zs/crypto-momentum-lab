@@ -93,6 +93,7 @@ class MarketBookRepository(Protocol):
     def list_manifests(
         self, scope: str | None = None, limit: int = 100
     ) -> list[DatasetManifest]: ...
+    def verify_manifest(self, manifest_id: str) -> dict[str, Any]: ...
     def get_distinct_dates_and_symbols(
         self, scope: str, interval: str = "15s"
     ) -> list[tuple[date, tuple[str, ...]]]: ...
@@ -199,6 +200,56 @@ class InMemoryMarketBookRepository:
 
     def load_decision_trace(self, decision_id: str) -> DecisionTrace | None:
         return self.decision_traces.get(decision_id)
+
+    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+        """Cryptographically verifies a DatasetManifest and its referenced revisions."""
+        manifest = self.load_manifest(manifest_id)
+        if manifest is None:
+            return {
+                "manifest_id": manifest_id,
+                "status": "NOT_FOUND",
+                "error": f"Manifest '{manifest_id}' not found in catalog",
+                "verified": False,
+            }
+
+        # Check hash
+        hasher = hashlib.sha256()
+        hasher.update(manifest.scope.encode())
+        hasher.update(",".join(sorted(manifest.symbols)).encode())
+        hasher.update(manifest.interval.encode())
+        hasher.update(manifest.start_time.isoformat().encode())
+        hasher.update(manifest.end_time.isoformat().encode())
+        hasher.update(manifest.visibility_mode.value.encode())
+        hasher.update(manifest.feature_algorithm_version.encode())
+        for r in manifest.revision_refs:
+            hasher.update(r.content_hash.encode())
+        computed_hash = hasher.hexdigest()
+
+        if computed_hash != manifest.manifest_hash:
+            return {
+                "manifest_id": manifest_id,
+                "status": "INTEGRITY_VIOLATION",
+                "error": (
+                    f"Computed hash {computed_hash} != stored {manifest.manifest_hash}"
+                ),
+                "verified": False,
+            }
+
+        return {
+            "manifest_id": manifest.manifest_id,
+            "status": "VERIFIED_REPRODUCIBLE",
+            "verified": True,
+            "scope": manifest.scope,
+            "symbols_count": len(manifest.symbols),
+            "interval": manifest.interval,
+            "start_time": manifest.start_time.isoformat(),
+            "end_time": manifest.end_time.isoformat(),
+            "visibility_mode": manifest.visibility_mode.value,
+            "manifest_hash": manifest.manifest_hash,
+            "coverage_ratio": str(manifest.coverage_ratio),
+            "revisions_count": len(manifest.revision_refs),
+            "holes_count": len(manifest.holes),
+        }
 
 
 class MarketBook:
@@ -384,15 +435,13 @@ class DatasetCatalog:
         holes: list[tuple[datetime, datetime]] = []
 
         total_expected = 0
-        batch_fetcher = getattr(self._repo, "get_canonical_refs_in_range", None)
-        canonical_map: dict[tuple[str, datetime], MarketRevisionRef] | None = None
-        if (
-            callable(batch_fetcher)
-            and visibility_mode == MarketVisibilityMode.CANONICAL
-        ):
-            canonical_map = batch_fetcher(
+        canonical_map = (
+            self._repo.get_canonical_refs_in_range(
                 scope, symbols, interval, start_time, end_time
             )
+            if visibility_mode == MarketVisibilityMode.CANONICAL
+            else None
+        )
 
         gap_per_sym: dict[str, datetime | None] = {s: None for s in symbols}
         current_time = start_time
@@ -403,8 +452,6 @@ class DatasetCatalog:
                 total_expected += 1
                 if canonical_map is not None:
                     ref = canonical_map.get((sym, b_start))
-                elif visibility_mode == MarketVisibilityMode.CANONICAL:
-                    ref = self._book.get_canonical_ref(scope, sym, interval, b_start)
                 else:
                     ref = self._book.get_decision_visible_ref(
                         scope, sym, interval, b_start, decision_time=b_end
@@ -506,67 +553,9 @@ class DatasetCatalog:
         return tuple(envelopes)
 
     def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
-        """Cryptographically verifies a DatasetManifest and its referenced revisions."""
-        verifier = getattr(self._repo, "verify_manifest", None)
-        if callable(verifier):
-            res = verifier(manifest_id)
-            if isinstance(res, dict):
-                return res
-
-        manifest = self._repo.load_manifest(manifest_id)
-        if manifest is None:
-            return {
-                "manifest_id": manifest_id,
-                "status": "NOT_FOUND",
-                "error": f"Manifest '{manifest_id}' not found in catalog",
-                "verified": False,
-            }
-
-        # Check hash
-        hasher = hashlib.sha256()
-        hasher.update(manifest.scope.encode())
-        hasher.update(",".join(sorted(manifest.symbols)).encode())
-        hasher.update(manifest.interval.encode())
-        hasher.update(manifest.start_time.isoformat().encode())
-        hasher.update(manifest.end_time.isoformat().encode())
-        hasher.update(manifest.visibility_mode.value.encode())
-        hasher.update(manifest.feature_algorithm_version.encode())
-        for r in manifest.revision_refs:
-            hasher.update(r.content_hash.encode())
-        computed_hash = hasher.hexdigest()
-
-        if computed_hash != manifest.manifest_hash:
-            return {
-                "manifest_id": manifest_id,
-                "status": "INTEGRITY_VIOLATION",
-                "error": (
-                    f"Computed hash {computed_hash} != stored {manifest.manifest_hash}"
-                ),
-                "verified": False,
-            }
-
-        return {
-            "manifest_id": manifest.manifest_id,
-            "status": "VERIFIED_REPRODUCIBLE",
-            "verified": True,
-            "scope": manifest.scope,
-            "symbols_count": len(manifest.symbols),
-            "interval": manifest.interval,
-            "start_time": manifest.start_time.isoformat(),
-            "end_time": manifest.end_time.isoformat(),
-            "visibility_mode": manifest.visibility_mode.value,
-            "manifest_hash": manifest.manifest_hash,
-            "coverage_ratio": str(manifest.coverage_ratio),
-            "revisions_count": len(manifest.revision_refs),
-            "holes_count": len(manifest.holes),
-        }
+        return self._repo.verify_manifest(manifest_id)
 
     def list_manifests(
         self, scope: str | None = None, limit: int = 100
     ) -> list[DatasetManifest]:
-        lister = getattr(self._repo, "list_manifests", None)
-        if callable(lister):
-            result = lister(scope=scope, limit=limit)
-            if isinstance(result, list):
-                return result
-        return []
+        return self._repo.list_manifests(scope=scope, limit=limit)

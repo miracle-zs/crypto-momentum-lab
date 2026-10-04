@@ -67,7 +67,20 @@ class ExchangeCancellationUnknownError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 
 
+ExchangeBoundaryCallback = Callable[
+    [OrderExecutionPlan, str, datetime],
+    Awaitable[None],
+]
+
+
 class OrderExchangeClient(Protocol):
+    def set_exchange_boundary_callbacks(
+        self,
+        *,
+        on_request: ExchangeBoundaryCallback | None = None,
+        on_response: ExchangeBoundaryCallback | None = None,
+    ) -> None: ...
+
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         pass
 
@@ -84,9 +97,3 @@ class OrderExchangeClient(Protocol):
         client_order_id: str,
     ) -> ExchangeOrderSnapshot:
         pass
-
-
-ExchangeBoundaryCallback = Callable[
-    [OrderExecutionPlan, str, datetime],
-    Awaitable[None],
-]

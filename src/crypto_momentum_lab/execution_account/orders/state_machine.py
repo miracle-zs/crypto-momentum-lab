@@ -36,11 +36,6 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 log = structlog.get_logger()
 
 
-class OrderPlanRepository(Protocol):
-    async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
-        pass
-
-
 class OrderEventRepository(Protocol):
     async def record_order_observation(
         self,
@@ -84,15 +79,13 @@ class OrderExecutionStateMachine:
         self,
         *,
         exchange: OrderExchangeClient,
-        repository: OrderPlanRepository,
         event_repository: OrderEventRepository,
         live_submit_enabled: bool,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_event: OrderEventCallback | None = None,
         on_before_submit: OrderPreSubmissionCallback | None = None,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
-        serialize_commands: bool = True,
         reconciliation_retry_delays: tuple[float, ...] = (
             1.0,
             2.0,
@@ -104,54 +97,26 @@ class OrderExecutionStateMachine:
         if any(delay < 0 for delay in reconciliation_retry_delays):
             raise ValueError("reconciliation retry delays must not be negative")
         self._exchange = exchange
-        self._repository = repository
         self._event_repository = event_repository
         self._live_submit_enabled = live_submit_enabled
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._on_event = on_event
         self._on_before_submit = on_before_submit
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
         self._sleep = sleep
-        self._lock = asyncio.Lock() if serialize_commands else None
         self._observation_lock = asyncio.Lock()
-        self._exchange_configured = False
-
-    def _ensure_exchange_configured(self) -> None:
-        if self._exchange_configured:
-            return
-        self._exchange_configured = True
-        set_boundary = getattr(self._exchange, "set_exchange_boundary_callbacks", None)
-        if callable(set_boundary):
-            set_boundary(
-                on_request=self._on_exchange_request,
-                on_response=self._on_exchange_response,
-            )
+        self._exchange.set_exchange_boundary_callbacks(
+            on_request=on_exchange_request,
+            on_response=on_exchange_response,
+        )
 
     async def submit(
         self,
         plan: OrderExecutionPlan,
         *,
-        prepared_submission: _PreparedOrderSubmission | None = None,
-    ) -> OrderExecutionResult:
-        self._ensure_exchange_configured()
-        if self._lock is None:
-            return await self._execute_approved_intent(
-                plan,
-                prepared_submission=prepared_submission,
-            )
-        async with self._lock:
-            return await self._execute_approved_intent(
-                plan,
-                prepared_submission=prepared_submission,
-            )
-
-    async def _execute_approved_intent(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        prepared_submission: _PreparedOrderSubmission | None = None,
+        prepared_submission: _PreparedOrderSubmission,
     ) -> OrderExecutionResult:
         try:
             if not plan.quantized:
@@ -160,18 +125,12 @@ class OrderExecutionStateMachine:
                 raise LiveSubmissionDisabledError(
                     "live submission requires explicit live_submit_enabled"
                 )
-            if prepared_submission is not None:
-                if prepared_submission.plan != plan:
-                    raise ValueError("prepared submission does not match order plan")
-            else:
-                await self._repository.save_planned_order(plan)
-            if prepared_submission is None:
-                await self._append_event(plan, ExchangeOrderState.SUBMITTING)
-            else:
-                await self._notify_event(
-                    prepared_submission.plan,
-                    prepared_submission.submitting_event,
-                )
+            if prepared_submission.plan != plan:
+                raise ValueError("prepared submission does not match order plan")
+            await self._notify_event(
+                prepared_submission.plan,
+                prepared_submission.submitting_event,
+            )
         except Exception as exc:
             if isinstance(
                 exc, (ValueError, LiveSubmissionDisabledError, _OrderPreSubmissionError)
@@ -237,15 +196,6 @@ class OrderExecutionStateMachine:
         return await self._apply_snapshot(plan, snapshot)
 
     async def reconcile_order(
-        self,
-        plan: OrderExecutionPlan,
-    ) -> OrderExecutionResult:
-        if self._lock is None:
-            return await self._reconcile_order(plan)
-        async with self._lock:
-            return await self._reconcile_order(plan)
-
-    async def _reconcile_order(
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
@@ -328,15 +278,6 @@ class OrderExecutionStateMachine:
         intentionally separate from the operator-authorized emergency cancel
         control exposed by the Binance client.
         """
-        if self._lock is None:
-            return await self._cancel_order(plan)
-        async with self._lock:
-            return await self._cancel_order(plan)
-
-    async def _cancel_order(
-        self,
-        plan: OrderExecutionPlan,
-    ) -> OrderExecutionResult:
         if not plan.quantized:
             raise ValueError("order plan must be quantized before cancellation")
         await self._append_event(plan, ExchangeOrderState.CANCELING)
@@ -626,9 +567,7 @@ class OrderExecutionStateMachine:
                 f"pre-submission guard failed: {guard_exc}"
             ) from guard_exc
 
-        exchange_handles_boundary = operation == "submit" and hasattr(
-            self._exchange, "set_exchange_boundary_callbacks"
-        )
+        exchange_handles_boundary = operation == "submit"
         if not exchange_handles_boundary:
             await self._notify_exchange_boundary(
                 plan,

@@ -4,10 +4,10 @@ schema_version: 1
 # wiring. Secrets never belong in this file; deployment values may be supplied
 # through the explicit environment references below. When the strategy hash is
 # left unset, the manifest loader derives it from the typed strategy inputs.
-# Migration revisions are approval bindings and must track the current schema
-# head used by the deployment; do not copy an old revision forward silently.
+# Commit and migration fields are optional metadata for administrative reports;
+# they are not runtime admission checks.
 runtime:
-  image_commit: "${CML_CODE_COMMIT:?set CML_CODE_COMMIT}"
+  image_commit: "${CML_CODE_COMMIT:-unknown}"
   migration_revision: "${CML_LIVE_MIGRATION_REVISION:-20260925_0043}"
 
 accounts:

@@ -46,7 +46,6 @@ from crypto_momentum_lab.domain.strategy.sizing import (
     SizingPlan,
     SizingRejection,
     SymbolLotRules,
-    default_symbol_lot_rules,
     quantize_lot_quantity,
 )
 
@@ -85,7 +84,6 @@ __all__ = [
     "SymbolLotRules",
     "UniverseRankingEntry",
     "UniverseRankingSnapshot",
-    "default_symbol_lot_rules",
     "deterministic_candidate_id",
     "deterministic_config_hash",
     "deterministic_signal_id",

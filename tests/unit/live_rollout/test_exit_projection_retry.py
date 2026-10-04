@@ -1,3 +1,7 @@
+from tests.fixtures.async_reservations import (
+    InMemoryPositionReservationRepository as MemoryReservations,
+)
+
 """A real Book version change between exit decision and queued preparation."""
 
 from dataclasses import replace
@@ -49,7 +53,6 @@ async def test_prior_exit_settlement_does_not_block_another_exit():
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=AsyncMock(),
     )
     coordinator.configure_submission(repository)
     plan = OrderExecutionPlan(
@@ -71,7 +74,9 @@ async def test_prior_exit_settlement_does_not_block_another_exit():
     backend.submit.return_value = OrderExecutionResult(
         plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED, "123"
     )
-    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(kwargs["plan"])
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: (
+        _prepared(kwargs["plan"])
+    )
 
     class Submission:
         async def execute(self, *_args, **_kwargs):
@@ -97,7 +102,7 @@ async def test_prior_exit_settlement_does_not_block_another_exit():
 @pytest.mark.parametrize("race_at", ["before_read", "before_act"])
 async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
-    book = ExecutionBook()
+    book = ExecutionBook(reservation_repository=MemoryReservations())
     book._ensure_journal(scope.to_position_key()).set_coverage(
         FactCoverageInterval(
             start_at=NOW,
@@ -151,15 +156,14 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
 
     backend, repository = AsyncMock(), AsyncMock()
     backend.submit.side_effect = post
-    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(
-        kwargs["plan"]
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: (
+        _prepared(kwargs["plan"])
     )
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=AsyncMock(),
     )
     coordinator.configure_submission(repository)
     decided = []

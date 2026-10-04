@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 
 import structlog
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account import AccountFillEvent, AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -26,7 +26,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.order_identity_adapter import (
-    LegacyOrderIdentityAdapter,
+    build_position_account_facts,
 )
 
 log = structlog.get_logger(__name__)
@@ -51,12 +51,12 @@ _EXIT_SUBMITTED_STATES = frozenset(
 
 def _build_position_batches(
     *,
-    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    position: AccountPositionSnapshot | PositionObservation,
+    environment: str,
+    account_label: str,
     side: StrategySide,
     position_side: FuturesPositionSide,
     matching_orders: Sequence[_PositionOrder],
-    fill_times: Mapping[str, datetime],
-    fill_prices: Mapping[str, Decimal],
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
     coverage_evidence: CoverageEvidence | None = None,
@@ -67,14 +67,14 @@ def _build_position_batches(
         position_side=position_side,
         position_amt=position.position_amt,
         entry_price=position.entry_price,
-        observed_at=getattr(position, "observed_at", None),
+        observed_at=position.observed_at,
     )
     # Authoritative PositionLedger projection: builds primary batches
     # with zero-gap reconciliation.
     try:
         position_key = PositionKey(
-            environment=getattr(position, "environment", "live"),
-            account_label=getattr(position, "account_label", "primary"),
+            environment=environment,
+            account_label=account_label,
             symbol=position.symbol,
             position_side=position_side,
         )
@@ -82,7 +82,7 @@ def _build_position_batches(
         def _fill_matches_position(fill: AccountFillEvent) -> bool:
             if fill.symbol != position.symbol:
                 return False
-            payload = fill.raw_payload or {}
+            payload = fill.raw_payload
             fill_ps = payload.get("positionSide") or payload.get("ps")
             if fill_ps:
                 fill_ps_str = str(fill_ps).upper()
@@ -94,9 +94,9 @@ def _build_position_batches(
         matching_fills = tuple(
             fill for fill in account_fills if _fill_matches_position(fill)
         )
-        coverage = getattr(position, "coverage", None)
-        if coverage is None and since_time is not None:
-            obs_dt = getattr(position, "observed_at", None) or datetime.now(UTC)
+        coverage = None
+        if since_time is not None and position.observed_at is not None:
+            obs_dt = position.observed_at
             if obs_dt < since_time:
                 obs_dt = since_time
             # Only cursor+checkpoint evidence can confirm completeness.
@@ -106,31 +106,29 @@ def _build_position_batches(
                 start=since_time,
                 end=obs_dt,
             )
-        facts = LegacyOrderIdentityAdapter.to_account_facts(
+        facts = build_position_account_facts(
             position_key=position_key,
             orders=matching_orders,
             fills=matching_fills,
             observation=observation,
             coverage=coverage,
-            fill_times=fill_times,
-            fill_prices=fill_prices,
         )
         ledger = PositionLedger(position_key)
-        shadow_projection = ledger.project(facts)
+        projection = ledger.project(facts)
 
         active_limit_orders = [
             order
             for order in matching_orders
-            if getattr(order, "plan", None) is not None
-            and getattr(order.plan, "reduce_only", False)
-            and getattr(order, "order_type", None) == "LIMIT"
-            and not getattr(getattr(order, "state", None), "terminal", False)
+            if order.plan is not None
+            and order.plan.reduce_only
+            and order.order_type == "LIMIT"
+            and not order.state.terminal
         ]
         active_market_orders = any(
-            getattr(order, "plan", None) is not None
-            and getattr(order.plan, "reduce_only", False)
-            and getattr(order, "order_type", None) == "MARKET"
-            and not getattr(getattr(order, "state", None), "terminal", False)
+            order.plan is not None
+            and order.plan.reduce_only
+            and order.order_type == "MARKET"
+            and not order.state.terminal
             for order in matching_orders
         )
         recovery_order = max(
@@ -146,8 +144,8 @@ def _build_position_batches(
             )
 
         ledger_batches_list: list[ManagedLivePositionBatch] = []
-        if shadow_projection.active_batches:
-            for ab in shadow_projection.active_batches:
+        if projection.active_batches:
+            for ab in projection.active_batches:
                 ledger_batches_list.append(
                     ManagedLivePositionBatch(
                         batch_id=ab.batch_id,
@@ -179,7 +177,7 @@ def _build_position_batches(
                             if ab.client_order_id
                             else frozenset()
                         ),
-                        projection_version=shadow_projection.projection_version,
+                        projection_version=projection.projection_version,
                     )
                 )
         ledger_batches = tuple(ledger_batches_list)
@@ -261,8 +259,8 @@ def _entry_fill_at(
     if order is None:
         return None
     for identifier in (
-        getattr(order, "exchange_order_id", None),
-        getattr(order, "client_order_id", None),
+        order.exchange_order_id,
+        order.client_order_id,
     ):
         if identifier is not None:
             fill_at = fill_times.get(identifier)
@@ -283,24 +281,6 @@ def _record_earliest_fill(
         fill_times[identifier] = filled_at
 
 
-def _record_fill_value(
-    fill_values: dict[str, tuple[Decimal, Decimal]],
-    identifier: str | None,
-    quantity: Decimal,
-    price: Decimal,
-) -> None:
-    if identifier is None or quantity <= 0 or price <= 0:
-        return
-    previous_quantity, previous_notional = fill_values.get(
-        identifier,
-        (Decimal("0"), Decimal("0")),
-    )
-    fill_values[identifier] = (
-        previous_quantity + quantity,
-        previous_notional + quantity * price,
-    )
-
-
 def _record_fill_quantity(
     fill_quantities: dict[str, Decimal],
     identifier: str | None,
@@ -311,13 +291,3 @@ def _record_fill_quantity(
     fill_quantities[identifier] = (
         fill_quantities.get(identifier, Decimal("0")) + quantity
     )
-
-
-def _average_fill_prices(
-    fill_values: Mapping[str, tuple[Decimal, Decimal]],
-) -> dict[str, Decimal]:
-    return {
-        identifier: notional / quantity
-        for identifier, (quantity, notional) in fill_values.items()
-        if quantity > 0 and notional > 0
-    }

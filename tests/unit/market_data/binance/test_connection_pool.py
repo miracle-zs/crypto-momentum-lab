@@ -85,7 +85,6 @@ def build_pool() -> tuple[
         BinanceConnectionPool(
             connection_factory=factory,
             max_subscriptions_per_connection=100,
-            control_messages_per_second=5,
         ),
         connections,
         events,
@@ -106,7 +105,6 @@ def build_pool_with_book_ticker_limit(
         BinanceConnectionPool(
             connection_factory=factory,
             max_subscriptions_per_connection=100,
-            control_messages_per_second=5,
             max_subscriptions_per_connection_by_stream={
                 CaptureStream.BOOK_TICKER: limit,
             },
@@ -194,7 +192,6 @@ async def test_pool_global_book_ticker_does_not_reconfigure_on_refresh() -> None
     pool = BinanceConnectionPool(
         connection_factory=factory,
         max_subscriptions_per_connection=100,
-        control_messages_per_second=5,
         use_all_book_ticker_stream=True,
     )
 
@@ -240,7 +237,6 @@ async def test_pool_stops_connections_concurrently() -> None:
     pool = BinanceConnectionPool(
         connection_factory=factory,
         max_subscriptions_per_connection=100,
-        control_messages_per_second=5,
     )
     await pool.apply_symbols(
         frozenset({"BTCUSDT"}),

@@ -74,8 +74,6 @@ class TrackedMembership:
     symbol: str
     status: MembershipStatus
     side: RankingSide | None
-    # Legacy snapshots may contain this field; new memberships leave it empty.
-    left_target_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)

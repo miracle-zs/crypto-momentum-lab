@@ -468,42 +468,6 @@ async def test_coordinator_triggers_on_max_dirty_age() -> None:
     await coordinator.stop()
 
 
-async def test_coordinator_check_dirty_age_idle() -> None:
-    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
-    strategy = _Strategy()
-    writer = CheckpointWriter(
-        run_id="run-idle-age",
-        persist=lambda run_id, checkpoint, saved_at: _persist(
-            persisted,
-            run_id,
-            checkpoint,
-            saved_at,
-        ),
-    )
-    coordinator = LiveCheckpointCoordinator(
-        writer=writer,
-        strategy=strategy,
-        checkpoint_every_states=100,
-        checkpoint_every_seconds=3600.0,
-        max_dirty_age_seconds=5.0,
-    )
-
-    await coordinator.start()
-    coordinator.record_processed_state(_state(), saved_at=NOW)
-    assert coordinator.dirty is True
-
-    # Not expired yet
-    assert coordinator.check_dirty_age() is False
-    assert len(persisted) == 0
-
-    # Expire dirty age
-    coordinator._last_persisted_monotonic -= 10.0
-    assert coordinator.check_dirty_age() is True
-    assert coordinator.dirty is False
-    await writer.flush()
-    assert len(persisted) == 1
-
-    await coordinator.stop()
 
 
 async def test_coordinator_save_final_timeout() -> None:

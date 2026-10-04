@@ -66,8 +66,6 @@ async def run_scheduler_loop(
         await sleeper(max(0.0, (scheduled - now).total_seconds()))
         try:
             await service.refresh(observed_at=scheduled)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "universe_refresh_failed",

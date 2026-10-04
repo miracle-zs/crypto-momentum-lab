@@ -25,6 +25,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
 )
+from tests.fixtures.prepared_submission import submit_prepared
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 
@@ -50,12 +51,10 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
     )
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
         on_event=on_event,
-        serialize_commands=False,
     )
 
     result = await machine.submit(
@@ -67,7 +66,6 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
     )
 
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
-    assert repository.plans == []
     assert [event.state for event in repository.events] == [
         ExchangeOrderState.ACKNOWLEDGED
     ]
@@ -89,15 +87,13 @@ async def test_pre_submission_callback_runs_before_exchange_write() -> None:
 
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
         on_before_submit=before_submit,
-        serialize_commands=False,
     )
 
-    result = await machine.submit(_plan())
+    result = await submit_prepared(machine, _plan())
 
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
     assert phases == ["pre_submission"]
@@ -118,15 +114,13 @@ async def test_failed_pre_submission_callback_blocks_exchange_write() -> None:
 
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
         on_before_submit=before_submit,
-        serialize_commands=False,
     )
 
-    result = await machine.submit(_plan())
+    result = await submit_prepared(machine, _plan())
 
     assert result.state is ExchangeOrderState.REJECTED
     assert exchange.calls == []
@@ -144,7 +138,7 @@ async def test_timeout_queries_by_client_order_id_before_retry() -> None:
     exchange.query_results = [None, _snapshot(ExchangeOrderState.ACKNOWLEDGED)]
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert exchange.calls == ["submit", "query", "query"]
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
@@ -154,7 +148,7 @@ async def test_timeout_with_failed_lookup_is_marked_for_reconciliation() -> None
     exchange = QueryFailExchange()
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert repository.events[-1].details["reason"] == "lookup unavailable"
@@ -167,7 +161,7 @@ async def test_clear_reject_persists_rejected_state() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert result.state is ExchangeOrderState.REJECTED
     assert repository.events[-1].state is ExchangeOrderState.REJECTED
@@ -180,7 +174,7 @@ async def test_partial_fill_remains_unresolved() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert result.state is ExchangeOrderState.PARTIALLY_FILLED
     assert not result.state.terminal
@@ -203,7 +197,7 @@ async def test_terminal_fill_updates_order_state_and_persists_fill() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert result.state is ExchangeOrderState.FILLED
     assert repository.fills == [fill]
@@ -250,7 +244,6 @@ async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effect
 
     machine = OrderExecutionStateMachine(
         exchange=FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)),
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -397,14 +390,32 @@ class FakeExchange:
     ) -> None:
         self.submit_result = submit_result
         self.query_result = query_result
+        self.on_request = None
+        self.on_response = None
         self.calls: list[str] = []
         self.query_results: list[ExchangeOrderSnapshot | Exception | None] = []
 
+    def set_exchange_boundary_callbacks(self, *, on_request=None, on_response=None):
+        self.on_request = on_request
+        self.on_response = on_response
+
+    async def emit_submit_boundary(self, plan, *, is_request):
+        callback = self.on_request if is_request else self.on_response
+        if callback is not None:
+            phase = (
+                "submit_request_started" if is_request else "submit_response_received"
+            )
+            await callback(plan, phase, datetime.now(UTC))
+
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
-        self.calls.append("submit")
-        if isinstance(self.submit_result, Exception):
-            raise self.submit_result
-        return self.submit_result
+        await self.emit_submit_boundary(plan, is_request=True)
+        try:
+            self.calls.append("submit")
+            if isinstance(self.submit_result, Exception):
+                raise self.submit_result
+            return self.submit_result
+        finally:
+            await self.emit_submit_boundary(plan, is_request=False)
 
     async def query_order_by_client_id(
         self,
@@ -494,12 +505,9 @@ class SequencedQueryExchange(FakeExchange):
 
 class FakeOrderRepository:
     def __init__(self) -> None:
-        self.plans: list[OrderExecutionPlan] = []
         self.events: list[ExchangeOrderEvent] = []
         self.fills: list[ExchangeOrderFill] = []
 
-    async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
-        self.plans.append(plan)
 
     async def record_order_observation(self, event, fills=()):
         for fill in fills:
@@ -521,7 +529,6 @@ def _machine(
 ) -> OrderExecutionStateMachine:
     return OrderExecutionStateMachine(
         exchange=exchange,
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -582,11 +589,9 @@ async def test_fact_commits_remain_serial_without_holding_command_network_lock()
             return True
 
     machine = OrderExecutionStateMachine(
-        exchange=object(),
-        repository=object(),
+        exchange=FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)),
         event_repository=Repository(),
         live_submit_enabled=True,
-        serialize_commands=False,
     )
     first = asyncio.create_task(
         machine.apply_observed_snapshot(
@@ -642,8 +647,6 @@ class FakeBoundaryExchange(FakeExchange):
                 )
 
 
-
-
 async def test_state_machine_hub_failure_blocks_exchange_submit() -> None:
     exchange = FakeBoundaryExchange(
         submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
@@ -657,15 +660,13 @@ async def test_state_machine_hub_failure_blocks_exchange_submit() -> None:
 
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=repository,
         event_repository=repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
         on_before_submit=failing_hub,
-        serialize_commands=False,
     )
 
-    result = await machine.submit(_plan())
+    result = await submit_prepared(machine, _plan())
 
     assert result.state is ExchangeOrderState.REJECTED
     assert exchange.calls == []
@@ -674,8 +675,6 @@ async def test_state_machine_hub_failure_blocks_exchange_submit() -> None:
         "reason": "account position expectation registration failed: TimeoutError",
         "phase": "before_exchange_submit",
     }
-
-
 
 
 async def test_state_machine_timeout_with_halt_remains_unknown_and_no_resend() -> None:
@@ -687,7 +686,7 @@ async def test_state_machine_timeout_with_halt_remains_unknown_and_no_resend() -
     repository = FakeOrderRepository()
 
     machine = _machine(exchange, repository)
-    result = await machine.submit(_plan())
+    result = await submit_prepared(machine, _plan())
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert exchange.calls == ["submit", "query", "query", "query", "query", "query"]

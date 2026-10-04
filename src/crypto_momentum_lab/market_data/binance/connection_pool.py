@@ -56,7 +56,6 @@ class BinanceConnectionPool:
         *,
         connection_factory: Callable[[SubscriptionGroup], PoolConnection],
         max_subscriptions_per_connection: int,
-        control_messages_per_second: float,
         max_subscriptions_per_connection_by_stream: Mapping[CaptureStream, int]
         | None = None,
         use_all_book_ticker_stream: bool = False,
@@ -66,16 +65,12 @@ class BinanceConnectionPool:
         self._max_subscriptions_per_connection_by_stream = dict(
             max_subscriptions_per_connection_by_stream or {}
         )
-        self._control_messages_per_second = control_messages_per_second
         self._use_all_book_ticker_stream = use_all_book_ticker_stream
         self._active_subscriptions: frozenset[Subscription] = frozenset()
         self._connections: dict[str, PoolConnection] = {}
         self._subscription_connections: dict[Subscription, str] = {}
         self._lock = asyncio.Lock()
         self._stopped = False
-
-    async def start(self) -> None:
-        return None
 
     async def apply_symbols(
         self,

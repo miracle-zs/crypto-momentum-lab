@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,11 +19,17 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.decision.ports import ExitRecoveryDisposition
+from crypto_momentum_lab.domain.execution.exchange_contract import (
+    ExchangeOrderQueryUnknownError,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
+from crypto_momentum_lab.execution_account.binance.response_rules import (
+    retry_after_seconds,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     ExchangeOrderRow,
@@ -200,6 +207,11 @@ class LiveExitReceiptRecovery:
         )
 
     def _defer_retry(self, error: Exception) -> None:
-        delay = getattr(error, "retry_after_seconds", None)
+        if isinstance(error, httpx.HTTPStatusError):
+            delay = retry_after_seconds(error.response)
+        elif isinstance(error, ExchangeOrderQueryUnknownError):
+            delay = error.retry_after_seconds
+        else:
+            delay = None
         seconds = max(5.0, float(delay)) if isinstance(delay, (int, float)) else 5.0
         self._retry_not_before = self._clock() + timedelta(seconds=seconds)

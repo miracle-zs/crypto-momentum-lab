@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.market import (
 )
 from crypto_momentum_lab.domain.market.decision_trace_service import (
     DecisionTraceService,
+    ReplayEvaluation,
 )
 from crypto_momentum_lab.domain.market.market_book import (
     InMemoryMarketBookRepository,
@@ -113,13 +114,14 @@ def test_decision_trace_replay_divergence_and_reproducibility() -> None:
     # Simple breakout policy: trigger if close > 65000.00
     def breakout_policy(
         envelopes: tuple[MarketEnvelope, ...],
-    ) -> tuple[bool, str | None]:
+    ) -> ReplayEvaluation:
         env = envelopes[0]
         if (env.state.close_price or Decimal("0")) > Decimal("65000.00"):
-            return True, None
-        return False, "no_breakout"
+            return ReplayEvaluation(True, None)
+        return ReplayEvaluation(False, "no_breakout")
 
-    intent_produced, reason = breakout_policy((book.read(ref1),))
+    evaluation = breakout_policy((book.read(ref1),))
+    intent_produced, reason = evaluation.intent_produced, evaluation.rejection_reason
     assert intent_produced is False
     assert reason == "no_breakout"
 
@@ -204,7 +206,7 @@ def test_missing_decision_visible_fails_closed_without_faking() -> None:
         trace_service.replay_decision(
             "dec_lost_history",
             replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-            policy_evaluator=lambda envs: (True, None),
+            policy_evaluator=lambda envs: ReplayEvaluation(True, None),
         )
 
 
@@ -382,7 +384,7 @@ def test_vertical_slice_publisher_runner_trace_and_replay() -> None:
     # --- 4. DECISION_VISIBLE mode reproduces exact decision ---
     def replay_evaluator(
         envelopes: tuple[MarketEnvelope, ...],
-    ) -> tuple[bool, str | None]:
+    ) -> ReplayEvaluation:
         env = envelopes[0]
         inp = DecisionInput(
             symbol="BTCUSDT",
@@ -395,7 +397,7 @@ def test_vertical_slice_publisher_runner_trace_and_replay() -> None:
             risk_config_version="risk_v1",
         )
         res = decide(inp, policy_state, policy)
-        return res.intent is not None, res.rejection_reason
+        return ReplayEvaluation(res.intent is not None, res.rejection_reason)
 
     replay_vis = trace_service.replay_decision(
         "dec_slice_001",

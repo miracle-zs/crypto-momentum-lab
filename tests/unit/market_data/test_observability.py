@@ -1,9 +1,36 @@
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
 import crypto_momentum_lab.market_data.observability as observability
+from crypto_momentum_lab.domain.market.models import CaptureStream, MarketDataState
+from crypto_momentum_lab.market_data.binance.websocket import (
+    BinanceWebSocketMetricsSnapshot,
+)
+
+
+def _capture_metrics(**overrides) -> observability.CaptureMetricsSnapshot:
+    values = dict(
+        state=MarketDataState.READY,
+        monitoring_generation=1,
+        monitoring_symbols=0,
+        desired_subscriptions=0,
+        active_subscriptions=0,
+        active_connections=0,
+        reconnect_count=0,
+        received_messages=0,
+        received_bytes=0,
+        queue_events=0,
+        queue_bytes=0,
+        archived_rows=0,
+        archived_bytes=0,
+        open_writers=0,
+        pending_manifests=0,
+        oldest_pending_manifest_seconds=None,
+        disk_free_bytes=0,
+    )
+    values.update(overrides)
+    return observability.CaptureMetricsSnapshot(**values)
 
 
 def test_event_loop_lag_level_uses_warning_and_critical_thresholds() -> None:
@@ -46,18 +73,21 @@ async def test_market_data_health_monitor_reports_runtime_signals(
 
     task = asyncio.create_task(
         observability.monitor_market_data_health(
-            capture_metrics=lambda: SimpleNamespace(
+            capture_metrics=lambda: _capture_metrics(
                 queue_events=7,
                 queue_bytes=1024,
                 monitoring_symbols=125,
             ),
-            connection_metrics=lambda: SimpleNamespace(
-                active_connections=3,
-                ready_connections=2,
-                reconnect_count=4,
-                ack_mismatch_count=1,
-                control_commands_sent=9,
-                received_messages=100,
+            connection_metrics=lambda: (
+                observability.BinanceConnectionPoolMetricsSnapshot(
+                    desired_subscriptions=100,
+                    active_connections=3,
+                    ready_connections=2,
+                    reconnect_count=4,
+                    ack_mismatch_count=1,
+                    control_commands_sent=9,
+                    received_messages=100,
+                )
             ),
             report_interval_seconds=0.01,
             sample_interval_seconds=0.001,
@@ -121,9 +151,11 @@ async def test_market_data_health_monitor_alerts_on_pressure_and_dead_dispatcher
             alerted.set()
 
     monkeypatch.setattr(observability, "log", FakeLog())
-    connection = SimpleNamespace(
+    connection = BinanceWebSocketMetricsSnapshot(
+        connection_attempts=1,
+        control_commands_sent=1,
         group_id="aggTrade:0001",
-        stream=SimpleNamespace(value="aggTrade"),
+        stream=CaptureStream.AGG_TRADE,
         desired_subscriptions=100,
         active=True,
         ready=True,
@@ -139,21 +171,24 @@ async def test_market_data_health_monitor_alerts_on_pressure_and_dead_dispatcher
     )
     task = asyncio.create_task(
         observability.monitor_market_data_health(
-            capture_metrics=lambda: SimpleNamespace(
+            capture_metrics=lambda: _capture_metrics(
                 queue_events=9,
                 queue_bytes=90,
                 queue_max_events=10,
                 queue_max_bytes=100,
                 monitoring_symbols=125,
             ),
-            connection_metrics=lambda: SimpleNamespace(
-                active_connections=1,
-                ready_connections=1,
-                reconnect_count=0,
-                ack_mismatch_count=0,
-                control_commands_sent=1,
-                received_messages=100,
-                connection_snapshots=(connection,),
+            connection_metrics=lambda: (
+                observability.BinanceConnectionPoolMetricsSnapshot(
+                    desired_subscriptions=100,
+                    active_connections=1,
+                    ready_connections=1,
+                    reconnect_count=0,
+                    ack_mismatch_count=0,
+                    control_commands_sent=1,
+                    received_messages=100,
+                    connection_snapshots=(connection,),
+                )
             ),
             report_interval_seconds=0.01,
             sample_interval_seconds=0.001,

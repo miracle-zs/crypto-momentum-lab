@@ -3,7 +3,7 @@ export function readinessStatusForSection(sectionId, data) {
     return "STALE";
   }
   if (sectionId === "overview") {
-    return data?.database_status ?? data?.status;
+    return data?.database_status;
   }
   return data?.status;
 }

@@ -120,7 +120,7 @@ class ScheduledRiskWindowController:
         ),
         clock: Callable[[], datetime],
         startup_market_timeout_seconds: float = 30.0,
-        wait_for_entry_submissions_idle: Callable[[], Awaitable[None]] | None = None,
+        wait_for_entry_submissions_idle: Callable[[], Awaitable[None]],
     ) -> None:
         self._config = config
         self._exit_manager = exit_manager
@@ -317,8 +317,6 @@ class ScheduledRiskWindowController:
         while True:
             try:
                 failure = await self.process()
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 # A schedule read or cancellation failure must not terminate
                 # the market/exit daemon.  The entry gate remains closed and
@@ -360,19 +358,15 @@ class ScheduledRiskWindowController:
         )
 
     async def _cancel_scheduled_entry_orders(self) -> str | None:
-        wait_for_idle = self._wait_for_entry_submissions_idle
-        if wait_for_idle is not None:
-            try:
-                await wait_for_idle()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                log.error(
-                    "live_scheduled_entry_submission_drain_failed",
-                    run_id=self._config.run_id,
-                    error_type=type(error).__name__,
-                )
-                return f"scheduled_entry_submission_drain_failed:{type(error).__name__}"
+        try:
+            await self._wait_for_entry_submissions_idle()
+        except Exception as error:
+            log.error(
+                "live_scheduled_entry_submission_drain_failed",
+                run_id=self._config.run_id,
+                error_type=type(error).__name__,
+            )
+            return f"scheduled_entry_submission_drain_failed:{type(error).__name__}"
         known_plans: dict[str, OrderExecutionPlan] = {}
         context: LiveDaemonRuntimeContext | None = None
         state = self._latest_scheduled_state()
@@ -424,8 +418,6 @@ class ScheduledRiskWindowController:
                     if not result.state.terminal:
                         return "scheduled_entry_order_cancel_not_confirmed"
                     cancelled_count += 1
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.error(
                 "live_scheduled_entry_order_cancel_failed",
@@ -465,6 +457,8 @@ class ScheduledRiskWindowController:
         ):
             return None
         states, state_failure = await self._scheduled_flatten_states(now)
+        if not states and state_failure is None and self._fetch_exchange_positions is not None:
+            return None
         if not states:
             if (
                 state_failure is None
@@ -499,8 +493,6 @@ class ScheduledRiskWindowController:
             try:
                 context = await self._context_provider(state)
                 self._apply_context(context)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 failure = f"scheduled_flatten_context_failed:{type(error).__name__}"
                 log.error(
@@ -581,8 +573,6 @@ class ScheduledRiskWindowController:
                 try:
                     context = await self._context_provider(state)
                     self._apply_context(context)
-                except asyncio.CancelledError:
-                    raise
                 except Exception as error:
                     failure = f"scheduled_flatten_context_failed:{type(error).__name__}"
                     continue
@@ -634,8 +624,6 @@ class ScheduledRiskWindowController:
                     reference_price=_scheduled_reference_price(state),
                     invalidate_context=False,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 approved = submitted = 0
                 request_failure = (
@@ -684,8 +672,6 @@ class ScheduledRiskWindowController:
             return cached_states, None
         try:
             exchange_positions = tuple(await self._fetch_exchange_positions())
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             # Keep the previous state-driven fallback available during a
             # transient REST outage.  The authoritative verification phase
@@ -709,12 +695,7 @@ class ScheduledRiskWindowController:
             if position.position_amt != 0
         }
         if not active_positions:
-            # Keep the established state-driven path as a compatibility
-            # fallback.  A just-filled reduce-only order can make the REST
-            # position read reach zero before the durable context catches up;
-            # the normal request path will then safely suppress a stale
-            # managed position instead of skipping the attempt altogether.
-            return cached_states, None
+            return (), None
 
         cached_by_symbol = {state.symbol: state for state in cached_states}
         states: list[MarketState15s] = []
@@ -744,8 +725,6 @@ class ScheduledRiskWindowController:
         for plan in plans:
             try:
                 result = await self._state_machine.cancel_order(plan)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.error(
                     "live_scheduled_active_exit_cancel_failed",
@@ -791,8 +770,6 @@ class ScheduledRiskWindowController:
             return "scheduled_position_verification_unavailable", None
         try:
             positions = tuple(await self._fetch_exchange_positions())
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.error(
                 "live_scheduled_position_verification_failed",

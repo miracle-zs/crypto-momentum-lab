@@ -31,7 +31,6 @@ def build_monitoring_memberships(
             symbol=symbol,
             status=MembershipStatus.TARGET,
             side=_target_side(result, symbol),
-            left_target_at=None,
         )
 
     for entry in result.gainers:
@@ -44,7 +43,6 @@ def build_monitoring_memberships(
                 symbol=entry.symbol,
                 status=MembershipStatus.EXTENDED,
                 side=RankingSide.GAINER,
-                left_target_at=None,
             )
 
     for symbol in sorted(forced_symbols):
@@ -54,7 +52,6 @@ def build_monitoring_memberships(
             symbol=symbol,
             status=MembershipStatus.FORCED,
             side=None,
-            left_target_at=None,
         )
 
     return memberships

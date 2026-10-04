@@ -1,3 +1,4 @@
+
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
@@ -11,12 +12,14 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
 )
+from tests.fixtures.live_context_reader import context_reader
 
 
 class _Provider:
     def __init__(self) -> None:
         self.current = True
         self.invalidations = 0
+        self.generation = 0
 
     async def __call__(self, _state: object) -> LiveDaemonRuntimeContext:
         raise AssertionError("context loading is outside this unit")
@@ -26,6 +29,7 @@ class _Provider:
 
     def invalidate(self, _event: ContextInvalidation | None = None) -> None:
         self.invalidations += 1
+        self.generation += 1
 
 
 @pytest.mark.asyncio
@@ -41,7 +45,7 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
 
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_provider=cast(LiveContextReader, provider),
+        context_provider=context_reader(cast(LiveContextReader, provider)),
         sync_pending_entry_plans=lambda context: None,
 
         update_managed_symbols=lambda positions, orders: cache_updates.append(
@@ -80,7 +84,7 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_provider=cast(LiveContextReader, provider),
+        context_provider=context_reader(cast(LiveContextReader, provider)),
         sync_pending_entry_plans=synced.append,
 
         update_managed_symbols=lambda positions, orders: cache_updates.append(
@@ -121,6 +125,7 @@ class _MockReader:
         self.current = True
         self.last_event: ContextInvalidation | None = None
         self.invalidation_count = 0
+        self.generation = 0
 
     async def __call__(self, _state: object) -> LiveDaemonRuntimeContext:
         raise AssertionError("outside this unit")
@@ -131,6 +136,7 @@ class _MockReader:
     def invalidate(self, event: ContextInvalidation | None = None) -> None:
         self.last_event = event
         self.invalidation_count += 1
+        self.generation += 1
 
 
 
@@ -139,7 +145,7 @@ def test_context_runtime_with_live_context_reader() -> None:
     reader = _MockReader()
     runtime = LiveContextRuntime(
         run_id="run-reader",
-        context_provider=reader,
+        context_provider=context_reader(reader),
         sync_pending_entry_plans=lambda context: None,
 
         update_managed_symbols=lambda _p, _o: None,
@@ -172,12 +178,16 @@ def test_context_runtime_with_live_context_reader() -> None:
 def test_invalidator_internal_type_error_is_not_called_again():
     calls = []
 
+    provider = _Provider()
+
     def invalidate(event):
+        provider.generation += 1
         calls.append(event)
         raise TypeError("invalid fact")
 
+    provider.invalidate = invalidate
     runtime = LiveContextRuntime(run_id="run-1",
-        context_provider=SimpleNamespace(invalidate=invalidate),
+        context_provider=context_reader(provider),
         sync_pending_entry_plans=lambda context: None,
 
         update_managed_symbols=lambda positions, orders: None)
@@ -202,9 +212,22 @@ async def test_context_applies_all_memory_views_before_subscription_target_updat
         runtime.apply_context(context)
         assert order == ["entries", "cache"]
 
-    runtime = LiveContextRuntime(run_id="run-1", context_provider=provider,
+    runtime = LiveContextRuntime(run_id="run-1", context_provider=context_reader(provider),
         sync_pending_entry_plans=lambda context: order.append("entries"),
 
         update_managed_symbols=lambda positions, orders: order.append("cache"),
         on_managed_position_symbols=notify)
     runtime.apply_context(context)
+
+
+def test_provider_invalidation_directly_advances_prefetch_generation():
+    provider = _Provider()
+    runtime = LiveContextRuntime(
+        run_id="run-1", context_provider=context_reader(provider),
+        sync_pending_entry_plans=lambda context: None,
+        update_managed_symbols=lambda positions, orders: None,
+    )
+    provider.invalidate()
+    assert runtime.generation == provider.generation == 1
+    runtime.invalidate()
+    assert runtime.generation == provider.generation == 2

@@ -26,6 +26,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
+from tests.fixtures.prepared_submission import submit_prepared
 
 NOW = datetime(2026, 9, 29, 6, 7, 1, tzinfo=UTC)
 
@@ -117,7 +118,7 @@ async def test_coordinator_resolves_active_stream_on_cold_start() -> None:
     plan = _plan("GRASSUSDT")
     # Submitting an order for a new symbol with no prior restored stream identity
     # must resolve from the active stream rather than raising RuntimeError
-    result = await coordinator.submit(plan)
+    result = await submit_prepared(coordinator, plan)
     assert result.state is ExchangeOrderState.FILLED
     assert result.executed_quantity == Decimal("137.6")
     book.observe.assert_called_once()
@@ -145,7 +146,9 @@ async def test_execution_book_get_active_stream() -> None:
 
 
 @pytest.mark.parametrize("stale", [False, True])
-async def test_repair_worker_coalesces_latest_context_and_rejects_stale_requests(monkeypatch, stale):
+async def test_repair_worker_coalesces_latest_context_and_rejects_stale_requests(
+    monkeypatch, stale
+):
     from dataclasses import replace
     from types import SimpleNamespace
 
@@ -167,16 +170,32 @@ async def test_repair_worker_coalesces_latest_context_and_rejects_stale_requests
         assert kwargs["is_current"]()
         return True
 
-    monkeypatch.setattr("crypto_momentum_lab.live_rollout.position_self_healing.auto_heal_unmanaged_position", repair)
-    runtime = LiveUnmanagedPositionRepair(account_label="primary", run_id="run-1",
-        book=SimpleNamespace(get_active_stream=lambda *args: ("hub", "epoch")), uow=object(),
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.position_self_healing.auto_heal_unmanaged_position",
+        repair,
+    )
+    runtime = LiveUnmanagedPositionRepair(
+        account_label="primary",
+        run_id="run-1",
+        book=SimpleNamespace(get_active_stream=lambda *args: ("hub", "epoch")),
+        uow=object(),
         context_is_current=lambda context: current[0],
         invalidate_context=lambda: invalidations.append(1),
-        request_recovery=lambda: wakes.append(1))
-    old = replace(_runtime_context(), unmanaged_position_symbols=frozenset({"BTCUSDT"}),
-        account_snapshot=SimpleNamespace(positions=(_position(position_amt=Decimal("1")),)))
-    latest = replace(old, account_snapshot=SimpleNamespace(positions=(
-        _position(position_amt=Decimal("2")),)))
+        request_recovery=lambda: wakes.append(1),
+    )
+    old = replace(
+        _runtime_context(),
+        unmanaged_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(
+            positions=(_position(position_amt=Decimal("1")),)
+        ),
+    )
+    latest = replace(
+        old,
+        account_snapshot=SimpleNamespace(
+            positions=(_position(position_amt=Decimal("2")),)
+        ),
+    )
     runtime.request(old)
     runtime.request(latest)
     assert not calls
@@ -207,6 +226,7 @@ async def test_repair_context_advanced_during_fact_read_cannot_persist():
 
     current = [True]
     persisted = AsyncMock()
+
     async def load(request):
         current[0] = False
         return object()
@@ -217,14 +237,22 @@ async def test_repair_context_advanced_during_fact_read_cannot_persist():
             yield SimpleNamespace(load_repair_facts=load, persist_repair=persisted)
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
-    request = PositionRepairRequest(key=key, run_id="run-1",
-        scope=AccountFactStreamScope.for_position_key(key, stream_id="hub", stream_epoch="epoch"),
-        expected_quantity=Decimal("1"), observed_at=NOW)
+    request = PositionRepairRequest(
+        key=key,
+        run_id="run-1",
+        scope=AccountFactStreamScope.for_position_key(
+            key, stream_id="hub", stream_epoch="epoch"
+        ),
+        expected_quantity=Decimal("1"),
+        observed_at=NOW,
+    )
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
     book = ExecutionBook()
     book._reload_position = AsyncMock()
-    assert not await auto_heal_unmanaged_position(request=request, uow=Uow(), book=book,
-                                                 is_current=lambda: current[0])
+    assert not await auto_heal_unmanaged_position(
+        request=request, uow=Uow(), book=book, is_current=lambda: current[0]
+    )
     persisted.assert_not_awaited()
     book._reload_position.assert_not_awaited()
 
@@ -249,34 +277,63 @@ async def test_context_reads_continue_while_existing_worker_repairs(monkeypatch)
     )
 
     started, release = asyncio.Event(), asyncio.Event()
+
     async def repair(**kwargs):
         started.set()
         await release.wait()
         return True
-    monkeypatch.setattr("crypto_momentum_lab.live_rollout.position_self_healing.auto_heal_unmanaged_position", repair)
-    book = SimpleNamespace(list_position_views=AsyncMock(return_value=()),
-                           get_active_stream=lambda *args: ("hub", "epoch"))
-    provider = object.__new__(PostgresLiveContextProvider)
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.position_self_healing.auto_heal_unmanaged_position",
+        repair,
+    )
+    book = SimpleNamespace(
+        context_revision=0,
+        list_position_views=AsyncMock(return_value=()),
+        get_active_stream=lambda *args: ("hub", "epoch"),
+    )
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = book
     provider._observe_book_drift = AsyncMock()
-    worker = LiveOrderReconciliation(order_repository=SimpleNamespace(
-        load_unresolved_orders=AsyncMock(return_value=())), state_machine=object(), run_id="run-1")
-    runtime = LiveUnmanagedPositionRepair(account_label="primary", run_id="run-1",
-        book=book, uow=object(), context_is_current=lambda context: True,
-        invalidate_context=lambda: None, request_recovery=worker.request_recovery)
+    worker = LiveOrderReconciliation(
+        order_repository=SimpleNamespace(
+            load_unresolved_orders=AsyncMock(return_value=())
+        ),
+        state_machine=object(),
+        run_id="run-1",
+    )
+    runtime = LiveUnmanagedPositionRepair(
+        account_label="primary",
+        run_id="run-1",
+        book=book,
+        uow=object(),
+        context_is_current=lambda context: True,
+        invalidate_context=lambda: None,
+        request_recovery=worker.request_recovery,
+    )
     provider._request_position_repair = runtime.request
     worker.repair_positions = runtime.repair_pending
-    context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}),
-        account_snapshot=SimpleNamespace(positions=(_position(),)))
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        account_snapshot=SimpleNamespace(positions=(_position(),)),
+    )
     task = asyncio.create_task(worker.run_requested())
     try:
         await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
         await asyncio.wait_for(started.wait(), 1)
         # Force another projection read while the actual repair callback remains blocked.
         provider._cached_book_result = None
-        result = await asyncio.wait_for(provider._with_execution_book(context,
-            SimpleNamespace(bucket_end=NOW)), 0.5)
+        result = await asyncio.wait_for(
+            provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW)), 0.5
+        )
         assert result.unmanaged_position_symbols == frozenset({"BTCUSDT"})
         assert not release.is_set()
     finally:

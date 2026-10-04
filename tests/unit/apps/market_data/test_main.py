@@ -1,3 +1,4 @@
+
 import asyncio
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
@@ -6,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -14,6 +16,9 @@ from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.market_data import main
 from crypto_momentum_lab.domain.market.models import CaptureStream
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    InMemoryRetentionRepository,
+)
 from crypto_momentum_lab.domain.universe.models import (
     MarketCandidate,
     MembershipStatus,
@@ -71,7 +76,6 @@ def fixture_snapshot() -> UniverseSnapshot:
                 "BTCUSDT",
                 MembershipStatus.TARGET,
                 RankingSide.GAINER,
-                None,
             ),
         ),
     )
@@ -97,7 +101,6 @@ def fixture_tiered_snapshot() -> UniverseSnapshot:
                 else MembershipStatus.EXTENDED
             ),
             RankingSide.GAINER,
-            None,
         )
         for entry in gainers
     )
@@ -307,6 +310,9 @@ async def test_operational_retention_uses_bounded_batches() -> None:
         def __init__(self) -> None:
             self.calls: list[tuple[str, int]] = []
 
+        async def is_runtime_state_partitioned(self) -> bool:
+            return False
+
         async def prune_contract_metadata(
             self,
             *,
@@ -335,6 +341,7 @@ async def test_operational_retention_uses_bounded_batches() -> None:
 
     await main.prune_operational_database_once(
         repository,
+        authority=main.RetentionAuthority(InMemoryRetentionRepository()),
         now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
     )
 
@@ -568,6 +575,12 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     state_hub = FakeStateHub()
     publisher = FakePublisher()
     runtime = SimpleNamespace(
+        quote_hub=SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+        quote_volume_publisher=None,
+        daily_open_prefetcher=None,
+        operational_retention=None,
+        maintenance_session_factory=None,
+        maintenance_capture_repository=None,
         capture=capture,
         connection_pool=SimpleNamespace(
             metrics_snapshot=lambda: SimpleNamespace(
@@ -1051,7 +1064,6 @@ async def test_capture_observer_reports_membership_churn() -> None:
                 "ETHUSDT",
                 MembershipStatus.TARGET,
                 RankingSide.GAINER,
-                None,
             ),
         ),
     )

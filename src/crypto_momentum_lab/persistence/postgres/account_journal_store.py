@@ -19,9 +19,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
     extract_fill_position_side,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
-    AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
     JournalFactDelta,
@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.execution.recovery_codec import (
     PositionRecoveryCodec,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,
@@ -528,7 +529,7 @@ class PostgresAccountJournalStore:
                         environment=environment,
                         account_label=account_label,
                         symbol=symbol,
-                        position_side=side,
+                        position_side=FuturesPositionSide(side),
                         stream_id=LEGACY_STREAM_ID,
                         stream_epoch=LEGACY_STREAM_EPOCH,
                     )
@@ -823,12 +824,6 @@ def _facts_from_rows(
         if checkpoint is not None
         else None
     )
-    legacy_rows = rows_for("legacy_checkpoint")
-    legacy_checkpoint = (
-        PositionRecoveryCodec.decode_legacy_checkpoint(legacy_rows[-1].payload)
-        if legacy_rows
-        else None
-    )
     domain_conflicts = tuple(
         PositionRecoveryCodec.decode_conflict(row.payload)
         for row in rows_for("fact_conflict")
@@ -938,7 +933,7 @@ def _facts_from_rows(
         conflicting_fills=fill_conflicts,
         has_late_events=late_flag or bool(late_fills),
         stream_scope=scope,
-        recovery_checkpoint=checkpoint or legacy_checkpoint,
+        recovery_checkpoint=checkpoint,
         fact_conflicts=tuple([*domain_conflicts, *conflicts]),
         integrity_issues=tuple(dict.fromkeys(issues)),
         late_fills=late_fills,
@@ -999,7 +994,6 @@ def _scope_conditions(model: Any, scope: AccountFactStreamScope) -> tuple[Any, .
 
 
 def _scope_from_columns(row: Any) -> AccountFactStreamScope:
-    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 
     return AccountFactStreamScope(
         environment=row.environment,

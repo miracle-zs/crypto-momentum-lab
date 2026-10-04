@@ -15,7 +15,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
 from crypto_momentum_lab.live_rollout.order_identity_adapter import (
-    LegacyOrderIdentityAdapter,
+    build_position_account_facts,
 )
 from tests.fixtures.b2_anonymized_timeline import (
     B2_TIMELINE,
@@ -84,7 +84,7 @@ def test_b2_post_zero_projection_with_position_ledger() -> None:
     all_fills = get_b2_account_fill_events()[:6]
     obs = get_b2_position_observation(position_amt=Decimal("172"))
 
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=system_orders,
         fills=all_fills,
@@ -108,7 +108,7 @@ def test_b2_dust_state_projection_contract() -> None:
     all_fills = get_b2_account_fill_events()[:11]
     obs = get_b2_position_observation(position_amt=Decimal("7"))
 
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=system_orders,
         fills=all_fills,

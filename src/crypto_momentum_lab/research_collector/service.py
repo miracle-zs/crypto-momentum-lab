@@ -53,9 +53,7 @@ from crypto_momentum_lab.research_collector.storage import (
     CapacitySnapshot,
     CapacityState,
     CheckpointStore,
-    LocalBatchSpool,
     ParquetWindowSink,
-    SinkFlushResult,
 )
 
 log = structlog.get_logger()
@@ -73,7 +71,6 @@ class ResearchStateCollector:
         config: CollectorConfig,
         source: CollectionSource,
         selector: SymbolSelector,
-        spool: LocalBatchSpool | None = None,
         sink: ParquetWindowSink | None = None,
         journal: ArchiveJournal | None = None,
         materializer: WindowMaterializer | None = None,
@@ -81,6 +78,8 @@ class ResearchStateCollector:
         backfill_source: RuntimeMarketStateBackfillSource | None = None,
         startup_timer: StartupPhaseTimer | None = None,
     ) -> None:
+        self._capacity_task: asyncio.Task[None] | None = None
+        self._materializer_task: asyncio.Task[None] | None = None
         config.root.mkdir(parents=True, exist_ok=True)
         self._config = config
         self._source = source
@@ -99,7 +98,6 @@ class ResearchStateCollector:
             sink=self._sink,
             journal=self._journal,
         )
-        self._spool = spool
         self._checkpoint_store = checkpoint_store or CheckpointStore(
             config.root / "checkpoints" / f"{config.environment}.json"
         )
@@ -138,30 +136,17 @@ class ResearchStateCollector:
         self._initialized = False
         self._capacity_snapshot: CapacitySnapshot | None = None
         self._last_capacity_refresh = 0.0
-        self._capacity_task: asyncio.Task[None] | None = None
         self._health_store = CollectorHealthStore(config.root, config.environment)
         self._health_store.reset()
         self._queue: asyncio.Queue[JournalRecord | None] = asyncio.Queue(
             maxsize=config.max_queue_batches
         )
-        self._materializer_task: asyncio.Task[None] | None = None
         self._materializer_error: BaseException | None = None
         self._materializer_failed = asyncio.Event()
 
     @property
     def config(self) -> CollectorConfig:
         return self._config
-
-    def __del__(self) -> None:
-        try:
-            task = getattr(self, "_materializer_task", None)
-            if task is not None and not task.done():
-                task.cancel()
-            cap_task = getattr(self, "_capacity_task", None)
-            if cap_task is not None and not cap_task.done():
-                cap_task.cancel()
-        except Exception:
-            pass
 
     async def refresh_capacity(self) -> CapacitySnapshot:
         """
@@ -308,7 +293,9 @@ class ResearchStateCollector:
             raise RuntimeError(
                 f"Materializer worker failed: {self._materializer_error}"
             ) from self._materializer_error
-        if getattr(self._queue, "_unfinished_tasks", 0) == 0:
+        if self._queue.empty() and (
+            self._materializer_task is None or self._materializer_task.done()
+        ):
             return
         self._ensure_materializer_task()
         joined = asyncio.create_task(self._queue.join())
@@ -528,8 +515,6 @@ class ResearchStateCollector:
                 await self._consume_source_once()
                 if not self._stopping:
                     await asyncio.sleep(0.5)
-            except asyncio.CancelledError:
-                raise
             except MarketStateHubReplayUnavailable as error:
                 self._connected = False
                 self._gap_count += 1
@@ -547,9 +532,7 @@ class ResearchStateCollector:
             return
         self._stopping = True
         self._publish_health()
-        stop = getattr(self._source, "stop", None)
-        if callable(stop):
-            stop()
+        self._source.stop()
         if self._capacity_task is not None and not self._capacity_task.done():
             self._capacity_task.cancel()
             try:
@@ -587,11 +570,10 @@ class ResearchStateCollector:
 
     async def health(self) -> CollectorHealth:
         await self.initialize()
-        if getattr(self._queue, "_unfinished_tasks", 0) > 0:
-            try:
-                await self.drain_queue(timeout_seconds=2.0)
-            except (TimeoutError, RuntimeError):
-                pass
+        try:
+            await self.drain_queue(timeout_seconds=2.0)
+        except (TimeoutError, RuntimeError):
+            pass
         snapshot = await self.refresh_capacity()
         pending_bytes = self._journal.pending_bytes
         pending_records = self._journal.pending_records()
@@ -636,9 +618,7 @@ class ResearchStateCollector:
                 await self.ingest(CollectionBatch(batch=batch))
         finally:
             self._connected = False
-            close = getattr(iterator, "aclose", None)
-            if callable(close):
-                await close()
+            await iterator.aclose()
 
     async def _recover_replay_gap(
         self,
@@ -699,12 +679,9 @@ class ResearchStateCollector:
             updated_at=datetime.now(UTC),
         )
         await asyncio.to_thread(self._checkpoint_store.save, self._checkpoint)
-        resume = getattr(self._source, "resume_after_recovery", None)
-        if not callable(resume):
-            raise CollectorStateConflict(
-                "source cannot accept a recovered Hub cursor"
-            ) from error
-        resume(stream_id=stream_id, sequence=latest_sequence)
+        self._source.resume_after_recovery(
+            stream_id=stream_id, sequence=latest_sequence
+        )
         log.warning(
             "research_collector_recovered_hub_gap",
             environment=self._config.environment,
@@ -753,10 +730,9 @@ class ResearchStateCollector:
                 f"Materializer worker failed: {self._materializer_error}"
             ) from self._materializer_error
         if self._materializer_task is not None and not self._materializer_task.done():
-            if getattr(self._queue, "_unfinished_tasks", 0) > 0:
-                # Replay recovery pauses ingress until durable output completes.
-                # A slow disk must not restart recovery from the old Hub cursor.
-                await self.drain_queue(timeout_seconds=10.0 if self._stopping else None)
+            # Replay recovery pauses ingress until durable output completes.
+            # A slow disk must not restart recovery from the old Hub cursor.
+            await self.drain_queue(timeout_seconds=10.0 if self._stopping else None)
         result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
         await self._save_checkpoint()
@@ -894,9 +870,6 @@ class ResearchStateCollector:
             }
         )
 
-    def _durable_sequence(self) -> int | None:
-        return self._journal.materialized_sequence
-
     async def _prepare_hub_stream(
         self,
         collection_batch: CollectionBatch,
@@ -910,8 +883,7 @@ class ResearchStateCollector:
             return
         if stream_id == self._active_stream_id:
             return
-        if getattr(self._queue, "_unfinished_tasks", 0) > 0:
-            await self.drain_queue(timeout_seconds=None)
+        await self.drain_queue(timeout_seconds=None)
         await self._flush_all_buffers()
         self._active_stream_id = stream_id
         self._journal.set_active_stream_id(stream_id)
@@ -1041,12 +1013,10 @@ class ResearchStateCollector:
 
     def _set_source_cursor_from_checkpoint(self) -> None:
         checkpoint = self._require_checkpoint()
-        set_cursor = getattr(self._source, "set_resume_cursor", None)
-        if callable(set_cursor):
-            set_cursor(
-                stream_id=checkpoint.stream_id,
-                sequence=checkpoint.last_sequence,
-            )
+        self._source.set_resume_cursor(
+            stream_id=checkpoint.stream_id,
+            sequence=checkpoint.last_sequence,
+        )
 
     def _require_checkpoint(self) -> CollectorCheckpoint:
         if self._checkpoint is None:
@@ -1118,48 +1088,4 @@ def _receipt_for_skipped_batch(
         ),
         selected_rows=0,
         skipped_rows=len(collection_batch.states),
-    )
-
-
-def _receipt_for_empty_selection(
-    collection_batch: CollectionBatch,
-    *,
-    flush_result: SinkFlushResult | MaterializerFlushResult,
-) -> CollectionReceipt:
-    return CollectionReceipt(
-        source_kind=collection_batch.source_kind,
-        sequence=(
-            collection_batch.sequence
-            if collection_batch.source_kind is SourceKind.HUB
-            else None
-        ),
-        selected_rows=0,
-        committed_rows=flush_result.committed_rows,
-        skipped_rows=len(collection_batch.states),
-    )
-
-
-def _receipt_for_ingested_batch(
-    collection_batch: CollectionBatch,
-    *,
-    selected_rows: int,
-    duplicate_rows: int,
-    flush_result: SinkFlushResult | MaterializerFlushResult,
-) -> CollectionReceipt:
-    return CollectionReceipt(
-        source_kind=collection_batch.source_kind,
-        sequence=(
-            collection_batch.sequence
-            if collection_batch.source_kind is SourceKind.HUB
-            else None
-        ),
-        selected_rows=selected_rows,
-        duplicate_rows=duplicate_rows,
-        committed_rows=flush_result.committed_rows,
-        committed_sequence=(
-            collection_batch.sequence
-            if collection_batch.source_kind is SourceKind.HUB
-            and collection_batch.sequence in flush_result.committed_sequences
-            else None
-        ),
     )

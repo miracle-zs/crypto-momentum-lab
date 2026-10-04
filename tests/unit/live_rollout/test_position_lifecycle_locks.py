@@ -9,6 +9,11 @@ from crypto_momentum_lab.live_rollout.position_lifecycle import (
 )
 
 
+async def _run(locks, key, operation):
+    async with locks.hold(key):
+        return await operation()
+
+
 def _key(symbol: str, side: FuturesPositionSide) -> PositionKey:
     return PositionKey("live", "account-1", symbol, side)
 
@@ -32,14 +37,14 @@ async def test_actor_serializes_one_position_and_runs_other_positions_concurrent
         return "second-result"
 
     first_call = asyncio.create_task(
-        actors.run(_key("BTCUSDT", FuturesPositionSide.LONG), first)
+        _run(actors, _key("BTCUSDT", FuturesPositionSide.LONG), first)
     )
     await started.wait()
     second_call = asyncio.create_task(
-        actors.run(_key("BTCUSDT", FuturesPositionSide.LONG), second)
+        _run(actors, _key("BTCUSDT", FuturesPositionSide.LONG), second)
     )
     other_call = asyncio.create_task(
-        actors.run(
+        _run(actors,
             _key("ETHUSDT", FuturesPositionSide.LONG),
             lambda: asyncio.sleep(0, result="other-result"),
         )
@@ -63,9 +68,9 @@ async def test_actor_continues_after_one_lifecycle_operation_fails():
         raise RuntimeError("failed operation")
 
     with pytest.raises(RuntimeError, match="failed operation"):
-        await actors.run(key, fail)
+        await _run(actors, key, fail)
 
-    assert await actors.run(key, lambda: asyncio.sleep(0, result=7)) == 7
+    assert await _run(actors, key, lambda: asyncio.sleep(0, result=7)) == 7
     await actors.close()
 
 
@@ -84,9 +89,9 @@ async def test_cancelled_waiter_never_runs_and_drain_waits_for_admitted_work():
     async def cancelled_operation():
         executed.append("unexpected")
 
-    active = asyncio.create_task(locks.run(key, first))
+    active = asyncio.create_task(_run(locks, key, first))
     await started.wait()
-    waiter = asyncio.create_task(locks.run(key, cancelled_operation))
+    waiter = asyncio.create_task(_run(locks, key, cancelled_operation))
     await asyncio.sleep(0)
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -98,5 +103,5 @@ async def test_cancelled_waiter_never_runs_and_drain_waits_for_admitted_work():
     await active
     await draining
     assert executed == []
-    assert await locks.run(key, lambda: asyncio.sleep(0, result=7)) == 7
+    assert await _run(locks, key, lambda: asyncio.sleep(0, result=7)) == 7
     await locks.close()

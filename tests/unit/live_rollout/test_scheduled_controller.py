@@ -1,12 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
     ScheduledRiskWindowControllerConfig,
@@ -51,9 +50,7 @@ def _market_state(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_controller_reports_pending_during_startup_market_wait() -> (
-    None
-):
+async def test_flat_exchange_needs_no_market_state_or_stale_context() -> None:
     # 23:45 UTC is FLATTENING phase under default Asia/Shanghai schedule
     current_time = datetime(2026, 7, 3, 23, 45, 0, tzinfo=UTC)
 
@@ -61,14 +58,7 @@ async def test_scheduled_controller_reports_pending_during_startup_market_wait()
         return ()
 
     async def dummy_context(_state):
-        return cast(
-            LiveDaemonRuntimeContext,
-            SimpleNamespace(
-                pending_position_symbols=frozenset(),
-                managed_positions=(),
-                unmanaged_position_symbols=frozenset(),
-            ),
-        )
+        pytest.fail("a flat exchange must not rebuild exits from stale local context")
 
     def dummy_publish(_context):
         pass
@@ -94,127 +84,20 @@ async def test_scheduled_controller_reports_pending_during_startup_market_wait()
         fetch_exchange_positions=fetch_positions,
         clock=lambda: current_time,
         startup_market_timeout_seconds=30.0,
+        wait_for_entry_submissions_idle=AsyncMock(),
     )
 
-    # Within startup period (t = 0), market states have not arrived yet
+    # No exchange exposure: startup market readiness is irrelevant to flattening.
     status = await controller.process()
-    assert status == "scheduled_flatten_market_state_pending"
+    assert status is None
 
-    # Within startup period (t = 10s), still waiting for market states
+    # A later pass also completes without consulting stale local positions.
     current_time += timedelta(seconds=10)
-    status = await controller.process()
-    assert status == "scheduled_flatten_market_state_pending"
-
-
-@pytest.mark.asyncio
-async def test_scheduled_controller_reports_error_when_market_wait_times_out() -> None:
-    current_time = datetime(2026, 7, 3, 23, 45, 0, tzinfo=UTC)
-
-    async def fetch_positions() -> tuple:
-        return ()
-
-    async def dummy_context(_state):
-        return cast(
-            LiveDaemonRuntimeContext,
-            SimpleNamespace(
-                pending_position_symbols=frozenset(),
-                managed_positions=(),
-                unmanaged_position_symbols=frozenset(),
-            ),
-        )
-
-    def dummy_publish(_context):
-        pass
-
-    class DummyExitManager:
-        async def requests_for_scheduled_flatten(self, positions, *, state, context):
-            return ()
-
-    controller = ScheduledRiskWindowController(
-        config=ScheduledRiskWindowControllerConfig(
-            run_id="test-run",
-            scheduled_risk_window=ScheduledRiskWindowConfig(),
-        ),
-        exit_manager=cast(object, DummyExitManager()),
-        state_machine=None,
-        context_provider=dummy_context,
-        apply_context=dummy_publish,
-        invalidate_context_cache=lambda: None,
-        process_exit_requests=cast(object, None),
-        set_entry_blocked=lambda _b, **_kw: None,
-        pending_entry_plans=lambda: (),
-        cancel_unfilled_entry_orders=cast(object, None),
-        fetch_exchange_positions=fetch_positions,
-        clock=lambda: current_time,
-        startup_market_timeout_seconds=30.0,
-    )
-
-    # Advance time past the 30.0s startup grace window without observing market state
-    current_time += timedelta(seconds=35)
-    status = await controller.process()
-    assert status == "scheduled_flatten_market_state_unavailable"
-
-
-@pytest.mark.asyncio
-async def test_scheduled_controller_completes_flatten_after_market_state_arrives() -> (
-    None
-):
-    current_time = datetime(2026, 7, 3, 23, 45, 0, tzinfo=UTC)
-
-    async def fetch_positions() -> tuple:
-        return ()
-
-    async def dummy_context(_state):
-        return cast(
-            LiveDaemonRuntimeContext,
-            SimpleNamespace(
-                pending_position_symbols=frozenset(),
-                managed_positions=(),
-                unmanaged_position_symbols=frozenset(),
-            ),
-        )
-
-    def dummy_publish(_context):
-        pass
-
-    class DummyExitManager:
-        async def requests_for_scheduled_flatten(self, positions, *, state, context):
-            return ()
-
-    controller = ScheduledRiskWindowController(
-        config=ScheduledRiskWindowControllerConfig(
-            run_id="test-run",
-            scheduled_risk_window=ScheduledRiskWindowConfig(),
-        ),
-        exit_manager=cast(object, DummyExitManager()),
-        state_machine=None,
-        context_provider=dummy_context,
-        apply_context=dummy_publish,
-        invalidate_context_cache=lambda: None,
-        process_exit_requests=cast(object, None),
-        set_entry_blocked=lambda _b, **_kw: None,
-        pending_entry_plans=lambda: (),
-        cancel_unfilled_entry_orders=cast(object, None),
-        fetch_exchange_positions=fetch_positions,
-        clock=lambda: current_time,
-        startup_market_timeout_seconds=30.0,
-    )
-
-    # Initial tick is pending
-    status = await controller.process()
-    assert status == "scheduled_flatten_market_state_pending"
-
-    # Market state arrives at t = 5s
-    current_time += timedelta(seconds=5)
-    state = _market_state(symbol="BTCUSDT", now=current_time)
-    controller.observe_state(state)
-
-    # Now flatten should process and complete cleanly
     status = await controller.process()
     assert status is None
 
 
-@pytest.mark.parametrize("mode", ["absent", "success", "failure"])
+@pytest.mark.parametrize("mode", ["success", "failure"])
 async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> None:
     calls = []
 
@@ -246,13 +129,13 @@ async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> 
         cancel_unfilled_entry_orders=None,
         fetch_exchange_positions=None,
         clock=lambda: datetime.now(tz=UTC),
-        wait_for_entry_submissions_idle=wait if mode != "absent" else None,
+        wait_for_entry_submissions_idle=wait,
     )
     result = await controller._cancel_scheduled_entry_orders()
     assert calls == (
-        ["wait"] if mode == "failure"
-        else ["wait", "pending"] if mode == "success"
-        else ["pending"]
+        ["wait"]
+        if mode == "failure"
+        else ["wait", "pending"]
     )
     assert result == (
         "scheduled_entry_submission_drain_failed:OSError" if mode == "failure" else None

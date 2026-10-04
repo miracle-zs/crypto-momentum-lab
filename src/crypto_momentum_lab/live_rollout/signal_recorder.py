@@ -1,7 +1,7 @@
 """Non-blocking persistence of live strategy signals and filter context."""
 
 import asyncio
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -151,7 +151,6 @@ class LiveStrategySignalRecorder:
         quote_volume_provider: QuoteVolume24hProvider | None = None,
         persist: LiveSignalBatchSink | None = None,
         queue_size: int = 4096,
-        max_recent_records: int = 4096,
     ) -> None:
         for value, field_name in (
             (run_id, "run_id"),
@@ -161,8 +160,6 @@ class LiveStrategySignalRecorder:
                 raise ValueError(f"{field_name} must not be empty")
         if queue_size <= 0:
             raise ValueError("queue_size must be positive")
-        if max_recent_records <= 0:
-            raise ValueError("max_recent_records must be positive")
         self._run_id = run_id
         self._account_label = account_label
         self._code_commit = code_commit
@@ -171,9 +168,6 @@ class LiveStrategySignalRecorder:
         self._queue_size = queue_size
         self._queue: asyncio.Queue[LiveSignalObservation | None] | None = None
         self._writer_task: asyncio.Task[None] | None = None
-        self._recent_records: deque[LiveSignalObservation] = deque(
-            maxlen=max_recent_records
-        )
         self._recorded_count = 0
         self._dropped_count = 0
         self._persist_failure_count = 0
@@ -205,14 +199,7 @@ class LiveStrategySignalRecorder:
         provider = self._quote_volume_provider
         if provider is None:
             return {}
-        metrics_fn = getattr(provider, "metrics_snapshot", None)
-        if callable(metrics_fn):
-            return dict(metrics_fn())
-        return {}
-
-    @property
-    def recent_records(self) -> tuple[LiveSignalObservation, ...]:
-        return tuple(self._recent_records)
+        return provider.metrics_snapshot()
 
     async def start(self) -> None:
         if self._writer_task is not None:
@@ -300,7 +287,7 @@ class LiveStrategySignalRecorder:
             strategy_version=candidate.strategy_version,
             config_hash=candidate.config_hash,
             symbol=candidate.symbol,
-            side=_enum_value(candidate.side),
+            side=candidate.side.value,
             detected_at=candidate.created_at,
             source_state_at=state.bucket_start,
             reason=candidate.reason,
@@ -351,7 +338,7 @@ class LiveStrategySignalRecorder:
                 strategy_version = signal.strategy_version
                 config_hash = signal.config_hash
                 symbol = signal.symbol
-                side = _enum_value(signal.side)
+                side = signal.side.value
                 detected_at = signal.detected_at
                 source_state_at = signal.source_state_at
                 reason = signal.reason
@@ -421,7 +408,6 @@ class LiveStrategySignalRecorder:
             )
             return
         self._recorded_count += 1
-        self._recent_records.append(observation)
         self._enqueue(observation)
 
     def _volume_fields(
@@ -476,8 +462,6 @@ class LiveStrategySignalRecorder:
                 batch.append(next_record)
             try:
                 await self._persist_batch(batch)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._persist_failure_count += len(batch)
                 log.warning(
@@ -509,8 +493,6 @@ class LiveStrategySignalRecorder:
                     timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
                 )
                 return
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 if attempt >= _PERSIST_BATCH_ATTEMPTS:
                     raise
@@ -536,8 +518,8 @@ def _candidate_payload(candidate: OrderIntentCandidate) -> dict[str, object]:
     return {
         "candidate_id": candidate.candidate_id,
         "signal_id": candidate.signal_id,
-        "side": _enum_value(candidate.side),
-        "entry_type": _enum_value(candidate.entry_type),
+        "side": candidate.side.value,
+        "entry_type": candidate.entry_type.value,
         "limit_price": candidate.limit_price,
         "desired_notional": candidate.desired_notional,
         "reduce_only": candidate.reduce_only,
@@ -574,12 +556,8 @@ def _market_context(state: MarketState15s) -> dict[str, JsonValue]:
         "source_event_count": state.source_event_count,
         "first_received_at": state.first_received_at,
         "last_received_at": state.last_received_at,
-        "data_complete": getattr(state, "data_complete", None),
-        "missing_agg_trade_count": getattr(
-            state,
-            "missing_agg_trade_count",
-            None,
-        ),
+        "data_complete": state.data_complete,
+        "missing_agg_trade_count": state.missing_agg_trade_count,
     }
     return _json_mapping(values)
 
@@ -630,12 +608,6 @@ def _observation_id(
         )
     )
     return f"live_sig_{uuid5(NAMESPACE_URL, value)}"
-
-
-def _enum_value(value: object) -> str:
-    if isinstance(value, Enum):
-        return str(value.value)
-    return str(value)
 
 
 def _json_mapping(value: Mapping[str, object]) -> dict[str, JsonValue]:

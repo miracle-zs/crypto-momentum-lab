@@ -64,7 +64,6 @@ async def test_save_snapshot_is_idempotent(
                 "BTCUSDT",
                 MembershipStatus.TARGET,
                 RankingSide.GAINER,
-                None,
             ),
         ),
     )
@@ -185,19 +184,16 @@ async def test_load_active_entry_symbols_at_filters_extended_memberships_in_sql(
                 "BTCUSDT",
                 MembershipStatus.TARGET,
                 RankingSide.GAINER,
-                None,
             ),
             TrackedMembership(
                 "ETHUSDT",
                 MembershipStatus.EXTENDED,
                 RankingSide.GAINER,
-                None,
             ),
             TrackedMembership(
                 "SOLUSDT",
                 MembershipStatus.RETAINED,
                 RankingSide.GAINER,
-                None,
             ),
         ),
     )

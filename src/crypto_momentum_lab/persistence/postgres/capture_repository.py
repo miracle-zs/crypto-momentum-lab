@@ -110,7 +110,7 @@ class PostgresCaptureRepository:
                             )
                         )
                     )
-                    deleted_count += int(getattr(result, "rowcount", 0) or 0)
+                    deleted_count += int(result.rowcount)
         return deleted_count
 
     async def save_quality_event(self, event: QualityEvent) -> None:
@@ -174,7 +174,7 @@ class PostgresCaptureRepository:
             count = await session.scalar(
                 select(func.count()).select_from(MarketDataQualityEventRow)
             )
-        return int(count or 0)
+        return int(count)
 
     async def latest_process_state(self) -> MarketDataState | None:
         async with self._session_factory() as session:

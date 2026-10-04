@@ -20,7 +20,6 @@ from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import 
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
-    PaperEquitySnapshotRow,
 )
 
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
@@ -157,18 +156,6 @@ def bucket_equity_observations(
     return latest_by_bucket
 
 
-def paper_equity_observations(
-    rows: Iterable[PaperEquitySnapshotRow],
-) -> list[EquityObservation]:
-    return [
-        EquityObservation(
-            observed_at=as_utc(row.observed_at),
-            equity=row.equity,
-            source_observed_at=as_utc(row.observed_at),
-        )
-        for row in rows
-        if row.equity is not None and row.equity > 0
-    ]
 
 
 def paper_equity_observations_from_values(

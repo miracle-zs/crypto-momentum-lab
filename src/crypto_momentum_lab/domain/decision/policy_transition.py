@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any, Protocol
+from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
     DecisionFrame,
@@ -84,7 +84,7 @@ class TimerRequest:
 
 @dataclass(frozen=True, slots=True)
 class PolicyTransition:
-    """Immutable outcome of StrategyPolicy.transition (R3)."""
+    """Immutable outcome of a pure policy transition."""
 
     decision_id: str
     frame_digest: str
@@ -96,25 +96,6 @@ class PolicyTransition:
     timer_requests: tuple[TimerRequest, ...] = ()
     rejection_reason: str | None = None
     transition_time: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    @property
-    def is_actionable(self) -> bool:
-        return self.entry_candidate is not None or self.exit_command is not None
-
-
-class StrategyPolicy(Protocol):
-    """Protocol governing pure, reproducible strategy policy state transitions."""
-
-    def transition(
-        self,
-        frame: DecisionFrame,
-        prior_state: Any,
-        policy_artifact: Any,
-        *,
-        market_envelope: MarketEnvelope,
-        position_view: PositionView,
-        closed_candles: tuple[ClosedCandle15m, ...] = (),
-    ) -> PolicyTransition: ...
 
 
 POLICY_SERIALIZATION_VERSION = 1
@@ -180,35 +161,14 @@ def canonicalize_policy_value(value: Any) -> Any:
             key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
         )
 
-    if is_dataclass(value) and not isinstance(value, type):
-        object_fields = {
-            item.name: getattr(value, item.name)
-            for item in fields(value)
-            if not item.name.startswith("_")
-        }
-    else:
-        object_fields: dict[str, Any] = {}
-        instance_dict = getattr(value, "__dict__", None)
-        if isinstance(instance_dict, dict):
-            object_fields = {
-                key: item
-                for key, item in instance_dict.items()
-                if not key.startswith("_")
-            }
-        else:
-            slots = getattr(type(value), "__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            for name in slots:
-                if (
-                    isinstance(name, str)
-                    and not name.startswith("_")
-                    and hasattr(value, name)
-                ):
-                    object_fields[name] = getattr(value, name)
-        if not object_fields:
-            value_type = f"{type(value).__module__}.{type(value).__qualname__}"
-            raise TypeError(f"unsupported policy value type: {value_type}")
+    if not is_dataclass(value) or isinstance(value, type):
+        value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+        raise TypeError(f"unsupported policy value type: {value_type}")
+    object_fields = {
+        item.name: getattr(value, item.name)
+        for item in fields(value)
+        if not item.name.startswith("_")
+    }
 
     normalized_fields = {
         key: canonicalize_policy_value(item)
@@ -224,47 +184,19 @@ def canonicalize_policy_value(value: Any) -> Any:
     }
 
 
-def _policy_object_fields(policy: Any) -> dict[str, Any]:
-    if isinstance(policy, Mapping):
-        if not all(isinstance(key, str) for key in policy):
-            raise TypeError("policy parameter keys must be strings")
-        return dict(policy)
-    if is_dataclass(policy) and not isinstance(policy, type):
-        return {
-            item.name: getattr(policy, item.name)
-            for item in fields(policy)
-            if not item.name.startswith("_")
-        }
-    instance_dict = getattr(policy, "__dict__", None)
-    if isinstance(instance_dict, dict):
-        return {
-            key: value
-            for key, value in instance_dict.items()
-            if not key.startswith("_")
-        }
-    slots = getattr(type(policy), "__slots__", ())
-    if isinstance(slots, str):
-        slots = (slots,)
-    return {
-        name: getattr(policy, name)
-        for name in slots
-        if isinstance(name, str) and not name.startswith("_") and hasattr(policy, name)
-    }
-
-
 def serialize_policy_parameters(policy: Any) -> dict[str, Any]:
     """Return versioned canonical parameters for every decision-relevant field."""
-    if policy is None:
-        return {"serialization_version": POLICY_SERIALIZATION_VERSION}
-    raw_fields = _policy_object_fields(policy)
+    raw_fields = {
+        item.name: getattr(policy, item.name)
+        for item in fields(policy)
+        if not item.name.startswith("_")
+    }
     res: dict[str, Any] = {"serialization_version": POLICY_SERIALIZATION_VERSION}
     for name, value in sorted(raw_fields.items()):
         # The filter injects an executable candidate callback. Its frozen input
         # candidate is recorded separately in DecisionTrace; serializing the
         # closure itself would not be reproducible.
         if name == "candidate_generator":
-            continue
-        if name == "symbol_lot_rules" and (callable(value) or isinstance(value, Mapping)):
             continue
         if isinstance(value, timedelta):
             seconds = _timedelta_seconds(value)
@@ -285,12 +217,6 @@ def serialize_policy_state(state: Any) -> dict[str, Any]:
     res: dict[str, Any] = {
         "serialization_version": POLICY_STATE_SERIALIZATION_VERSION,
     }
-    if state is None:
-        return res
-    if isinstance(state, Mapping):
-        res["custom_state"] = canonicalize_policy_value(state)
-        return res
-
     aliases = {
         "cooldown_until_by_symbol": "cooldown_until",
         "anchor_prices_by_symbol": "anchor_prices",
@@ -299,7 +225,11 @@ def serialize_policy_state(state: Any) -> dict[str, Any]:
         "holding_deadline_by_symbol": "holding_deadline",
         "sizing_state_by_symbol": "sizing_state",
     }
-    raw_fields = _policy_object_fields(state)
+    raw_fields = {
+        item.name: getattr(state, item.name)
+        for item in fields(state)
+        if not item.name.startswith("_")
+    }
     for name, value in sorted(raw_fields.items()):
         res[aliases.get(name, name)] = canonicalize_policy_value(value)
     return res
@@ -323,12 +253,12 @@ def compute_transition_input_hash(
     param_digest = (
         policy_parameters_digest
         if policy_parameters_digest is not None
-        else getattr(frame, "policy_parameters_digest", "")
+        else frame.policy_parameters_digest
     )
     state_digest = (
         policy_state_digest
         if policy_state_digest is not None
-        else getattr(frame, "policy_state_digest", "")
+        else frame.policy_state_digest
     )
     payload = {
         "frame_digest": frame.frame_digest,
@@ -355,49 +285,11 @@ def _evaluate_sizing(
     Returns:
         (updated_candidate, sizing_plan, rejection_reason)
     """
-    sizing_model: SizingModel | None = getattr(policy_artifact, "sizing_model", None)
+    sizing_model: SizingModel | None = policy_artifact.sizing_model
     if sizing_model is None:
         return cand, None, None
 
-    raw_lot_rules: Any | None = getattr(
-        policy_artifact, "symbol_lot_rules", None
-    )
-    if raw_lot_rules is None:
-        return None, None, "sizing_missing_realtime_lot_rules"
-
-    resolved_rules: Any | None = None
-    if callable(raw_lot_rules):
-        resolved_rules = raw_lot_rules(symbol)
-    elif isinstance(raw_lot_rules, Mapping):
-        resolved_rules = raw_lot_rules.get(symbol)
-    else:
-        resolved_rules = raw_lot_rules
-
-    if resolved_rules is None:
-        return None, None, "sizing_missing_realtime_lot_rules"
-
-    lot_rules: SymbolLotRules | None = None
-    if isinstance(resolved_rules, SymbolLotRules):
-        lot_rules = resolved_rules
-    elif (
-        hasattr(resolved_rules, "step_size")
-        and hasattr(resolved_rules, "tick_size")
-        and hasattr(resolved_rules, "min_quantity")
-        and hasattr(resolved_rules, "max_quantity")
-        and hasattr(resolved_rules, "min_notional")
-    ):
-        try:
-            lot_rules = SymbolLotRules(
-                symbol=getattr(resolved_rules, "symbol", symbol),
-                tick_size=getattr(resolved_rules, "tick_size"),
-                step_size=getattr(resolved_rules, "step_size"),
-                min_quantity=getattr(resolved_rules, "min_quantity"),
-                max_quantity=getattr(resolved_rules, "max_quantity"),
-                min_notional=getattr(resolved_rules, "min_notional"),
-            )
-        except Exception:
-            lot_rules = None
-
+    lot_rules: SymbolLotRules | None = policy_artifact.symbol_lot_rules
     if lot_rules is None:
         return None, None, "sizing_missing_realtime_lot_rules"
 
@@ -407,7 +299,7 @@ def _evaluate_sizing(
         cash_balance=cash_balance,
         lot_rules=lot_rules,
         as_of=as_of,
-        sizing_version=getattr(policy_artifact, "policy_version", 1),
+        sizing_version=policy_artifact.policy_version,
     )
     if isinstance(result, SizingRejection):
         return None, None, f"sizing_{result.reason}"
@@ -441,7 +333,7 @@ def execute_policy_transition(
     closed_candles: tuple[ClosedCandle15m, ...] = (),
     decision_input: Any | None = None,
 ) -> PolicyTransition:
-    """Canonical pure implementation of StrategyPolicy.transition.
+    """Compute the canonical pure policy transition.
 
     Guarantees:
     - Pure function: zero I/O, no database, no network, no implicit wall clock;
@@ -506,9 +398,7 @@ def execute_policy_transition(
         elif position_view.key.position_side == FuturesPositionSide.LONG:
             pos_side = StrategySide.LONG
 
-        exit_policy: PositionExitPolicy = getattr(
-            policy_artifact, "exit_policy", PositionExitPolicy()
-        )
+        exit_policy: PositionExitPolicy = policy_artifact.exit_policy
         exit_reason = position_exit_reason(
             held_until=clock_time,
             opened_at=earliest_open,
@@ -554,16 +444,9 @@ def execute_policy_transition(
                     created_at=clock_time,
                     expected_projection_version=position_view.projection_version,
                 )
-                cooldown_dur: timedelta = getattr(
-                    policy_artifact, "cooldown_duration", timedelta(minutes=15)
-                )
+                cooldown_dur: timedelta = policy_artifact.cooldown_duration
                 cd_due = clock_time + cooldown_dur
-                if hasattr(prior_state, "with_exit"):
-                    next_state = prior_state.with_exit(symbol, cd_due)
-                elif hasattr(prior_state, "with_cooldown"):
-                    next_state = prior_state.with_cooldown(symbol, cd_due)
-                else:
-                    next_state = prior_state
+                next_state = prior_state.with_exit(symbol, cd_due)
                 timer = TimerRequest(
                     timer_id=f"tm_cd_{decision_id}",
                     timer_type="cooldown_expiry",
@@ -597,14 +480,11 @@ def execute_policy_transition(
                         details={"opened_at": earliest_open.isoformat()},
                     )
                 )
-                if hasattr(prior_state, "with_holding_deadline"):
-                    current_dl = getattr(
-                        prior_state, "holding_deadline_by_symbol", {}
-                    ).get(symbol)
-                    if current_dl != holding_deadline:
-                        next_state = prior_state.with_holding_deadline(
-                            symbol, holding_deadline
-                        )
+                current_dl = prior_state.holding_deadline_by_symbol.get(symbol)
+                if current_dl != holding_deadline:
+                    next_state = prior_state.with_holding_deadline(
+                        symbol, holding_deadline
+                    )
             return PolicyTransition(
                 decision_id=decision_id,
                 frame_digest=frame.frame_digest,
@@ -629,9 +509,9 @@ def execute_policy_transition(
         )
 
     # 3. Check Position Mode and Entry Evaluation (when position is flat)
-    pos_mode = getattr(policy_artifact, "position_mode", StrategyPositionMode.LONG_ONLY)
+    pos_mode = policy_artifact.position_mode
     if position_view.total_quantity == Decimal("0"):
-        generator = getattr(policy_artifact, "candidate_generator", None)
+        generator = policy_artifact.candidate_generator
         if generator is not None:
             arg0 = decision_input if decision_input is not None else market_envelope
             cand = generator(arg0, prior_state)
@@ -668,9 +548,7 @@ def execute_policy_transition(
                 ref_price = cand.limit_price or state_15s.close_price or Decimal("0")
                 effective_cash = frame.cash_balance
                 if effective_cash <= Decimal("0") and decision_input is not None:
-                    effective_cash = getattr(
-                        decision_input, "cash_balance", effective_cash
-                    )
+                    effective_cash = decision_input.cash_balance
                 cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
                     cand=cand,
                     policy_artifact=policy_artifact,
@@ -693,9 +571,7 @@ def execute_policy_transition(
                     cand = cand_sized
 
                 grace_timers: list[TimerRequest] = []
-                grace_period: timedelta = getattr(
-                    policy_artifact, "grace_period", timedelta(0)
-                )
+                grace_period: timedelta = policy_artifact.grace_period
                 grace_due: datetime | None = None
                 if grace_period > timedelta(0):
                     grace_due = clock_time + grace_period
@@ -709,16 +585,13 @@ def execute_policy_transition(
                         )
                     )
 
-                if hasattr(prior_state, "with_anchor_and_intent"):
-                    next_state = prior_state.with_anchor_and_intent(
-                        symbol=symbol,
-                        anchor_price=state_15s.close_price or Decimal("0"),
-                        intent_id=cand.candidate_id,
-                        grace_until=grace_due,
-                    )
-                else:
-                    next_state = prior_state
-                if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+                next_state = prior_state.with_anchor_and_intent(
+                    symbol=symbol,
+                    anchor_price=state_15s.close_price or Decimal("0"),
+                    intent_id=cand.candidate_id,
+                    grace_until=grace_due,
+                )
+                if sizing_plan is not None:
                     next_state = next_state.with_sizing_state(
                         symbol=symbol,
                         sizing_state=asdict(sizing_plan),
@@ -745,12 +618,8 @@ def execute_policy_transition(
                 )
 
         # Built-in breakout threshold evaluation
-        entry_thresh: Decimal | None = getattr(
-            policy_artifact, "entry_threshold", None
-        )
-        short_entry_thresh: Decimal | None = getattr(
-            policy_artifact, "short_entry_threshold", None
-        )
+        entry_thresh: Decimal | None = policy_artifact.entry_threshold
+        short_entry_thresh: Decimal | None = policy_artifact.short_entry_threshold
         close_px = state_15s.close_price or Decimal("0")
         cand = None
         if entry_thresh is not None and close_px > entry_thresh:
@@ -764,21 +633,19 @@ def execute_policy_transition(
                     rejection_reason="direction_not_permitted_by_position_mode",
                     transition_time=clock_time,
                 )
-            target_notional_val = getattr(policy_artifact, "target_notional", None)
+            target_notional_val = policy_artifact.target_notional
             if target_notional_val is None or target_notional_val <= Decimal("0"):
                 raise ValueError(
                     "policy_artifact must provide an explicit positive target_notional"
                 )
             target_notional: Decimal = target_notional_val
-            order_type: EntryType = getattr(
-                policy_artifact, "order_type", EntryType.MARKET
-            )
+            order_type: EntryType = policy_artifact.order_type
             cand = OrderIntentCandidate(
                 candidate_id=f"intent_{decision_id}",
                 signal_id=f"sig_{decision_id}",
                 run_id="run_deterministic",
-                strategy_name=getattr(policy_artifact, "strategy_name", "breakout"),
-                strategy_version=f"v{getattr(policy_artifact, 'policy_version', 1)}",
+                strategy_name=policy_artifact.strategy_name,
+                strategy_version=f"v{policy_artifact.policy_version}",
                 config_hash=policy_artifact.policy_id,
                 symbol=symbol,
                 side=StrategySide.LONG,
@@ -802,19 +669,19 @@ def execute_policy_transition(
                     rejection_reason="direction_not_permitted_by_position_mode",
                     transition_time=clock_time,
                 )
-            target_notional_val = getattr(policy_artifact, "target_notional", None)
+            target_notional_val = policy_artifact.target_notional
             if target_notional_val is None or target_notional_val <= Decimal("0"):
                 raise ValueError(
                     "policy_artifact must provide an explicit positive target_notional"
                 )
             target_notional = target_notional_val
-            order_type = getattr(policy_artifact, "order_type", EntryType.MARKET)
+            order_type = policy_artifact.order_type
             cand = OrderIntentCandidate(
                 candidate_id=f"intent_{decision_id}",
                 signal_id=f"sig_{decision_id}",
                 run_id="run_deterministic",
-                strategy_name=getattr(policy_artifact, "strategy_name", "breakout"),
-                strategy_version=f"v{getattr(policy_artifact, 'policy_version', 1)}",
+                strategy_name=policy_artifact.strategy_name,
+                strategy_version=f"v{policy_artifact.policy_version}",
                 config_hash=policy_artifact.policy_id,
                 symbol=symbol,
                 side=StrategySide.SHORT,
@@ -828,7 +695,9 @@ def execute_policy_transition(
                 features={"close_price": str(close_px)},
             )
         else:
-            reason = "below_entry_threshold" if entry_thresh is not None else "no_candidate"
+            reason = (
+                "below_entry_threshold" if entry_thresh is not None else "no_candidate"
+            )
             return PolicyTransition(
                 decision_id=decision_id,
                 frame_digest=frame.frame_digest,
@@ -843,7 +712,7 @@ def execute_policy_transition(
         ref_price = cand.limit_price or close_px
         effective_cash = frame.cash_balance
         if effective_cash <= Decimal("0") and decision_input is not None:
-            effective_cash = getattr(decision_input, "cash_balance", effective_cash)
+            effective_cash = decision_input.cash_balance
         cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
             cand=cand,
             policy_artifact=policy_artifact,
@@ -866,7 +735,7 @@ def execute_policy_transition(
             cand = cand_sized
 
         grace_timers = []
-        grace_period = getattr(policy_artifact, "grace_period", timedelta(0))
+        grace_period = policy_artifact.grace_period
         grace_due = None
         if grace_period > timedelta(0):
             grace_due = clock_time + grace_period
@@ -880,16 +749,13 @@ def execute_policy_transition(
                 )
             )
 
-        if hasattr(prior_state, "with_anchor_and_intent"):
-            next_state = prior_state.with_anchor_and_intent(
-                symbol=symbol,
-                anchor_price=close_px,
-                intent_id=cand.candidate_id,
-                grace_until=grace_due,
-            )
-        else:
-            next_state = prior_state
-        if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+        next_state = prior_state.with_anchor_and_intent(
+            symbol=symbol,
+            anchor_price=close_px,
+            intent_id=cand.candidate_id,
+            grace_until=grace_due,
+        )
+        if sizing_plan is not None:
             next_state = next_state.with_sizing_state(
                 symbol=symbol,
                 sizing_state=asdict(sizing_plan),

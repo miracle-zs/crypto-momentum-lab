@@ -47,14 +47,8 @@ def _serialize_candidate_intent(intent: OrderIntentCandidate) -> dict[str, objec
         "strategy_version": intent.strategy_version,
         "config_hash": intent.config_hash,
         "symbol": intent.symbol,
-        "side": intent.side.value
-        if hasattr(intent.side, "value")
-        else str(intent.side),
-        "entry_type": (
-            intent.entry_type.value
-            if hasattr(intent.entry_type, "value")
-            else str(intent.entry_type)
-        ),
+        "side": intent.side.value,
+        "entry_type": intent.entry_type.value,
         "limit_price": jsonable(intent.limit_price),
         "desired_notional": jsonable(intent.desired_notional),
         "reduce_only": intent.reduce_only,
@@ -234,10 +228,10 @@ class PostgresOrderSubmissionRepository:
             if plan.reduce_only:
                 raise ValueError("exposure claim fields are only valid for entries")
             if exposure_notional is None:
-                ref_price = plan.price or getattr(plan, "reference_price", None)
+                ref_price = plan.price or plan.reference_price
                 if ref_price is not None and ref_price > 0 and plan.quantity > 0:
                     exposure_notional = plan.quantity * ref_price
-                elif intent is not None and getattr(intent, "desired_notional", None):
+                elif intent is not None and intent.desired_notional:
                     exposure_notional = intent.desired_notional
             if not all(
                 value is not None

@@ -18,6 +18,7 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
+    StrategyDataRequirement,
     StrategyDecision,
     StrategySide,
     StrategySignal,
@@ -39,14 +40,23 @@ class RiskFixtureContext:
 
 
 class FakeStrategy:
+    buffered_symbol_count = 0
+    buffered_state_count = 0
+
+    def cache_protected_symbols(self) -> frozenset[str]:
+        return frozenset()
+
+    def prune_inactive_symbols(self, **kwargs) -> tuple[str, ...]:
+        return ()
+
     def warm_market_state(self, state) -> None:
         pass
 
     def reset_symbol(self, symbol: str) -> None:
         pass
 
-    def required_data(self) -> None:
-        return None
+    def required_data(self) -> StrategyDataRequirement:
+        return StrategyDataRequirement(15, 1, ("close_price",), 30, False)
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         return StrategyDecision(

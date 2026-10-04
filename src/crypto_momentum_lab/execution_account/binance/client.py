@@ -284,7 +284,7 @@ class BinanceUsdMPrivateReadClient:
         account_label: str,
         base_url: str = "https://fapi.binance.com",
         http_client: httpx.AsyncClient | None = None,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
@@ -320,7 +320,7 @@ class BinanceUsdMPrivateReadClient:
         self._api_secret = api_secret
         self._environment = environment
         self._account_label = account_label
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._recv_window_ms = recv_window_ms
         self._read_request_pacer = (
             _AsyncRequestPacer(request_interval_seconds)
@@ -906,7 +906,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         live_submit_enabled: bool,
         base_url: str = "https://fapi.binance.com",
         http_client: httpx.AsyncClient | None = None,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
@@ -1023,8 +1023,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         desired_margin_type = self._entry_margin_type
         try:
             all_margin_types = await self.fetch_symbol_margin_types()
-        except asyncio.CancelledError:
-            raise
         except httpx.TimeoutException as exc:
             raise ExchangeOrderRejectedError(
                 "Binance entry margin type warmup could not read symbol configs"
@@ -1248,8 +1246,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 self.fetch_positions(),
                 self.fetch_open_orders(symbol=plan.symbol),
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             raise ExitRecoveryInspectionUnknownError(
                 "Binance exit recovery inspection could not be completed"
@@ -1412,11 +1408,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 raise ExchangeOrderQueryUnknownError(
                     "Binance order lookup returned a transient HTTP error; "
                     "order state requires reconciliation",
-                    retry_after_seconds=getattr(
-                        exc,
-                        "retry_after_seconds",
-                        None,
-                    ),
+                    retry_after_seconds=retry_after_seconds(exc.response),
                 ) from exc
             raise
         except httpx.TimeoutException as exc:
@@ -1463,11 +1455,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 raise ExchangeCancellationUnknownError(
                     "Binance cancel request was rate limited; "
                     "order state must be reconciled",
-                    retry_after_seconds=getattr(
-                        exc,
-                        "retry_after_seconds",
-                        None,
-                    ),
+                    retry_after_seconds=retry_after_seconds(exc.response),
                 ) from exc
             if exc.response.status_code >= 500:
                 raise ExchangeCancellationUnknownError(
@@ -1502,11 +1490,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     raise ExchangeCancellationUnknownError(
                         "Binance open-order check returned an error; "
                         "order state must be reconciled",
-                        retry_after_seconds=getattr(
-                            query_error,
-                            "retry_after_seconds",
-                            None,
-                        ),
+                        retry_after_seconds=retry_after_seconds(query_error.response),
                     ) from query_error
                 if any(
                     order.symbol == symbol and order.client_order_id == client_order_id

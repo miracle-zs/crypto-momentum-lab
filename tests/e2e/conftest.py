@@ -23,11 +23,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
     PositionReservationRow,
     RiskHaltRow,
-    ShadowSuppressionEventRow,
     TradingLeaseRow,
-)
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
 )
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
@@ -37,6 +33,9 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
 from tests.e2e.fake_binance_websocket import fake_binance_server
+from tests.fixtures.order_rows import (
+    OrderRows,
+)
 
 __all__ = ["fake_binance_server", "order_repository"]
 
@@ -45,7 +44,7 @@ __all__ = ["fake_binance_server", "order_repository"]
 async def order_repository(
     async_database_url: str,
 ) -> AsyncIterator[
-    tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]]
+    tuple[OrderRows, async_sessionmaker[AsyncSession]]
 ]:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -71,8 +70,7 @@ async def order_repository(
                 ExecutionCommandRow,
                 ExecutionReconciliationEventRow,
                 RiskHaltRow,
-                ShadowSuppressionEventRow,
             ):
                 await session.execute(delete(model))
-    yield PostgresOrderPlanRepository(factory), factory
+    yield OrderRows(factory), factory
     await engine.dispose()

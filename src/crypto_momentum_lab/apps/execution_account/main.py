@@ -263,14 +263,6 @@ def sync_command(
         str,
         typer.Option("--fill-symbols"),
     ] = "",
-    interval_seconds: Annotated[
-        float,
-        typer.Option("--interval-seconds", min=1),
-    ] = 15.0,
-    fill_interval_seconds: Annotated[
-        float,
-        typer.Option("--fill-interval-seconds", min=1),
-    ] = 60.0,
     websocket_url: Annotated[
         str,
         typer.Option("--websocket-url"),
@@ -407,8 +399,6 @@ def sync_command(
             expected_multi_assets_mode=expected_multi_assets_mode,
             expected_hedge_mode=expected_hedge_mode,
             fill_symbols=_parse_symbols(fill_symbols),
-            interval_seconds=interval_seconds,
-            fill_interval_seconds=fill_interval_seconds,
             websocket_url=websocket_url,
             account_event_hub_host=account_event_hub_host,
             account_event_hub_port=account_event_hub_port,
@@ -529,8 +519,6 @@ async def sync_continuously(
     expected_multi_assets_mode: bool,
     expected_hedge_mode: bool,
     fill_symbols: tuple[str, ...],
-    interval_seconds: float,
-    fill_interval_seconds: float,
     websocket_url: str,
     account_event_hub_host: str,
     account_event_hub_port: int,

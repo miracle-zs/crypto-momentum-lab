@@ -128,12 +128,11 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
         execution_book=book,
     )
     try:
-        assert not await recover_restored_commands(
-            book=book,
-            coordinator=coordinator,
-            orders=orders,
-            reconcile_order=coordinator.reconcile_order,
-        )
+        assert not (
+            await recover_restored_commands(
+                book=book, coordinator=coordinator, orders=orders
+            )
+        )[0]
         assert not book.command_requires_recovery("legacy")
         assert book.get_outbox("legacy").external_order_id == "111"
         # Historical settlement proof must not recreate this closed position.
@@ -220,12 +219,7 @@ async def test_terminal_read_model_does_not_hide_restored_dispatch_gate(state):
         # The previous unresolved-orders-only scan leaves this command blocked.
         await runtime.reconcile_all(include_confirmed=True)
         assert book.command_requires_recovery("legacy")
-        runtime.recover_commands = lambda reconcile_order: recover_restored_commands(
-            book=book,
-            coordinator=coordinator,
-            orders=orders,
-            reconcile_order=reconcile_order,
-        )
+        runtime.execution_book = book
         assert not await runtime.reconcile_all(include_confirmed=True)
         assert book.get_outbox("legacy").state == DispatchState.TERMINAL
         assert not book.command_requires_recovery("legacy")
@@ -411,15 +405,11 @@ async def test_recover_restored_commands_rejects_prepared_unsubmitted_command() 
         execution_book=book,
     )
     try:
-        reconcile_mock = AsyncMock()
-        pending = await recover_restored_commands(
-            book=book,
-            coordinator=coordinator,
-            orders=EmptyOrders(),
-            reconcile_order=reconcile_mock,
+        pending, plans = await recover_restored_commands(
+            book=book, coordinator=coordinator, orders=EmptyOrders()
         )
         assert not pending
-        reconcile_mock.assert_not_awaited()
+        assert plans == ()
         outbox = book.get_outbox("prep-unsubmitted")
         assert outbox is not None
         assert outbox.state == DispatchState.REJECTED
@@ -459,15 +449,11 @@ async def test_recover_restored_commands_reconciles_unknown_without_order_record
         execution_book=book,
     )
     try:
-        reconcile_mock = AsyncMock()
-        await recover_restored_commands(
-            book=book,
-            coordinator=coordinator,
-            orders=EmptyOrders(),
-            reconcile_order=reconcile_mock,
+        pending, plans = await recover_restored_commands(
+            book=book, coordinator=coordinator, orders=EmptyOrders()
         )
-        reconcile_mock.assert_awaited_once()
-        synthesized_plan = reconcile_mock.await_args.args[0]
+        assert pending
+        (synthesized_plan,) = plans
         assert synthesized_plan.client_order_id == "unknown-cmd"
         assert synthesized_plan.symbol == SCOPE.symbol
         assert synthesized_plan.side == "BUY"

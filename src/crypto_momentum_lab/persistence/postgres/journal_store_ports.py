@@ -6,12 +6,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,

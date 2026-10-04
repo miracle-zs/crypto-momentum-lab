@@ -78,11 +78,6 @@ class MarketRevisionRef:
         if not self.source_epoch.strip():
             raise ValueError("source_epoch must not be empty")
 
-    @property
-    def canonical_bucket_key(self) -> tuple[str, str, str, datetime]:
-        """Natural key for the time bucket across revisions."""
-        return (self.scope, self.symbol, self.interval, self.bucket_start)
-
 
 @dataclass(frozen=True, slots=True)
 class MarketEnvelope:

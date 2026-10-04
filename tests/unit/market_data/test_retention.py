@@ -1,3 +1,9 @@
+
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    InMemoryRetentionRepository,
+    RetentionAuthority,
+)
+
 """Unit tests for market data operational retention loop and consumer requirements."""
 
 import asyncio
@@ -18,6 +24,7 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
 @pytest.mark.asyncio
 async def test_resolve_market_data_consumer_requirements_collects_watermarks() -> None:
     session = AsyncMock()
+    session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
     # First scalar call: StrategyRuntimeCheckpointRow.saved_at
     # Second scalar call: AccountPositionSnapshotRow.observed_at
     checkpoint_time = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
@@ -42,6 +49,7 @@ async def test_resolve_market_data_consumer_requirements_collects_watermarks() -
 @pytest.mark.asyncio
 async def test_resolve_market_data_consumer_requirements_empty_when_no_rows() -> None:
     session = AsyncMock()
+    session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
     session.scalar.side_effect = [None, None]
 
     session_ctx = AsyncMock()
@@ -72,6 +80,7 @@ async def test_market_data_retention_loop_fails_closed_when_provider_raises() ->
             interval_seconds=0.01,
             consumer_requirements_provider=failing_provider,
             sleeper=lambda _: asyncio.sleep(0),
+            authority=RetentionAuthority(InMemoryRetentionRepository()),
         )
     )
 
@@ -109,6 +118,7 @@ async def test_market_data_retention_loop_passes_consumer_requirements() -> None
             interval_seconds=0.01,
             consumer_requirements_provider=provider,
             sleeper=lambda _: asyncio.sleep(0),
+            authority=RetentionAuthority(InMemoryRetentionRepository()),
         )
     )
 

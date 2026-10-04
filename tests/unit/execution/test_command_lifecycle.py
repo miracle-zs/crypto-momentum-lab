@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.execution.command_models import (
     ExecutionScope,
     OutboxEntry,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.trade_command import (
     PositionReservation,
     TradeCommand,
@@ -28,7 +29,7 @@ NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 @pytest.fixture
 def entry():
-    scope = ExecutionScope("live", "account-3", "TESTUSDT", "LONG")
+    scope = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
     command = TradeCommand(
         "command-1",
         scope.to_position_key(),

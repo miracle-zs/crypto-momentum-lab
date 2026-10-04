@@ -213,8 +213,8 @@ _QueueItem = RiskControlEvent | _QueueOverflow | Exception
 class RiskControlHub:
     """Bounded control-event fan-out owned by execution-account."""
 
-    def __init__(self, config: RiskControlHubConfig | None = None) -> None:
-        self._config = config or RiskControlHubConfig()
+    def __init__(self, config: RiskControlHubConfig = RiskControlHubConfig()) -> None:
+        self._config = config
         self._server: Server | None = None
         self._bound_host: str | None = None
         self._bound_port: int | None = None
@@ -499,12 +499,9 @@ class RiskControlHub:
         queue: asyncio.Queue[str],
         writer_start: asyncio.Event,
     ) -> None:
-        try:
-            await writer_start.wait()
-            while True:
-                await connection.send(await queue.get())
-        except (ConnectionClosed, asyncio.CancelledError):
-            raise
+        await writer_start.wait()
+        while True:
+            await connection.send(await queue.get())
 
 
 class WebSocketRiskControlSource:
@@ -519,7 +516,7 @@ class WebSocketRiskControlSource:
         consumer_id: str,
         strategy_name: str | None = None,
         session_id: str | None = None,
-        config: RiskControlHubConfig | None = None,
+        config: RiskControlHubConfig = RiskControlHubConfig(),
         on_connection_change: Callable[[bool, str | None], None] | None = None,
         availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
@@ -543,7 +540,7 @@ class WebSocketRiskControlSource:
         self._consumer_id = consumer_id
         self._strategy_name = strategy_name
         self._session_id = session_id
-        self._config = config or RiskControlHubConfig()
+        self._config = config
         self._on_connection_change = on_connection_change
         self._availability_clock = availability_clock or StreamAvailabilityClock(
             StreamAvailabilityConfig(
@@ -683,8 +680,6 @@ class WebSocketRiskControlSource:
                             reader_task,
                             return_exceptions=True,
                         )
-            except asyncio.CancelledError:
-                raise
             except (
                 ConnectionClosed,
                 OSError,
@@ -692,7 +687,7 @@ class WebSocketRiskControlSource:
                 RiskControlHubError,
             ) as error:
                 self._notify_connection_change(False, type(error).__name__)
-                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.mark_disrupted()
                 self._availability_clock.check_timeout(
                     error_factory=RiskControlHubError,
                     custom_message="risk-control hub unavailable beyond timeout",
@@ -729,8 +724,6 @@ class WebSocketRiskControlSource:
                     expected_account_label=self._account_label,
                 )
                 _put_queue_item(receive_queue, event)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             _put_queue_item(receive_queue, error)
 
@@ -762,7 +755,7 @@ class WebSocketRiskControlSource:
         self._last_sequence = None
         self._recovery_count += 1
         self._last_recovery_reason = reason
-        self._availability_clock.mark_recovering(reason)
+        self._availability_clock.mark_recovering()
         self._notify_connection_change(False, reason)
 
     def _notify_connection_change(self, available: bool, reason: str | None) -> None:
@@ -792,7 +785,7 @@ class WebSocketRiskControlPublisher:
         *,
         url: str,
         token: str | None = None,
-        config: RiskControlHubConfig | None = None,
+        config: RiskControlHubConfig = RiskControlHubConfig(),
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -800,7 +793,7 @@ class WebSocketRiskControlPublisher:
             raise ValueError("token must not be blank when present")
         self._url = url
         self._token = token
-        self._config = config or RiskControlHubConfig()
+        self._config = config
 
     async def publish(self, event: RiskControlEvent) -> RiskControlEvent:
         try:

@@ -2,7 +2,9 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+)
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -122,97 +124,3 @@ async def test_entry_lane_stops_after_uncertain_submission() -> None:
     assert outcome.approved_intent_count == 1
     assert outcome.submitted_order_count == 1
     assert outcome.pending_reconciliation
-
-
-async def test_entry_lane_rejects_when_max_concurrency_per_symbol_exceeded() -> None:
-    executed: list[str] = []
-
-    class MockPosition:
-        symbol = "BTCUSDT"
-
-    class MockContext:
-        managed_positions = (MockPosition(), MockPosition())
-        unresolved_orders = ()
-
-    lane = EntryExecutionLane(
-        config=EntryLaneConfig(run_id="run-1", max_concurrency_per_symbol=2),
-        clock=lambda: NOW,
-        entry_enabled=lambda: True,
-        entry_enabled_reason=lambda: "ready",
-        execute_candidate=lambda *args, **kwargs: None,
-        invalidate_context=lambda: None,
-    )
-
-    outcome = await lane.process(
-        decision=_decision(_intent()),  # _intent().symbol is BTCUSDT
-        state=_state(),
-        context=cast(LiveDaemonRuntimeContext, MockContext()),
-        gate_reasons=(),
-        recorded_at=NOW,
-    )
-
-    assert executed == []
-    assert outcome.approved_intent_count == 0
-    assert outcome.submitted_order_count == 0
-
-
-
-
-async def test_entry_lane_enforces_concurrency_with_current_entry_policy() -> (
-    None
-):
-    executed: list[str] = []
-
-    class MockPosition:
-        symbol = "BTCUSDT"
-
-    class MockContext:
-        managed_positions = (MockPosition(), MockPosition())
-        unresolved_orders = ()
-
-    from crypto_momentum_lab.domain.strategy.entry_policy import (
-        UniverseRankingEntry,
-        UniverseRankingSnapshot,
-    )
-    from crypto_momentum_lab.domain.strategy.models import StrategySide
-
-    snapshot = UniverseRankingSnapshot(
-        snapshot_id="snap-1",
-        observed_at=NOW,
-        entries=(
-            UniverseRankingEntry(
-                symbol="BTCUSDT",
-                rank=1,
-                direction=StrategySide.LONG,
-            ),
-        ),
-    )
-
-    lane = EntryExecutionLane(
-        config=EntryLaneConfig(
-            run_id="run-1",
-            max_concurrency_per_symbol=2,
-            entry_universe_snapshot_provider=lambda **kwargs: snapshot,
-        ),
-        clock=lambda: NOW,
-        entry_enabled=lambda: True,
-        entry_enabled_reason=lambda: "ready",
-        execute_candidate=lambda candidate, **kwargs: executed.append(
-            candidate.candidate_id
-        ),
-        invalidate_context=lambda: None,
-    )
-
-    outcome = await lane.process(
-        decision=_decision(_intent()),  # _intent().symbol is BTCUSDT
-        state=_state(),
-        context=cast(LiveDaemonRuntimeContext, MockContext()),
-        gate_reasons=(),
-        recorded_at=NOW,
-    )
-
-    # Must be rejected because concurrency (2) >= max_concurrency_per_symbol (2),
-    # even though policy_decision.eligible was True!
-    assert executed == []
-    assert outcome.approved_intent_count == 0
-    assert outcome.submitted_order_count == 0

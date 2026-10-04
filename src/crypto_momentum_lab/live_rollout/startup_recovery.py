@@ -14,9 +14,7 @@ from crypto_momentum_lab.domain.market.runtime_state_repository import (
     RuntimeMarketStateReadRepository,
 )
 from crypto_momentum_lab.domain.strategy.models import StrategyCheckpoint
-from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
-    LiveRuntimeStrategy,
-)
+from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
 from crypto_momentum_lab.live_rollout.readiness import LiveWarmupStatus
 
 log = structlog.get_logger()
@@ -233,7 +231,7 @@ async def load_live_warmup_symbols(
 
 
 def strategy_last_processed_at_by_symbol(
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
 ) -> Mapping[str, datetime]:
     checkpoint = strategy.checkpoint(include_market_state_buffers=False)
     return checkpoint.last_processed_at_by_symbol
@@ -241,7 +239,7 @@ def strategy_last_processed_at_by_symbol(
 
 def validate_live_warmup_coverage(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     states: Collection[MarketState15s],
     expected_symbols: Collection[str],
     cutover_at: datetime,
@@ -249,12 +247,6 @@ def validate_live_warmup_coverage(
     """Reject startup unless every target symbol has a contiguous buffer."""
 
     requirement = strategy.required_data()
-    if requirement is None:
-        log.warning(
-            "live_strategy_warmup_validation_skipped",
-            reason="strategy_has_no_required_data_contract",
-        )
-        return
     warmup_buckets = int(requirement.warmup_buckets)
     interval = timedelta(
         seconds=int(requirement.base_state_interval_seconds)
@@ -270,7 +262,7 @@ def validate_live_warmup_coverage(
         valid_states = [
             state
             for state in states_by_symbol.get(symbol, ())
-            if all(getattr(state, field, None) is not None for field in required_fields)
+            if all(getattr(state, field) is not None for field in required_fields)
         ]
         valid_states.sort(key=lambda state: state.bucket_start)
         if len(valid_states) < warmup_buckets:
@@ -300,7 +292,7 @@ def validate_live_warmup_coverage(
 
 def _symbols_with_complete_warmup(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     states: Collection[MarketState15s],
     expected_symbols: Collection[str],
     cutover_at: datetime,
@@ -314,8 +306,6 @@ def _symbols_with_complete_warmup(
     """
 
     requirement = strategy.required_data()
-    if requirement is None:
-        return frozenset(expected_symbols)
     warmup_buckets = int(requirement.warmup_buckets)
     interval = timedelta(
         seconds=int(requirement.base_state_interval_seconds)
@@ -330,7 +320,7 @@ def _symbols_with_complete_warmup(
         valid_states = [
             state
             for state in states_by_symbol.get(symbol, ())
-            if all(getattr(state, field, None) is not None for field in required_fields)
+            if all(getattr(state, field) is not None for field in required_fields)
         ]
         valid_states.sort(key=lambda state: state.bucket_start)
         if len(valid_states) < warmup_buckets:
@@ -349,7 +339,7 @@ def _symbols_with_complete_warmup(
 
 def _recovery_state_limit(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     symbol_count: int,
     lookback_seconds: int,
 ) -> int:
@@ -362,19 +352,14 @@ def _recovery_state_limit(
     """
 
     requirement = strategy.required_data()
-    interval_seconds = 15
-    if requirement is not None:
-        interval_seconds = max(
-            1,
-            int(requirement.base_state_interval_seconds),
-        )
+    interval_seconds = requirement.base_state_interval_seconds
     states_per_symbol = max(1, lookback_seconds // interval_seconds + 2)
     return max(WARMUP_STATE_LIMIT, symbol_count * states_per_symbol)
 
 
 async def warm_live_strategy(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     repository: RuntimeMarketStateReadRepository,
     environment: str,
     now: datetime,
@@ -479,7 +464,7 @@ async def warm_live_strategy(
 
 async def restore_live_strategy_from_checkpoint(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     checkpoint: StrategyCheckpoint,
     repository: RuntimeMarketStateReadRepository,
     environment: str,
@@ -592,24 +577,18 @@ def checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
     return True
 
 
-def live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
+def live_warmup_seconds(strategy: RuntimeStrategy) -> int:
     """Return the minimum history window sufficient for strategy buffers."""
     requirement = strategy.required_data()
-    warmup_buckets = 0
-    interval_seconds = 15
-    if requirement is not None:
-        warmup_buckets = int(requirement.warmup_buckets)
-        interval_seconds = max(
-            1,
-            int(requirement.base_state_interval_seconds),
-        )
+    warmup_buckets = requirement.warmup_buckets
+    interval_seconds = requirement.base_state_interval_seconds
     buffer_seconds = (warmup_buckets + 16) * interval_seconds
     return max(MIN_WARMUP_SECONDS, buffer_seconds)
 
 
 async def warm_live_strategy_then_start_fresh(
     *,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     repository: RuntimeMarketStateReadRepository,
     environment: str,
     now: datetime,
@@ -657,11 +636,9 @@ def _notify_warmup_status(
         )
 
 
-def _required_warmup_buckets(strategy: LiveRuntimeStrategy) -> int:
+def _required_warmup_buckets(strategy: RuntimeStrategy) -> int:
     requirement = strategy.required_data()
-    if requirement is None:
-        return 1
-    return max(1, int(requirement.warmup_buckets))
+    return requirement.warmup_buckets
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

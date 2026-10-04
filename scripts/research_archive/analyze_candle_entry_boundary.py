@@ -455,7 +455,6 @@ def main() -> None:
             "runtime_quote_rows",
             "b1_position_rows",
             "live_entry_order_rows",
-            "live_reconstructed_rows",
         )
     }
     write_report(rows, metadata, args.output_dir)

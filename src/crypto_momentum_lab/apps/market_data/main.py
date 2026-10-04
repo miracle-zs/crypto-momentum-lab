@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import os
 import shutil
 import signal
@@ -30,7 +29,6 @@ from crypto_momentum_lab.domain.market.models import (
 )
 from crypto_momentum_lab.domain.operational.retention_authority import (
     RetentionAuthority,
-    create_authority_from_repository,
 )
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
@@ -669,8 +667,6 @@ class CaptureUniverseObserver:
         async def _run() -> None:
             try:
                 await callback(symbols)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.warning(
                     "promotion_backfill_task_failed",
@@ -786,8 +782,6 @@ async def reconcile_paper_exit_subscriptions(
         await sleeper(interval_seconds)
         try:
             await observer.refresh_protected_symbols()
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "paper_exit_subscription_reconcile_failed",
@@ -848,8 +842,6 @@ async def run_raw_archive_retention_loop(
                 root,
                 retention_days=retention_days,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "raw_archive_retention_failed",
@@ -866,7 +858,7 @@ async def prune_operational_database_once(
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     now: datetime | None = None,
-    authority: RetentionAuthority | None = None,
+    authority: RetentionAuthority,
 ) -> None:
     if contract_metadata_retention_hours <= 0:
         raise ValueError("contract_metadata_retention_hours must be positive")
@@ -879,12 +871,6 @@ async def prune_operational_database_once(
     observed_at = datetime.now(UTC) if now is None else now
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
-
-    if authority is None:
-        authority = create_authority_from_repository(
-            repository,
-            async_repo_factory=AsyncPostgresRetentionRepository,
-        )
 
     plan = await authority.plan_prune_async(
         dataset_name="market_data",
@@ -911,9 +897,7 @@ async def prune_operational_database_once(
             batch_size=contract_metadata_batch_size,
             **req_kwargs,
         )
-        is_partitioned = False
-        if hasattr(repository, "is_runtime_state_partitioned"):
-            is_partitioned = await repository.is_runtime_state_partitioned()
+        is_partitioned = await repository.is_runtime_state_partitioned()
         deleted_states = await repository.prune_runtime_market_states(
             before=p.effective_cutoff,
             batch_size=runtime_state_batch_size,
@@ -959,6 +943,7 @@ async def prune_operational_database_once(
 async def run_operational_database_retention_loop(
     repository: PostgresOperationalRetentionRepository,
     *,
+    authority: RetentionAuthority,
     interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS,
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
@@ -987,6 +972,7 @@ async def run_operational_database_retention_loop(
                         continue  # Fail-closed!
                 await prune_operational_database_once(
                     repository,
+                    authority=authority,
                     contract_metadata_retention_hours=(
                         contract_metadata_retention_hours
                     ),
@@ -995,8 +981,6 @@ async def run_operational_database_retention_loop(
                     runtime_state_batch_size=runtime_state_batch_size,
                     consumer_requirements=reqs,
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "operational_database_retention_failed",
@@ -1020,18 +1004,14 @@ async def _resolve_market_data_consumer_requirements(
                 )
             )
         )
-        all_deps = registered_deps.all() if hasattr(registered_deps, "all") else ()
-        if inspect.isawaitable(all_deps):
-            all_deps = await all_deps
-        if isinstance(all_deps, (list, tuple)):
-            for dep in all_deps:
-                requirements.append(
-                    RetentionConsumerRequirement(
-                        consumer_id=dep.consumer_id,
-                        min_required_watermark=dep.recovery_watermark,
-                        reason=f"registered_dependency:{dep.reason}",
-                    )
+        for dep in registered_deps.all():
+            requirements.append(
+                RetentionConsumerRequirement(
+                    consumer_id=dep.consumer_id,
+                    min_required_watermark=dep.recovery_watermark,
+                    reason=f"registered_dependency:{dep.reason}",
                 )
+            )
 
         # 2. In-flight active checkpoints and position states
         earliest_checkpoint = await session.scalar(
@@ -1092,10 +1072,7 @@ class MarketDataRuntime:
 def _archive_retention_repository(
     runtime: MarketDataRuntime,
 ) -> PostgresCaptureRepository:
-    return (
-        getattr(runtime, "maintenance_capture_repository", None)
-        or runtime.capture_repository
-    )
+    return runtime.maintenance_capture_repository or runtime.capture_repository
 
 
 @asynccontextmanager
@@ -1384,9 +1361,6 @@ async def build_market_data_runtime(
                 max_subscriptions_per_connection=(
                     runtime.capture.max_subscriptions_per_connection
                 ),
-                control_messages_per_second=(
-                    runtime.capture.control_messages_per_second
-                ),
                 max_subscriptions_per_connection_by_stream=(
                     {
                         CaptureStream.BOOK_TICKER: (
@@ -1553,17 +1527,14 @@ async def run_market_data(
         capture_task: asyncio.Task[None] | None = None
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
-        quote_hub = getattr(runtime, "quote_hub", None)
-        quote_volume_publisher = getattr(runtime, "quote_volume_publisher", None)
-        daily_open_prefetcher = getattr(runtime, "daily_open_prefetcher", None)
+        quote_hub = runtime.quote_hub
+        quote_volume_publisher = runtime.quote_volume_publisher
+        daily_open_prefetcher = runtime.daily_open_prefetcher
         try:
             await runtime.state_hub.start()
             startup_timer.mark("state_hub_started")
-            if quote_hub is not None:
-                await quote_hub.start()
-                startup_timer.mark("quote_hub_started")
-            else:
-                startup_timer.mark("quote_hub_skipped")
+            await quote_hub.start()
+            startup_timer.mark("quote_hub_started")
             await runtime.runtime_state_publisher.start()
             startup_timer.mark("runtime_state_publisher_started")
             await runtime.capture.start(
@@ -1645,31 +1616,28 @@ async def run_market_data(
                     )
                 ),
             )
-            operational_retention = getattr(
-                runtime,
-                "operational_retention",
-                None,
-            )
+            operational_retention = runtime.operational_retention
             if operational_retention is not None:
-                maintenance_sessions = getattr(
-                    runtime,
-                    "maintenance_session_factory",
-                    None,
-                )
-                consumer_req_provider = None
-                if maintenance_sessions is not None:
+                maintenance_sessions = runtime.maintenance_session_factory
+                if maintenance_sessions is None:
+                    raise ValueError(
+                        "operational retention requires maintenance sessions"
+                    )
 
-                    async def consumer_req_provider() -> tuple[
-                        RetentionConsumerRequirement, ...
-                    ]:
-                        return await _resolve_market_data_consumer_requirements(
-                            maintenance_sessions
-                        )
+                async def consumer_req_provider() -> tuple[
+                    RetentionConsumerRequirement, ...
+                ]:
+                    return await _resolve_market_data_consumer_requirements(
+                        maintenance_sessions
+                    )
 
                 auxiliary_tasks += (
                     asyncio.create_task(
                         run_operational_database_retention_loop(
                             operational_retention,
+                            authority=RetentionAuthority(
+                                AsyncPostgresRetentionRepository(maintenance_sessions)
+                            ),
                             interval_seconds=(
                                 runtime.database_retention_interval_seconds
                             ),
@@ -1740,8 +1708,7 @@ async def run_market_data(
                 await daily_open_prefetcher.stop()
             if quote_volume_publisher is not None:
                 await quote_volume_publisher.stop()
-            if quote_hub is not None:
-                await quote_hub.stop()
+            await quote_hub.stop()
             await runtime.state_hub.stop()
     if health is not None:
         health.stopped()

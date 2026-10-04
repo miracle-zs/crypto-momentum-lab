@@ -12,6 +12,13 @@ class FixedLiveLimits:
     max_gross_exposure: Decimal | None
     max_concurrency_per_symbol: int | None = None
 
+    def __post_init__(self) -> None:
+        if (
+            self.max_concurrency_per_symbol is not None
+            and self.max_concurrency_per_symbol <= 0
+        ):
+            raise ValueError("max_concurrency_per_symbol must be positive")
+
 
 @dataclass(frozen=True, slots=True)
 class LiveLimitContext:

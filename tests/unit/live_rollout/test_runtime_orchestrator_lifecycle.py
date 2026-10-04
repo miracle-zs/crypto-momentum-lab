@@ -54,10 +54,8 @@ def _make_test_config() -> LiveRuntimeConfig:
             strategy_name="orderflow_impulse",
             session_id="session-1",
             operator="operator-1",
-            lease_owner="worker-1",
             strategy_config_hash="a" * 64,
             git_commit_hash="b" * 40,
-            migration_revision="20260911_0040",
         ),
         market=LiveRuntimeMarket(
             market_environment="live",
@@ -168,7 +166,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         return_value=None
     )
     mock_persistence.repositories.live_repository.save_session = AsyncMock()
-    mock_persistence.repositories.order_repository = MagicMock()
     mock_persistence.repositories.order_read_repository = MagicMock()
     mock_persistence.repositories.order_event_repository = MagicMock()
     mock_persistence.repositories.submission_repository = MagicMock()

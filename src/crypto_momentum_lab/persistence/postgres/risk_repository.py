@@ -1,6 +1,5 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any, cast
 
 from sqlalchemy import select, update
@@ -26,6 +25,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyLiveStateRow,
     TradingLeaseRow,
 )
+from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
 class LeaseAlreadyHeldError(RuntimeError):
@@ -77,7 +77,7 @@ def risk_evaluation_row(evaluation: RiskEvaluation) -> dict[str, object]:
         "decision": evaluation.decision.value,
         "reason": evaluation.reason,
         "evaluated_at": evaluation.evaluated_at,
-        "details": _jsonable(evaluation.details),
+        "details": jsonable(evaluation.details),
     }
 
 
@@ -89,7 +89,7 @@ def risk_halt_row(halt: RiskHalt) -> dict[str, object]:
         "reason": halt.reason,
         "active": halt.active,
         "created_at": halt.created_at,
-        "details": _jsonable(halt.details),
+        "details": jsonable(halt.details),
     }
 
 
@@ -162,16 +162,6 @@ class PostgresRiskRepository:
                     owned_row.code_generation = code_generation
                 return _lease_from_row(owned_row)
 
-    async def release_lease(self, lease_id: str, owner: str) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await session.scalar(
-                    select(TradingLeaseRow)
-                    .where(TradingLeaseRow.lease_id == lease_id)
-                    .with_for_update()
-                )
-                owned_row = _require_owned_active_lease(row, owner)
-                owned_row.state = TradingLeaseState.RELEASED.value
 
     async def load_active_lease(
         self,
@@ -207,7 +197,7 @@ class PostgresRiskRepository:
                         .values(
                             evaluation_id=evaluation.evaluation_id,
                             reason=evaluation.reason,
-                            details=_jsonable(evaluation.details),
+                            details=jsonable(evaluation.details),
                         )
                         .on_conflict_do_nothing()
                     )
@@ -224,7 +214,7 @@ class PostgresRiskRepository:
                         set_={
                             "reason": halt.reason,
                             "active": halt.active,
-                            "details": _jsonable(halt.details),
+                            "details": jsonable(halt.details),
                         },
                     )
                 )
@@ -325,23 +315,3 @@ def _halt_from_row(row: RiskHaltRow) -> RiskHalt:
         created_at=row.created_at,
         details=cast(dict[str, JsonValue], row.details),
     )
-
-
-def _jsonable(value: object) -> JsonValue:
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)

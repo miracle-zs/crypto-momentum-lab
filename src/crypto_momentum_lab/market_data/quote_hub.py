@@ -118,8 +118,8 @@ class _Subscriber:
 class MarketQuoteHub:
     """Fan out the newest quote without coupling consumers to persistence."""
 
-    def __init__(self, config: MarketQuoteHubConfig | None = None) -> None:
-        self._config = config or MarketQuoteHubConfig()
+    def __init__(self, config: MarketQuoteHubConfig = MarketQuoteHubConfig()) -> None:
+        self._config = config
         self._server: Server | None = None
         self._bound_host: str | None = None
         self._bound_port: int | None = None
@@ -361,11 +361,8 @@ class MarketQuoteHub:
         connection: ServerConnection,
         queue: asyncio.Queue[str],
     ) -> None:
-        try:
-            while True:
-                await connection.send(await queue.get())
-        except (ConnectionClosed, asyncio.CancelledError):
-            raise
+        while True:
+            await connection.send(await queue.get())
 
 
 class WebSocketMarketQuoteSource:
@@ -377,7 +374,7 @@ class WebSocketMarketQuoteSource:
         url: str,
         environment: str,
         consumer_id: str,
-        config: MarketQuoteHubConfig | None = None,
+        config: MarketQuoteHubConfig = MarketQuoteHubConfig(),
         on_connection_change: Callable[[bool, str | None], None] | None = None,
         availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
@@ -390,7 +387,7 @@ class WebSocketMarketQuoteSource:
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
-        self._config = config or MarketQuoteHubConfig()
+        self._config = config
         self._on_connection_change = on_connection_change
         self._availability_clock = availability_clock or StreamAvailabilityClock(
             StreamAvailabilityConfig(
@@ -489,8 +486,6 @@ class WebSocketMarketQuoteSource:
                             reader_task,
                             return_exceptions=True,
                         )
-            except asyncio.CancelledError:
-                raise
             except (
                 ConnectionClosed,
                 OSError,
@@ -501,7 +496,7 @@ class WebSocketMarketQuoteSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.mark_disrupted()
                 self._availability_clock.check_timeout(
                     error_factory=MarketQuoteHubError,
                     custom_message=(
@@ -541,8 +536,6 @@ class WebSocketMarketQuoteSource:
                 latest_quotes[quote.symbol] = quote
                 quote_available.set()
                 await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             reader_error[0] = error
             quote_available.set()
@@ -584,7 +577,7 @@ class WebSocketMarketQuoteVolumeSource:
         url: str,
         environment: str,
         consumer_id: str,
-        config: MarketQuoteHubConfig | None = None,
+        config: MarketQuoteHubConfig = MarketQuoteHubConfig(),
         availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
@@ -596,7 +589,7 @@ class WebSocketMarketQuoteVolumeSource:
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
-        self._config = config or MarketQuoteHubConfig()
+        self._config = config
         self._availability_clock = availability_clock or StreamAvailabilityClock(
             StreamAvailabilityConfig(
                 startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
@@ -690,15 +683,13 @@ class WebSocketMarketQuoteVolumeSource:
                             reader_task,
                             return_exceptions=True,
                         )
-            except asyncio.CancelledError:
-                raise
             except (
                 ConnectionClosed,
                 OSError,
                 TimeoutError,
                 MarketQuoteHubError,
-            ) as error:
-                self._availability_clock.mark_disrupted(str(error))
+            ):
+                self._availability_clock.mark_disrupted()
                 self._availability_clock.check_timeout(
                     error_factory=MarketQuoteHubError,
                     custom_message=(
@@ -729,8 +720,6 @@ class WebSocketMarketQuoteVolumeSource:
                 latest[snapshot.symbol] = snapshot
                 available.set()
                 await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             reader_error[0] = error
             available.set()

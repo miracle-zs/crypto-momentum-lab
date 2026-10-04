@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,11 +36,12 @@ async def test_telemetry_outage_cannot_discard_account_trade_facts():
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),
         latest_market_states=Cache(),
         latest_market_quotes=Cache(),
         telemetry=Telemetry(),
-        on_account_snapshot=lambda event: ordering.append("durable-facts"),
+        on_account_snapshot=AsyncMock(side_effect=lambda event: ordering.append("durable-facts")),
         is_transient_error=lambda error: isinstance(error, ConnectionError),
     )
     await runtime._process_event(event)
@@ -92,14 +94,15 @@ async def test_runtime_retains_event_until_order_and_book_facts_are_applied(
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),
         latest_market_states=EmptyCache(),
         latest_market_quotes=EmptyCache(),
         order_reconciliation=Reconciliation(),
         is_transient_error=lambda error: isinstance(error, ConnectionError),
-        on_account_snapshot=lambda event: ordering.append(
+        on_account_snapshot=AsyncMock(side_effect=lambda event: ordering.append(
             ("book", event.client_order_id)
-        ),
+        )),
     )
     if failures == 3:
         with pytest.raises(ConnectionError, match="temporary persistence failure"):
@@ -140,12 +143,13 @@ async def test_transient_order_failure_requests_account_fact_recovery() -> None:
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),  # type: ignore[arg-type]
         latest_market_states=EmptyCache(),  # type: ignore[arg-type]
         latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
         order_reconciliation=Reconciliation(),  # type: ignore[arg-type]
         is_transient_error=lambda error: isinstance(error, ConnectionError),
-        on_account_snapshot=published.append,
+        on_account_snapshot=AsyncMock(side_effect=published.append),
         on_account_snapshot_recovery=recoveries.append,
     )
 
@@ -184,12 +188,13 @@ async def test_runtime_reconciles_order_before_publishing_snapshot() -> None:
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),  # type: ignore[arg-type]
         latest_market_states=EmptyCache(),  # type: ignore[arg-type]
         latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
         order_reconciliation=Reconciliation(),  # type: ignore[arg-type]
         is_transient_error=lambda _error: False,
-        on_account_snapshot=lambda _event: ordering.append("snapshot"),
+        on_account_snapshot=AsyncMock(side_effect=lambda _event: ordering.append("snapshot")),
     )
 
     await runtime.run(Source())  # type: ignore[arg-type]
@@ -258,7 +263,7 @@ async def test_pending_position_does_not_delay_next_account_snapshot(
         run_id="run-1",
         is_transient_error=lambda _error: False,
         on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
-        on_account_snapshot=lambda _event: snapshots.append(len(snapshots)),
+        on_account_snapshot=AsyncMock(side_effect=lambda _event: snapshots.append(len(snapshots))),
     )
 
     await runtime.run(Source())  # type: ignore[arg-type]
@@ -299,6 +304,7 @@ async def test_runtime_invalidates_account_snapshot_before_non_transient_crash()
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),  # type: ignore[arg-type]
         latest_market_states=EmptyCache(),  # type: ignore[arg-type]
         latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
@@ -348,6 +354,7 @@ async def test_runtime_deduplicates_fill_telemetry_after_account_stream_replay()
             return ()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),  # type: ignore[arg-type]
         latest_market_states=EmptyCache(),  # type: ignore[arg-type]
         latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
@@ -398,11 +405,12 @@ async def test_async_snapshot_is_applied_before_account_decision(
             raise ValueError("snapshot invalid")
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=Daemon(),
         latest_market_states=Cache(),
         latest_market_quotes=Quotes(),
         is_transient_error=lambda error: transient,
-        on_account_snapshot=snapshot,
+        on_account_snapshot=AsyncMock(side_effect=snapshot),
         on_account_snapshot_recovery=recoveries.append,
     )
     if fail_snapshot:
@@ -453,12 +461,13 @@ async def test_blocked_exit_repair_does_not_block_account_publication():
         repair.request_recovery()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=object(),
         latest_market_states=Cache(),
         latest_market_quotes=Cache(),
         order_reconciliation=repair,
         is_transient_error=lambda error: False,
-        on_account_snapshot=publish,
+        on_account_snapshot=AsyncMock(side_effect=publish),
     )
     worker = asyncio.create_task(repair.run_requested())
     event = SimpleNamespace(

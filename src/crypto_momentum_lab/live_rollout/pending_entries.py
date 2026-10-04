@@ -51,8 +51,7 @@ class LivePendingEntryRegistry:
 
         if plan.reduce_only:
             return
-        state = getattr(event, "state", None)
-        if state is not None and getattr(state, "terminal", False):
+        if event.state.terminal:
             self._pending.pop(plan.client_order_id, None)
 
     def sync(self, context: LiveDaemonRuntimeContext) -> None:
@@ -101,7 +100,7 @@ class LivePendingEntryRegistry:
             effective_price = (
                 plan.price
                 if plan.price is not None
-                else getattr(plan, "reference_price", None)
+                else plan.reference_price
             )
             if effective_price is not None and effective_price > 0:
                 reserved_notional += remaining_quantity * effective_price

@@ -11,9 +11,11 @@ from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     ExitOrderSubmissionFact,
     PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 from tests.fixtures.b2_anonymized_timeline import get_b2_account_fill_events
@@ -336,7 +338,7 @@ def test_position_ledger_interleaved_exit_fill_does_not_split_new_batch() -> Non
         environment="live",
         account_label="primary",
         symbol="BTCUSDT",
-        position_side="BOTH",
+        position_side=FuturesPositionSide.BOTH,
     )
     t0 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
     t_exit_sub = datetime(2026, 8, 1, 10, 5, tzinfo=UTC)
@@ -396,7 +398,7 @@ def test_position_ledger_external_reduction_does_not_fabricate_exit_boundary() -
         environment="live",
         account_label="primary",
         symbol="BTCUSDT",
-        position_side="BOTH",
+        position_side=FuturesPositionSide.BOTH,
     )
     t0 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
     fills = [

@@ -85,22 +85,19 @@ class PostgresOrderReadRepository:
             ]
             claim_notionals: dict[str, Decimal] = {}
             if market_intent_ids:
-                try:
-                    claim_rows = (
-                        await session.execute(
-                            select(
-                                LiveExposureClaimRow.intent_id,
-                                LiveExposureClaimRow.notional,
-                            ).where(
-                                LiveExposureClaimRow.intent_id.in_(market_intent_ids)
-                            )
+                claim_rows = (
+                    await session.execute(
+                        select(
+                            LiveExposureClaimRow.intent_id,
+                            LiveExposureClaimRow.notional,
+                        ).where(
+                            LiveExposureClaimRow.intent_id.in_(market_intent_ids)
                         )
-                    ).all()
-                    claim_notionals = {
-                        order_id: notional for order_id, notional in claim_rows
-                    }
-                except Exception:
-                    pass
+                    )
+                ).all()
+                claim_notionals = {
+                    order_id: notional for order_id, notional in claim_rows
+                }
         return tuple(
             _persisted_order(
                 row,
@@ -132,18 +129,15 @@ class PostgresOrderReadRepository:
                 and row.intent_id is not None
                 and (details or {}).get("reference_price") is None
             ):
-                try:
-                    claims = (
-                        await session.scalars(
-                            select(LiveExposureClaimRow.notional).where(
-                                LiveExposureClaimRow.intent_id == row.intent_id
-                            )
+                claims = (
+                    await session.scalars(
+                        select(LiveExposureClaimRow.notional).where(
+                            LiveExposureClaimRow.intent_id == row.intent_id
                         )
-                    ).all()
-                    if claims and row.quantity > 0:
-                        ref_price = claims[0] / row.quantity
-                except Exception:
-                    pass
+                    )
+                ).all()
+                if claims and row.quantity > 0:
+                    ref_price = claims[0] / row.quantity
             order = _persisted_order(
                 row,
                 reference_price=ref_price,
@@ -331,5 +325,5 @@ def _persisted_order(
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,
         updated_at=row.updated_at,
-        executed_quantity=row.executed_quantity or Decimal("0"),
+        executed_quantity=row.executed_quantity,
     )

@@ -9,13 +9,15 @@ from typing import Protocol
 from crypto_momentum_lab.domain.account.models import AccountFillEvent
 from crypto_momentum_lab.domain.execution.ports import ExecutionHeadSnapshot
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
     PositionView,
 )
-from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    DurableJournalCut,
+)
 
 
 class PositionRepairBlocked(RuntimeError):

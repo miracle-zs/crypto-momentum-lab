@@ -6,7 +6,6 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.schemas import ResearchCollectorResponse
@@ -34,7 +33,7 @@ def read_research_collector_status(
     environment: str = DEFAULT_RESEARCH_COLLECTOR_ENVIRONMENT,
     top_count: int = DEFAULT_RESEARCH_COLLECTOR_TOP_COUNT,
     stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
-    disk_usage_fn: Callable[[Path], Any] | None = None,
+    disk_free_bytes_fn: Callable[[Path], int] | None = None,
 ) -> ResearchCollectorResponse:
     """Build a bounded, filesystem-only status snapshot for the dashboard.
 
@@ -56,7 +55,7 @@ def read_research_collector_status(
             hard_limit_bytes=config.hard_limit_bytes,
             global_warning_free_bytes=config.global_warning_free_bytes,
             global_pause_free_bytes=config.global_pause_free_bytes,
-            disk_usage_fn=disk_usage_fn,
+            disk_free_bytes_fn=disk_free_bytes_fn,
         ).snapshot()
         parquet_files = _parquet_files(root / "parquet")
         window_rows, window_starts, latest_written_at = _window_rows(

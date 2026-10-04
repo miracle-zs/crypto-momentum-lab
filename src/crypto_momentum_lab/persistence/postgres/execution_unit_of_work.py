@@ -33,13 +33,13 @@ from crypto_momentum_lab.domain.execution.ports import (
     ExecutionWatermark as _ExecutionWatermark,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,
@@ -146,14 +146,12 @@ class ExecutionTransaction:
         self,
         reservations: Sequence[PositionReservation],
         *,
-        expected_projection_version: str | None = None,
-        batch_quantities: Mapping[str, Decimal] | None = None,
-        proven_position_quantity: Decimal | None = None,
+        batch_quantities: Mapping[str, Decimal],
+        proven_position_quantity: Decimal,
     ) -> None:
         await self._reservation_repository.save_reservations_in_session(
             self.session,
             reservations,
-            expected_projection_version=expected_projection_version,
             batch_quantities=batch_quantities,
             proven_position_quantity=proven_position_quantity,
         )

@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.domain.strategy.paper_models import (
@@ -141,6 +143,11 @@ async def test_save_checkpoint_commits_checkpoint_before_telemetry_event() -> No
     session.execute = fake_execute
 
     session_factory = MagicMock()
+    session_factory.kw = {
+        "bind": create_async_engine(
+            "postgresql+asyncpg://localhost/unused", poolclass=NullPool
+        )
+    }
     session_factory.return_value.__aenter__.return_value = session
     session_factory.return_value.__aexit__.return_value = None
 
@@ -194,6 +201,11 @@ async def test_save_checkpoint_does_not_insert_event_when_commit_fails() -> None
     session.execute = fake_execute
 
     session_factory = MagicMock()
+    session_factory.kw = {
+        "bind": create_async_engine(
+            "postgresql+asyncpg://localhost/unused", poolclass=NullPool
+        )
+    }
     session_factory.return_value.__aenter__.return_value = session
     session_factory.return_value.__aexit__.return_value = None
 

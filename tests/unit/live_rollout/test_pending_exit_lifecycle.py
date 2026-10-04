@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, create_autospec
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
 
@@ -77,6 +77,7 @@ def _setup_pending_exit_test():
         decision_unit_of_work=uow,
         execution_book=book,
         register_account_stream=book.register_active_stream,
+        request_exit_recovery=Mock(),
     )
     handler = AsyncMock(return_value=SimpleNamespace(state="submitted"))
     source.set_exit_handler(handler)

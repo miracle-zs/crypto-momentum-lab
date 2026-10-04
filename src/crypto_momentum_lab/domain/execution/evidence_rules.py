@@ -101,9 +101,7 @@ def _coverage_for_scope(
     else:
         start = evidence.observed_at
         end = evidence.observed_at
-    is_page_complete = bool(getattr(proof, "page_exhausted", False)) and bool(
-        getattr(proof, "not_truncated", False)
-    )
+    is_page_complete = proof.page_exhausted and proof.not_truncated
     if is_page_complete:
         derived = compose_fact_coverage(
             proof,

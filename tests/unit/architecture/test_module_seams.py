@@ -44,8 +44,6 @@ import pytest
         "crypto_momentum_lab.domain.execution.position_recovery",
         "crypto_momentum_lab.domain.execution.command_lifecycle",
         "crypto_momentum_lab.domain.execution.command_codec",
-        "crypto_momentum_lab.domain.execution.command_repository",
-        "crypto_momentum_lab.domain.execution.reservation_repository",
         "crypto_momentum_lab.domain.execution.evidence_models",
         "crypto_momentum_lab.domain.execution.evidence_rules",
         "crypto_momentum_lab.domain.execution.evidence_settlement",

@@ -78,18 +78,15 @@ def test_top30_selection_keeps_retained_and_open_position_symbols() -> None:
                 "ADAUSDT",
                 MembershipStatus.RETAINED,
                 RankingSide.GAINER,
-                observed_at,
             ),
             TrackedMembership(
                 "SOLUSDT",
                 MembershipStatus.EXTENDED,
                 RankingSide.GAINER,
-                observed_at,
             ),
             TrackedMembership(
                 "XRPUSDT",
                 MembershipStatus.FORCED,
-                None,
                 None,
             ),
         ),

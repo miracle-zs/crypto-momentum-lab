@@ -347,7 +347,6 @@ class MarketDataPerformanceResponse(DashboardSchema):
     observed_at: datetime | None = None
     market_delay_ms: float | None = None
     realtime_closure_delay_seconds: float | None = None
-    simulated_close_drop_count: int = 0
     missing_agg_trade_count: int = 0
     quality_events_count_1h: int = 0
 

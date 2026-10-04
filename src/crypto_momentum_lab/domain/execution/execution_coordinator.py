@@ -40,21 +40,11 @@ class ExecutionReadinessError(Exception):
 class PositionReservationRepository(Protocol):
     """Protocol for durable storage and crash-recovery of batch lot reservations."""
 
-    def save_reservation(
-        self,
-        reservation: PositionReservation,
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
-        batch_quantity: Decimal | None = None,
-    ) -> None:
-        raise NotImplementedError
-
     def save_reservations(
         self,
         reservations: tuple[PositionReservation, ...],
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
-        batch_quantities: dict[str, Decimal] | None = None,
+        *,
+        batch_quantities: dict[str, Decimal],
     ) -> None:
         raise NotImplementedError
 
@@ -78,31 +68,12 @@ class InMemoryPositionReservationRepository:
     def __init__(self) -> None:
         self._reservations: dict[str, PositionReservation] = {}
 
-    def save_reservation(
-        self,
-        reservation: PositionReservation,
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
-        batch_quantity: Decimal | None = None,
-    ) -> None:
-        self.save_reservations(
-            (reservation,),
-            expected_projection_version=expected_projection_version,
-            batch_quantities=(
-                {reservation.batch_id: batch_quantity}
-                if batch_quantity is not None
-                else None
-            ),
-        )
-
     def save_reservations(
         self,
         reservations: tuple[PositionReservation, ...],
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
-        batch_quantities: dict[str, Decimal] | None = None,
+        *,
+        batch_quantities: dict[str, Decimal],
     ) -> None:
-        batch_quantities = batch_quantities or {}
         pending: dict[str, Decimal] = {}
         to_commit: list[PositionReservation] = []
         for reservation in reservations:
@@ -126,23 +97,26 @@ class InMemoryPositionReservationRepository:
                         f"{existing.reserved_quantity}"
                     )
                 continue
-            limit = batch_quantities.get(reservation.batch_id)
-            if limit is not None:
-                already = pending.get(reservation.batch_id, Decimal("0"))
-                for other in self._reservations.values():
-                    if (
-                        other.batch_id == reservation.batch_id
-                        and other.active_quantity > Decimal("0")
-                    ):
-                        already += other.active_quantity
-                if already + reservation.reserved_quantity > limit:
-                    raise ReservationConflictError(
-                        f"batch {reservation.batch_id} over-reserved"
-                    )
-                pending[reservation.batch_id] = (
-                    pending.get(reservation.batch_id, Decimal("0"))
-                    + reservation.reserved_quantity
+            if reservation.batch_id not in batch_quantities:
+                raise ReservationConflictError(
+                    f"batch {reservation.batch_id} has no proven capacity"
                 )
+            limit = batch_quantities[reservation.batch_id]
+            already = pending.get(reservation.batch_id, Decimal("0"))
+            for other in self._reservations.values():
+                if (
+                    other.batch_id == reservation.batch_id
+                    and other.active_quantity > Decimal("0")
+                ):
+                    already += other.active_quantity
+            if already + reservation.reserved_quantity > limit:
+                raise ReservationConflictError(
+                    f"batch {reservation.batch_id} over-reserved"
+                )
+            pending[reservation.batch_id] = (
+                pending.get(reservation.batch_id, Decimal("0"))
+                + reservation.reserved_quantity
+            )
             to_commit.append(reservation)
 
         for res in to_commit:
@@ -325,14 +299,19 @@ class ExecutionCoordinator:
                 reserved_quantity=allocation.allocated_quantity,
                 created_at=datetime.now(UTC),
             )
-            self._repo.save_reservation(
-                res,
-                expected_projection_version=command.expected_projection_version,
-            )
-            self._reservations_by_id[res_id] = res
             created_reservations.append(res)
 
-        return tuple(created_reservations)
+        reservations = tuple(created_reservations)
+        self._repo.save_reservations(
+            reservations,
+            batch_quantities={
+                batch_id: batch.quantity for batch_id, batch in batches_by_id.items()
+            },
+        )
+        self._reservations_by_id.update(
+            (reservation.reservation_id, reservation) for reservation in reservations
+        )
+        return reservations
 
     def reconcile_fill(
         self,
@@ -344,23 +323,7 @@ class ExecutionCoordinator:
         if res is None:
             raise KeyError(f"Reservation {reservation_id} not found")
 
-        new_consumed = res.consumed_quantity + filled_quantity
-        if new_consumed + res.released_quantity > res.reserved_quantity:
-            raise ValueError(
-                f"Consumed ({new_consumed}) + released ({res.released_quantity}) "
-                f"exceeds reserved ({res.reserved_quantity})"
-            )
-
-        updated = PositionReservation(
-            reservation_id=res.reservation_id,
-            command_id=res.command_id,
-            position_key=res.position_key,
-            batch_id=res.batch_id,
-            reserved_quantity=res.reserved_quantity,
-            consumed_quantity=new_consumed,
-            released_quantity=res.released_quantity,
-            created_at=res.created_at,
-        )
+        updated = res if filled_quantity == 0 else res.consume(filled_quantity)
         self._repo.update_reservation(updated)
         self._reservations_by_id[reservation_id] = updated
         return updated
@@ -376,22 +339,7 @@ class ExecutionCoordinator:
             raise KeyError(f"Reservation {reservation_id} not found")
 
         to_release = res.active_quantity if quantity is None else quantity
-        if to_release > res.active_quantity:
-            raise ValueError(
-                f"Release quantity {to_release} exceeds active "
-                f"reserved quantity {res.active_quantity}"
-            )
-
-        updated = PositionReservation(
-            reservation_id=res.reservation_id,
-            command_id=res.command_id,
-            position_key=res.position_key,
-            batch_id=res.batch_id,
-            reserved_quantity=res.reserved_quantity,
-            consumed_quantity=res.consumed_quantity,
-            released_quantity=res.released_quantity + to_release,
-            created_at=res.created_at,
-        )
+        updated = res if to_release == 0 else res.release(to_release)
         self._repo.update_reservation(updated)
         self._reservations_by_id[reservation_id] = updated
         return updated

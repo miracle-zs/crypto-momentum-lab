@@ -4,24 +4,15 @@ from datetime import datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.live_rollout import (
-    LiveGateDecision,
     LiveSessionState,
     LiveSessionTransition,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
 )
 
 
 class LiveTransitionRepository(Protocol):
     async def save_transition(self, transition: LiveSessionTransition) -> None:
         pass
-
-
-class LivePlanExecutor(Protocol):
-    async def __call__(self, plan: OrderExecutionPlan) -> OrderExecutionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,17 +23,10 @@ class LiveSessionConfig:
     risk_config_hash: str
 
 
-@dataclass(frozen=True, slots=True)
-class LiveSessionResult:
-    gate: LiveGateDecision
-    state: LiveSessionState
-    order_result: OrderExecutionResult | None
-
-
 class LiveSessionLifecycle:
     """Persist the shared live-session transition contract.
 
-    Long-running daemons and one-shot plans use the same transition shape.
+    Long-running daemons use this transition shape.
     Keeping transition construction here prevents the composition root from
     growing a second, subtly different session-state implementation.
     """
@@ -91,55 +75,8 @@ class LiveSessionLifecycle:
         return transition
 
 
-class LiveRolloutSession:
-    def __init__(
-        self,
-        *,
-        repository: LiveTransitionRepository,
-        execute_plan: LivePlanExecutor,
-        config: LiveSessionConfig,
-        clock: Callable[[], datetime],
-    ) -> None:
-        self._execute_plan = execute_plan
-        self._lifecycle = LiveSessionLifecycle(
-            repository=repository,
-            config=config,
-            clock=clock,
-        )
-
-    async def run_one(
-        self,
-        *,
-        gate: LiveGateDecision,
-        plan: OrderExecutionPlan,
-    ) -> LiveSessionResult:
-        if not gate.approved:
-            await self._lifecycle.transition(
-                LiveSessionState.HALTED,
-                ",".join(gate.reasons),
-            )
-            return LiveSessionResult(gate, LiveSessionState.HALTED, None)
-        await self._lifecycle.transition(LiveSessionState.LIVE_ENABLED)
-        order_result = await self._execute_plan(plan)
-        return LiveSessionResult(gate, LiveSessionState.LIVE_ENABLED, order_result)
-
-
-from crypto_momentum_lab.live_rollout.runtime_session import (  # noqa: E402
-    RegisteredResource,
-    ResourceOwnershipRegistry,
-    RuntimeSession,
-    SessionLifecycleState,
-)
-
 __all__ = [
-    "LivePlanExecutor",
-    "LiveRolloutSession",
     "LiveSessionConfig",
     "LiveSessionLifecycle",
-    "LiveSessionResult",
     "LiveTransitionRepository",
-    "RegisteredResource",
-    "ResourceOwnershipRegistry",
-    "RuntimeSession",
-    "SessionLifecycleState",
 ]

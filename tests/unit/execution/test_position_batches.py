@@ -37,6 +37,8 @@ def test_count_active_symbol_batch_concurrency_scenarios() -> None:
         ) -> None:
             self.symbol = symbol
             self.batches = batches
+            self.recovery_exit_started_at = None
+            self.closing_order_filled = False
 
     # Case 1: No positions, no orders -> 0
     assert count_active_symbol_batch_concurrency("ACUUSDT", (), ()) == 0

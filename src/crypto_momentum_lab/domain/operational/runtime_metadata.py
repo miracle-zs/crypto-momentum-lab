@@ -5,25 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol
-
-
-class RuntimePlanMetadata(Protocol):
-    """Read-only plan identity usable by reports without execution configuration."""
-
-    @property
-    def plan_id(self) -> str: ...
-
-    @property
-    def plan_hash(self) -> str: ...
-
-    @property
-    def runtime_generation(self) -> str: ...
-
-    @property
-    def compiled_at(self) -> datetime: ...
 
 
 def compute_content_hash(content: str | bytes | dict[str, Any] | list[Any]) -> str:
@@ -41,25 +27,28 @@ def compute_content_hash(content: str | bytes | dict[str, Any] | list[Any]) -> s
     return hashlib.sha256(encoded).hexdigest()
 
 
-def compute_trading_rules_hash(rules: Any) -> str:
+class TradingRuleHashInput(Protocol):
+    tick_size: Decimal
+    step_size: Decimal
+    min_quantity: Decimal
+    max_quantity: Decimal
+    min_notional: Decimal
+
+
+def compute_trading_rules_hash(rules: Mapping[str, TradingRuleHashInput]) -> str:
     """Compute deterministic SHA-256 hash for symbol trading rules."""
-    if not isinstance(rules, dict):
-        return compute_content_hash(str(rules))
-    serialized: dict[str, Any] = {}
-    for symbol, rule in sorted(rules.items()):
-        if hasattr(rule, "tick_size"):
-            serialized[str(symbol)] = {
+    return compute_content_hash(
+        {
+            symbol: {
                 "tick_size": str(rule.tick_size),
                 "step_size": str(rule.step_size),
                 "min_quantity": str(rule.min_quantity),
                 "max_quantity": str(rule.max_quantity),
                 "min_notional": str(rule.min_notional),
             }
-        elif isinstance(rule, dict):
-            serialized[str(symbol)] = {k: str(v) for k, v in sorted(rule.items())}
-        else:
-            serialized[str(symbol)] = str(rule)
-    return compute_content_hash(serialized)
+            for symbol, rule in sorted(rules.items())
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)

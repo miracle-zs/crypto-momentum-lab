@@ -1,5 +1,6 @@
-"""Unit tests for LegacyOrderIdentityAdapter and PositionLedger projection."""
+"""Unit tests for build_position_account_facts and PositionLedger projection."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -15,7 +16,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
 from crypto_momentum_lab.live_rollout.order_identity_adapter import (
-    LegacyOrderIdentityAdapter,
+    build_position_account_facts,
 )
 from tests.fixtures.b2_anonymized_timeline import (
     get_b2_account_fill_events,
@@ -24,7 +25,7 @@ from tests.fixtures.b2_anonymized_timeline import (
 )
 
 
-def test_legacy_order_identity_adapter_conversion() -> None:
+def test_orders_without_trades_do_not_generate_fills() -> None:
     key = PositionKey(
         environment="live",
         account_label="primary",
@@ -32,16 +33,20 @@ def test_legacy_order_identity_adapter_conversion() -> None:
         position_side=FuturesPositionSide.BOTH,
     )
     system_orders = get_b2_system_order_facts(symbol="BTCUSDT")
-    obs = get_b2_position_observation(symbol="BTCUSDT", position_amt=Decimal("120"))
+    obs = replace(
+        get_b2_position_observation(symbol="BTCUSDT", position_amt=Decimal("120")),
+        observed_at=datetime(2026, 10, 4, tzinfo=UTC),
+    )
 
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=system_orders,
         observation=obs,
     )
 
     assert facts.position_key == key
-    assert len(facts.fills) == len(system_orders)
+    assert facts.fills == ()
+    assert not facts.has_synthetic_fills
     assert len(facts.snapshots) == 1
     assert facts.snapshots[0].position_amt == Decimal("120")
 
@@ -59,7 +64,7 @@ def test_position_ledger_direct_projection_scenario() -> None:
     obs = get_b2_position_observation(position_amt=Decimal("120"))
     fills = get_b2_account_fill_events(account_label="primary")[:1]
 
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=system_orders,
         fills=fills,
@@ -85,7 +90,7 @@ def test_position_ledger_handles_external_fill_timeline() -> None:
     obs = get_b2_position_observation(position_amt=Decimal("172"))
 
     all_fills_up_to_post_zero = get_b2_account_fill_events()[:6]
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=system_orders,
         fills=all_fills_up_to_post_zero,
@@ -147,7 +152,7 @@ def test_legacy_order_identity_adapter_isolates_hedge_mode_position_side() -> No
 
     all_fills = (long_fill, short_fill)
 
-    long_facts = LegacyOrderIdentityAdapter.to_account_facts(
+    long_facts = build_position_account_facts(
         position_key=long_key,
         orders=(),
         fills=all_fills,
@@ -155,7 +160,7 @@ def test_legacy_order_identity_adapter_isolates_hedge_mode_position_side() -> No
     assert len(long_facts.fills) == 1
     assert long_facts.fills[0].trade_id == "t_long"
 
-    short_facts = LegacyOrderIdentityAdapter.to_account_facts(
+    short_facts = build_position_account_facts(
         position_key=short_key,
         orders=(),
         fills=all_fills,
@@ -225,7 +230,7 @@ def test_to_account_facts_filters_stale_pre_episode_fills() -> None:
         raw_payload={"positionSide": "BOTH", "is_system": True},
     )
 
-    facts = LegacyOrderIdentityAdapter.to_account_facts(
+    facts = build_position_account_facts(
         position_key=key,
         orders=[current_order],
         fills=[stale_fill, current_fill],
@@ -233,3 +238,20 @@ def test_to_account_facts_filters_stale_pre_episode_fills() -> None:
 
     assert len(facts.fills) == 1
     assert facts.fills[0].trade_id == "t_current_22799"
+
+
+def test_order_without_price_does_not_invent_a_unit_price():
+    key = PositionKey(environment="live", account_label="primary", symbol="BTCUSDT")
+    order = replace(get_b2_system_order_facts(symbol="BTCUSDT")[0], price=None)
+    facts = build_position_account_facts(
+        position_key=key, orders=(order,)
+    )
+    assert facts.fills == ()
+    assert not facts.has_synthetic_fills
+
+
+def test_observation_without_timestamp_does_not_invent_snapshot_time():
+    key = PositionKey(environment="live", account_label="primary", symbol="BTCUSDT")
+    observation = replace(get_b2_position_observation(symbol="BTCUSDT", position_amt=Decimal("120")), observed_at=None)
+    facts = build_position_account_facts(position_key=key, orders=(), observation=observation)
+    assert facts.snapshots == ()

@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
     AccountFillLoadProvenance,
@@ -343,7 +344,7 @@ async def test_missing_entry_scan_replay_is_durable_and_idempotent(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"missing-entry-{uuid4().hex[:12]}"
-    key = PositionKey("live", account, "BTCUSDT", "LONG")
+    key = PositionKey("live", account, "BTCUSDT", FuturesPositionSide.LONG)
     scope = ExecutionScope("live", account, "BTCUSDT", key.position_side)
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
     baseline = _snapshot(key, start, "0", "0")
@@ -532,7 +533,7 @@ async def test_flat_bootstrap_cannot_prevent_durable_parent_scan_adoption(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"flat-parent-{uuid4().hex[:12]}"
-    key = PositionKey("live", account, "BTCUSDT", "LONG")
+    key = PositionKey("live", account, "BTCUSDT", FuturesPositionSide.LONG)
     scope = ExecutionScope("live", account, key.symbol, key.position_side)
     old = AccountFactStreamScope.for_position_key(
         key, stream_id="hub", stream_epoch="old"
@@ -686,7 +687,7 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"business-{uuid4().hex[:12]}"
-    key = PositionKey("live", account, "BTCUSDT", "LONG")
+    key = PositionKey("live", account, "BTCUSDT", FuturesPositionSide.LONG)
     scope = ExecutionScope("live", account, "BTCUSDT", key.position_side)
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
     entry = _fill(key, "entry", "BUY", "2", start + timedelta(minutes=1))
@@ -949,7 +950,7 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = f"journal-anchor-{uuid4().hex[:12]}"
-    key = PositionKey("live", account, "XVSUSDT", "LONG")
+    key = PositionKey("live", account, "XVSUSDT", FuturesPositionSide.LONG)
     scope = ExecutionScope("live", account, "XVSUSDT", key.position_side)
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
     baseline = _snapshot(key, start, "0", "0")

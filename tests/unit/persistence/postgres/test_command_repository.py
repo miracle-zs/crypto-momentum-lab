@@ -42,6 +42,7 @@ def _command(
     if quote is not None:
         details["cumulative_filled_quote"] = quote
     return SimpleNamespace(
+        command="entry",
         command_id=command_id,
         client_order_id=f"order-{command_id}",
         status=status,

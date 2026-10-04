@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     OrderSubmissionPreparation,
 )
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
 )
@@ -27,6 +28,10 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
+from tests.fixtures.async_reservations import (
+    InMemoryPositionReservationRepository as MemoryReservations,
+)
+from tests.fixtures.prepared_submission import submit_prepared
 
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
@@ -40,16 +45,25 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
         if self.execution_book.has_execution_unit_of_work:
             return await super()._atomic_prepare_submission(plan, preparation)
         from dataclasses import fields
-        values = {field.name: getattr(preparation, field.name) for field in fields(preparation)}
+
+        values = {
+            field.name: getattr(preparation, field.name)
+            for field in fields(preparation)
+        }
 
         async def prepare(_tx):
             return await self._submission_repository.prepare_submission_in_session(
-                None, plan=plan, prepared_at=self._submission_clock(), **values,
+                None,
+                plan=plan,
+                prepared_at=self._submission_clock(),
+                **values,
             )
 
-        if self._reservation_repository is None:
+        if not self.execution_book.has_reservation_repository:
             return await prepare(None)
-        request = await self._build_execution_request(plan)
+        request = await self._build_execution_request(
+            plan, strategy_name=preparation.intent.strategy_name
+        )
         result = await self.execution_book.act(request, prepare_submission=prepare)
         self._handle_act_result(plan, result)
         return result.prepared_submission
@@ -168,8 +182,7 @@ class BlockingSubmitBackend(BlockingBackend):
 async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
     backend = BlockingBackend()
     coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
     )
 
     reconcile_task = asyncio.create_task(
@@ -177,7 +190,7 @@ async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
     )
     await backend.query_started.wait()
     submit_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=True))
     )
 
     await asyncio.wait_for(backend.submit_started.wait(), timeout=0.03)
@@ -193,14 +206,16 @@ async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
 
 async def test_slow_reconcile_does_not_block_same_symbol_exit() -> None:
     backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     recovery = asyncio.create_task(
         coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
     )
     await backend.query_started.wait()
     try:
         result = await asyncio.wait_for(
-            coordinator.submit(_plan("BTCUSDT", reduce_only=True)),
+            submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=True)),
             timeout=1,
         )
         assert result.state is ExchangeOrderState.ACKNOWLEDGED
@@ -253,13 +268,12 @@ async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel()
 
     backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
     )
     drain = AsyncMock()
     coordinator.execution_book.drain = drain
     submit_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     await backend.submit_started.wait()
 
@@ -282,11 +296,10 @@ async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel()
 async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> None:
     backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
     )
     submit_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     await backend.submit_started.wait()
 
@@ -303,7 +316,7 @@ async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> No
         OrderPreSubmissionError,
         match="entry submissions are blocked",
     ):
-        await coordinator.submit(_plan("ETHUSDT", reduce_only=False))
+        await submit_prepared(coordinator, _plan("ETHUSDT", reduce_only=False))
 
     await coordinator.aclose()
 
@@ -311,8 +324,7 @@ async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> No
 async def test_prepare_and_execute_serializes_reconcile_after_prepare() -> None:
     backend = BlockingBackend()
     coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
     )
     plan = _plan("BTCUSDT", reduce_only=False)
     prepare_started = asyncio.Event()
@@ -348,11 +360,12 @@ async def test_coordinator_rejects_commands_after_close() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=BlockingBackend(),
         account_label="primary",
+        execution_book=ExecutionBook(),
     )
     await coordinator.aclose()
 
     with pytest.raises(RuntimeError, match="coordinator is closed"):
-        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
 
 
 def _plan(symbol: str, *, reduce_only: bool) -> OrderExecutionPlan:
@@ -411,36 +424,38 @@ async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
         backend=backend,
         account_label="primary",
         max_queue_depth=4,
-        exit_headroom=2,  # Entries can only fill up to 4 - 2 = 2 slots
+        exit_headroom=2,
+        execution_book=ExecutionBook(),
     )
 
     # First command is picked up and blocks backend
     block_task = asyncio.create_task(
-        coordinator.submit(
+        submit_prepared(
+            coordinator,
             replace(
                 _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
-            )
+            ),
         )
     )
     await backend.submit_started.wait()
 
     # Now queue 2 entry commands (fills queue to entry_limit = 2)
     e1_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     e2_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     await asyncio.sleep(0.01)
 
     # 3rd entry command must be rejected immediately due to headroom preservation
     with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
-        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
 
     # An EXIT command (reduce_only=True) CAN still enter
     # because headroom is reserved for exits!
     exit_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=True))
     )
     await asyncio.sleep(0.01)
 
@@ -455,22 +470,24 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        max_queue_wait_seconds=0.05,  # Short timeout for testing
+        max_queue_wait_seconds=0.05,
+        execution_book=ExecutionBook(),
     )
 
     # Block the worker
     block_task = asyncio.create_task(
-        coordinator.submit(
+        submit_prepared(
+            coordinator,
             replace(
                 _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
-            )
+            ),
         )
     )
     await backend.submit_started.wait()
 
     # Queue an entry command
     entry_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
 
     # Sleep longer than max_queue_wait_seconds
@@ -493,20 +510,19 @@ async def test_submission_succeeds_again_after_idle_timeout() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        idle_timeout_seconds=0.05,  # Short idle timeout for test
+        idle_timeout_seconds=0.05,
+        execution_book=ExecutionBook(),
     )
 
-
     # Submit one command
-    res1 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+    res1 = await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=True))
     assert res1.state is ExchangeOrderState.ACKNOWLEDGED
 
     # Wait for idle timeout
     await asyncio.sleep(0.1)
 
-
     # A later order must still be accepted after a period without work.
-    res2 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+    res2 = await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=True))
     assert res2.state is ExchangeOrderState.ACKNOWLEDGED
 
     await coordinator.aclose()
@@ -518,14 +534,16 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
         backend=backend,
         account_label="primary",
         max_queue_wait_seconds=0.05,
+        execution_book=ExecutionBook(),
     )
 
     # Worker starts and hangs on query without releasing
     block_task = asyncio.create_task(
-        coordinator.submit(
+        submit_prepared(
+            coordinator,
             replace(
                 _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
-            )
+            ),
         )
     )
     await backend.submit_started.wait()
@@ -535,7 +553,7 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
     with pytest.raises(
         OrderPreSubmissionError, match="waited .* in queue exceeding limit"
     ):
-        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
 
     backend.release_submit.set()
     await block_task
@@ -548,31 +566,33 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
         backend=backend,
         account_label="primary",
         max_queue_depth=4,
-        exit_headroom=2,  # entry limit = 2
+        exit_headroom=2,
+        execution_book=ExecutionBook(),
     )
 
     # Block worker with a real submission
     block_task = asyncio.create_task(
-        coordinator.submit(
+        submit_prepared(
+            coordinator,
             replace(
                 _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
-            )
+            ),
         )
     )
     await backend.submit_started.wait()
 
     # Fill entry capacity (limit = 2)
     e1_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     e2_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
     await asyncio.sleep(0.01)
 
     # Attempting another entry fails due to entry capacity
     with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
-        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+        await submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
 
     # But cancel_order for entry order MUST still succeed using exit priority!
     non_reduce_only_plan = _plan("BTCUSDT", reduce_only=False)
@@ -599,7 +619,7 @@ async def test_cancel_order_releases_reservation_after_backend_success() -> None
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=reservation_repo,
+        execution_book=ExecutionBook(reservation_repository=reservation_repo),
     )
     key = PositionKey(
         environment="live",
@@ -666,7 +686,7 @@ async def test_cancel_order_does_not_release_reservation_if_state_not_canceled()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=reservation_repo,
+        execution_book=ExecutionBook(reservation_repository=reservation_repo),
     )
     key = PositionKey(
         environment="live",
@@ -725,13 +745,10 @@ async def test_reservation_creation_failure_fails_closed() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return None
@@ -739,7 +756,7 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=BrokenReservationRepo(),
+        execution_book=ExecutionBook(reservation_repository=BrokenReservationRepo()),
     )
     from unittest.mock import AsyncMock
 
@@ -762,11 +779,18 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     with pytest.raises(
         OrderPreSubmissionError, match="Failed to create position reservation"
     ):
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
 
-    raw = _RealOrderExecutionCoordinator(backend=backend, environment="live", account_label="primary")
+    raw = _RealOrderExecutionCoordinator(
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=ExecutionBook(),
+    )
     raw.configure_submission(AsyncMock())
-    with pytest.raises(OrderPreSubmissionError, match="requires an execution transaction"):
+    with pytest.raises(
+        OrderPreSubmissionError, match="requires an execution transaction"
+    ):
         await raw.prepare_and_execute(plan, preparation=_submission_preparation(plan))
     assert backend.calls == []
     await raw.aclose()
@@ -800,13 +824,10 @@ async def test_multi_batch_reservations_stay_active_on_ambiguous_backend_failure
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -815,7 +836,7 @@ async def test_multi_batch_reservations_stay_active_on_ambiguous_backend_failure
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
 
     class FailingBackend(BlockingBackend):
@@ -847,7 +868,7 @@ async def test_multi_batch_reservations_stay_active_on_ambiguous_backend_failure
     )
 
     with pytest.raises(RuntimeError, match="Exchange API rejected order"):
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
 
     # A generic transport exception does not prove the exchange rejected the
     # order; both allocations stay reserved while the outbox is UNKNOWN.
@@ -885,13 +906,10 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -910,7 +928,7 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=FillBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
 
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
@@ -936,7 +954,7 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
     )
 
     # Execute fill of 25 (covering both batches: 10 from batch_1, 15 from batch_2)
-    res = await coordinator.submit(plan)
+    res = await submit_prepared(coordinator, plan)
     assert res.executed_quantity == Decimal("25.0")
 
     # Both reservations should be consumed to 0 active
@@ -982,13 +1000,10 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
     class PartialFillBackend(BlockingBackend):
         async def submit(self, plan: OrderExecutionPlan, *, prepared_submission=None):
@@ -1004,7 +1019,7 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=PartialFillBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
 
@@ -1027,7 +1042,7 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
         quantized=True,
         allocations=allocs,
     )
-    res = await coordinator.submit(plan)
+    res = await submit_prepared(coordinator, plan)
     assert res.executed_quantity == Decimal("12.0")
 
     r0 = repo.reservations["res_order-partial_0"]
@@ -1037,81 +1052,6 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
     assert r0.active_quantity == Decimal("0")
     assert r1.consumed_quantity == Decimal("2.0")
     assert r1.active_quantity == Decimal("18.0")
-    await coordinator.aclose()
-
-
-async def test_reservation_save_receives_projection_version() -> None:
-    captured: dict[str, Any] = {}
-
-    class CaptureRepo:
-        async def load_active_reservations(self, key: Any = None) -> list[Any]:
-            return []
-
-        def save_reservation(self, res: Any, **kwargs: Any) -> None:
-            captured["res"] = res
-            captured["kwargs"] = kwargs
-
-        async def update_reservation(self, res: Any, release_reason: str = "") -> None:
-            return None
-
-        async def load_reservation(self, reservation_id: str) -> Any:
-            return captured.get("res")
-
-        async def save_reservations(
-            self,
-            reservations,
-            *,
-            expected_projection_version=None,
-            batch_quantities=None,
-        ):
-            for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
-
-    class FillBackend(BlockingBackend):
-        async def submit(self, plan: OrderExecutionPlan, *, prepared_submission=None):
-            return OrderExecutionResult(
-                client_order_id=plan.client_order_id,
-                state=ExchangeOrderState.FILLED,
-                exchange_order_id="e1",
-                executed_quantity=plan.quantity,
-                average_price=Decimal("1.0"),
-            )
-
-    coordinator = OrderExecutionCoordinator(
-        backend=FillBackend(),
-        account_label="primary",
-        reservation_repository=CaptureRepo(),
-    )
-    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-
-    scope = ExecutionScope(
-        environment=coordinator._environment,
-        account_label=coordinator._account_label,
-        symbol="BTCUSDT",
-        position_side=FuturesPositionSide.BOTH,
-    )
-    view = await coordinator.execution_book.read(scope)
-    expected_pv = view.projection_version
-    plan = OrderExecutionPlan(
-        intent_id="intent-pv",
-        run_id="run-1",
-        client_order_id="order-pv",
-        symbol="BTCUSDT",
-        side="SELL",
-        order_type="MARKET",
-        quantity=Decimal("1.0"),
-        price=None,
-        reduce_only=True,
-        position_side=FuturesPositionSide.BOTH,
-        created_at=NOW,
-        quantized=True,
-        projection_version=expected_pv,
-        batch_id="batch_1",
-    )
-    await coordinator.submit(plan)
-    assert captured["kwargs"].get("expected_projection_version") == expected_pv
     await coordinator.aclose()
 
 
@@ -1153,18 +1093,15 @@ async def test_reservation_conflict_mismatch_is_rejected() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
     coordinator = OrderExecutionCoordinator(
         backend=BlockingBackend(),
         account_label="primary",
-        reservation_repository=ConflictingRepo(),
+        execution_book=ExecutionBook(reservation_repository=ConflictingRepo()),
     )
     plan = OrderExecutionPlan(
         intent_id="intent-conflict",
@@ -1182,7 +1119,7 @@ async def test_reservation_conflict_mismatch_is_rejected() -> None:
         batch_id="batch_plan",
     )
     with pytest.raises(OrderPreSubmissionError, match="does not match|already exists"):
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
     await coordinator.aclose()
 
 
@@ -1197,7 +1134,7 @@ async def test_unallocated_exit_order_fails_closed_without_inventing_batch() -> 
     coordinator = OrderExecutionCoordinator(
         backend=BlockingBackend(),
         account_label="primary",
-        reservation_repository=DummyRepo(),
+        execution_book=ExecutionBook(reservation_repository=DummyRepo()),
     )
     plan = OrderExecutionPlan(
         intent_id="intent-unallocated",
@@ -1216,7 +1153,7 @@ async def test_unallocated_exit_order_fails_closed_without_inventing_batch() -> 
     with pytest.raises(
         OrderPreSubmissionError, match="has no allocated batches or batch_id"
     ):
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
     await coordinator.aclose()
 
 
@@ -1249,13 +1186,10 @@ async def test_reconcile_order_consumes_filled_reservation() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -1289,7 +1223,7 @@ async def test_reconcile_order_consumes_filled_reservation() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=ReconcileFillBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     plan = OrderExecutionPlan(
         intent_id="intent-rec",
@@ -1348,13 +1282,10 @@ async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -1390,7 +1321,7 @@ async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=SnapshotBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     plan = OrderExecutionPlan(
         intent_id="intent-snap",
@@ -1460,13 +1391,10 @@ async def test_cancel_order_releases_all_allocations_for_command() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -1506,7 +1434,7 @@ async def test_cancel_order_releases_all_allocations_for_command() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=CancelBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     allocs = (
         ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
@@ -1569,13 +1497,10 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -1593,7 +1518,7 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
     coordinator = OrderExecutionCoordinator(
         backend=RejectedBackend(),
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     plan = OrderExecutionPlan(
         intent_id="intent-reject",
@@ -1611,7 +1536,7 @@ async def test_terminal_order_with_zero_fill_releases_active_reservations() -> N
         batch_id="batch_1",
     )
 
-    result = await coordinator.submit(plan)
+    result = await submit_prepared(coordinator, plan)
     assert result.state == ExchangeOrderState.REJECTED
     res = repo.reservations["res_order-reject"]
     assert res.active_quantity == Decimal("0")
@@ -1632,7 +1557,6 @@ async def test_coordinator_execution_book_integration() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
         execution_book=custom_book,
     )
 
@@ -1678,25 +1602,25 @@ async def test_account_4_prohibits_synthetic_batches() -> None:
     coord_all = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     with pytest.raises(
         OrderPreSubmissionError,
         match="prohibited",
     ):
-        await coord_all.submit(synth_plan)
+        await submit_prepared(coord_all, synth_plan)
     await coord_all.aclose()
 
     coord_4 = OrderExecutionCoordinator(
         backend=backend,
         account_label="account-4",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
     with pytest.raises(
         OrderPreSubmissionError,
         match="prohibited",
     ):
-        await coord_4.submit(synth_plan)
+        await submit_prepared(coord_4, synth_plan)
     await coord_4.aclose()
 
 
@@ -1710,7 +1634,7 @@ async def test_account_4_authoritative_reservation_and_outbox_lifecycle() -> Non
     coord_4 = OrderExecutionCoordinator(
         backend=backend,
         account_label="account-4",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
 
     plan = OrderExecutionPlan(
@@ -1729,7 +1653,7 @@ async def test_account_4_authoritative_reservation_and_outbox_lifecycle() -> Non
         batch_id="lot_20260927_001",
     )
 
-    res = await coord_4.submit(plan)
+    res = await submit_prepared(coord_4, plan)
     assert res.state == ExchangeOrderState.ACKNOWLEDGED
 
     # Outbox tracking in ExecutionBook
@@ -1765,7 +1689,7 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
     coord_4 = OrderExecutionCoordinator(
         backend=FailingBackend(),
         account_label="account-4",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
 
     plan = OrderExecutionPlan(
@@ -1785,7 +1709,7 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
     )
 
     with pytest.raises(RuntimeError, match="Exchange API timeout"):
-        await coord_4.submit(plan)
+        await submit_prepared(coord_4, plan)
 
     book = coord_4.execution_book
     outbox = book.get_outbox(plan.client_order_id)
@@ -1804,7 +1728,6 @@ async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
 async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
     from crypto_momentum_lab.domain.account import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-    from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
 
     class DispatchFailingRepository:
         async def upsert_execution_command(self, **kwargs: Any) -> None:
@@ -1812,12 +1735,13 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
                 raise RuntimeError("dispatch write failed")
 
     backend = BlockingBackend()
-    book = ExecutionBook(command_repository=DispatchFailingRepository())
-    reservation_repo = InMemoryPositionReservationRepository()
+    book = ExecutionBook(
+        command_repository=DispatchFailingRepository(),
+        reservation_repository=MemoryReservations(),
+    )
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=reservation_repo,
         execution_book=book,
     )
     plan = _plan("BTCUSDT", reduce_only=False)
@@ -1876,7 +1800,7 @@ async def test_dispatch_persistence_failure_prevents_exchange_post() -> None:
 
     try:
         with pytest.raises(RuntimeError, match="dispatch write failed"):
-            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+            await asyncio.wait_for(submit_prepared(coordinator, plan), timeout=1)
 
         assert backend.calls == []
     finally:
@@ -1911,7 +1835,6 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
         execution_book=book,
     )
     plan = OrderExecutionPlan(
@@ -1931,7 +1854,7 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
     )
 
     try:
-        result = await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        result = await asyncio.wait_for(submit_prepared(coordinator, plan), timeout=1)
         assert result.state is ExchangeOrderState.ACKNOWLEDGED
         assert book.command_requires_recovery(plan.client_order_id)
 
@@ -1967,7 +1890,6 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=reservation_repo,
         execution_book=book,
     )
     plan = OrderExecutionPlan(
@@ -1987,7 +1909,7 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
     )
 
     try:
-        result = await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        result = await asyncio.wait_for(submit_prepared(coordinator, plan), timeout=1)
         assert result.state is ExchangeOrderState.ACKNOWLEDGED
         assert book.command_requires_recovery(plan.client_order_id)
 
@@ -2000,7 +1922,7 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
         assert reservation.active_quantity == Decimal("1.0")
 
         with pytest.raises(OrderPreSubmissionError):
-            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+            await asyncio.wait_for(submit_prepared(coordinator, plan), timeout=1)
         assert backend.calls == ["submit:BTCUSDT:exit"]
     finally:
         await coordinator.aclose()
@@ -2020,15 +1942,11 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
         async def save_reservations(
             self,
             reservations: tuple[PositionReservation, ...],
-            expected_projection_version: str | None = None,
-            expires_at: datetime | None = None,
             batch_quantities: dict[str, Decimal] | None = None,
         ) -> None:
             self.saved_batch_quantities = batch_quantities
             await super().save_reservations(
                 reservations,
-                expected_projection_version=expected_projection_version,
-                expires_at=expires_at,
                 batch_quantities=batch_quantities,
             )
 
@@ -2037,7 +1955,7 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="account-4",
-        reservation_repository=repo,
+        execution_book=ExecutionBook(reservation_repository=repo),
     )
 
     plan = OrderExecutionPlan(
@@ -2053,13 +1971,14 @@ async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
         position_side=FuturesPositionSide.BOTH,
         created_at=NOW,
         quantized=True,
+        batch_quantities={"lot_1": Decimal("10"), "lot_2": Decimal("20")},
         allocations=(
             ExitAllocation("lot_1", Decimal("2.0")),
             ExitAllocation("lot_2", Decimal("3.0")),
         ),
     )
 
-    await coord.submit(plan)
+    await submit_prepared(coord, plan)
     assert repo.saved_batch_quantities == {
         "lot_1": Decimal("2.0"),
         "lot_2": Decimal("3.0"),
@@ -2105,11 +2024,13 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
 
     repo = InMemoryRepo(res)
     backend = BlockingBackend()
+    execution_book = ExecutionBook(reservation_repository=repo)
+    for reservation in [res]:
+        execution_book.coordinator.register_reservation(reservation)
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
-        initial_reservations=[res],
+        execution_book=execution_book,
     )
 
     plan = OrderExecutionPlan(
@@ -2195,13 +2116,10 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
             self,
             reservations,
             *,
-            expected_projection_version=None,
             batch_quantities=None,
         ):
             for reservation in reservations:
-                self.save_reservation(
-                    reservation, expected_projection_version=expected_projection_version
-                )
+                self.save_reservation(reservation)
 
         async def load_reservation(self, reservation_id):
             return self.reservations.get(reservation_id)
@@ -2213,8 +2131,6 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
-        domain_coordinator=domain_coord,
         execution_book=book,
     )
     snap = AccountPositionSnapshot(
@@ -2276,9 +2192,7 @@ async def test_snapshot_ingestion_requires_typed_facts_without_inferred_flat() -
 
     book = ExecutionBook()
     coord = OrderExecutionCoordinator(
-        backend=BlockingBackend(),
-        account_label="primary",
-        execution_book=book,
+        backend=BlockingBackend(), account_label="primary", execution_book=book
     )
     flat = AccountPositionSnapshot(
         environment="live",
@@ -2296,7 +2210,9 @@ async def test_snapshot_ingestion_requires_typed_facts_without_inferred_flat() -
         raw_payload={},
     )
 
-    await coord.observe_account_snapshot(flat, symbols=("ETHUSDT",))
+    await coord.observe_account_snapshot(
+        flat,
+    )
 
     btc_view = await book.read(
         ExecutionScope(
@@ -2369,10 +2285,7 @@ async def test_repeated_flat_snapshot_is_ingested_once_per_stream() -> None:
 
     book = Book()
     coord = OrderExecutionCoordinator(
-        backend=BlockingBackend(),
-        account_label="primary",
-        domain_coordinator=object(),
-        execution_book=book,
+        backend=BlockingBackend(), account_label="primary", execution_book=book
     )
     flat = AccountPositionSnapshot(
         environment="live",
@@ -2436,9 +2349,7 @@ async def test_snapshot_evidence_identity_keeps_position_sides_distinct() -> Non
 
     book = ExecutionBook()
     coord = OrderExecutionCoordinator(
-        backend=BlockingBackend(),
-        account_label="primary",
-        execution_book=book,
+        backend=BlockingBackend(), account_label="primary", execution_book=book
     )
     for side in ("LONG", "SHORT"):
         await coord.observe_account_snapshot(
@@ -2515,11 +2426,13 @@ async def test_cumulative_fill_reconciliation_exact_deltas() -> None:
 
     backend = BlockingBackend()
     repo = InMemoryRepo(res)
+    execution_book = ExecutionBook(reservation_repository=repo)
+    for reservation in [res]:
+        execution_book.coordinator.register_reservation(reservation)
     coord = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
-        reservation_repository=repo,
-        initial_reservations=[res],
+        execution_book=execution_book,
     )
     plan = OrderExecutionPlan(
         intent_id="intent-1",
@@ -2671,12 +2584,12 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
         request_id="order-cumulative-10",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-cum",
         decision_ref="decision-cum",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("10"),
+        side=StrategySide.LONG,
     )
     assert await book.act(exit_request)
     plan = OrderExecutionPlan(
@@ -2693,9 +2606,7 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
         created_at=NOW,
     )
     coord = OrderExecutionCoordinator(
-        backend=BlockingBackend(),
-        account_label="primary",
-        execution_book=book,
+        backend=BlockingBackend(), account_label="primary", execution_book=book
     )
 
     async def observe(state: ExchangeOrderState, cumulative: str) -> None:
@@ -2729,14 +2640,11 @@ async def test_execution_book_observes_monotonic_cumulative_fill_facts() -> None
     await coord.aclose()
 
 
-@pytest.mark.parametrize("serialize_commands", [False, True])
-async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
-    serialize_commands,
-):
+async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting():
     from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        )
+    )
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -2752,6 +2660,10 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
     )
 
     class Exchange:
+        def set_exchange_boundary_callbacks(self, *, on_request=None, on_response=None):
+            self.on_request = on_request
+            self.on_response = on_response
+
         async def query_order_by_client_id(self, _symbol, _client_order_id):
             started.set()
             await release.wait()
@@ -2766,12 +2678,12 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
 
     backend = OrderExecutionStateMachine(
         exchange=Exchange(),
-        repository=object(),
         event_repository=Repository(),
         live_submit_enabled=True,
-        serialize_commands=serialize_commands,
     )
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     recovery = asyncio.create_task(coordinator.reconcile_order(plan))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -2792,7 +2704,9 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
 
 
 async def test_closed_coordinator_rejects_independent_fact():
-    coordinator = OrderExecutionCoordinator(backend=object(), account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=object(), account_label="primary", execution_book=ExecutionBook()
+    )
     await coordinator.aclose()
     with pytest.raises(RuntimeError, match="closed"):
         await coordinator.apply_observed_snapshot(
@@ -2801,9 +2715,14 @@ async def test_closed_coordinator_rejects_independent_fact():
 
 
 async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_without_rest():
+    from unittest.mock import create_autospec
+
+    from crypto_momentum_lab.domain.execution.exchange_contract import (
+        OrderExchangeClient,
+    )
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        )
+    )
     from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
 
     events = []
@@ -2815,13 +2734,14 @@ async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_witho
             return True
 
     backend = OrderExecutionStateMachine(
-        exchange=object(),
-        repository=object(),
+        exchange=create_autospec(OrderExchangeClient, instance=True, spec_set=True),
         event_repository=Repository(),
         live_submit_enabled=True,
         clock=lambda: NOW,
     )
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     try:
         result = await coordinator.mark_reconciliation_pending(plan)
         assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
@@ -2855,7 +2775,9 @@ def _submission_preparation(plan):
 
 async def test_preparation_failure_never_calls_exchange():
     backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
 
     class Repository:
         async def prepare_submission_in_session(self, session, **kwargs):
@@ -2928,7 +2850,9 @@ async def test_execution_rejects_missing_projection_without_mutating_plan(
     plan = replace(_plan("BTCUSDT", reduce_only=False), projection_version=version)
     try:
         with pytest.raises(OrderPreSubmissionError, match="no Book projection token"):
-            await coordinator._build_execution_request(plan)
+            await coordinator._build_execution_request(
+                plan, strategy_name="orderflow_impulse"
+            )
         assert plan.projection_version == version
     finally:
         await coordinator.aclose()
@@ -2957,7 +2881,6 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
         backend=backend,
         account_label="primary",
         execution_book=book,
-        reservation_repository=reservation_repo,
     )
     scope = ExecutionScope(
         environment="live",
@@ -2994,6 +2917,7 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
 
     # 1. Block the scheduler worker with a real submission task
     blocking_plan = _plan("BTCUSDT", reduce_only=True)
+
     async def blocking_cancel(plan):
         backend.submit_started.set()
         await backend.release_submit.wait()
@@ -3004,7 +2928,7 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
     await backend.submit_started.wait()
 
     # 2. Queue the entry submission while worker is blocked
-    submit_task = asyncio.create_task(coordinator.submit(plan))
+    submit_task = asyncio.create_task(submit_prepared(coordinator, plan))
     await asyncio.sleep(0.01)
 
     # 3. Cancel the queued order before submission starts
@@ -3053,7 +2977,6 @@ async def test_in_flight_submission_cancellation_records_unknown_pending_reconci
         backend=backend,
         account_label="primary",
         execution_book=book,
-        reservation_repository=reservation_repo,
     )
     plan = OrderExecutionPlan(
         intent_id="intent-in-flight-cancel",
@@ -3074,7 +2997,7 @@ async def test_in_flight_submission_cancellation_records_unknown_pending_reconci
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
 
     outbox = book.get_outbox(plan.client_order_id)
     assert outbox is not None
@@ -3092,7 +3015,7 @@ async def test_submission_checks_projection_without_an_extra_book_read(stale):
 
     from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 
-    book = ExecutionBook()
+    book = ExecutionBook(reservation_repository=MemoryReservations())
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
     version = (await book.read(scope)).projection_version
     plan = replace(
@@ -3106,15 +3029,14 @@ async def test_submission_checks_projection_without_an_extra_book_read(stale):
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=AsyncMock(),
     )
     try:
         if stale:
             with pytest.raises(OrderPreSubmissionError, match="stale view"):
-                await coordinator.submit(plan)
+                await submit_prepared(coordinator, plan)
             assert backend.calls == []
         else:
-            result = await coordinator.submit(plan)
+            result = await submit_prepared(coordinator, plan)
             assert result.state is ExchangeOrderState.ACKNOWLEDGED
             assert backend.calls == ["submit:BTCUSDT:entry"]
         book.read.assert_not_awaited()
@@ -3133,7 +3055,10 @@ async def test_entry_ack_returns_before_projection_and_shutdown_drains_in_order(
     observed = []
     backend = BlockingBackend()
     coordinator = _RealOrderExecutionCoordinator(
-        backend=backend, account_label="primary", environment="live"
+        backend=backend,
+        account_label="primary",
+        environment="live",
+        execution_book=ExecutionBook(),
     )
     first = _plan("BTCUSDT", reduce_only=False)
     second = replace(first, client_order_id="second-entry", intent_id="second-intent")
@@ -3148,12 +3073,12 @@ async def test_entry_ack_returns_before_projection_and_shutdown_drains_in_order(
     coordinator._observe_order_result_in_execution_book = project
     closing = None
     try:
-        result = await asyncio.wait_for(coordinator.submit(first), timeout=1)
+        result = await asyncio.wait_for(submit_prepared(coordinator, first), timeout=1)
         assert result.state is ExchangeOrderState.ACKNOWLEDGED
         await asyncio.wait_for(started.wait(), timeout=1)
         assert observed == []
         assert (
-            await asyncio.wait_for(coordinator.submit(second), timeout=1)
+            await asyncio.wait_for(submit_prepared(coordinator, second), timeout=1)
         ).state is ExchangeOrderState.ACKNOWLEDGED
         closing = asyncio.create_task(coordinator.aclose())
         await asyncio.sleep(0)
@@ -3176,9 +3101,11 @@ async def test_entry_ack_returns_before_projection_and_shutdown_drains_in_order(
 @pytest.mark.parametrize("cancel_waiter", [False, True])
 async def test_recovery_waits_for_same_order_post_even_if_caller_cancels(cancel_waiter):
     backend = BlockingSubmitBackend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     plan = _plan("BTCUSDT", reduce_only=False)
-    submit = asyncio.create_task(coordinator.submit(plan))
+    submit = asyncio.create_task(submit_prepared(coordinator, plan))
     await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
     if cancel_waiter:
         submit.cancel()
@@ -3206,13 +3133,21 @@ async def test_absence_fact_does_not_wait_behind_another_order_post():
             return _result(plan, ExchangeOrderState.ABSENT_RECONCILED)
 
     backend = Backend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
-    posting = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
+    posting = asyncio.create_task(
+        submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
+    )
     await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
-    absent_plan = replace(_plan("BTCUSDT", reduce_only=True), client_order_id="proven-absent")
+    absent_plan = replace(
+        _plan("BTCUSDT", reduce_only=True), client_order_id="proven-absent"
+    )
     try:
         observed = await asyncio.wait_for(
-            coordinator.mark_absent_reconciled(absent_plan, details={"reason": "verified_absence"}),
+            coordinator.mark_absent_reconciled(
+                absent_plan, details={"reason": "verified_absence"}
+            ),
             timeout=1,
         )
         assert observed.state is ExchangeOrderState.ABSENT_RECONCILED
@@ -3220,4 +3155,34 @@ async def test_absence_fact_does_not_wait_behind_another_order_post():
     finally:
         backend.release_submit.set()
         await posting
+        await coordinator.aclose()
+
+
+@pytest.mark.parametrize("reduce_only", (False, True))
+@pytest.mark.parametrize("side", (StrategySide.LONG, StrategySide.SHORT))
+async def test_one_way_execution_request_uses_explicit_order_direction(
+    side, reduce_only
+):
+    opening_buy = side is StrategySide.LONG
+    exchange_buy = opening_buy != reduce_only
+    plan = replace(
+        _plan("BTCUSDT", reduce_only=reduce_only),
+        side="BUY" if exchange_buy else "SELL",
+        strategy_name=None,
+        batch_id="lot-direction" if reduce_only else None,
+        projection_version="pv_direction",
+    )
+    coordinator = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        execution_book=ExecutionBook(),
+    )
+    try:
+        request = await coordinator._build_execution_request(
+            plan, strategy_name="intent-strategy"
+        )
+        assert request.scope.position_side is FuturesPositionSide.BOTH
+        assert request.side is side
+        assert request.strategy_name == "intent-strategy"
+    finally:
         await coordinator.aclose()

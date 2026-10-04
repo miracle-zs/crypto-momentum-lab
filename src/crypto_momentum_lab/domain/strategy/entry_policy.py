@@ -65,9 +65,7 @@ class EmaPolicyState:
     max_age: timedelta | None = None
 
     def __post_init__(self) -> None:
-        status = EmaPolicyStatus(self.status)
-        object.__setattr__(self, "status", status)
-        if status is EmaPolicyStatus.VALID:
+        if self.status is EmaPolicyStatus.VALID:
             if self.snapshot is None:
                 raise ValueError("valid EMA state requires a snapshot")
             if self.max_age is None or self.max_age <= timedelta(0):
@@ -113,7 +111,6 @@ class UniverseRankingEntry:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _normalized_symbol(self.symbol))
-        object.__setattr__(self, "direction", StrategySide(self.direction))
         if self.rank <= 0:
             raise ValueError("rank must be positive")
 
@@ -201,7 +198,6 @@ class PolicyInputSnapshot:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _normalized_symbol(self.symbol))
-        object.__setattr__(self, "direction", StrategySide(self.direction))
         _require_aware(self.observed_at, "observed_at")
         _require_aware(self.candidate_expiry, "candidate_expiry")
         if not isinstance(self.entry_enabled, bool):

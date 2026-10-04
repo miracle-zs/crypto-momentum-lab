@@ -10,6 +10,7 @@ from crypto_momentum_lab.health.memory import (
     current_rss_bytes,
     tracemalloc_memory_snapshot,
 )
+from crypto_momentum_lab.market_data.agg_trade_recovery import AggTradeRecoveryMetrics
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPoolMetricsSnapshot,
 )
@@ -25,7 +26,7 @@ async def monitor_market_data_health(
     capture_metrics: Callable[[], CaptureMetricsSnapshot],
     connection_metrics: Callable[[], BinanceConnectionPoolMetricsSnapshot],
     runtime_state_metrics: Callable[[], dict[str, object]] | None = None,
-    recovery_metrics: Callable[[], object] | None = None,
+    recovery_metrics: Callable[[], AggTradeRecoveryMetrics] | None = None,
     report_interval_seconds: float = 30.0,
     sample_interval_seconds: float = 1.0,
     queue_warning_utilization: float = 0.75,
@@ -108,74 +109,22 @@ async def monitor_market_data_health(
                 ),
                 "last_close_code": snapshot.last_close_code,
                 "last_reason": snapshot.last_reason,
-                "phase": getattr(snapshot, "phase", None),
-                "pending_control_id": getattr(
-                    snapshot,
-                    "pending_control_id",
-                    None,
-                ),
-                "pending_control_method": getattr(
-                    snapshot,
-                    "pending_control_method",
-                    None,
-                ),
-                "ingress_queue_events": getattr(
-                    snapshot,
-                    "ingress_queue_events",
-                    None,
-                ),
-                "ingress_queue_dropped_events": getattr(
-                    snapshot,
-                    "ingress_queue_dropped_events",
-                    None,
-                ),
-                "ingress_queue_max_events": getattr(
-                    snapshot,
-                    "ingress_queue_max_events",
-                    None,
-                ),
-                "ingress_queue_high_watermark_events": getattr(
-                    snapshot,
-                    "ingress_queue_high_watermark_events",
-                    None,
-                ),
-                "reader_task_alive": getattr(
-                    snapshot,
-                    "reader_task_alive",
-                    None,
-                ),
-                "dispatch_task_alive": getattr(
-                    snapshot,
-                    "dispatch_task_alive",
-                    None,
-                ),
-                "realtime_queue_events": getattr(
-                    snapshot,
-                    "realtime_queue_events",
-                    None,
-                ),
-                "realtime_queue_dropped_events": getattr(
-                    snapshot,
-                    "realtime_queue_dropped_events",
-                    None,
-                ),
-                "realtime_queue_max_events": getattr(
-                    snapshot,
-                    "realtime_queue_max_events",
-                    None,
-                ),
-                "realtime_queue_high_watermark_events": getattr(
-                    snapshot,
-                    "realtime_queue_high_watermark_events",
-                    None,
-                ),
-                "realtime_dispatch_task_alive": getattr(
-                    snapshot,
-                    "realtime_dispatch_task_alive",
-                    None,
-                ),
+                "phase": snapshot.phase,
+                "pending_control_id": snapshot.pending_control_id,
+                "pending_control_method": snapshot.pending_control_method,
+                "ingress_queue_events": snapshot.ingress_queue_events,
+                "ingress_queue_dropped_events": snapshot.ingress_queue_dropped_events,
+                "ingress_queue_max_events": snapshot.ingress_queue_max_events,
+                "ingress_queue_high_watermark_events": snapshot.ingress_queue_high_watermark_events,
+                "reader_task_alive": snapshot.reader_task_alive,
+                "dispatch_task_alive": snapshot.dispatch_task_alive,
+                "realtime_queue_events": snapshot.realtime_queue_events,
+                "realtime_queue_dropped_events": snapshot.realtime_queue_dropped_events,
+                "realtime_queue_max_events": snapshot.realtime_queue_max_events,
+                "realtime_queue_high_watermark_events": snapshot.realtime_queue_high_watermark_events,
+                "realtime_dispatch_task_alive": snapshot.realtime_dispatch_task_alive,
             }
-            for snapshot in getattr(connections, "connection_snapshots", ())
+            for snapshot in connections.connection_snapshots
         )
         lag_percentiles = _calculate_lag_percentiles(lag_samples)
         lag_samples.clear()
@@ -191,47 +140,21 @@ async def monitor_market_data_health(
             event_loop_lag_max_ms=lag_percentiles["max"],
             queue_events=capture.queue_events,
             queue_bytes=capture.queue_bytes,
-            queue_max_events=getattr(capture, "queue_max_events", 0),
-            queue_max_bytes=getattr(capture, "queue_max_bytes", 0),
+            queue_max_events=capture.queue_max_events,
+            queue_max_bytes=capture.queue_max_bytes,
             queue_utilization=round(queue_utilization, 6),
-            queue_high_watermark_events=getattr(
-                capture,
-                "queue_high_watermark_events",
-                0,
-            ),
-            queue_high_watermark_bytes=getattr(
-                capture,
-                "queue_high_watermark_bytes",
-                0,
-            ),
-            queue_backpressure_wait_count=getattr(
-                capture,
-                "queue_backpressure_wait_count",
-                0,
-            ),
+            queue_high_watermark_events=capture.queue_high_watermark_events,
+            queue_high_watermark_bytes=capture.queue_high_watermark_bytes,
+            queue_backpressure_wait_count=capture.queue_backpressure_wait_count,
             queue_backpressure_wait_seconds=round(
-                getattr(capture, "queue_backpressure_wait_seconds", 0.0),
+                capture.queue_backpressure_wait_seconds,
                 6,
             ),
-            queue_waiting_producers=getattr(
-                capture,
-                "queue_waiting_producers",
-                0,
-            ),
-            queue_coalesced_replacements=(
-                getattr(capture, "queue_coalesced_replacements", 0)
-            ),
-            queue_dropped_events=getattr(capture, "queue_dropped_events", 0),
-            queue_pending_coalesced_events=getattr(
-                capture,
-                "queue_pending_coalesced_events",
-                0,
-            ),
-            filtered_book_ticker_events=getattr(
-                capture,
-                "filtered_book_ticker_events",
-                0,
-            ),
+            queue_waiting_producers=capture.queue_waiting_producers,
+            queue_coalesced_replacements=(capture.queue_coalesced_replacements),
+            queue_dropped_events=capture.queue_dropped_events,
+            queue_pending_coalesced_events=capture.queue_pending_coalesced_events,
+            filtered_book_ticker_events=capture.filtered_book_ticker_events,
             monitoring_symbols=capture.monitoring_symbols,
             active_connections=connections.active_connections,
             ready_connections=connections.ready_connections,
@@ -305,9 +228,7 @@ async def monitor_market_data_health(
                 "market_data_websocket_ingress_pressure",
                 group_ids=pressured_ingress_groups,
             )
-        backpressure_wait_count = int(
-            getattr(capture, "queue_backpressure_wait_count", 0)
-        )
+        backpressure_wait_count = int(capture.queue_backpressure_wait_count)
         if backpressure_wait_count > previous_backpressure_wait_count:
             log.warning(
                 "market_data_backpressure_observed",
@@ -316,16 +237,14 @@ async def monitor_market_data_health(
                 ),
                 total_wait_count=backpressure_wait_count,
                 total_wait_seconds=round(
-                    getattr(
-                        capture,
-                        "queue_backpressure_wait_seconds",
-                        0.0,
-                    ),
+                    capture.queue_backpressure_wait_seconds,
                     6,
                 ),
             )
         unrecovered_gap_count = int(
-            getattr(recovery_snapshot, "unrecovered_gap_count", 0)
+            recovery_snapshot.unrecovered_gap_count
+            if recovery_snapshot is not None
+            else 0
         )
         if unrecovered_gap_count > previous_unrecovered_gap_count:
             log.warning(
@@ -357,8 +276,8 @@ def _event_loop_lag_level(
 
 
 def _queue_utilization(capture: CaptureMetricsSnapshot) -> float:
-    max_events = int(getattr(capture, "queue_max_events", 0))
-    max_bytes = int(getattr(capture, "queue_max_bytes", 0))
+    max_events = int(capture.queue_max_events)
+    max_bytes = int(capture.queue_max_bytes)
     event_ratio = 0.0 if max_events <= 0 else capture.queue_events / max_events
     byte_ratio = 0.0 if max_bytes <= 0 else capture.queue_bytes / max_bytes
     return max(event_ratio, byte_ratio)
@@ -382,11 +301,13 @@ def _connection_ingress_utilization(detail: dict[str, object]) -> float:
     return events / maximum
 
 
-def _recovery_snapshot(snapshot: object | None) -> dict[str, int] | None:
+def _recovery_snapshot(
+    snapshot: AggTradeRecoveryMetrics | None,
+) -> dict[str, int] | None:
     if snapshot is None:
         return None
     return {
-        name: int(getattr(snapshot, name, 0))
+        name: int(getattr(snapshot, name))
         for name in (
             "detected_gap_count",
             "recovered_gap_count",

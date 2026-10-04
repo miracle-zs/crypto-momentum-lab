@@ -39,12 +39,6 @@ class ExitRecoveryObservation:
         ):
             raise ValueError("active_exit_order_client_ids must be unique")
 
-    @property
-    def has_active_order(self) -> bool:
-        return bool(self.active_exit_order_client_ids) or (
-            self.order is not None and not self.order.state.terminal
-        )
-
 
 class ExitRecoveryClient(Protocol):
     async def inspect_exit_order(

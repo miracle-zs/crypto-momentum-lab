@@ -33,6 +33,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
+from crypto_momentum_lab.domain.strategy import StrategySide
 
 
 def _dt(hour: int, minute: int, second: int = 0) -> datetime:
@@ -152,7 +153,8 @@ async def test_flat_position_stream_adoption_avoids_copy_and_transaction() -> No
 
 
 @pytest.mark.asyncio
-async def test_flat_position_act_when_head_is_none() -> None:
+@pytest.mark.parametrize("side", (StrategySide.LONG, StrategySide.SHORT))
+async def test_flat_position_act_when_head_is_none(side) -> None:
     from contextlib import asynccontextmanager
 
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
@@ -193,7 +195,7 @@ async def test_flat_position_act_when_head_is_none() -> None:
         environment="paper",
         account_label="primary",
         symbol="BTCUSDT",
-        position_side=FuturesPositionSide.LONG,
+        position_side=FuturesPositionSide.BOTH,
     )
     key = scope.to_position_key()
     book._stream_scopes[key.canonical_id] = AccountFactStreamScope.for_position_key(
@@ -218,15 +220,16 @@ async def test_flat_position_act_when_head_is_none() -> None:
         request_id="entry-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=side,
     )
     result = await book.act(req)
     assert isinstance(result, Accepted)
+    assert result.receipt.command.side is side
     assert uow.tx.persisted_head is not None
     assert uow.tx.persisted_head["expected_revision"] == 0
     assert uow.tx.persisted_head["is_flat_adoption"] is False
@@ -294,12 +297,12 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
         request_id="entry-algo-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-algo-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("100.0"),
+        side=StrategySide.LONG,
     )
     result = await book.act(req)
     assert isinstance(result, Accepted)
@@ -398,12 +401,12 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
         request_id="exit-algo-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-algo-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("100.0"),
+        side=StrategySide.LONG,
     )
     result = await book.act(req)
     assert isinstance(result, Accepted)
@@ -484,12 +487,12 @@ async def test_flat_position_act_can_adopt_older_flat_head() -> None:
         request_id="entry-2",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
     result = await book.act(req)
     assert isinstance(result, Accepted)
@@ -540,12 +543,12 @@ async def test_non_flat_position_act_with_older_head_is_blocked() -> None:
         request_id="entry-3",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
     result = await book.act(req)
     assert isinstance(result, Blocked)
@@ -575,12 +578,12 @@ async def test_execution_book_act_stale_view_rejected() -> None:
         request_id="req-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token="pv_BTCUSDT_wrong_token",
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
 
     result = await book.act(req)
@@ -598,12 +601,12 @@ async def test_execution_book_accepts_entry_with_pending_coverage() -> None:
         request_id="req-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
 
     # Not ready because coverage is unconfirmed
@@ -673,12 +676,12 @@ async def test_execution_book_act_and_idempotency_workflow() -> None:
         request_id="req-exit-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-exit-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
 
     act_result = await book.act(req)
@@ -697,12 +700,12 @@ async def test_execution_book_act_and_idempotency_workflow() -> None:
         request_id="req-exit-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-exit-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("0.5"),
+        side=StrategySide.LONG,
     )
     conflict_result = await book.act(req_conflict)
     assert isinstance(conflict_result, CommandConflict)
@@ -787,12 +790,12 @@ async def test_execution_book_fails_closed_when_acceptance_persistence_fails() -
         request_id="req-persist-failure",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
 
     result = await book.act(req)
@@ -868,12 +871,12 @@ async def test_execution_book_persists_reservation_link_with_first_outbox_write(
         request_id="req-with-reservation-link",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-exit",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
     )
 
     result = await book.act(req)
@@ -1492,12 +1495,12 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
                 request_id=command_id,
                 scope=scope,
                 strategy_name="trend_v1",
-                strategy_version="1.0.0",
                 run_id="run-after-restore",
                 decision_ref="decision-after-restore",
                 expected_view_token="*",
                 action=TradeCommandType.ENTRY,
                 requested_quantity=Decimal("1"),
+                side=StrategySide.LONG,
             )
         )
         assert isinstance(blocked, Blocked)
@@ -1540,12 +1543,12 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
             request_id=f"new-entry-{command_id}",
             scope=scope,
             strategy_name="trend_v1",
-            strategy_version="1.0.0",
             run_id="run-after-restore",
             decision_ref="decision-after-restore",
             expected_view_token=view.projection_version,
             action=TradeCommandType.ENTRY,
             requested_quantity=Decimal("1"),
+            side=StrategySide.LONG,
         )
     )
     assert isinstance(accepted, Accepted)
@@ -1596,12 +1599,12 @@ async def test_execution_book_outbox_lifecycle_and_transitions() -> None:
         request_id="req-outbox-1",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-1",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("2.0"),
+        side=StrategySide.LONG,
     )
 
     act_res = await book.act(req)
@@ -1682,12 +1685,12 @@ async def test_execution_book_cumulative_fills_and_reservation_settlement() -> N
         request_id="req-exit-cum",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-cum",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("5.0"),
+        side=StrategySide.LONG,
     )
 
     act_res = await book.act(req)
@@ -1828,12 +1831,12 @@ async def test_execution_book_partial_fill_and_order_cancel_event() -> None:
         request_id="cmd-exit-partial",
         scope=scope,
         strategy_name="trend_v1",
-        strategy_version="1.0.0",
         run_id="run-1",
         decision_ref="dec-part",
         expected_view_token=view.projection_version,
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("2.0"),
+        side=StrategySide.LONG,
     )
 
     act_res = await book.act(req)
@@ -1946,8 +1949,10 @@ def test_facts_hash_is_deterministic_and_position_scoped():
     from dataclasses import replace
 
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
     )
 
     key = PositionKey("live", "acc", "BTCUSDT", FuturesPositionSide.LONG)
@@ -2019,11 +2024,13 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
         ExecutionHeadSnapshot,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2101,12 +2108,14 @@ async def test_repaired_position_reload_uses_the_real_uow_contract(
 
     from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         FuturesPositionSide,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
     from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
         AsyncPostgresExecutionUnitOfWork,
     )
@@ -2185,11 +2194,13 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
         ExecutionHeadSnapshot,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     key = PositionKey("live", "primary", "ZESTUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2267,11 +2278,13 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
         ExecutionHeadSnapshot,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     key = PositionKey(
         environment="live",
@@ -2432,11 +2445,13 @@ def test_historical_view_preserves_configuration_and_current_state(
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2479,10 +2494,12 @@ async def test_nonempty_historical_read_preserves_latest_position() -> None:
     from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     scope = _scope()
     key = scope.to_position_key()
@@ -2805,12 +2822,12 @@ async def test_unparseable_active_command_blocks_restore_before_identity_reads(f
         request_id="blocked-during-restore",
         scope=_scope(),
         strategy_name="trend",
-        strategy_version="1",
         run_id="run",
         decision_ref="decision",
         expected_view_token="unused",
         action=TradeCommandType.ENTRY,
         requested_quantity=Decimal("1"),
+        side=StrategySide.LONG,
     )
     result = await book.act(request)
     assert isinstance(result, Blocked)
@@ -2902,9 +2919,7 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
 
 
 @pytest.mark.asyncio
-async def test_restore_preserves_diverged_reservations_and_provides_recovery() -> (
-    None
-):
+async def test_restore_preserves_diverged_reservations_and_provides_recovery() -> None:
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.execution.ports import (
@@ -2912,11 +2927,13 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
         ExecutionHeadSnapshot,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
@@ -2973,7 +2990,6 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
 
     from contextlib import asynccontextmanager
 
-
     class StubUow:
         async def load_positions(self, **kwargs):
             return (state,)
@@ -3023,4 +3039,6 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
     # Still preserves the active reservation
     assert len(book.get_active_reservations(key)) == 1
 
-    assert not book.command_requires_recovery(f"reservation_divergence:{key.canonical_id}")
+    assert not book.command_requires_recovery(
+        f"reservation_divergence:{key.canonical_id}"
+    )

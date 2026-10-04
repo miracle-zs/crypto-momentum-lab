@@ -10,8 +10,8 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -33,6 +33,17 @@ from crypto_momentum_lab.domain.operational.retention_models import RecoverySpec
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayEvaluation:
+    """Policy evaluator output used by decision replay."""
+
+    intent_produced: bool
+    rejection_reason: str | None
+    notional: Decimal | None = None
+    input_hash: str | None = None
+    next_policy_version: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayResult:
     """Outcome of replaying a historic strategy decision."""
 
@@ -45,7 +56,6 @@ class ReplayResult:
     replayed_rejection_reason: str | None
     evaluated_revisions: tuple[MarketRevisionRef, ...]
     divergence_explanation: str | None = None
-    replayed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class DecisionTraceService:
@@ -117,7 +127,7 @@ class DecisionTraceService:
         decision_id: str,
         *,
         replay_mode: MarketVisibilityMode = MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator: Callable[[tuple[MarketEnvelope, ...]], Any],
+        policy_evaluator: Callable[[tuple[MarketEnvelope, ...]], ReplayEvaluation],
     ) -> ReplayResult:
         """Replays historic decision using visible or canonical revisions.
 
@@ -157,30 +167,13 @@ class DecisionTraceService:
         # Evaluate strategy policy on the chosen envelopes
         raw_result = policy_evaluator(tuple(envelopes))
 
-        intent_produced: bool
-        rejection: str | None
-        replayed_notional: str | None = None
-        replayed_input_hash: str | None = None
-        replayed_next_version: int | None = None
-
-        if hasattr(raw_result, "intent"):  # DecisionResult
-            intent_produced = raw_result.intent is not None
-            rejection = raw_result.rejection_reason
-            if raw_result.intent is not None:
-                n = getattr(raw_result.intent, "desired_notional", None)
-                if n is None:
-                    n = getattr(raw_result.intent, "target_notional", None)
-                replayed_notional = str(n) if n is not None else None
-            replayed_input_hash = getattr(raw_result, "input_hash", None)
-            if hasattr(raw_result, "next_policy_state"):
-                replayed_next_version = raw_result.next_policy_state.policy_version
-        elif isinstance(raw_result, tuple):
-            intent_produced, rejection = raw_result[:2]
-            if len(raw_result) > 2:
-                replayed_notional = str(raw_result[2])
-        else:
-            intent_produced = bool(raw_result)
-            rejection = None
+        intent_produced = raw_result.intent_produced
+        rejection = raw_result.rejection_reason
+        replayed_notional = (
+            str(raw_result.notional) if raw_result.notional is not None else None
+        )
+        replayed_input_hash = raw_result.input_hash
+        replayed_next_version = raw_result.next_policy_version
 
         divergence: str | None = None
         reproduced = (

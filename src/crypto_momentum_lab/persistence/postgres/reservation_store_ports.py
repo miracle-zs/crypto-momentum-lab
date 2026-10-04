@@ -18,9 +18,8 @@ class ExecutionReservationStore(Protocol):
         session: AsyncSession,
         reservations: Sequence[PositionReservation],
         *,
-        expected_projection_version: str | None = None,
-        batch_quantities: Mapping[str, Decimal] | None = None,
-        proven_position_quantity: Decimal | None = None,
+        batch_quantities: Mapping[str, Decimal],
+        proven_position_quantity: Decimal,
     ) -> None: ...
 
     async def update_reservation_in_session(

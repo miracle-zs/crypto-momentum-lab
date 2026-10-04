@@ -1,3 +1,5 @@
+from tests.fixtures.symbol_rules import btc_lot_rules
+
 """Unit tests for Phase 4 Sizing, Lot Partitioning, and Margin Capacity (R3).
 
 Obeys Astra Architecture Blueprint 2026-09-25:
@@ -23,21 +25,13 @@ from crypto_momentum_lab.domain.decision import (
     SizingRejection,
     StrategyPositionMode,
     SymbolLotRules,
-    default_symbol_lot_rules,
     execute_policy_transition,
     quantize_lot_quantity,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
-    PositionLedgerBatch,
     PositionView,
-)
-from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocation,
-    ExitAllocationPlan,
-    ExitPolicyMode,
-    validate_exit_allocation_plan,
 )
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -147,7 +141,7 @@ def test_quantize_lot_quantity_downward_truncation() -> None:
 
 def test_symbol_lot_rules_validation() -> None:
     """SymbolLotRules must enforce positive bounds and step ordering."""
-    rules = default_symbol_lot_rules("BTCUSDT")
+    rules = btc_lot_rules()
     assert rules.symbol == "BTCUSDT"
     assert rules.step_size == Decimal("0.001")
     assert rules.min_quantity == Decimal("0.001")
@@ -184,7 +178,7 @@ def test_fixed_notional_sizing_success() -> None:
         max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.05"),
     )
-    lot_rules = default_symbol_lot_rules("BTCUSDT")
+    lot_rules = btc_lot_rules()
     now = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
     # Price = 65000.00 -> raw_qty = 0.01 BTC -> notional = 650.00
@@ -211,7 +205,7 @@ def test_fixed_notional_sizing_fail_closed_rejections() -> None:
         max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.05"),
     )
-    lot_rules = default_symbol_lot_rules("BTCUSDT")
+    lot_rules = btc_lot_rules()
     now = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
     # 1. Invalid price
@@ -269,7 +263,7 @@ def test_equity_fraction_sizing_dynamic_compounding() -> None:
         max_slippage_budget_bps=Decimal("10.0"),
         resize_tolerance=Decimal("0.10"),
     )
-    lot_rules = default_symbol_lot_rules("BTCUSDT")
+    lot_rules = btc_lot_rules()
     now = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
     # Cash = 2000, 10% fraction * 5x leverage -> 1000 notional
@@ -321,7 +315,7 @@ def test_execute_policy_transition_with_sizing_model() -> None:
         entry_threshold=Decimal("65000.00"),
         position_mode=StrategyPositionMode.LONG_ONLY,
         sizing_model=sizing_model,
-        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
+        symbol_lot_rules=btc_lot_rules(),
     )
 
     transition = execute_policy_transition(
@@ -379,7 +373,7 @@ def test_execute_policy_transition_fail_closed_on_sizing_rejection() -> None:
         entry_threshold=Decimal("65000.00"),
         position_mode=StrategyPositionMode.LONG_ONLY,
         sizing_model=sizing_model,
-        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
+        symbol_lot_rules=btc_lot_rules(),
     )
 
     transition = execute_policy_transition(
@@ -450,7 +444,7 @@ def test_execute_policy_transition_generator_with_dynamic_sizing() -> None:
         strategy_name="custom_strat",
         candidate_generator=generator,
         sizing_model=sizing_model,
-        symbol_lot_rules=default_symbol_lot_rules("BTCUSDT"),
+        symbol_lot_rules=btc_lot_rules(),
     )
 
     transition = execute_policy_transition(
@@ -466,96 +460,6 @@ def test_execute_policy_transition_generator_with_dynamic_sizing() -> None:
     assert cand.desired_notional == Decimal("2500.00")
     assert cand.features["quantized_quantity"] == "0.050"
     assert cand.features["custom_feat"] == 1
-
-
-def test_validate_exit_allocation_plan_invariants() -> None:
-    """ExitAllocationPlan strictly verifies Astra Section 7 allocation invariants."""
-    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    b1 = PositionLedgerBatch(
-        batch_id="b1",
-        episode_id="ep1",
-        quantity=Decimal("1.5"),
-        original_quantity=Decimal("1.5"),
-        entry_price=Decimal("65000"),
-        opened_at=t0,
-    )
-    b2 = PositionLedgerBatch(
-        batch_id="b2",
-        episode_id="ep1",
-        quantity=Decimal("1.0"),
-        original_quantity=Decimal("1.0"),
-        entry_price=Decimal("66000"),
-        opened_at=t0,
-    )
-
-    pos_key = PositionKey(
-        environment="live",
-        account_label="test_acc",
-        symbol="BTCUSDT",
-    )
-
-    # 1. Valid allocation plan: requesting 2.0, allocating 1.5 from b1 and 0.5 from b2
-    valid_plan = ExitAllocationPlan(
-        position_key=pos_key,
-        allocations=(
-            ExitAllocation(batch_id="b1", allocated_quantity=Decimal("1.5")),
-            ExitAllocation(batch_id="b2", allocated_quantity=Decimal("0.5")),
-        ),
-        total_allocated_quantity=Decimal("2.0"),
-        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
-    )
-    validate_exit_allocation_plan(
-        valid_plan, (b1, b2), requested_quantity=Decimal("2.0")
-    )
-    assert valid_plan.total_allocated_quantity == Decimal("2.0")
-
-    # 2. Over-requested: allocated 2.5 > requested 2.0
-    bad_plan_over = ExitAllocationPlan(
-        position_key=pos_key,
-        allocations=(
-            ExitAllocation(batch_id="b1", allocated_quantity=Decimal("1.5")),
-            ExitAllocation(batch_id="b2", allocated_quantity=Decimal("1.0")),
-        ),
-        total_allocated_quantity=Decimal("2.5"),
-        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
-    )
-    with pytest.raises(ValueError, match="exceeds requested_quantity"):
-        validate_exit_allocation_plan(
-            bad_plan_over, (b1, b2), requested_quantity=Decimal("2.0")
-        )
-
-    # 3. Sum mismatch: sum(allocations) != total rejected in __post_init__
-    with pytest.raises(ValueError, match="sum of allocations"):
-        ExitAllocationPlan(
-            position_key=pos_key,
-            allocations=(
-                ExitAllocation(batch_id="b1", allocated_quantity=Decimal("1.0")),
-            ),
-            total_allocated_quantity=Decimal("1.5"),
-            policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
-        )
-
-    # 4. Batch capacity exceeded: allocating 2.0 from b1 when b1 only has 1.5
-    bad_plan_batch = ExitAllocationPlan(
-        position_key=pos_key,
-        allocations=(ExitAllocation(batch_id="b1", allocated_quantity=Decimal("2.0")),),
-        total_allocated_quantity=Decimal("2.0"),
-        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
-    )
-    with pytest.raises(ValueError, match="exceeds batch b1 capacity"):
-        validate_exit_allocation_plan(bad_plan_batch, (b1, b2))
-
-    # 5. Unknown batch allocated
-    bad_plan_unknown = ExitAllocationPlan(
-        position_key=pos_key,
-        allocations=(
-            ExitAllocation(batch_id="unknown_b", allocated_quantity=Decimal("1.0")),
-        ),
-        total_allocated_quantity=Decimal("1.0"),
-        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
-    )
-    with pytest.raises(ValueError, match="references non-existent batch"):
-        validate_exit_allocation_plan(bad_plan_unknown, (b1, b2))
 
 
 def test_execute_policy_transition_fail_closed_when_missing_lot_rules() -> None:
@@ -607,181 +511,16 @@ def test_execute_policy_transition_fail_closed_when_missing_lot_rules() -> None:
     assert transition.rejection_reason == "sizing_missing_realtime_lot_rules"
 
 
-def test_execute_policy_transition_with_mapping_lot_rules() -> None:
-    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000.00"))
-    pview = _make_position_view("BTCUSDT")
-
-    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
-    frame = DecisionFrame(
-        scope="test",
-        symbol="BTCUSDT",
-        clock_event=clock,
-        market_refs=(mref,),
-        position_view_token=pview.projection_version,
-        universe_version="univ_v1",
-        risk_config_version="risk_v1",
-        policy_code_digest="code_01",
-        policy_parameters_digest="params_01",
-        policy_state_digest="state_01",
-        cash_balance=Decimal("5000.00"),
-    )
-    state = PolicyState()
-    sizing_model = FixedNotionalSizingModel(
-        target_notional=Decimal("660.00"),
-        max_leverage=Decimal("5.0"),
-        max_slippage_budget_bps=Decimal("10.0"),
-        resize_tolerance=Decimal("0.05"),
-    )
-    rules_map = {"BTCUSDT": default_symbol_lot_rules("BTCUSDT")}
-    policy = EffectivePolicy(
-        policy_id="breakout_v1",
-        strategy_name="breakout",
-        entry_threshold=Decimal("65000.00"),
-        position_mode=StrategyPositionMode.LONG_ONLY,
-        sizing_model=sizing_model,
-        symbol_lot_rules=rules_map,
-    )
-
-    transition = execute_policy_transition(
-        frame=frame,
-        prior_state=state,
-        policy_artifact=policy,
-        market_envelope=menv,
-        position_view=pview,
-    )
-
-    assert transition.rejection_reason is None
-    assert transition.entry_candidate is not None
-    assert transition.entry_candidate.desired_notional == Decimal("660.00")
-
-
-def test_execute_policy_transition_with_callable_lot_rules() -> None:
-    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    mref, menv = _make_15s_state("ETHUSDT", t0, Decimal("3000.00"))
-    pview = _make_position_view("ETHUSDT")
-
-    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
-    frame = DecisionFrame(
-        scope="test",
-        symbol="ETHUSDT",
-        clock_event=clock,
-        market_refs=(mref,),
-        position_view_token=pview.projection_version,
-        universe_version="univ_v1",
-        risk_config_version="risk_v1",
-        policy_code_digest="code_01",
-        policy_parameters_digest="params_01",
-        policy_state_digest="state_01",
-        cash_balance=Decimal("5000.00"),
-    )
-    state = PolicyState()
-    sizing_model = FixedNotionalSizingModel(
-        target_notional=Decimal("300.00"),
-        max_leverage=Decimal("5.0"),
-        max_slippage_budget_bps=Decimal("10.0"),
-        resize_tolerance=Decimal("0.05"),
-    )
-
-    def lot_provider(sym: str) -> SymbolLotRules | None:
-        if sym == "ETHUSDT":
-            return default_symbol_lot_rules("ETHUSDT")
-        return None
-
-    policy = EffectivePolicy(
-        policy_id="breakout_v1",
-        strategy_name="breakout",
-        entry_threshold=Decimal("2500.00"),
-        position_mode=StrategyPositionMode.LONG_ONLY,
-        sizing_model=sizing_model,
-        symbol_lot_rules=lot_provider,
-    )
-
-    transition = execute_policy_transition(
-        frame=frame,
-        prior_state=state,
-        policy_artifact=policy,
-        market_envelope=menv,
-        position_view=pview,
-    )
-
-    assert transition.rejection_reason is None
-    assert transition.entry_candidate is not None
-    assert transition.entry_candidate.desired_notional == Decimal("300.00")
-
-
-def test_execute_policy_transition_callable_lot_rules_miss_fail_closed() -> None:
-    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
-    mref, menv = _make_15s_state("SOLUSDT", t0, Decimal("150.00"))
-    pview = _make_position_view("SOLUSDT")
-
-    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
-    frame = DecisionFrame(
-        scope="test",
-        symbol="SOLUSDT",
-        clock_event=clock,
-        market_refs=(mref,),
-        position_view_token=pview.projection_version,
-        universe_version="univ_v1",
-        risk_config_version="risk_v1",
-        policy_code_digest="code_01",
-        policy_parameters_digest="params_01",
-        policy_state_digest="state_01",
-        cash_balance=Decimal("5000.00"),
-    )
-    state = PolicyState()
-    sizing_model = FixedNotionalSizingModel(
-        target_notional=Decimal("300.00"),
-        max_leverage=Decimal("5.0"),
-        max_slippage_budget_bps=Decimal("10.0"),
-        resize_tolerance=Decimal("0.05"),
-    )
-    policy = EffectivePolicy(
-        policy_id="breakout_v1",
-        strategy_name="breakout",
-        entry_threshold=Decimal("100.00"),
-        position_mode=StrategyPositionMode.LONG_ONLY,
-        sizing_model=sizing_model,
-        symbol_lot_rules=lambda _sym: None,
-    )
-
-    transition = execute_policy_transition(
-        frame=frame,
-        prior_state=state,
-        policy_artifact=policy,
-        market_envelope=menv,
-        position_view=pview,
-    )
-
-    assert transition.entry_candidate is None
-    assert transition.rejection_reason == "sizing_missing_realtime_lot_rules"
-
-
-def test_serialize_policy_parameters_supports_dynamic_symbol_lot_rules() -> None:
+def test_serialized_policy_freezes_resolved_symbol_rules() -> None:
     from crypto_momentum_lab.domain.decision.policy_transition import (
         serialize_policy_parameters,
     )
 
-    sizing_model = FixedNotionalSizingModel(
-        target_notional=Decimal("660.00"),
-        max_leverage=Decimal("5.0"),
-        max_slippage_budget_bps=Decimal("10.0"),
-        resize_tolerance=Decimal("0.05"),
-    )
-    policy_callable = EffectivePolicy(
+    policy = EffectivePolicy(
         policy_id="breakout_v1",
         strategy_name="breakout",
-        sizing_model=sizing_model,
-        symbol_lot_rules=lambda sym: None,
+        symbol_lot_rules=btc_lot_rules(),
     )
-    params_c = serialize_policy_parameters(policy_callable)
-    assert "symbol_lot_rules" not in params_c
-
-    policy_map = EffectivePolicy(
-        policy_id="breakout_v1",
-        strategy_name="breakout",
-        sizing_model=sizing_model,
-        symbol_lot_rules={"BTCUSDT": default_symbol_lot_rules("BTCUSDT")},
-    )
-    params_m = serialize_policy_parameters(policy_map)
-    assert "symbol_lot_rules" not in params_m
+    parameters = serialize_policy_parameters(policy)
+    assert parameters["symbol_lot_rules"]["symbol"] == "BTCUSDT"
+    assert parameters["symbol_lot_rules"]["step_size"] == "0.001"

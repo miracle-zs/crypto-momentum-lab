@@ -1,3 +1,4 @@
+
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -21,6 +22,7 @@ from crypto_momentum_lab.domain.execution.evidence_settlement import account_tra
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
+    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
@@ -29,7 +31,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
-SCOPE = ExecutionScope("live", "account-3", "TESTUSDT", "LONG")
+SCOPE = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
 
 
 def fill(quantity="6", *, order_id="order", cumulative=False):

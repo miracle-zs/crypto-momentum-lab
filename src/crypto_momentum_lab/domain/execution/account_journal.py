@@ -22,16 +22,16 @@ from crypto_momentum_lab.domain.account.models import (
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
-    AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
-    CanonicalFactCache,
     ExitOrderSubmissionFact,
     FactCoverageInterval,
     JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+    CanonicalFactCache,
     DurableJournalCut,
     PositionRecoveryCheckpoint,
 )
@@ -177,13 +177,13 @@ class AccountJournal:
             if not _same_fill(existing, fill):
                 self._conflicts.append(fill)
                 self._has_synthetic_fills = self._has_synthetic_fills or bool(
-                    (fill.raw_payload or {}).get("synthetic_from_order", False)
+                    fill.raw_payload.get("synthetic_from_order", False)
                 )
                 self._revision += 1
             return False
 
         self._has_synthetic_fills = self._has_synthetic_fills or bool(
-            (fill.raw_payload or {}).get("synthetic_from_order", False)
+            fill.raw_payload.get("synthetic_from_order", False)
         )
 
         checkpoint_cut = (
@@ -312,34 +312,7 @@ class AccountJournal:
         self._cached_facts_none = None
         self._revision += 1
 
-    def record_integrity_issue(self, issue: str) -> None:
-        normalized = issue.strip()
-        if not normalized:
-            raise ValueError("integrity issue must not be empty")
-        self._integrity_issues.append(normalized)
-        self._cached_facts_none = None
-        self._revision += 1
 
-    def record_fill_cursor(
-        self,
-        cursor: AccountFillReconciliationCursor,
-    ) -> None:
-        if (
-            cursor.environment != self._position_key.environment
-            or cursor.account_label != self._position_key.account_label
-            or cursor.symbol != self._position_key.symbol
-        ):
-            raise ValueError("fill cursor identity does not match journal position key")
-        if (
-            self._fill_cursor_provenance is not None
-            and cursor.last_checked_at < self._fill_cursor_provenance.last_checked_at
-        ):
-            raise ValueError("fill cursor provenance cannot move backwards")
-        if cursor != self._fill_cursor_provenance:
-            self._fill_cursor_provenance = cursor
-            self._update_latest_event_at(cursor.last_checked_at)
-            self._cached_facts_none = None
-            self._revision += 1
 
     def record_fill_load_provenance(
         self,
@@ -629,7 +602,7 @@ class AccountJournal:
         has_synthetic_fills = (
             self._has_synthetic_fills
             or any(
-                bool((fill.raw_payload or {}).get("synthetic_from_order", False))
+                bool(fill.raw_payload.get("synthetic_from_order", False))
                 for fill in fills
             )
             or bool(recovery_checkpoint and recovery_checkpoint.has_synthetic_fills)

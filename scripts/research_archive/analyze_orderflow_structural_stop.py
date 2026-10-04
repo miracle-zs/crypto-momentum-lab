@@ -141,7 +141,11 @@ async def fetch_bars(
                             break
                         except Exception as error:  # noqa: BLE001
                             last_error = error
-                            status_code = getattr(getattr(error, "response", None), "status_code", None)
+                            status_code = (
+                                error.response.status_code
+                                if isinstance(error, httpx.HTTPStatusError)
+                                else None
+                            )
                             delay = 12.0 * (attempt + 1) if status_code in (418, 429) else 0.5 * (attempt + 1)
                             await asyncio.sleep(delay)
                     if last_error is not None:

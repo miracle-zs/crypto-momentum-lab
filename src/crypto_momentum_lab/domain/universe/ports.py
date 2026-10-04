@@ -67,36 +67,11 @@ class MonitoringObligationProvider(Protocol):
     async def forced_symbols(self) -> frozenset[str]: ...
 
 
-class NoMonitoringObligations:
-    async def forced_symbols(self) -> frozenset[str]:
-        return frozenset()
-
-
 class UniverseSnapshotObserver(Protocol):
     async def snapshot_updated(
         self,
         snapshot: UniverseSnapshot,
     ) -> None: ...
-
-
-class NoUniverseSnapshotObserver:
-    async def snapshot_updated(
-        self,
-        snapshot: UniverseSnapshot,
-    ) -> None:
-        return None
-
-
-class UniverseSymbolReader(Protocol):
-    """Read activated entry symbols and ranked gainers at the decision cut."""
-
-    async def load_active_entry_symbols_at(
-        self, observed_at: datetime | None
-    ) -> frozenset[str]: ...
-
-    async def load_positive_gainer_symbols_at(
-        self, observed_at: datetime, *, top_count: int
-    ) -> frozenset[str]: ...
 
 
 class UniverseSnapshotReader(Protocol):

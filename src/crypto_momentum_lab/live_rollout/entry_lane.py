@@ -9,7 +9,7 @@ daemon's exchange or persistence implementations.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
@@ -17,9 +17,6 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
-from crypto_momentum_lab.domain.execution.position_batches import (
-    count_active_symbol_batch_concurrency,
-)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     CandidatePolicyDecision,
@@ -84,7 +81,6 @@ class EntryLaneConfig:
     require_price_above_ema10: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
-    max_concurrency_per_symbol: int | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -95,11 +91,6 @@ class EntryLaneConfig:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
         if not isinstance(self.entry_order_type, EntryType):
             raise TypeError("entry_order_type must be an EntryType")
-        if (
-            self.max_concurrency_per_symbol is not None
-            and self.max_concurrency_per_symbol <= 0
-        ):
-            raise ValueError("max_concurrency_per_symbol must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +208,7 @@ class EntryExecutionLane:
             )
             candidate_filter_results[candidate.candidate_id] = {
                 "symbol": candidate.symbol,
-                "side": _enum_text(candidate.side),
+                "side": str(candidate.side),
                 "reduce_only": candidate.reduce_only,
                 "passed": not reasons,
                 "rejection_reason": reasons[0] if reasons else None,
@@ -277,7 +268,7 @@ class EntryExecutionLane:
                 "rejection_count": len(decision.rejections),
                 "strategy_rejections": [
                     {
-                        "reason": _enum_text(rejection.reason),
+                        "reason": str(rejection.reason),
                         "symbol": rejection.symbol,
                         "bucket_start": rejection.bucket_start,
                         "details": rejection.details,
@@ -537,41 +528,11 @@ class EntryExecutionLane:
                     else entry_filter_context.ema_config_hash
                 ),
             )
-            cap = self._config.max_concurrency_per_symbol
-            if (
-                cap is not None
-                and _count_symbol_concurrency(candidate.symbol, context) >= cap
-            ):
-                policy = evaluation.policy_decision
-                evaluation = replace(
-                    evaluation,
-                    policy_decision=replace(
-                        policy,
-                        eligible=False,
-                        reasons=policy.reasons
-                        + ("max_concurrency_per_symbol_exceeded",),
-                    ),
-                )
             decisions.append(evaluation)
         return _EntryPolicyEvaluation(
             decisions=tuple(decisions),
             universe_snapshot_error=universe_snapshot_error,
         )
-
-
-def _count_symbol_concurrency(
-    symbol: str,
-    context: LiveDaemonRuntimeContext | None,
-) -> int:
-    if context is None:
-        return 0
-    managed_positions = getattr(context, "managed_positions", ()) or ()
-    unresolved_orders = getattr(context, "unresolved_orders", ()) or ()
-    return count_active_symbol_batch_concurrency(
-        symbol=symbol,
-        managed_positions=managed_positions,
-        unresolved_orders=unresolved_orders,
-    )
 
 
 def _market_state_age_seconds(
@@ -615,7 +576,7 @@ def _live_signal_account_context(
         }
     return {
         "context_available": True,
-        "account_state": _enum_text(context.account_state),
+        "account_state": str(context.account_state),
         "account_observed_at": context.account_observed_at,
         "account_snapshot_version": context.account_snapshot_version,
         "realized_pnl": context.realized_pnl,
@@ -631,7 +592,7 @@ def _live_signal_account_context(
         "active_halt_reasons": [halt.reason for halt in context.active_halts],
         "unresolved_order_count": len(context.unresolved_order_states),
         "unresolved_order_states": [
-            _enum_text(state) for state in context.unresolved_order_states
+            str(state) for state in context.unresolved_order_states
         ],
         "risk_config": {
             "max_order_notional": context.risk_config.max_order_notional,
@@ -641,10 +602,6 @@ def _live_signal_account_context(
         },
         "gate_reasons": list(gate_reasons),
     }
-
-
-def _enum_text(value: object) -> str:
-    return str(getattr(value, "value", value))
 
 
 def _planned_entry_execution_context(
@@ -667,9 +624,9 @@ def _planned_entry_execution_context(
     else:
         _, price_source = entry_limit_price(candidate, state=state)
     return {
-        "original_entry_type": _enum_text(candidate.entry_type),
+        "original_entry_type": str(candidate.entry_type),
         "original_limit_price": candidate.limit_price,
-        "effective_entry_type": _enum_text(prepared.entry_type),
+        "effective_entry_type": str(prepared.entry_type),
         "effective_limit_price": prepared.limit_price,
         "effective_limit_price_source": price_source,
         "effective_expires_at": prepared.expires_at,

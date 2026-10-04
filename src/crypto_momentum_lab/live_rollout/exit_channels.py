@@ -419,8 +419,6 @@ class LiveExitChannelRuntime:
                     # the original event, never the old order allocation.
                     continue
                 break
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 if self._is_order_identity_conflict(error):
                     failure = ORDER_IDENTITY_CONFLICT_REASON
@@ -528,8 +526,6 @@ class LiveExitChannelRuntime:
                         now=now,
                         latest_quote=quote,
                     )
-                except asyncio.CancelledError:
-                    raise
                 except Exception as error:
                     if self._is_order_identity_conflict(error):
                         failure = ORDER_IDENTITY_CONFLICT_REASON

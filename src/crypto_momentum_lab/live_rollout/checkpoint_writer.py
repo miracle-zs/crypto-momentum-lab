@@ -57,7 +57,7 @@ class CheckpointWriter:
         persist: PersistCheckpoint,
         retry_delay_seconds: float = 1.0,
         flush_timeout_seconds: float = 10.0,
-        clock: Callable[[], float] | None = None,
+        clock: Callable[[], float] = perf_counter,
         on_persist_success: Callable[[], None] | None = None,
     ) -> None:
         if not run_id.strip():
@@ -71,7 +71,7 @@ class CheckpointWriter:
         self._on_persist_success = on_persist_success
         self._retry_delay_seconds = retry_delay_seconds
         self._flush_timeout_seconds = flush_timeout_seconds
-        self._clock: Callable[[], float] = clock or perf_counter
+        self._clock = clock
         self._pending: _PendingCheckpoint | None = None
         self._wake = asyncio.Event()
         self._idle = asyncio.Event()
@@ -108,10 +108,6 @@ class CheckpointWriter:
     @property
     def last_persisted_monotonic(self) -> float | None:
         return self._last_persisted_monotonic
-
-    @property
-    def last_submitted_token(self) -> int:
-        return self._submitted_count
 
     async def start(self) -> None:
         if self._task is not None:
@@ -179,8 +175,6 @@ class CheckpointWriter:
                 ),
                 timeout=self._flush_timeout_seconds,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "live_checkpoint_critical_write_failed",
@@ -233,8 +227,6 @@ class CheckpointWriter:
                 retry_pending = False
                 try:
                     await self._persist_one(pending)
-                except asyncio.CancelledError:
-                    raise
                 except Exception as error:
                     self._failure_count += 1
                     log.exception(

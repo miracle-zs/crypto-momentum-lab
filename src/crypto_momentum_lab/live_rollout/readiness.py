@@ -26,37 +26,6 @@ from crypto_momentum_lab.health import LocalHealthWriter
 log = structlog.get_logger()
 
 
-
-
-
-
-@dataclass(frozen=True, slots=True)
-class StreamReadinessSnapshot:
-    """Availability across upstream real-time market and account streams."""
-
-    overall: str
-    streams: dict[str, str]
-
-    @classmethod
-    def from_streams(cls, streams: Mapping[str, str]) -> StreamReadinessSnapshot:
-        values = [v.upper() for v in streams.values()]
-        if not values:
-            overall = "UNKNOWN"
-        elif any(v == "DISRUPTED" for v in values):
-            overall = "DISRUPTED"
-        elif any(v == "RECOVERING" for v in values):
-            overall = "RECOVERING"
-        elif any(v == "CONNECTING" for v in values):
-            overall = "CONNECTING"
-        elif all(v == "READY" for v in values):
-            overall = "READY"
-        else:
-            overall = "UNKNOWN"
-        return cls(overall=overall, streams=dict(streams))
-
-
-
-
 class ReadinessStrategy(Protocol):
     """The compact strategy surface needed by readiness reporting."""
 
@@ -109,8 +78,6 @@ class LiveReadinessPublisher:
         account_label: str,
         session_id: str,
         strategy: str,
-        code_commit: str,
-        migration_revision: str,
         entry_universe_target_count: int | None,
         warmup_required_buckets: int,
         on_publish: Callable[[Mapping[str, object]], None] | None = None,
@@ -119,8 +86,6 @@ class LiveReadinessPublisher:
             (account_label, "account_label"),
             (session_id, "session_id"),
             (strategy, "strategy"),
-            (code_commit, "code_commit"),
-            (migration_revision, "migration_revision"),
         ):
             if not value.strip():
                 raise ValueError(f"{field_name} must not be empty")
@@ -133,8 +98,6 @@ class LiveReadinessPublisher:
         self._account_label = account_label
         self._session_id = session_id
         self._strategy = strategy
-        self._code_commit = code_commit
-        self._migration_revision = migration_revision
         self._entry_universe_target_count = entry_universe_target_count
         self._entry_universe_count = 0
         self._warmup_required_buckets = warmup_required_buckets
@@ -146,11 +109,6 @@ class LiveReadinessPublisher:
         self._last_published_market_bucket: datetime | None = None
         self._entry_enabled = False
         self._entry_enabled_reason = "initializing"
-        self._exit_gate_open = True
-        self._exit_gate_reason = "normal"
-        self._unmanaged_risk_clear = True
-        self._halt_active = False
-        self._stream_states: dict[str, str] = {}
         self.publish()
 
     @property
@@ -249,59 +207,6 @@ class LiveReadinessPublisher:
 
         self.publish()
 
-    def current_stream_readiness(self) -> StreamReadinessSnapshot:
-        return StreamReadinessSnapshot.from_streams(self._stream_states)
-
-    def update_stream_readiness(
-        self,
-        stream_name: str,
-        state: str,
-    ) -> None:
-        """Record the availability of a specific stream source."""
-        if not stream_name.strip():
-            raise ValueError("stream_name must not be empty")
-        state_str = getattr(state, "value", str(state)).upper()
-        if self._stream_states.get(stream_name) != state_str:
-            self._stream_states[stream_name] = state_str
-            self.publish()
-
-    def update_tradeability(
-        self,
-        *,
-        entry_enabled: bool | None = None,
-        entry_reason: str | None = None,
-        exit_enabled: bool | None = None,
-        exit_reason: str | None = None,
-        unmanaged_risk_clear: bool | None = None,
-        halt_active: bool | None = None,
-    ) -> None:
-        """Publish action-control facts without deriving a business run mode."""
-        changed = False
-        if entry_enabled is not None and entry_enabled != self._entry_enabled:
-            self._entry_enabled = entry_enabled
-            changed = True
-        if entry_reason is not None and entry_reason != self._entry_enabled_reason:
-            self._entry_enabled_reason = entry_reason
-            changed = True
-        if exit_enabled is not None and exit_enabled != self._exit_gate_open:
-            self._exit_gate_open = exit_enabled
-            changed = True
-        if exit_reason is not None and exit_reason != self._exit_gate_reason:
-            self._exit_gate_reason = exit_reason
-            changed = True
-        if (
-            unmanaged_risk_clear is not None
-            and unmanaged_risk_clear != self._unmanaged_risk_clear
-        ):
-            self._unmanaged_risk_clear = unmanaged_risk_clear
-            changed = True
-        if halt_active is not None and halt_active != self._halt_active:
-            self._halt_active = halt_active
-            changed = True
-
-        if changed:
-            self.publish()
-
     def observe_market_state(
         self,
         state: MarketState15s,
@@ -350,7 +255,6 @@ class LiveReadinessPublisher:
 
         if self._health is None and self._on_publish is None:
             return
-        streams = self.current_stream_readiness()
         now_utc = datetime.now(tz=UTC)
         payload: Mapping[str, object] = {
             "schema_version": self.schema_version,
@@ -359,8 +263,6 @@ class LiveReadinessPublisher:
             "account_label": self._account_label,
             "session_id": self._session_id,
             "strategy": self._strategy,
-            "code_commit": self._code_commit,
-            "migration_revision": self._migration_revision,
             "entry_universe_target_count": self._entry_universe_target_count,
             "entry_universe_count": self._entry_universe_count,
             "warmup_required_buckets": self._warmup_required_buckets,
@@ -378,14 +280,14 @@ class LiveReadinessPublisher:
                 "mode": "RUNNING",
                 "entry_gate_open": self._entry_enabled,
                 "entry_gate_reason": self._entry_enabled_reason,
-                "exit_gate_open": self._exit_gate_open,
-                "exit_gate_reason": self._exit_gate_reason,
-                "unmanaged_risk_clear": self._unmanaged_risk_clear,
-                "halt_active": self._halt_active,
+                "exit_gate_open": True,
+                "exit_gate_reason": "normal",
+                "unmanaged_risk_clear": True,
+                "halt_active": False,
             },
             "stream_readiness": {
-                "overall": streams.overall,
-                "streams": streams.streams,
+                "overall": "UNKNOWN",
+                "streams": {},
             },
         }
         try:
@@ -400,7 +302,9 @@ class LiveReadinessPublisher:
             try:
                 self._on_publish(payload)
             except Exception as error:
-                log.warning("live_readiness_sink_failed", error_type=type(error).__name__)
+                log.warning(
+                    "live_readiness_sink_failed", error_type=type(error).__name__
+                )
 
 
 def _normalized_symbols(symbols: Collection[str]) -> frozenset[str]:
@@ -415,5 +319,4 @@ __all__ = [
     "LiveReadinessPublisher",
     "LiveWarmupStatus",
     "ReadinessStrategy",
-    "StreamReadinessSnapshot",
 ]

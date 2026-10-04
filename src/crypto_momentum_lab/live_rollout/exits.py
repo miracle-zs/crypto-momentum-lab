@@ -8,6 +8,9 @@ from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -16,15 +19,7 @@ from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionEpisode,
-    PositionKey,
-    PositionLedgerBatch,
-    PositionLedgerProjection,
     PositionView,
-)
-from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocator,
-    ExitPolicyMode,
 )
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -74,14 +69,6 @@ class ManagedLivePosition:
     def __post_init__(self) -> None:
         if not self.symbol.strip():
             raise ValueError("symbol must not be empty")
-        if not isinstance(self.side, StrategySide):
-            object.__setattr__(self, "side", StrategySide(self.side))
-        if not isinstance(self.position_side, FuturesPositionSide):
-            object.__setattr__(
-                self,
-                "position_side",
-                FuturesPositionSide(self.position_side),
-            )
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
         if self.entry_price <= 0:
@@ -136,7 +123,7 @@ class ManagedLivePosition:
 def managed_live_positions_from_views(
     views: tuple[PositionView, ...],
     *,
-    unresolved_orders: tuple[object, ...] = (),
+    unresolved_orders: tuple[PersistedExchangeOrder, ...] = (),
 ) -> tuple[ManagedLivePosition, ...]:
     """Adapt authoritative Book batches for existing operational consumers.
 
@@ -155,7 +142,7 @@ def managed_live_positions_from_views(
             # reduce side for an exit order.
             continue
 
-        recovery_by_batch: dict[str, object] = {}
+        recovery_by_batch: dict[str, PersistedExchangeOrder] = {}
         reserved_by_order: dict[str, dict[str, Decimal]] = {}
         for reservation in view.reservations:
             if reservation.active_quantity > 0:
@@ -165,8 +152,8 @@ def managed_live_positions_from_views(
                     + reservation.active_quantity
                 )
         for order in unresolved_orders:
-            plan = getattr(order, "plan", None)
-            if plan is None or not plan.reduce_only or plan.symbol != view.key.symbol:
+            plan = order.plan
+            if not plan.reduce_only or plan.symbol != view.key.symbol:
                 continue
             if plan.position_side != view.key.position_side:
                 continue
@@ -258,15 +245,16 @@ class LiveExitConfig:
     strategy_version: str
     strategy_config_hash: str
     policy: PositionExitPolicy
-    account_label: str | None = None
+    account_label: str
+    candle_grace_decision_profit_pct: Decimal
     candidate_ttl_seconds: int = 60
     candle_grace_bars: int = 0
-    candle_grace_decision_profit_pct: Decimal | None = None
     candle_grace_profit_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         for value, field_name in (
             (self.run_id, "run_id"),
+            (self.account_label, "account_label"),
             (self.strategy_name, "strategy_name"),
             (self.strategy_version, "strategy_version"),
             (self.strategy_config_hash, "strategy_config_hash"),
@@ -278,8 +266,6 @@ class LiveExitConfig:
         if self.candle_grace_bars < 0:
             raise ValueError("candle_grace_bars must not be negative")
         decision_profit_pct = self.candle_grace_decision_profit_pct
-        if decision_profit_pct is None:
-            decision_profit_pct = self.candle_grace_profit_pct
         if self.candle_grace_bars > 0 and decision_profit_pct <= 0:
             raise ValueError(
                 "candle_grace_decision_profit_pct must be positive when grace "
@@ -289,15 +275,6 @@ class LiveExitConfig:
             raise ValueError("candle_grace_profit_pct must be in [0, 1)")
         if decision_profit_pct < 0 or decision_profit_pct >= 1:
             raise ValueError("candle_grace_decision_profit_pct must be in [0, 1)")
-
-    @property
-    def decision_profit_pct(self) -> Decimal:
-        """Profit threshold for direct close on the first adverse candle."""
-        return (
-            self.candle_grace_profit_pct
-            if self.candle_grace_decision_profit_pct is None
-            else self.candle_grace_decision_profit_pct
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,7 +429,7 @@ class LiveExitManager:
                 if _recovery_target_touched(
                     position=position,
                     mark_price=reference_price,
-                    profit_pct=self._config.decision_profit_pct,
+                    profit_pct=self._config.candle_grace_decision_profit_pct,
                 ):
                     requests.append(
                         self._build_order_request(
@@ -772,6 +749,19 @@ class LiveExitManager:
         order_quantity = (
             _uncovered_position_quantity(position) if quantity is None else quantity
         )
+        available_quantity = (
+            sum(
+                (
+                    batch.quantity
+                    for batch in position.batches
+                    if position.batch_id is None or batch.batch_id == position.batch_id
+                ),
+                start=Decimal("0"),
+            )
+            if position.batches
+            else position.quantity
+        )
+        order_quantity = min(order_quantity, position.quantity, available_quantity)
         if order_quantity <= 0:
             raise ValueError("exit order quantity must be positive")
         batch_component = (
@@ -800,12 +790,6 @@ class LiveExitManager:
             if state is None:
                 raise ValueError("state or created_at is required")
             created_at = state.bucket_end
-        order_quantity = self._allocate_exit_quantity(
-            position=position,
-            order_quantity=order_quantity,
-            reference_price=reference_price,
-            reason=reason,
-        )
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -858,102 +842,6 @@ class LiveExitManager:
             ),
             quantity=order_quantity,
         )
-
-    def _allocate_exit_quantity(
-        self,
-        *,
-        position: ManagedLivePosition,
-        order_quantity: Decimal,
-        reference_price: Decimal,
-        reason: str,
-        hedge_mode: bool = True,
-    ) -> Decimal:
-        pos_side = getattr(position, "position_side", None)
-        if isinstance(pos_side, FuturesPositionSide):
-            position_side = pos_side
-        elif isinstance(pos_side, str) and pos_side.strip():
-            position_side = FuturesPositionSide(pos_side.strip().upper())
-        elif hedge_mode:
-            position_side = (
-                FuturesPositionSide.LONG
-                if position.side is StrategySide.LONG
-                else FuturesPositionSide.SHORT
-            )
-        else:
-            position_side = FuturesPositionSide.BOTH
-
-        resolved_label = getattr(position, "account_label", None) or getattr(
-            self._config, "account_label", None
-        )
-        if not resolved_label or not str(resolved_label).strip():
-            raise ValueError(
-                f"Position for symbol {position.symbol} is missing required account_label"
-            )
-        position_key = PositionKey(
-            environment="live",
-            account_label=str(resolved_label).strip(),
-            symbol=position.symbol,
-            position_side=position_side,
-        )
-
-        batches: tuple[PositionLedgerBatch, ...] = (
-            tuple(
-                PositionLedgerBatch(
-                    batch_id=b.batch_id or f"b_{idx}",
-                    episode_id="shadow_ep",
-                    quantity=b.quantity,
-                    original_quantity=b.quantity,
-                    entry_price=b.entry_price,
-                    opened_at=b.opened_at,
-                )
-                for idx, b in enumerate(position.batches)
-            )
-            if position.batches
-            else (
-                PositionLedgerBatch(
-                    batch_id=position.batch_id or "batch_default",
-                    episode_id="shadow_ep",
-                    quantity=position.quantity,
-                    original_quantity=position.quantity,
-                    entry_price=position.entry_price,
-                    opened_at=position.opened_at,
-                ),
-            )
-        )
-
-        episode = PositionEpisode(
-            episode_id="shadow_ep",
-            position_key=position_key,
-            side=position.side,
-            opened_at=position.opened_at,
-            batches=batches,
-        )
-        projection = PositionLedgerProjection(
-            position_key=position_key,
-            active_episode=episode,
-            active_batches=batches,
-            total_active_quantity=sum(
-                (b.quantity for b in batches), start=Decimal("0")
-            ),
-            unallocated_quantity=Decimal("0"),
-            reconciliation_gap=Decimal("0"),
-            high_watermark_trade_at=position.opened_at,
-        )
-        cmd = ExitAllocator.create_exit_command(
-            projection,
-            requested_quantity=order_quantity,
-            target_batch_ids=(position.batch_id,) if position.batch_id else None,
-            policy=(
-                ExitPolicyMode.TARGET_BATCHES_ONLY
-                if (position.batch_id or order_quantity < position.quantity)
-                else ExitPolicyMode.FULL_POSITION_CLOSE
-            ),
-            reference_price=reference_price,
-            reason=reason,
-        )
-        if cmd is not None and cmd.requested_quantity > 0:
-            return cmd.requested_quantity
-        return order_quantity
 
     def _build_request(
         self,

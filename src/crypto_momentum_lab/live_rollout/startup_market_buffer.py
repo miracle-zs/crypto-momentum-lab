@@ -28,7 +28,6 @@ class StartupMarketStateBuffer:
         self._queue: asyncio.Queue[MarketState15s] = asyncio.Queue(maxsize=max_states)
         self._on_state_skipped = on_state_skipped
         self._connection_available = False
-        self._connection_reason = "market_state_hub_connecting"
         self._closed = False
         self._closed_event = asyncio.Event()
         self._error: BaseException | None = None
@@ -36,10 +35,6 @@ class StartupMarketStateBuffer:
     @property
     def connection_available(self) -> bool:
         return self._connection_available
-
-    @property
-    def connection_reason(self) -> str:
-        return self._connection_reason
 
     @property
     def buffered_state_count(self) -> int:
@@ -51,11 +46,6 @@ class StartupMarketStateBuffer:
         reason: str | None,
     ) -> None:
         self._connection_available = available
-        self._connection_reason = (
-            "market_state_hub_ready"
-            if available
-            else (reason or "market_state_hub_unavailable")
-        )
 
     async def append(self, state: MarketState15s) -> None:
         if self._closed:

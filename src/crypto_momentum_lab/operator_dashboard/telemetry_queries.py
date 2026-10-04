@@ -69,7 +69,7 @@ def _decision_slo_response(
     terminal_reasons: dict[str, dict[str, dict[str, int]]] = {}
     consumer_stats: dict[str, _DecisionSLOConsumerStats] = {}
     for row in rows:
-        details = row.details if isinstance(row.details, Mapping) else {}
+        details = row.details
         recorded_transitions: set[str] = set()
         decision_slo_latencies = details.get(_DECISION_SLO_LATENCY_KEY)
         if isinstance(decision_slo_latencies, Mapping):

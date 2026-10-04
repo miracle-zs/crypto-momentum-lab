@@ -113,12 +113,6 @@ class OrderExecutionPlan:
             raise ValueError("price must be positive when present")
         if self.reference_price is not None and self.reference_price <= 0:
             raise ValueError("reference_price must be positive when present")
-        if not isinstance(self.position_side, FuturesPositionSide):
-            object.__setattr__(
-                self,
-                "position_side",
-                FuturesPositionSide(self.position_side),
-            )
         _require_aware(self.created_at, "created_at")
         if self.time_in_force is not None:
             time_in_force = self.time_in_force.upper()

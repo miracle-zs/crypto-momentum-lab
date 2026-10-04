@@ -31,22 +31,6 @@ from crypto_momentum_lab.domain.operational.retention_models import (
 )
 
 
-def _normalize_prune_outcome(res: Any) -> PruneOutcome:
-    """Normalize executor return value into a structured PruneOutcome."""
-    if isinstance(res, PruneOutcome):
-        return res
-    if isinstance(res, tuple) and len(res) == 2:
-        return PruneOutcome(
-            rows_archived=res[0],
-            rows_deleted=res[1],
-            batches=1 if res[1] > 0 else 0,
-            status=PruneReceiptStatus.SUCCESS,
-        )
-    raise TypeError(
-        f"executor_fn must return PruneOutcome or tuple[int, int], got {type(res)}"
-    )
-
-
 async def _maybe_await(val: Any) -> Any:
     if inspect.isawaitable(val):
         return await val
@@ -120,8 +104,8 @@ class RetentionAuthority:
     Cross-process callers additionally coordinate via PostgreSQL advisory locks.
     """
 
-    def __init__(self, repository: RetentionRepository | None = None) -> None:
-        self._repo = repository or InMemoryRetentionRepository()
+    def __init__(self, repository: RetentionRepository) -> None:
+        self._repo = repository
         self._dataset_locks: dict[str, Any] = {}
 
     def _get_lock(self, dataset_name: str) -> Any:
@@ -462,7 +446,7 @@ class RetentionAuthority:
         expected_dependency_version: str,
         executor_fn: Callable[
             [PrunePlan],
-            Awaitable[PruneOutcome | tuple[int, int]] | PruneOutcome | tuple[int, int],
+            Awaitable[PruneOutcome],
         ],
     ) -> PruneReceipt:
         """Asynchronously executes a PrunePlan with dependency epoch fencing.
@@ -484,7 +468,7 @@ class RetentionAuthority:
         expected_dependency_version: str,
         executor_fn: Callable[
             [PrunePlan],
-            Awaitable[PruneOutcome | tuple[int, int]] | PruneOutcome | tuple[int, int],
+            Awaitable[PruneOutcome],
         ],
     ) -> PruneReceipt:
         """Inner execution logic, called under dataset lock."""
@@ -533,10 +517,7 @@ class RetentionAuthority:
             return receipt
 
         try:
-            res = executor_fn(plan)
-            if inspect.isawaitable(res):
-                res = await res
-            outcome = _normalize_prune_outcome(res)
+            outcome = await executor_fn(plan)
             receipt = outcome.to_receipt(
                 plan=plan,
                 dependency_version_verified=current_dep_version,
@@ -578,7 +559,7 @@ class RetentionAuthority:
         *,
         plan: PrunePlan,
         expected_dependency_version: str,
-        executor_fn: Callable[[PrunePlan], PruneOutcome | tuple[int, int]],
+        executor_fn: Callable[[PrunePlan], PruneOutcome],
     ) -> PruneReceipt:
         """Executes a PrunePlan after validating dependency epoch fencing.
 
@@ -634,8 +615,7 @@ class RetentionAuthority:
 
         # 3. Execute bounded prune
         try:
-            res = executor_fn(plan)
-            outcome = _normalize_prune_outcome(res)
+            outcome = executor_fn(plan)
             receipt = outcome.to_receipt(
                 plan=plan,
                 dependency_version_verified=current_dep_version,
@@ -697,42 +677,3 @@ class RetentionAuthority:
                 status="FAILED",
                 details=f"Restore verification failed: {ex}",
             )
-
-
-def create_authority_from_repository(
-    repository: Any,
-    *,
-    async_repo_factory: Callable[..., Any] | None = None,
-) -> RetentionAuthority:
-    """Creates a RetentionAuthority backed by a real or in-memory repo.
-
-    Extracts session_factory from the given repository and builds an
-    async retention repository.  Falls back to in-memory when the
-    repository is a test mock or has no usable session factory.
-
-    This replaces the duplicated mock-detection boilerplate that was
-    copy-pasted across market_data/main.py and retention.py.
-    """
-    session_factory = getattr(
-        repository,
-        "session_factory",
-        getattr(repository, "_session_factory", None),
-    )
-    if session_factory is None:
-        return RetentionAuthority()
-
-    # Detect test mocks — production code should not run real DB ops
-    # against a mock session factory.
-    sf_type_name = type(session_factory).__name__
-    if hasattr(session_factory, "_mock_return_value") or sf_type_name in (
-        "AsyncMock",
-        "MagicMock",
-        "Mock",
-    ):
-        return RetentionAuthority()
-
-    if async_repo_factory is not None:
-        ret_repo = async_repo_factory(session_factory)
-    else:
-        ret_repo = None
-    return RetentionAuthority(repository=ret_repo)

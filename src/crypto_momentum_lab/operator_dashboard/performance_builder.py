@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from crypto_momentum_lab.domain.performance.account_performance import (
     AccountPerformanceCalculator,
@@ -30,8 +30,24 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 )
 
 
+class CashFlowRow(Protocol):
+    correction_id: str
+    account_label: str
+    amount: Decimal
+    cash_flow_type: str
+    effective_at: datetime
+    reason: str
+    approval_ref: str
+    evidence_hash: str
+
+
+class EquityRow(Protocol):
+    observed_at: datetime
+    wallet_balance: Decimal
+
+
 def build_cash_flow_facts(
-    cf_rows: Sequence[Any],
+    cf_rows: Sequence[CashFlowRow],
 ) -> tuple[CashFlowFact, ...]:
     """Converts ORM cash-flow correction rows into domain CashFlowFacts."""
     return tuple(
@@ -50,7 +66,7 @@ def build_cash_flow_facts(
 
 
 def build_valuation_points(
-    equity_rows: Sequence[Any],
+    equity_rows: Sequence[EquityRow],
 ) -> tuple[ValuationPoint, ...]:
     """Converts ORM equity snapshot rows into domain ValuationPoints."""
     return tuple(
@@ -64,11 +80,13 @@ def build_valuation_points(
 
 # ── Canonical metric spec definitions ──────────────────────────────
 _METRIC_SPECS = (
-    MetricSpec("cash_flow_adjusted_pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL, "USDT"),
-    MetricSpec("net_equity_delta", MetricFamily.NET_EQUITY_DELTA, "USDT"),
-    MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN, "ratio"),
-    MetricSpec("modified_dietz", MetricFamily.MODIFIED_DIETZ, "ratio"),
-    MetricSpec("mwr", MetricFamily.MONEY_WEIGHTED_RETURN, "ratio"),
+    MetricSpec(
+        "cash_flow_adjusted_pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL, unit="USDT"
+    ),
+    MetricSpec("net_equity_delta", MetricFamily.NET_EQUITY_DELTA, unit="USDT"),
+    MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN, unit="ratio"),
+    MetricSpec("modified_dietz", MetricFamily.MODIFIED_DIETZ, unit="ratio"),
+    MetricSpec("mwr", MetricFamily.MONEY_WEIGHTED_RETURN, unit="ratio"),
 )
 
 
@@ -105,42 +123,11 @@ def compute_cash_flow_evidence_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _row_content_hash_matches(row: Any, ev_hash_str: str) -> bool | None:
-    """Return True/False when content fields allow a hash check, else None."""
-    fields = {
-        name: getattr(row, name, None)
-        for name in (
-            "correction_id",
-            "account_label",
-            "amount",
-            "cash_flow_type",
-            "effective_at",
-            "reason",
-            "approval_ref",
-        )
-    }
-    if any(v is None for v in fields.values()):
-        return None
-    eff_at = fields["effective_at"]
-    if not isinstance(eff_at, datetime):
-        return None
-    expected = compute_cash_flow_evidence_hash(
-        correction_id=str(fields["correction_id"]),
-        account_label=str(fields["account_label"]),
-        amount=Decimal(str(fields["amount"])),
-        cash_flow_type=str(fields["cash_flow_type"]),
-        effective_at=eff_at,
-        reason=str(fields["reason"]),
-        approval_ref=str(fields["approval_ref"]),
-    )
-    return expected.lower() == ev_hash_str.lower()
-
-
 def _assess_coverage(
-    cf_rows: Sequence[Any],
+    cf_rows: Sequence[CashFlowRow],
     start_time: datetime,
     end_time: datetime,
-    equity_rows: Sequence[Any] = (),
+    equity_rows: Sequence[EquityRow] = (),
     max_equity_gap: timedelta | None = None,
     is_empty_proven: bool = False,
 ) -> tuple[bool, str, str]:
@@ -155,10 +142,8 @@ def _assess_coverage(
     4. Every fact's evidence_hash is non-placeholder hex and, when content
        fields are available, equals the canonical content hash.
     """
-    s_time = (
-        start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
-    )
-    e_time = end_time if end_time.tzinfo is not None else end_time.replace(tzinfo=UTC)
+    s_time = start_time
+    e_time = end_time
 
     if equity_rows:
         if len(equity_rows) < 2:
@@ -167,20 +152,16 @@ def _assess_coverage(
                 "uncertified",
                 "uncertified_equity_window_incomplete",
             )
-        first_at = getattr(equity_rows[0], "observed_at", None)
-        last_at = getattr(equity_rows[-1], "observed_at", None)
+        first_at = equity_rows[0].observed_at
+        last_at = equity_rows[-1].observed_at
         if first_at is None or last_at is None:
             return (
                 False,
                 "uncertified",
                 "uncertified_equity_window_incomplete",
             )
-        first_utc = (
-            first_at if first_at.tzinfo is not None else first_at.replace(tzinfo=UTC)
-        )
-        last_utc = (
-            last_at if last_at.tzinfo is not None else last_at.replace(tzinfo=UTC)
-        )
+        first_utc = first_at
+        last_utc = last_at
         if first_utc > s_time or last_utc < e_time:
             return (
                 False,
@@ -189,16 +170,14 @@ def _assess_coverage(
             )
         prev_utc = first_utc
         for r in equity_rows[1:]:
-            cur_at = getattr(r, "observed_at", None)
+            cur_at = r.observed_at
             if cur_at is None:
                 return (
                     False,
                     "uncertified",
                     "uncertified_equity_window_incomplete",
                 )
-            cur_utc = (
-                cur_at if cur_at.tzinfo is not None else cur_at.replace(tzinfo=UTC)
-            )
+            cur_utc = cur_at
             if cur_utc < prev_utc:
                 return (
                     False,
@@ -227,15 +206,15 @@ def _assess_coverage(
         )
 
     for r in cf_rows:
-        rec_id = getattr(r, "correction_id", "unknown")
-        ev_hash = getattr(r, "evidence_hash", None)
+        rec_id = r.correction_id
+        ev_hash = r.evidence_hash
         if not ev_hash:
             return (
                 False,
                 "uncertified",
                 f"uncertified_missing_evidence_hash_in_record_{rec_id}",
             )
-        ev_hash_str = str(ev_hash).strip()
+        ev_hash_str = ev_hash.strip()
         if not _HEX_64_PATTERN.fullmatch(ev_hash_str):
             return (
                 False,
@@ -248,30 +227,38 @@ def _assess_coverage(
                 "uncertified",
                 f"uncertified_zero_placeholder_evidence_in_record_{rec_id}",
             )
-        appr = getattr(r, "approval_ref", None)
-        appr_str = str(appr).strip().lower() if appr is not None else ""
+        appr = r.approval_ref
+        appr_str = appr.strip().lower()
         if appr_str in _PLACEHOLDER_APPROVALS:
             return (
                 False,
                 "uncertified",
                 f"uncertified_missing_approval_ref_in_record_{rec_id}",
             )
-        eff_at = getattr(r, "effective_at", None)
+        eff_at = r.effective_at
         if eff_at is None:
             return (
                 False,
                 "uncertified",
                 f"uncertified_missing_effective_at_in_record_{rec_id}",
             )
-        eff_time = eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
+        eff_time = eff_at
         if eff_time < s_time or eff_time > e_time:
             return (
                 False,
                 "uncertified",
                 f"uncertified_cash_flow_out_of_interval_{rec_id}",
             )
-        content_ok = _row_content_hash_matches(r, ev_hash_str)
-        if content_ok is not True:
+        expected_hash = compute_cash_flow_evidence_hash(
+            correction_id=r.correction_id,
+            account_label=r.account_label,
+            amount=r.amount,
+            cash_flow_type=r.cash_flow_type,
+            effective_at=r.effective_at,
+            reason=r.reason,
+            approval_ref=r.approval_ref,
+        )
+        if expected_hash != ev_hash_str.lower():
             return (
                 False,
                 "uncertified",
@@ -288,8 +275,8 @@ def _assess_coverage(
 def build_performance_summary(
     *,
     account_label: str,
-    equity_rows: Sequence[Any],
-    cf_rows: Sequence[Any],
+    equity_rows: Sequence[EquityRow],
+    cf_rows: Sequence[CashFlowRow],
     start_time: datetime,
     end_time: datetime,
     max_equity_gap: timedelta | None = None,
@@ -307,9 +294,9 @@ def build_performance_summary(
 
     effective_max_gap = max_equity_gap
     if effective_max_gap is None and len(equity_rows) >= 3:
-        first_at = getattr(equity_rows[0], "observed_at", None)
-        last_at = getattr(equity_rows[-1], "observed_at", None)
-        if first_at is not None and last_at is not None and last_at > first_at:
+        first_at = equity_rows[0].observed_at
+        last_at = equity_rows[-1].observed_at
+        if last_at > first_at:
             expected_step = (last_at - first_at) / (len(equity_rows) - 1)
             effective_max_gap = max(timedelta(hours=2), expected_step * 4)
 
@@ -394,8 +381,8 @@ def build_performance_summary(
 def build_performance_summary_dict(
     *,
     account_label: str,
-    equity_rows: Sequence[Any],
-    cf_rows: Sequence[Any],
+    equity_rows: Sequence[EquityRow],
+    cf_rows: Sequence[CashFlowRow],
     start_time: datetime,
     end_time: datetime,
     max_equity_gap: timedelta | None = None,

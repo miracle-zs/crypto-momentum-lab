@@ -258,7 +258,7 @@ class FixedNotionalSizingModel:
                 details={
                     "target_notional": str(self.target_notional),
                     "actual_notional": str(actual_notional),
-                    "resize_fraction": str(fraction),
+                    "resize_fraction": format(fraction.normalize(), "f"),
                     "tolerance": str(self.resize_tolerance),
                 },
                 rejected_at=as_of,
@@ -283,7 +283,7 @@ class FixedNotionalSizingModel:
             sizing_timestamp=as_of,
             features={
                 "model": "fixed_notional",
-                "resize_fraction": str(fraction),
+                "resize_fraction": format(fraction.normalize(), "f"),
             },
         )
 
@@ -391,7 +391,7 @@ class EquityFractionSizingModel:
                 details={
                     "target_notional": str(target_notional),
                     "actual_notional": str(actual_notional),
-                    "resize_fraction": str(fraction),
+                    "resize_fraction": format(fraction.normalize(), "f"),
                     "tolerance": str(self.resize_tolerance),
                 },
                 rejected_at=as_of,
@@ -416,47 +416,7 @@ class EquityFractionSizingModel:
             sizing_timestamp=as_of,
             features={
                 "model": "equity_fraction",
-                "fraction_of_equity": str(self.fraction_of_equity),
-                "resize_fraction": str(fraction),
+                "fraction_of_equity": format(self.fraction_of_equity.normalize(), "f"),
+                "resize_fraction": format(fraction.normalize(), "f"),
             },
         )
-
-
-def default_symbol_lot_rules(symbol: str) -> SymbolLotRules:
-    """Default conservative Binance USD-M Futures lot rules."""
-    sym = symbol.upper()
-    if sym.startswith("BTC"):
-        return SymbolLotRules(
-            symbol=sym,
-            tick_size=Decimal("0.10"),
-            step_size=Decimal("0.001"),
-            min_quantity=Decimal("0.001"),
-            max_quantity=Decimal("1000.00"),
-            min_notional=Decimal("5.00"),
-        )
-    if sym.startswith("ETH"):
-        return SymbolLotRules(
-            symbol=sym,
-            tick_size=Decimal("0.01"),
-            step_size=Decimal("0.01"),
-            min_quantity=Decimal("0.01"),
-            max_quantity=Decimal("10000.00"),
-            min_notional=Decimal("5.00"),
-        )
-    if sym.startswith("SOL"):
-        return SymbolLotRules(
-            symbol=sym,
-            tick_size=Decimal("0.01"),
-            step_size=Decimal("0.1"),
-            min_quantity=Decimal("0.1"),
-            max_quantity=Decimal("50000.00"),
-            min_notional=Decimal("5.00"),
-        )
-    return SymbolLotRules(
-        symbol=sym,
-        tick_size=Decimal("0.0001"),
-        step_size=Decimal("1.0"),
-        min_quantity=Decimal("1.0"),
-        max_quantity=Decimal("1000000.00"),
-        min_notional=Decimal("5.00"),
-    )

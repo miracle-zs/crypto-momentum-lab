@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Protocol
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
     ClockEvent as ClockEvent,
@@ -53,11 +53,13 @@ from crypto_momentum_lab.domain.strategy.models import (
     RejectionReason,
     StrategyDecision,
     StrategyRejection,
+    StrategySide,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitPolicy,
 )
+from crypto_momentum_lab.domain.strategy.sizing import SizingModel, SymbolLotRules
 
 log = logging.getLogger(__name__)
 
@@ -332,9 +334,14 @@ class EffectivePolicy:
     cooldown_duration: timedelta = timedelta(minutes=15)
     position_mode: StrategyPositionMode = StrategyPositionMode.LONG_ONLY
     grace_period: timedelta = timedelta(0)
-    sizing_model: Any | None = None
-    symbol_lot_rules: Any | None = None
-    candidate_generator: Any | None = None
+    sizing_model: SizingModel | None = None
+    symbol_lot_rules: SymbolLotRules | None = None
+    candidate_generator: (
+        Callable[
+            [DecisionInput | MarketEnvelope, PolicyState], OrderIntentCandidate | None
+        ]
+        | None
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,21 +373,14 @@ def compute_decision_input_hash(
     pos_key = decision_input.position_view.key
     batches_summary = []
     for batch in decision_input.position_view.batches:
-        remaining_quantity = getattr(batch, "remaining_quantity", None)
-        if remaining_quantity is None:
-            remaining_quantity = getattr(batch, "quantity", Decimal("0"))
         batches_summary.append(
             (
-                getattr(batch, "batch_id", ""),
-                getattr(batch, "episode_id", ""),
-                str(getattr(batch, "original_quantity", "0")),
-                str(remaining_quantity),
-                str(getattr(batch, "entry_price", "0")),
-                (
-                    batch.opened_at.isoformat()
-                    if hasattr(getattr(batch, "opened_at", None), "isoformat")
-                    else str(getattr(batch, "opened_at", ""))
-                ),
+                batch.batch_id,
+                batch.episode_id,
+                str(batch.original_quantity),
+                str(batch.quantity),
+                str(batch.entry_price),
+                batch.opened_at.isoformat(),
             )
         )
     payload: dict[str, Any] = {
@@ -390,19 +390,11 @@ def compute_decision_input_hash(
         "position_scope": {
             "environment": pos_key.environment,
             "account_label": pos_key.account_label,
-            "position_side": (
-                pos_key.position_side.value
-                if hasattr(pos_key.position_side, "value")
-                else str(pos_key.position_side)
-            ),
+            "position_side": pos_key.position_side.value,
         },
         "position_version": decision_input.position_view.projection_version,
         "position_quantity": str(decision_input.position_view.total_quantity),
-        "position_health": (
-            decision_input.position_view.health_status.value
-            if hasattr(decision_input.position_view.health_status, "value")
-            else str(decision_input.position_view.health_status)
-        ),
+        "position_health": decision_input.position_view.health_status.value,
         "position_batches": sorted(batches_summary),
         "universe_version": decision_input.universe_version,
         "clock_time": decision_input.clock_event.timestamp.isoformat(),
@@ -435,9 +427,7 @@ def decide(
     frame = decision_input.frame
     if frame is None:
         clock_event = decision_input.clock_event
-        scope_to_use = getattr(decision_input.market_ref, "scope", None) or getattr(
-            decision_input.position_view.key, "environment", None
-        )
+        scope_to_use = decision_input.market_ref.scope
         if not scope_to_use:
             raise ValueError("Decision frame requires an explicit environment/scope")
         frame = DecisionFrame(
@@ -456,9 +446,7 @@ def decide(
         )
 
     candles = (
-        closed_candles
-        if closed_candles is not None
-        else getattr(decision_input, "closed_candles", ())
+        closed_candles if closed_candles is not None else decision_input.closed_candles
     )
     transition = execute_policy_transition(
         frame=frame,
@@ -482,25 +470,6 @@ def decide(
         transition=transition,
         decision_frame=frame,
     )
-
-
-class DecisionEngine:
-    """Authoritative pure domain DecisionEngine service."""
-
-    @staticmethod
-    def evaluate(
-        decision_input: DecisionInput,
-        state: PolicyState,
-        policy: EffectivePolicy,
-        closed_candles: tuple[ClosedCandle15m, ...] | None = None,
-    ) -> DecisionResult:
-        """Evaluates pure strategy decision."""
-        return decide(
-            decision_input,
-            state,
-            policy,
-            closed_candles=closed_candles,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,12 +513,12 @@ def build_decision_input(
     Every runner freezes the same kind of facts; only the epoch/scope
     labels differ. Do not reassemble DecisionInput ad hoc in runners.
     """
-    effective_scope = scope or getattr(state, "environment", None)
+    effective_scope = scope or state.environment
     if not effective_scope:
         raise ValueError(
             "Decision input assembly requires an explicit environment/scope"
         )
-    effective_source_epoch = source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
+    effective_source_epoch = source_epoch or f"seq_{state.trade_count}"
 
     if market_ref is None:
         pub_time = state.last_received_at or state.bucket_end
@@ -640,7 +609,7 @@ def decision_trace_from_result(
     if policy is not None:
         payload["policy_parameters"] = serialize_policy_parameters(policy)
         if callable(
-            getattr(policy, "candidate_generator", None)
+            policy.candidate_generator
         ) and decision_input.position_view.total_quantity == Decimal("0"):
             payload["candidate_generation_mode"] = "injected_candidate"
             if input_candidate is not None:
@@ -673,43 +642,33 @@ def decision_trace_from_result(
 
     pv = decision_input.position_view
     batches_data = []
-    for batch in getattr(pv, "batches", ()):
-        quantity = getattr(batch, "quantity", None)
-        if quantity is None:
-            quantity = getattr(batch, "allocated_quantity", "0")
-        remaining_quantity = getattr(batch, "remaining_quantity", None)
-        if remaining_quantity is None:
-            remaining_quantity = quantity
-        opened_at = getattr(batch, "opened_at", None)
-        exit_submitted_at = getattr(batch, "exit_order_submitted_at", None)
+    for batch in pv.batches:
         batches_data.append(
             {
-                "batch_id": getattr(batch, "batch_id", ""),
-                "episode_id": getattr(batch, "episode_id", ""),
-                "symbol": getattr(batch, "symbol", pv.key.symbol),
-                "side": _enum_value(getattr(batch, "side", pv.key.position_side)),
-                "quantity": str(quantity),
-                "remaining_quantity": str(remaining_quantity),
-                "allocated_quantity": str(quantity),
-                "original_quantity": str(getattr(batch, "original_quantity", quantity)),
-                "entry_price": str(getattr(batch, "entry_price", "0")),
-                "opened_at": opened_at.isoformat()
-                if hasattr(opened_at, "isoformat")
-                else str(opened_at or ""),
+                "batch_id": batch.batch_id,
+                "episode_id": batch.episode_id,
+                "symbol": pv.key.symbol,
+                "side": pv.key.position_side.value,
+                "quantity": str(batch.quantity),
+                "remaining_quantity": str(batch.quantity),
+                "allocated_quantity": str(batch.quantity),
+                "original_quantity": str(batch.original_quantity),
+                "entry_price": str(batch.entry_price),
+                "opened_at": batch.opened_at.isoformat(),
                 "exit_order_submitted_at": (
-                    exit_submitted_at.isoformat()
-                    if hasattr(exit_submitted_at, "isoformat")
+                    batch.exit_order_submitted_at.isoformat()
+                    if batch.exit_order_submitted_at is not None
                     else None
                 ),
             }
         )
 
-    active_episode = getattr(pv, "active_episode", None)
+    active_episode = pv.active_episode
     active_episode_data = None
     if active_episode is not None:
         active_episode_data = {
             "episode_id": active_episode.episode_id,
-            "side": _enum_value(active_episode.side),
+            "side": active_episode.side.value,
             "opened_at": active_episode.opened_at.isoformat(),
             "closed_at": (
                 active_episode.closed_at.isoformat()
@@ -731,13 +690,13 @@ def decision_trace_from_result(
                 "environment": key.environment,
                 "account_label": key.account_label,
                 "symbol": key.symbol,
-                "position_side": _enum_value(key.position_side),
+                "position_side": key.position_side.value,
             },
             "symbol": pv.key.symbol,
-            "position_side": _enum_value(pv.key.position_side),
+            "position_side": pv.key.position_side.value,
             "total_quantity": str(pv.total_quantity),
             "unallocated_quantity": str(pv.unallocated_quantity),
-            "health_status": _enum_value(pv.health_status),
+            "health_status": pv.health_status.value,
             "projection_version": pv.projection_version,
             "input_revision": pv.input_revision,
             "event_cut": pv.event_cut.isoformat() if pv.event_cut else None,
@@ -764,10 +723,7 @@ def decision_trace_from_result(
         for candle in decision_input.closed_candles
     ]
 
-    if (
-        hasattr(decision_input, "market_envelope")
-        and decision_input.market_envelope is not None
-    ):
+    if decision_input.market_envelope is not None:
         try:
             from crypto_momentum_lab.domain.market.state_codec import (
                 market_state_to_payload,
@@ -799,10 +755,6 @@ def decision_trace_from_result(
     )
 
 
-def _enum_value(value: Any) -> Any:
-    return value.value if hasattr(value, "value") else value
-
-
 def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, Any]:
     notional = candidate.desired_notional
     features = canonicalize_policy_value(candidate.features)
@@ -829,8 +781,8 @@ def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, An
         "strategy_version": candidate.strategy_version,
         "config_hash": candidate.config_hash,
         "symbol": candidate.symbol,
-        "side": _enum_value(candidate.side),
-        "entry_type": _enum_value(candidate.entry_type),
+        "side": candidate.side.value,
+        "entry_type": candidate.entry_type.value,
         "limit_price": (
             canonicalize_policy_value(candidate.limit_price)
             if candidate.limit_price is not None
@@ -850,330 +802,142 @@ def _serialize_intent_candidate(candidate: OrderIntentCandidate) -> dict[str, An
     }
 
 
-def map_decision_rejection_reason(raw_reason: str | None) -> str:
-    """Canonical rejection reason label shared by live and paper runners."""
-    if raw_reason == "cooldown_active":
-        return "COOLDOWN_ACTIVE"
-    if raw_reason == "holding_position_no_exit":
-        return "HOLDING_POSITION"
-    if raw_reason == "below_entry_threshold":
-        return "BELOW_ENTRY_THRESHOLD"
-    return "NO_SIGNAL"
+class DecisionReplayReceipt(Protocol):
+    """Commit result required to suppress repeated decision effects."""
 
-
-def create_authoritative_decision_filter(
-    strategy_name: str,
-    target_notional: Decimal | None = None,
-    fact_provider: Callable[[MarketState15s], FrozenDecisionInputs | None]
-    | None = None,
-    on_decision_result: Callable[[DecisionResult, DecisionInput], None] | None = None,
-    trace_recorder: Callable[[DecisionTrace], None] | None = None,
-    effective_policy: EffectivePolicy | None = None,
-    clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
-    source_epoch_provider: Callable[[MarketState15s], str] | None = None,
-) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
-    """Authoritative decision filter wrapping DecisionEngine for runtime loops.
-
-    Refuses to evaluate against synthetic facts. Without a fact provider, or
-    when the frozen position is not READY, candidates are rejected with an
-    explicit reason instead of being approved on an empty READY view.
-    """
-    engine = DecisionEngine()
-    if target_notional is None:
-        if effective_policy is not None:
-            target_notional = effective_policy.target_notional
-        else:
-            target_notional = Decimal("100.00")
-    if target_notional <= Decimal("0"):
-        raise ValueError("target_notional must be explicitly configured and positive")
-    notional = target_notional
-
-    def _clock_sequence(state: MarketState15s) -> int:
-        sequence = (
-            1 if clock_sequence_provider is None else clock_sequence_provider(state)
-        )
-        if sequence <= 0:
-            raise ValueError("decision clock sequence must be positive")
-        return sequence
-
-    def _source_epoch(state: MarketState15s) -> str:
-        epoch = None if source_epoch_provider is None else source_epoch_provider(state)
-        env = getattr(state, "environment", None)
-        if not env:
-            raise ValueError("MarketState15s requires an explicit environment")
-        return epoch or f"ep_{env}"
-
-    def _reject_all(
-        decision: StrategyDecision,
-        state: MarketState15s,
-        reason: str,
-    ) -> StrategyDecision:
-        details = {
-            "raw_reason": reason,
-            "strategy_name": strategy_name,
-        }
-        new_rejections = list(decision.rejections)
-        for cand in decision.candidates:
-            new_rejections.append(
-                StrategyRejection(
-                    reason=RejectionReason.NO_SIGNAL,
-                    symbol=state.symbol,
-                    bucket_start=state.bucket_start,
-                    details={**details, "candidate_id": cand.candidate_id},
-                )
-            )
-        return StrategyDecision(
-            signals=decision.signals,
-            candidates=(),
-            rejections=tuple(new_rejections),
-            checkpoint=decision.checkpoint,
-        )
-
-    def _filter(decision: StrategyDecision, state: MarketState15s) -> StrategyDecision:
-        if not decision.candidates:
-            if fact_provider is not None:
-                frozen = fact_provider(state)
-                if (
-                    frozen is not None
-                    and frozen.position_view.key.symbol == state.symbol
-                    and frozen.position_view.total_quantity > Decimal("0")
-                ):
-                    scope_to_use = getattr(state, "environment", None)
-                    if not scope_to_use:
-                        raise ValueError(
-                            "MarketState15s requires an explicit environment"
-                        )
-                    policy = (
-                        replace(
-                            effective_policy,
-                            candidate_generator=lambda inp, st: None,
-                        )
-                        if effective_policy is not None
-                        else EffectivePolicy(
-                            policy_id=f"policy_{strategy_name}",
-                            strategy_name=strategy_name,
-                            target_notional=notional,
-                            candidate_generator=lambda inp, st: None,
-                        )
-                    )
-                    dec_input = build_decision_input(
-                        state=state,
-                        frozen=frozen,
-                        clock_sequence=_clock_sequence(state),
-                        scope=scope_to_use,
-                        source_epoch=_source_epoch(state),
-                        policy=policy,
-                    )
-                    dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
-                    if trace_recorder is not None:
-                        trace = decision_trace_from_result(
-                            dec_res,
-                            dec_input,
-                            strategy_name=strategy_name,
-                            account_label=frozen.position_view.key.account_label,
-                            prior_policy_state=frozen.policy_state,
-                            policy=policy,
-                        )
-                        trace_recorder(trace)
-                    if on_decision_result is not None:
-                        on_decision_result(
-                            dec_res,
-                            dec_input,
-                        )
-            return decision
-
-        if fact_provider is None:
-            return _reject_all(decision, state, "missing_frozen_decision_inputs")
-        frozen = fact_provider(state)
-        if frozen is None:
-            return _reject_all(decision, state, "frozen_decision_inputs_unavailable")
-        pos_view = frozen.position_view
-        if pos_view.key.symbol != state.symbol:
-            return _reject_all(decision, state, "frozen_inputs_symbol_mismatch")
-        scope_to_use = getattr(state, "environment", None)
-        if not scope_to_use:
-            raise ValueError("MarketState15s requires an explicit environment")
-        base_policy = (
-            replace(
-                effective_policy,
-                candidate_generator=lambda inp, st: None,
-            )
-            if effective_policy is not None
-            else EffectivePolicy(
-                policy_id=f"policy_{strategy_name}",
-                strategy_name=strategy_name,
-                target_notional=notional,
-                candidate_generator=lambda inp, st: None,
-            )
-        )
-        dec_input = build_decision_input(
-            state=state,
-            frozen=frozen,
-            clock_sequence=_clock_sequence(state),
-            scope=scope_to_use,
-            source_epoch=_source_epoch(state),
-            policy=base_policy,
-        )
-
-        filtered_candidates: list[OrderIntentCandidate] = []
-        new_rejections: list[StrategyRejection] = list(decision.rejections)
-
-        for cand in decision.candidates:
-            # Pin every approved intent to the exact Book projection used by
-            # this decision. Live submission carries this token to
-            # ExecutionBook.act, whose CAS rejects any intervening account
-            # fact update.
-            candidate_features = dict(cand.features)
-            candidate_features["projection_version"] = pos_view.projection_version
-            candidate_features["position_side"] = pos_view.key.position_side.value
-            cand = replace(cand, features=candidate_features)
-            policy = (
-                replace(
-                    effective_policy,
-                    candidate_generator=lambda inp, st, _c=cand: _c,
-                )
-                if effective_policy is not None
-                else EffectivePolicy(
-                    policy_id=f"policy_{strategy_name}",
-                    strategy_name=strategy_name,
-                    target_notional=notional,
-                    candidate_generator=lambda inp, st, _c=cand: _c,
-                )
-            )
-            # Shared starting PolicyState — never a fresh empty state.
-            dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
-            if trace_recorder is not None:
-                trace = decision_trace_from_result(
-                    dec_res,
-                    dec_input,
-                    strategy_name=strategy_name,
-                    account_label=frozen.position_view.key.account_label,
-                    prior_policy_state=frozen.policy_state,
-                    policy=policy,
-                    input_candidate=cand,
-                )
-                trace_recorder(trace)
-            if on_decision_result is not None:
-                on_decision_result(
-                    dec_res,
-                    dec_input,
-                )
-            if dec_res.intent is not None:
-                filtered_candidates.append(dec_res.intent)
-            else:
-                raw_reason = dec_res.rejection_reason or ("decision_engine_filtered")
-                rej_reason = (
-                    RejectionReason.COOLDOWN_ACTIVE
-                    if raw_reason == "cooldown_active"
-                    else (
-                        RejectionReason.HOLDING_POSITION
-                        if raw_reason == "holding_position_no_exit"
-                        else (
-                            RejectionReason.BELOW_ENTRY_THRESHOLD
-                            if raw_reason == "below_entry_threshold"
-                            else RejectionReason.NO_SIGNAL
-                        )
-                    )
-                )
-                new_rejections.append(
-                    StrategyRejection(
-                        reason=rej_reason,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={
-                            "decision_id": dec_res.decision_id,
-                            "raw_reason": raw_reason,
-                            "candidate_id": cand.candidate_id,
-                            "policy_state_version": (
-                                frozen.policy_state.policy_version
-                            ),
-                        },
-                    )
-                )
-
-        return StrategyDecision(
-            signals=decision.signals,
-            candidates=tuple(filtered_candidates),
-            rejections=tuple(new_rejections),
-            checkpoint=decision.checkpoint,
-        )
-
-    return _filter
+    @property
+    def is_replay(self) -> bool: ...
 
 
 def create_authoritative_async_decision_filter(
     strategy_name: str,
     *,
     fact_provider: Callable[
-        [MarketState15s, Any | None], Awaitable[FrozenDecisionInputs | None]
+        [MarketState15s, StrategySide | None], Awaitable[FrozenDecisionInputs | None]
     ],
     durable_decision_commit: Callable[
-        [DecisionTrace, DecisionResult, DecisionInput], Awaitable[object]
+        [DecisionTrace, DecisionResult, DecisionInput], Awaitable[DecisionReplayReceipt]
     ],
-    target_notional: Decimal | None = None,
-    effective_policy: EffectivePolicy | None = None,
+    effective_policy_provider: Callable[[MarketState15s], EffectivePolicy],
     clock_sequence_provider: Callable[[MarketState15s], int] | None = None,
     source_epoch_provider: Callable[[MarketState15s], str] | None = None,
 ) -> Callable[[StrategyDecision, MarketState15s], Awaitable[StrategyDecision]]:
-    """Build the live filter that waits for each durable decision commit.
+    """Evaluate each candidate against fresh facts and commit its result directly."""
 
-    The synchronous filter remains the API for paper and research callers.
-    This live adapter evaluates one candidate at a time, waits for its durable
-    trace/policy/exit commit, then asks for the next frozen input so its policy
-    state and revision reflect the commit that just completed.
-    """
+    def reject(
+        decision: StrategyDecision,
+        state: MarketState15s,
+        reason: str,
+    ) -> StrategyDecision:
+        return replace(
+            decision,
+            candidates=(),
+            rejections=decision.rejections
+            + tuple(
+                StrategyRejection(
+                    reason=RejectionReason.NO_SIGNAL,
+                    symbol=state.symbol,
+                    bucket_start=state.bucket_start,
+                    details={
+                        "raw_reason": reason,
+                        "strategy_name": strategy_name,
+                        "candidate_id": candidate.candidate_id,
+                    },
+                )
+                for candidate in decision.candidates
+            ),
+        )
 
     async def evaluate_one(
         decision: StrategyDecision,
         state: MarketState15s,
-        candidate_side: Any | None,
+        candidate: OrderIntentCandidate | None,
     ) -> StrategyDecision:
-        frozen = await fact_provider(state, candidate_side)
-        if frozen is not None and candidate_side is not None:
-            # The immutable strategy candidate is still a proposal. Bind its
-            # execution identity to the exact authoritative view before the
-            # synchronous domain evaluator sees or traces it.
-            frozen_view = frozen.position_view
-            candidates = tuple(
-                replace(
-                    item,
-                    features={
-                        **item.features,
-                        "projection_version": frozen_view.projection_version,
-                        "position_side": frozen_view.key.position_side.value,
-                    },
-                )
-                if item.side == candidate_side
-                else item
-                for item in decision.candidates
-            )
-            decision = replace(decision, candidates=candidates)
-        traces: list[DecisionTrace] = []
-        observations: list[tuple[DecisionResult, DecisionInput]] = []
-        sync_filter = create_authoritative_decision_filter(
-            strategy_name,
-            target_notional=target_notional,
-            fact_provider=lambda _state: frozen,
-            on_decision_result=lambda result, decision_input: observations.append(
-                (result, decision_input)
-            ),
-            trace_recorder=traces.append,
-            effective_policy=effective_policy,
-            clock_sequence_provider=clock_sequence_provider,
-            source_epoch_provider=source_epoch_provider,
+        frozen = await fact_provider(
+            state, None if candidate is None else candidate.side
         )
-        filtered = sync_filter(decision, state)
-        if len(traces) != len(observations):
-            raise RuntimeError(
-                "decision trace and result callbacks produced different counts"
+        if frozen is None:
+            return reject(decision, state, "frozen_decision_inputs_unavailable")
+        view = frozen.position_view
+        if view.key.symbol != state.symbol:
+            return reject(decision, state, "frozen_inputs_symbol_mismatch")
+        if candidate is None and view.total_quantity <= 0:
+            return decision
+        if not state.environment:
+            raise ValueError("MarketState15s requires an explicit environment")
+        sequence = (
+            1 if clock_sequence_provider is None else clock_sequence_provider(state)
+        )
+        if sequence <= 0:
+            raise ValueError("decision clock sequence must be positive")
+        epoch = (
+            f"ep_{state.environment}"
+            if source_epoch_provider is None
+            else source_epoch_provider(state)
+        )
+        if not epoch:
+            raise ValueError("decision source epoch must be explicit")
+        if candidate is not None:
+            candidate = replace(
+                candidate,
+                features={
+                    **candidate.features,
+                    "projection_version": view.projection_version,
+                    "position_side": view.key.position_side.value,
+                },
             )
-        for trace, (result, decision_input) in zip(traces, observations, strict=True):
-            receipt = await durable_decision_commit(trace, result, decision_input)
-            if getattr(receipt, "is_replay", False):
-                # The original decision already owns its effects. Durable exit
-                # commands resume through outbox recovery, never this replay.
-                return replace(filtered, candidates=())
-        return filtered
+        policy = replace(
+            effective_policy_provider(state),
+            candidate_generator=lambda _input, _state: candidate,
+        )
+        if policy.target_notional <= 0:
+            raise ValueError(
+                "target_notional must be explicitly configured and positive"
+            )
+        decision_input = build_decision_input(
+            state=state,
+            frozen=frozen,
+            clock_sequence=sequence,
+            scope=state.environment,
+            source_epoch=epoch,
+            policy=policy,
+        )
+        result = decide(decision_input, frozen.policy_state, policy)
+        trace = decision_trace_from_result(
+            result,
+            decision_input,
+            strategy_name=strategy_name,
+            account_label=view.key.account_label,
+            prior_policy_state=frozen.policy_state,
+            policy=policy,
+            input_candidate=candidate,
+        )
+        receipt = await durable_decision_commit(trace, result, decision_input)
+        if candidate is None:
+            return decision
+        if receipt.is_replay:
+            return replace(decision, candidates=())
+        if result.intent is not None:
+            return replace(decision, candidates=(result.intent,))
+        reason = result.rejection_reason or "decision_engine_filtered"
+        rejection = StrategyRejection(
+            reason={
+                "cooldown_active": RejectionReason.COOLDOWN_ACTIVE,
+                "holding_position_no_exit": RejectionReason.HOLDING_POSITION,
+                "below_entry_threshold": RejectionReason.BELOW_ENTRY_THRESHOLD,
+            }.get(reason, RejectionReason.NO_SIGNAL),
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            details={
+                "decision_id": result.decision_id,
+                "raw_reason": reason,
+                "candidate_id": candidate.candidate_id,
+                "policy_state_version": frozen.policy_state.policy_version,
+            },
+        )
+        return replace(
+            decision, candidates=(), rejections=decision.rejections + (rejection,)
+        )
 
     async def _filter(
         decision: StrategyDecision,
@@ -1190,7 +954,7 @@ def create_authoritative_async_decision_filter(
                 candidates=(candidate,),
                 rejections=(),
             )
-            filtered = await evaluate_one(single_candidate, state, candidate.side)
+            filtered = await evaluate_one(single_candidate, state, candidate)
             filtered_candidates.extend(filtered.candidates)
             rejections.extend(filtered.rejections)
         return StrategyDecision(

@@ -144,7 +144,6 @@ def test_dashboard_js_uses_fetch_timeout_and_section_inflight() -> None:
     assert "pollInFlight" not in poller_js
 
 
-
 @pytest.mark.asyncio
 async def test_performance_queries_uses_market_state_progress_delay() -> None:
     mock_session = AsyncMock()
@@ -405,3 +404,49 @@ def test_assess_coverage_requires_equity_window_bracket() -> None:
     assert ok_gap is False
     assert status_gap == "uncertified"
     assert "equity_window_gap_detected" in proof_gap
+
+
+def test_dashboard_metric_results_preserve_units_and_versions(monkeypatch):
+    from dataclasses import dataclass
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.performance.account_performance import (
+        AccountPerformanceCalculator,
+    )
+    from crypto_momentum_lab.operator_dashboard.performance_builder import (
+        build_performance_summary,
+    )
+
+    @dataclass
+    class Equity:
+        observed_at: datetime
+        wallet_balance: Decimal
+
+    start = datetime(2026, 10, 4, tzinfo=UTC)
+    end = start + timedelta(hours=1)
+    calculate = AccountPerformanceCalculator.calculate
+    calculated = {}
+
+    def record_metric(spec, cut):
+        result = calculate(spec, cut)
+        calculated[result.metric_name] = (result.unit, result.metric_version)
+        return result
+
+    monkeypatch.setattr(AccountPerformanceCalculator, "calculate", record_metric)
+    summary = build_performance_summary(
+        account_label="primary",
+        equity_rows=(Equity(start, Decimal("100")), Equity(end, Decimal("105"))),
+        cf_rows=(),
+        start_time=start,
+        end_time=end,
+        is_empty_proven=True,
+    )
+    assert summary is not None
+    assert summary.net_equity_delta == "5"
+    assert calculated == {
+        "cash_flow_adjusted_pnl": ("USDT", "v1"),
+        "net_equity_delta": ("USDT", "v1"),
+        "twr": ("ratio", "v1"),
+        "modified_dietz": ("ratio", "v1"),
+        "mwr": ("ratio", "v1"),
+    }

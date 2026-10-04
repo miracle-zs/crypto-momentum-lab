@@ -42,6 +42,10 @@ ReadyCallback = Callable[[bool], None]
 
 
 class EntryExchangeWarmup(Protocol):
+    def is_entry_leverage_configured(self, symbol: str) -> bool: ...
+
+    def is_entry_margin_type_configured(self, symbol: str) -> bool: ...
+
     @property
     def configured_margin_type_count(self) -> int: ...
 
@@ -104,12 +108,9 @@ class LiveEntryRuntime:
 
     def is_symbol_warmed(self, symbol: str) -> bool:
         """Return whether symbol has completed exchange leverage and margin warmup."""
-        client = self._client
-        if hasattr(client, "is_entry_leverage_configured") and not client.is_entry_leverage_configured(symbol):
-            return False
-        if hasattr(client, "is_entry_margin_type_configured") and not client.is_entry_margin_type_configured(symbol):
-            return False
-        return True
+        return self._client.is_entry_leverage_configured(
+            symbol
+        ) and self._client.is_entry_margin_type_configured(symbol)
 
     def trigger_symbol_warmup(self, symbol: str) -> None:
         """Initialize symbol in background if not yet warmed."""
@@ -120,8 +121,10 @@ class LiveEntryRuntime:
             self._warm_symbol_background(symbol),
             name=f"live-symbol-warmup:{symbol}",
         )
+
         def _done(_: asyncio.Task[None]) -> None:
             self._warming_symbols.discard(symbol)
+
         task.add_done_callback(_done)
 
     async def _warm_symbol_background(self, symbol: str) -> None:
@@ -224,8 +227,6 @@ class LiveEntryRuntime:
                 initial_symbols = await self._load_entry_symbols_from_database(
                     observed_at
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.warning(
                     "live_entry_symbol_warmup_failed",
@@ -240,8 +241,6 @@ class LiveEntryRuntime:
                     cached_symbol_count=self._client.configured_margin_type_count,
                     margin_type=self._margin_type,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.warning(
                     "live_entry_margin_type_warmup_failed",
@@ -255,8 +254,6 @@ class LiveEntryRuntime:
                     symbol_count=len(initial_symbols),
                     leverage=self._entry_leverage,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.warning(
                     "live_entry_leverage_warmup_failed",

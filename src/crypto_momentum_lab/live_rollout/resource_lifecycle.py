@@ -69,10 +69,6 @@ class LiveResourceLifecycle:
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._close_failures: list[str] = []
 
-    @property
-    def close_failures(self) -> tuple[str, ...]:
-        return tuple(self._close_failures)
-
     async def close(self) -> tuple[str, ...]:
         """Stop producers before transports, then dispose database engines."""
 

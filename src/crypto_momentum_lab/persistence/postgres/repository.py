@@ -235,7 +235,6 @@ class PostgresUniverseRepository:
                     symbol=row.symbol,
                     status=MembershipStatus(row.status),
                     side=None if row.side is None else RankingSide(row.side),
-                    left_target_at=row.left_target_at,
                 )
                 for row in rows
             }
@@ -361,7 +360,6 @@ class PostgresUniverseRepository:
                         "symbol": item.symbol,
                         "status": item.status.value,
                         "side": None if item.side is None else item.side.value,
-                        "left_target_at": item.left_target_at,
                     }
                     for item in snapshot.memberships
                 ]
@@ -443,30 +441,34 @@ class PostgresUniverseRepository:
             for row in entries
         )
         gainers = tuple(
-            RankEntry(
-                row.symbol,
-                row.utc_day_return,
-                row.gainer_rank,
-                RankingSide.GAINER,
+            sorted(
+                (
+                    RankEntry(
+                        row.symbol,
+                        row.utc_day_return,
+                        row.gainer_rank,
+                        RankingSide.GAINER,
+                    )
+                    for row in entries
+                    if row.utc_day_return is not None and row.gainer_rank is not None
+                ),
+                key=lambda entry: entry.rank,
             )
-            for row in sorted(
-                (item for item in entries if item.gainer_rank is not None),
-                key=lambda item: item.gainer_rank or 0,
-            )
-            if row.utc_day_return is not None and row.gainer_rank is not None
         )
         losers = tuple(
-            RankEntry(
-                row.symbol,
-                row.utc_day_return,
-                row.loser_rank,
-                RankingSide.LOSER,
+            sorted(
+                (
+                    RankEntry(
+                        row.symbol,
+                        row.utc_day_return,
+                        row.loser_rank,
+                        RankingSide.LOSER,
+                    )
+                    for row in entries
+                    if row.utc_day_return is not None and row.loser_rank is not None
+                ),
+                key=lambda entry: entry.rank,
             )
-            for row in sorted(
-                (item for item in entries if item.loser_rank is not None),
-                key=lambda item: item.loser_rank or 0,
-            )
-            if row.utc_day_return is not None and row.loser_rank is not None
         )
         ranking = RankingResult(
             candidates=candidates,
@@ -491,7 +493,6 @@ class PostgresUniverseRepository:
                     row.symbol,
                     MembershipStatus(row.status),
                     None if row.side is None else RankingSide(row.side),
-                    row.left_target_at,
                 )
                 for row in membership_rows
             ),

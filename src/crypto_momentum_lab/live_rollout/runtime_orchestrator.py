@@ -52,7 +52,6 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import (
-    EntryType,
     OrderIntentCandidate,
     RunMode,
     StrategyRunIdentity,
@@ -84,9 +83,6 @@ from crypto_momentum_lab.live_rollout.account_event_ports import (
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
 )
-from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
-    recover_restored_commands,
-)
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.database_assembly import (
@@ -102,9 +98,8 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 from crypto_momentum_lab.live_rollout.execution_runtime import (
-    LiveExecutionCallbacks,
     build_live_execution_runtime,
-    compile_live_runtime_plan,
+    build_live_policy,
 )
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
@@ -166,11 +161,15 @@ from crypto_momentum_lab.live_rollout.risk_control import (
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _BINANCE_SHARED_COMMAND_PACER_PATH_ENV,
     _BINANCE_SHARED_REQUEST_PACER_PATH_ENV,
-    _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
     _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
+    _LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS,
     LiveRuntimeConfig,
     _live_strategy_config,
     _live_strategy_config_hash,
+)
+from crypto_momentum_lab.live_rollout.runtime_session import (
+    ResourceOwnershipRegistry,
+    RuntimeSession,
 )
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
@@ -182,8 +181,6 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 from crypto_momentum_lab.live_rollout.session import (
     LiveSessionConfig,
     LiveSessionLifecycle,
-    ResourceOwnershipRegistry,
-    RuntimeSession,
 )
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
@@ -310,7 +307,6 @@ async def run_live_daemon(
     operator = config.identity.operator
     strategy_config_hash = config.identity.strategy_config_hash
     git_commit_hash = config.identity.git_commit_hash
-    migration_revision = config.identity.migration_revision
 
     market_environment = config.market.market_environment
     market_state_source = config.market.market_state_source
@@ -453,7 +449,6 @@ async def run_live_daemon(
         live_repository = persistence.repositories.live_repository
         heartbeat_live_repository = persistence.repositories.heartbeat_live_repository
         heartbeat_risk_repository = persistence.repositories.heartbeat_risk_repository
-        order_repository = persistence.repositories.order_repository
         order_adoption_repository = persistence.repositories.order_adoption_repository
         order_read_repository = persistence.repositories.order_read_repository
         order_event_repository = persistence.repositories.order_event_repository
@@ -536,14 +531,13 @@ async def run_live_daemon(
             "runtime_metadata_snapshot_created",
             **snapshot_dict,
         )
-        if hasattr(telemetry, "record"):
-            try:
-                await telemetry.record(
-                    RUNTIME_METADATA_SNAPSHOT,
-                    payload=snapshot_dict,
-                )
-            except Exception as tel_err:
-                log.warning("runtime_metadata_telemetry_failed", error=str(tel_err))
+        try:
+            await telemetry.record(
+                RUNTIME_METADATA_SNAPSHOT,
+                payload=snapshot_dict,
+            )
+        except Exception as tel_err:
+            log.warning("runtime_metadata_telemetry_failed", error=str(tel_err))
 
         def _write_metadata_disk() -> None:
             meta_dir = Path(os.environ.get("CML_RUNTIME_METADATA_DIR", "/tmp"))
@@ -605,36 +599,30 @@ async def run_live_daemon(
             ),
         )
 
-        target_notional = getattr(config.execution, "target_notional", None)
-        if target_notional is None:
-            target_notional = getattr(config.strategy, "target_notional_usdt", None)
+        target_notional = config.execution.target_notional
         if target_notional is None or target_notional <= 0:
             raise ValueError(
                 "target_notional must be explicitly configured and > 0, "
                 f"got {target_notional}"
             )
 
-        runtime_plan = compile_live_runtime_plan(
+        effective_policy = build_live_policy(
             config=config,
             target_notional=target_notional,
             risk_config=risk_config,
-            account_label=account_label,
             strategy_name=strategy_name,
         )
 
         execution_runtime = await build_live_execution_runtime(
             sessions=execution_factory,
             exchange=client,
-            order_repository=order_repository,
             event_repository=order_event_repository,
             account_label=account_label,
             strategy_name=strategy_name,
-            callbacks=LiveExecutionCallbacks(
-                on_event=order_event_runtime.handle,
-                on_before_submit=register_expected_entry,
-                on_exchange_request=telemetry.exchange_request_started,
-                on_exchange_response=telemetry.exchange_response_received,
-            ),
+            on_event=order_event_runtime.handle,
+            on_before_submit=register_expected_entry,
+            on_exchange_request=telemetry.exchange_request_started,
+            on_exchange_response=telemetry.exchange_response_received,
             submission_repository=submission_repository,
         )
         execution_book = execution_runtime.book
@@ -663,7 +651,7 @@ async def run_live_daemon(
             }
             if allocs:
                 features["batch_id"] = allocs[0].batch_id
-                if getattr(allocs[0], "entry_price", None) is not None:
+                if allocs[0].entry_price is not None:
                     features["entry_price"] = str(allocs[0].entry_price)
 
             intent = OrderIntentCandidate(
@@ -675,11 +663,7 @@ async def run_live_daemon(
                 config_hash=strategy_config_hash,
                 symbol=cmd.position_key.symbol,
                 side=cmd.side,
-                entry_type=(
-                    cmd.order_type
-                    if isinstance(cmd.order_type, EntryType)
-                    else EntryType(str(cmd.order_type).lower())
-                ),
+                entry_type=cmd.order_type,
                 limit_price=cmd.limit_price,
                 desired_notional=None,
                 reduce_only=True,
@@ -704,11 +688,7 @@ async def run_live_daemon(
                 client_order_id=exit_client_order_id,
                 symbol=cmd.position_key.symbol,
                 side="SELL" if cmd.side == StrategySide.LONG else "BUY",
-                order_type=(
-                    cmd.order_type.value
-                    if hasattr(cmd.order_type, "value")
-                    else str(cmd.order_type)
-                ),
+                order_type=cmd.order_type.value,
                 quantity=cmd.requested_quantity,
                 price=cmd.limit_price,
                 reduce_only=True,
@@ -773,12 +753,7 @@ async def run_live_daemon(
             state_machine=execution_coordinator,
             run_id=session_id,
             recover_exits=recover_decision_exits,
-            recover_commands=lambda reconcile_order: recover_restored_commands(
-                book=execution_book,
-                coordinator=execution_coordinator,
-                orders=repair_order_repository,
-                reconcile_order=reconcile_order,
-            ),
+            execution_book=execution_book,
         )
         # Restore local facts at startup; remote uncertainty is repaired by the
         # supervised background worker after the trading channels are running.
@@ -823,17 +798,13 @@ async def run_live_daemon(
                 source_paths=(f"{market_state_source}:{market_environment}",),
             ),
         )
-        required_data = getattr(strategy, "required_data", None)
-        if not callable(required_data):
-            raise RuntimeError("live strategy does not expose required data")
+        required_data = strategy.required_data
         live_readiness = LiveReadinessPublisher(
             health=health,
             on_publish=telemetry.runtime_readiness,
             account_label=account_label,
             session_id=session_id,
             strategy=strategy_name,
-            code_commit=git_commit_hash,
-            migration_revision=migration_revision,
             entry_universe_target_count=entry_positive_gainer_top_count,
             warmup_required_buckets=int(required_data().warmup_buckets),
         )
@@ -974,10 +945,7 @@ async def run_live_daemon(
             error: LiveMarketStateContinuityError,
         ) -> tuple[MarketState15s, ...]:
             requirement = required_data()
-            interval_seconds = max(
-                1,
-                int(getattr(requirement, "base_state_interval_seconds", 15)),
-            )
+            interval_seconds = requirement.base_state_interval_seconds
             return await _load_live_market_state_gap(
                 repository=state_repository,
                 environment=market_environment,
@@ -1038,9 +1006,6 @@ async def run_live_daemon(
 
         def _resolve_symbol_lot_rules(sym: str) -> SymbolLotRules | None:
             rules = loaded_trading_rules.get(sym)
-            if rules is None and live_repository is not None:
-                cached = getattr(live_repository, "_cached_rules", {})
-                rules = cached.get(sym)
             if rules is not None:
                 return SymbolLotRules(
                     symbol=rules.symbol,
@@ -1096,21 +1061,19 @@ async def run_live_daemon(
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
-                max_concurrency_per_symbol=max_concurrency_per_symbol,
                 decision_filter=create_authoritative_async_decision_filter(
                     strategy_name,
                     fact_provider=fact_source.build,
                     durable_decision_commit=fact_source.commit_decision,
-                    effective_policy=replace(
-                        runtime_plan.effective_policy,
-                        symbol_lot_rules=_resolve_symbol_lot_rules,
+                    effective_policy_provider=lambda state: replace(
+                        effective_policy,
+                        symbol_lot_rules=_resolve_symbol_lot_rules(state.symbol),
                     ),
                     clock_sequence_provider=lambda state: max(
                         1, state.source_event_count
                     ),
                 ),
                 decision_fact_binder=fact_source.bind_context,
-
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -1139,7 +1102,9 @@ async def run_live_daemon(
             commit_market_state_cursor=hub_cursor_state.acknowledge_state,
             entered_symbol_lookup=hub_cursor_state.consume_entered_symbol,
         )
-        order_event_runtime.set_daemon(daemon)
+        order_event_runtime.set_entry_observer(
+            daemon.pending_entries.observe_order_event
+        )
         risk_control_dispatcher = RiskControlCommandDispatcher(
             repository=live_repository,
             account_label=account_label,
@@ -1297,7 +1262,6 @@ async def run_live_daemon(
             ):
                 await execution_coordinator.observe_account_snapshot(
                     event.account_snapshot,
-                    symbols=event.symbols,
                     fills=event.fills,
                     fill_load_scans=event.fill_load_scans,
                     stream_id="account_event_hub",
@@ -1418,7 +1382,7 @@ async def run_live_daemon(
         if health is not None:
             health_monitor = LiveHealthMonitor(
                 health=health,
-                interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
+                interval_seconds=_LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS,
                 is_degraded=lambda: (
                     market_task.done()
                     or account_task.done()
@@ -1602,7 +1566,7 @@ async def _run_account_event_channel(
     run_id: str | None = None,
     telemetry: AccountFillSink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
-    on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None] | None = None,
+    on_account_snapshot: Callable[[AccountEvent], Awaitable[None]] | None = None,
     on_account_snapshot_recovery: Callable[[str], None] | None = None,
 ) -> None:
     runtime = LiveAccountEventRuntime(

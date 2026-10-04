@@ -1,8 +1,10 @@
+
 from datetime import UTC, datetime
 
 import pytest
 
 from crypto_momentum_lab.domain.operational.retention_authority import (
+    InMemoryRetentionRepository,
     RetentionAuthority,
 )
 from crypto_momentum_lab.execution_account.retention import (
@@ -73,7 +75,7 @@ async def test_prune_once_passes_the_configured_horizon() -> None:
         environment="live",
         account_label="primary",
         config=config,
-        authority=RetentionAuthority(),
+        authority=RetentionAuthority(InMemoryRetentionRepository()),
         now=now,
     )
 
@@ -118,7 +120,7 @@ async def test_retention_loop_fails_closed_when_provider_raises() -> None:
             environment="live",
             account_label="primary",
             config=config,
-            authority=RetentionAuthority(),
+            authority=RetentionAuthority(InMemoryRetentionRepository()),
             consumer_requirements_provider=_failing_provider,
             on_error=lambda err: errors.append(err),
             sleep=_fake_sleep,

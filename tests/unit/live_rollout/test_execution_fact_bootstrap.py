@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
     _bootstrap_execution_position_facts,
 )
@@ -68,7 +69,7 @@ async def test_bootstrap_real_flat_hedge_rows_ready_both_execution_scopes() -> N
 
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
     from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-    from crypto_momentum_lab.domain.execution.trade_command import FuturesPositionSide
+    from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.execution_account.orders.coordinator import (
         OrderExecutionCoordinator,
     )
@@ -96,7 +97,10 @@ async def test_bootstrap_real_flat_hedge_rows_ready_both_execution_scopes() -> N
         return rows
 
     coordinator = OrderExecutionCoordinator(
-        backend=object(), account_label="primary", environment="live"
+        backend=object(),
+        account_label="primary",
+        environment="live",
+        execution_book=ExecutionBook(),
     )
     await _bootstrap_execution_position_facts(
         SimpleNamespace(fetch_positions=fetch_positions),

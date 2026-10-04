@@ -1,4 +1,4 @@
-"""Unit tests for PolicyTransition and StrategyPolicy contracts (R3).
+"""Behavior tests for pure policy transitions.
 
 Obeys Astra Architecture Blueprint 2026-09-25:
 1. Pure transition: transition(frame, prior_state, policy) -> PolicyTransition;

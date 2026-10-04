@@ -7,7 +7,6 @@ from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.readiness import (
     LiveReadinessPublisher,
     LiveWarmupStatus,
-    StreamReadinessSnapshot,
 )
 
 
@@ -18,8 +17,6 @@ def _publisher(tmp_path):
         account_label="primary",
         session_id="live-primary-v1",
         strategy="orderflow_impulse",
-        code_commit="a" * 40,
-        migration_revision="20260925_0043",
         entry_universe_target_count=10,
         warmup_required_buckets=140,
     )
@@ -161,80 +158,10 @@ def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> Non
 
 
 
-def test_stream_readiness_snapshot_aggregation() -> None:
-    assert StreamReadinessSnapshot.from_streams({}).overall == "UNKNOWN"
-
-    ready = StreamReadinessSnapshot.from_streams(
-        {"account": "READY", "quote": "READY", "market": "READY"}
-    )
-    assert ready.overall == "READY"
-
-    connecting = StreamReadinessSnapshot.from_streams(
-        {"account": "CONNECTING", "quote": "READY"}
-    )
-    assert connecting.overall == "CONNECTING"
-
-    recovering = StreamReadinessSnapshot.from_streams(
-        {"account": "READY", "market": "RECOVERING"}
-    )
-    assert recovering.overall == "RECOVERING"
-
-    disrupted = StreamReadinessSnapshot.from_streams(
-        {"account": "READY", "quote": "DISRUPTED", "market": "RECOVERING"}
-    )
-    assert disrupted.overall == "DISRUPTED"
 
 
 
 
-def test_readiness_publisher_layered_tradeability_and_stream_readiness(
-    tmp_path,
-) -> None:
-    health, publisher = _publisher(tmp_path)
-
-    # Initial publish
-    payload = json.loads(health.readiness_path.read_text())
-    assert "tradeability" in payload
-    assert payload["tradeability"]["mode"] == "RUNNING"
-    assert payload["tradeability"]["entry_gate_open"] is False
-    assert payload["tradeability"]["exit_gate_open"] is True
-    assert payload["tradeability"]["unmanaged_risk_clear"] is True
-    assert payload["tradeability"]["halt_active"] is False
-
-    assert "stream_readiness" in payload
-    assert payload["stream_readiness"]["overall"] == "UNKNOWN"
-
-    # Update streams
-    publisher.update_stream_readiness("account", "READY")
-    publisher.update_stream_readiness("quote", "READY")
-    publisher.update_stream_readiness("market_state", "READY")
-
-    # Update tradeability with entry open
-    publisher.update_tradeability(
-        entry_enabled=True,
-        entry_reason="live_entry_prerequisites_ready",
-    )
-
-    payload2 = json.loads(health.readiness_path.read_text())
-    assert payload2["tradeability"]["mode"] == "RUNNING"
-    assert payload2["tradeability"]["entry_gate_open"] is True
-    assert payload2["tradeability"]["entry_gate_reason"] == (
-        "live_entry_prerequisites_ready"
-    )
-    assert payload2["stream_readiness"]["overall"] == "READY"
-    assert payload2["stream_readiness"]["streams"]["account"] == "READY"
-
-    # Induce unmanaged risk -> mode remains RUNNING with fact preserved
-    publisher.update_tradeability(unmanaged_risk_clear=False)
-    payload3 = json.loads(health.readiness_path.read_text())
-    assert payload3["tradeability"]["mode"] == "RUNNING"
-    assert payload3["tradeability"]["unmanaged_risk_clear"] is False
-
-    # Explicit controls remain facts while the active process stays RUNNING
-    publisher.update_tradeability(halt_active=True)
-    payload4 = json.loads(health.readiness_path.read_text())
-    assert payload4["tradeability"]["mode"] == "RUNNING"
-    assert payload4["tradeability"]["halt_active"] is True
 
 
 def test_readiness_compute_dynamic_market_age_and_published_at(

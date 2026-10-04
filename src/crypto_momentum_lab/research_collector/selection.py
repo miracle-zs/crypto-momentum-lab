@@ -21,6 +21,7 @@ from crypto_momentum_lab.research_collector.models import (
     require_utc,
 )
 
+
 class AllSymbolsSelector:
     """Retain every symbol delivered by the Hub.
 

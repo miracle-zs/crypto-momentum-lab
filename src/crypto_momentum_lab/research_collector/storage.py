@@ -1,10 +1,7 @@
 """Durable storage adapters for the research collector.
 
-The collector uses two local seams:
-
-* ``LocalBatchSpool`` is a small write-ahead log.  A batch is not considered
-  checkpointable until its Parquet window has been atomically replaced.
-* ``ParquetWindowSink`` writes one deterministic file per 15-minute window.
+The write-ahead journal lives in ``journal.py``. ``ParquetWindowSink`` writes
+one deterministic file per 15-minute window.
   Replaying a batch therefore rewrites the same window and deduplicates by the
   natural ``(environment, symbol, bucket_start)`` key instead of creating a
   second permanent copy.
@@ -29,7 +26,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 from uuid import UUID
 
 import pyarrow as pa
@@ -39,11 +35,6 @@ import structlog
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
 )
-from crypto_momentum_lab.domain.market.state_codec import (
-    market_state_from_payload,
-    market_state_to_payload,
-)
-from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.persistence.parquet.datasets import market_state_15s_row
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
@@ -180,146 +171,6 @@ class SinkFlushResult:
     files_written: int
     bytes_written: int
     committed_version_keys: frozenset[_VERSION_KEY] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
-class SpoolRecord:
-    path: Path
-    collection_batch: CollectionBatch
-    selection: SelectionSnapshot
-
-
-class LocalBatchSpool:
-    """A bounded, atomic JSON write-ahead log for selected Hub batches."""
-
-    def __init__(self, root: Path, *, max_bytes: int) -> None:
-        if max_bytes <= 0:
-            raise ValueError("max_bytes must be positive")
-        self._root = root
-        self._pending_root = root / "pending"
-        self._max_bytes = max_bytes
-        self._pending_root.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def root(self) -> Path:
-        return self._root
-
-    def pending_bytes(self) -> int:
-        return _directory_size(self._pending_root)
-
-    def pending_records(self) -> tuple[SpoolRecord, ...]:
-        records: list[SpoolRecord] = []
-        for path in sorted(self._pending_root.rglob("*.json")):
-            records.append(self._read(path))
-        return tuple(records)
-
-    def write(
-        self,
-        collection_batch: CollectionBatch,
-        selection: SelectionSnapshot,
-        states: tuple[MarketState15s, ...],
-    ) -> SpoolRecord:
-        if not states:
-            raise ValueError("states must not be empty")
-        payload = {
-            "schema_version": 1,
-            "source_kind": collection_batch.source_kind.value,
-            "sequence": collection_batch.sequence,
-            "stream_id": collection_batch.stream_id,
-            "published_at": collection_batch.batch.published_at.isoformat(),
-            "environment": collection_batch.environment,
-            "states": [market_state_to_payload(state) for state in states],
-            "selection": _selection_to_payload(selection, states),
-        }
-        encoded = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()
-        directory = self._pending_root / collection_batch.source_kind.value
-        if collection_batch.stream_id:
-            directory /= _safe_component(collection_batch.stream_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{digest}.json"
-        if not path.exists():
-            if self.pending_bytes() + len(encoded) > self._max_bytes:
-                raise CollectorPaused(
-                    "research collector spool limit reached: "
-                    f"{self.pending_bytes()} + {len(encoded)} > {self._max_bytes}"
-                )
-            _atomic_write_bytes(path, encoded)
-        return SpoolRecord(
-            path=path,
-            collection_batch=CollectionBatch(
-                batch=MarketStateBatch(
-                    sequence=collection_batch.sequence,
-                    published_at=collection_batch.batch.published_at,
-                    environment=collection_batch.environment,
-                    states=states,
-                    stream_id=collection_batch.stream_id,
-                ),
-                source_kind=collection_batch.source_kind,
-            ),
-            selection=selection,
-        )
-
-    def remove(self, record: SpoolRecord) -> None:
-        try:
-            record.path.unlink()
-        except FileNotFoundError:
-            return
-        _fsync_directory(record.path.parent)
-
-    def _read(self, path: Path) -> SpoolRecord:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise CollectorStateConflict(
-                f"cannot read collector spool record {path}: {error}"
-            ) from error
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-            raise CollectorStateConflict(f"unsupported collector spool record: {path}")
-        raw_states = payload.get("states")
-        if not isinstance(raw_states, list) or not raw_states:
-            raise CollectorStateConflict(f"spool states are invalid: {path}")
-        states = tuple(
-            market_state_from_payload(item)
-            for item in raw_states
-            if isinstance(item, dict)
-        )
-        if len(states) != len(raw_states):
-            raise CollectorStateConflict(f"spool states are invalid: {path}")
-        selection = _selection_from_payload(payload.get("selection"))
-        raw_source_kind = payload.get("source_kind")
-        if not isinstance(raw_source_kind, str):
-            raise CollectorStateConflict(f"spool source_kind is invalid: {path}")
-        try:
-            source_kind = SourceKind(raw_source_kind)
-        except ValueError as error:
-            raise CollectorStateConflict(
-                f"spool source_kind is invalid: {path}"
-            ) from error
-        sequence = _require_int(payload.get("sequence"), "sequence")
-        published_at = _parse_datetime(payload.get("published_at"), "published_at")
-        environment = _require_string(payload.get("environment"), "environment")
-        stream_id = payload.get("stream_id")
-        if stream_id is not None and not isinstance(stream_id, str):
-            raise CollectorStateConflict(f"spool stream_id is invalid: {path}")
-        return SpoolRecord(
-            path=path,
-            collection_batch=CollectionBatch(
-                batch=MarketStateBatch(
-                    sequence=sequence,
-                    published_at=published_at,
-                    environment=environment,
-                    states=states,
-                    stream_id=stream_id,
-                ),
-                source_kind=source_kind,
-            ),
-            selection=selection,
-        )
 
 
 class ParquetWindowSink:
@@ -660,7 +511,7 @@ class CapacityGuard:
         hard_limit_bytes: int,
         global_warning_free_bytes: int,
         global_pause_free_bytes: int,
-        disk_usage_fn: Callable[[Path], Any] | None = None,
+        disk_free_bytes_fn: Callable[[Path], int] | None = None,
         max_snapshot_age_seconds: float = 90.0,
     ) -> None:
         if soft_limit_bytes <= 0 or hard_limit_bytes <= soft_limit_bytes:
@@ -678,7 +529,9 @@ class CapacityGuard:
         self._hard_limit_bytes = hard_limit_bytes
         self._global_warning_free_bytes = global_warning_free_bytes
         self._global_pause_free_bytes = global_pause_free_bytes
-        self._disk_usage_fn = disk_usage_fn or shutil.disk_usage
+        self._disk_free_bytes_fn = disk_free_bytes_fn or (
+            lambda path: shutil.disk_usage(path).free
+        )
         self._max_snapshot_age_seconds = max_snapshot_age_seconds
 
         self._base_collector_bytes: int = 0
@@ -690,11 +543,6 @@ class CapacityGuard:
         self._last_snapshot: CapacitySnapshot | None = None
         self._scan_lock = threading.Lock()
         self._written_lock = threading.RLock()
-
-    @property
-    def _written_bytes_since_scan(self) -> int:
-        with self._written_lock:
-            return max(0, self._total_bytes_written - self._baseline_written_total)
 
     def _evaluate_state(
         self,
@@ -727,12 +575,7 @@ class CapacityGuard:
 
             with self._written_lock:
                 scan_completed_at_written = self._total_bytes_written
-                usage = self._disk_usage_fn(self._root)
-                disk_free_bytes = (
-                    getattr(usage, "free", usage)
-                    if not isinstance(usage, int)
-                    else usage
-                )
+                disk_free_bytes = self._disk_free_bytes_fn(self._root)
                 now_dt = datetime.now(UTC)
                 now_mono = time.monotonic()
 

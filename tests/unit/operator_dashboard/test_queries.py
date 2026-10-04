@@ -817,7 +817,6 @@ def test_universe_membership_carries_rank_and_market_fields() -> None:
         symbol="AAAUSDT",
         status="retained",
         side="gainer",
-        left_target_at=datetime(2026, 8, 18, 4, 0, tzinfo=UTC),
     )
     entry = SimpleNamespace(
         symbol="AAAUSDT",

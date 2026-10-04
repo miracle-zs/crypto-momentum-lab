@@ -189,58 +189,42 @@ def _position_order_from_row(
     fallback_executed_quantity: Decimal | None,
 ) -> _PositionOrder | None:
     try:
-        position_side = FuturesPositionSide(
-            getattr(row, "position_side", FuturesPositionSide.BOTH)
-        )
+        position_side = FuturesPositionSide(row.position_side)
     except (TypeError, ValueError):
         return None
-    created_at = getattr(row, "created_at", None)
-    updated_at = getattr(row, "updated_at", None)
-    if created_at is None:
-        created_at = plan.created_at if plan is not None else None
-    if updated_at is None:
-        updated_at = created_at
+    created_at = row.created_at
+    updated_at = row.updated_at
     if created_at is None or updated_at is None:
         return None
     state = _normalise_order_state(
-        getattr(row, "state", None),
+        row.state,
         fallback=fallback_state,
     )
-    executed_quantity = _decimal_or_zero(getattr(row, "executed_quantity", None))
+    executed_quantity = _decimal_or_zero(row.executed_quantity)
     if fallback_executed_quantity is not None:
         executed_quantity = max(
             executed_quantity,
             _decimal_or_zero(fallback_executed_quantity),
         )
-    quantity = _decimal_or_zero(
-        getattr(row, "quantity", None)
-        if getattr(row, "quantity", None) is not None
-        else (None if plan is None else plan.quantity)
-    )
+    quantity = _decimal_or_zero(row.quantity)
     quantity = max(quantity, executed_quantity)
     if quantity <= 0:
         return None
-    price_value = getattr(row, "price", None)
+    price_value = row.price
     if price_value is None and plan is not None:
         price_value = plan.price
     price = None if price_value is None else _decimal_or_zero(price_value)
     return _PositionOrder(
-        symbol=str(getattr(row, "symbol", plan.symbol if plan else "")),
+        symbol=str(row.symbol),
         position_side=position_side,
-        side=str(getattr(row, "side", plan.side if plan else "")).upper(),
-        reduce_only=bool(
-            getattr(row, "reduce_only", plan.reduce_only if plan else False)
-        ),
-        order_type=str(
-            getattr(row, "order_type", plan.order_type if plan else "")
-        ).upper(),
+        side=str(row.side).upper(),
+        reduce_only=bool(row.reduce_only),
+        order_type=str(row.order_type).upper(),
         quantity=quantity,
         executed_quantity=executed_quantity,
         state=state,
-        client_order_id=_optional_text(
-            getattr(row, "client_order_id", plan.client_order_id if plan else None)
-        ),
-        exchange_order_id=_optional_text(getattr(row, "exchange_order_id", None)),
+        client_order_id=_optional_text(row.client_order_id),
+        exchange_order_id=_optional_text(row.exchange_order_id),
         created_at=created_at,
         updated_at=updated_at,
         price=price,

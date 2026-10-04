@@ -1,3 +1,6 @@
+from crypto_momentum_lab.domain.strategy import StrategySide
+from tests.fixtures.prepared_submission import submit_prepared
+
 """Real REST -> state machine -> Book regression for delayed execution prices."""
 
 from datetime import UTC, datetime
@@ -44,8 +47,6 @@ class EventRepository:
     def __init__(self):
         self.events = []
 
-    async def save_planned_order(self, plan):
-        pass
 
     async def record_order_observation(self, event, fills=()):
         self.events.append(event)
@@ -126,12 +127,12 @@ async def test_incomplete_fill_waits_for_price_without_crash_or_second_post(
             request_id=plan.client_order_id,
             scope=scope,
             strategy_name="trend_v1",
-            strategy_version="1.0.0",
             run_id="run",
             decision_ref="exit",
             expected_view_token=view.projection_version,
             action=TradeCommandType.EXIT,
             requested_quantity=plan.quantity,
+            side=StrategySide.LONG,
         )
     )
     assert book.get_outbox(plan.client_order_id) is not None, getattr(
@@ -170,7 +171,6 @@ async def test_incomplete_fill_waits_for_price_without_crash_or_second_post(
         )
         machine = OrderExecutionStateMachine(
             exchange=exchange,
-            repository=repository,
             event_repository=repository,
             live_submit_enabled=True,
             clock=lambda: NOW,
@@ -182,7 +182,7 @@ async def test_incomplete_fill_waits_for_price_without_crash_or_second_post(
             account_label="account-4",
         )
         try:
-            result = await coordinator.submit(plan)
+            result = await submit_prepared(coordinator, plan)
             assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
             assert result.executed_quantity == plan.quantity
             assert result.average_price == 0

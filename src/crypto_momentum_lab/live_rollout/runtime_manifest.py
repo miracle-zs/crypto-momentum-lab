@@ -169,10 +169,10 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             f"runtime manifest {path} must use schema_version: 1"
         )
 
-    runtime = _mapping(root.get("runtime"), "runtime", path)
-    default_image_commit = _text(runtime.get("image_commit"), "runtime.image_commit")
+    runtime = _mapping(root.get("runtime", {}), "runtime", path)
+    default_image_commit = _text(runtime.get("image_commit", "unknown"), "runtime.image_commit")
     default_migration_revision = _text(
-        runtime.get("migration_revision"),
+        runtime.get("migration_revision", "unknown"),
         "runtime.migration_revision",
     )
     raw_accounts = root.get("accounts")
@@ -218,7 +218,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                     f"{prefix}.session_id",
                 ),
                 lease_owner=_text(
-                    account.get("lease_owner"),
+                    account.get("lease_owner", f"live-worker-{label}"),
                     f"{prefix}.lease_owner",
                 ),
                 image_commit=_text(
@@ -286,10 +286,8 @@ def _computed_strategy_config_hash(
             entry_order_type=inputs.entry_order_type,
             entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
         )
-    except StrategyRegistryError:
-        # Keep manifest parsing useful for generic topology validation. The
-        # runtime command will reject an unsupported strategy at startup.
-        return "unset"
+    except StrategyRegistryError as error:
+        raise RuntimeManifestError(str(error)) from error
 
 
 def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
@@ -491,11 +489,6 @@ def _decimal(value: Any, field: str) -> Decimal:
         raise RuntimeManifestError(f"{field} must be a decimal") from error
 
 
-def _positive_decimal(value: Any, field: str) -> Decimal:
-    parsed = _decimal(value, field)
-    if not parsed.is_finite() or parsed <= 0:
-        raise RuntimeManifestError(f"{field} must be finite and positive")
-    return parsed
 
 
 def _operations(value: Any, field: str) -> str:

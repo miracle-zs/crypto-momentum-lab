@@ -3,7 +3,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from crypto_momentum_lab.live_rollout.entry_cache import LiveEntrySymbolCache
+from crypto_momentum_lab.live_rollout.entry_cache import (
+    LiveEntrySymbolCache,
+    LiveEntryUniverseData,
+)
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
@@ -168,11 +171,11 @@ async def test_supervisor_stop_tolerates_cancelled_entry_caches() -> None:
     now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
     ready = asyncio.Event()
 
-    async def load_symbols(_: datetime) -> frozenset[str]:
-        return frozenset({"BTCUSDT"})
+    async def load_universe(_: datetime) -> LiveEntryUniverseData:
+        return LiveEntryUniverseData(symbols=frozenset({"BTCUSDT"}), snapshot=None)
 
     cache = LiveEntrySymbolCache(
-        symbol_loader=load_symbols,
+        universe_loader=load_universe,
         clock=lambda: now,
         on_ready=lambda _: ready.set(),
     )

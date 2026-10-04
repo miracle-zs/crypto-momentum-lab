@@ -1,3 +1,8 @@
+from tests.fixtures.async_reservations import (
+    InMemoryPositionReservationRepository as MemoryReservations,
+)
+from tests.fixtures.prepared_submission import submit_prepared
+
 """Restored order rows must retain exact Book reservation ownership."""
 
 from dataclasses import replace
@@ -52,7 +57,7 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
     path,
 ):
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
-    book = ExecutionBook()
+    book = ExecutionBook(reservation_repository=MemoryReservations())
     book._ensure_journal(scope.to_position_key()).set_coverage(
         FactCoverageInterval(
             start_at=NOW,
@@ -119,15 +124,14 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
     backend.submit.return_value = OrderExecutionResult(
         "grace", ExchangeOrderState.ACKNOWLEDGED, "123"
     )
-    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(
-        kwargs["plan"]
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: (
+        _prepared(kwargs["plan"])
     )
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         environment="live",
         account_label="primary",
         execution_book=book,
-        reservation_repository=AsyncMock(),
     )
     coordinator.configure_submission(repository)
     try:
@@ -192,6 +196,7 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
                 PositionExitMode.CANDLE_15M,
                 candle_grace_bars=8,
                 candle_grace_profit_pct=Decimal("0.0088"),
+                candle_grace_decision_profit_pct=Decimal("0.0088"),
             )
         )
         candle = ClosedCandle15m(
@@ -230,7 +235,10 @@ async def test_startup_reconciliation_does_not_lock_submission_configuration():
         plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED, "123", plan=plan
     )
     coordinator = OrderExecutionCoordinator(
-        backend=backend, environment="live", account_label="primary"
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=ExecutionBook(),
     )
     try:
         await coordinator.reconcile_order(plan)
@@ -249,11 +257,14 @@ async def test_submission_configuration_stays_locked_after_first_submit():
         plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED, "123", plan=plan
     )
     coordinator = OrderExecutionCoordinator(
-        backend=backend, environment="live", account_label="primary"
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=ExecutionBook(),
     )
     try:
         coordinator.configure_submission(AsyncMock())
-        await coordinator.submit(plan)
+        await submit_prepared(coordinator, plan)
         with pytest.raises(RuntimeError, match="cannot configure submission"):
             coordinator.configure_submission(AsyncMock())
     finally:

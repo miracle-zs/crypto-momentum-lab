@@ -46,8 +46,9 @@ class FakeResourceLifecycle:
     def __init__(self) -> None:
         self.close_called = False
 
-    async def close(self) -> None:
+    async def close(self) -> tuple[str, ...]:
         self.close_called = True
+        return ()
 
 
 async def test_resource_ownership_registry_reverse_teardown() -> None:
@@ -141,12 +142,8 @@ async def test_runtime_session_successful_run_and_4_phase_shutdown() -> None:
         shutdown_budget_seconds=10.0,
     )
 
-    assert session.state == SessionLifecycleState.READY
+    assert session.state == SessionLifecycleState.RUNNING
 
-    session.set_recovering()
-    assert session.state == SessionLifecycleState.RECOVERING
-    session.set_ready()
-    assert session.state == SessionLifecycleState.READY
 
     result = await session.run()
 

@@ -21,12 +21,6 @@ class EntryOrderLifecycleObserver(Protocol):
     def observe(self, plan: OrderExecutionPlan, event: ExchangeOrderEvent) -> None: ...
 
 
-class EntryOrderEventObserver(Protocol):
-    def observe_entry_order_event(
-        self, plan: OrderExecutionPlan, event: ExchangeOrderEvent
-    ) -> None: ...
-
-
 class LiveOrderEventRuntime:
     """Keep telemetry best-effort while preserving local order observers."""
 
@@ -34,12 +28,14 @@ class LiveOrderEventRuntime:
         self,
         *,
         telemetry: OrderEventSink,
-        request_recovery: Callable[[], None] = lambda: None,
+        request_recovery: Callable[[], None],
     ) -> None:
         self._telemetry = telemetry
         self._request_recovery = request_recovery
         self._entry_order_lifecycle: EntryOrderLifecycleObserver | None = None
-        self._daemon: EntryOrderEventObserver | None = None
+        self._observe_entry: (
+            Callable[[OrderExecutionPlan, ExchangeOrderEvent], None] | None
+        ) = None
 
     def set_entry_order_lifecycle(
         self,
@@ -47,8 +43,10 @@ class LiveOrderEventRuntime:
     ) -> None:
         self._entry_order_lifecycle = lifecycle
 
-    def set_daemon(self, daemon: EntryOrderEventObserver) -> None:
-        self._daemon = daemon
+    def set_entry_observer(
+        self, observer: Callable[[OrderExecutionPlan, ExchangeOrderEvent], None]
+    ) -> None:
+        self._observe_entry = observer
 
     async def handle(
         self,
@@ -69,8 +67,8 @@ class LiveOrderEventRuntime:
                 self._request_recovery()
             if self._entry_order_lifecycle is not None:
                 self._entry_order_lifecycle.observe(plan, event)
-            if self._daemon is not None:
-                self._daemon.observe_entry_order_event(plan, event)
+            if self._observe_entry is not None:
+                self._observe_entry(plan, event)
 
 
 __all__ = ["LiveOrderEventRuntime"]

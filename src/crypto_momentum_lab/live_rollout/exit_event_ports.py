@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s, RealtimeMarketQuote
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
@@ -14,31 +14,15 @@ if TYPE_CHECKING:
 
 
 class ExitEventProcessor(Protocol):
-    async def process_state(
-        self, state: MarketState15s, context: LiveDaemonRuntimeContext
-    ) -> ExitLaneOutcome: ...
-
-    async def process_quote(
+    async def handle_trigger(
         self,
-        quote: RealtimeMarketQuote,
+        trigger: Literal["state", "closed_candle", "grace_timeout", "quote"],
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
-    ) -> ExitLaneOutcome: ...
-
-    async def process_closed_candle(
-        self,
-        event: ClosedCandle15mEvent,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> ExitLaneOutcome: ...
-
-    async def process_grace_timeout(
-        self,
-        state: MarketState15s,
-        now: datetime,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
+        *,
+        event: ClosedCandle15mEvent | None = None,
+        quote: RealtimeMarketQuote | None = None,
+        now: datetime | None = None,
     ) -> ExitLaneOutcome: ...
 
 

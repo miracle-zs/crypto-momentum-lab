@@ -22,6 +22,7 @@ import structlog
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
+from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
 from crypto_momentum_lab.execution_account.hub import (
     WebSocketAccountEventSource,
 )
@@ -35,12 +36,9 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 )
 from crypto_momentum_lab.live_rollout.hub_cursor import LiveHubCursorState
 from crypto_momentum_lab.live_rollout.market_cache import LatestMarketStateCache
-from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
-    LiveRuntimeStrategy,
-)
 from crypto_momentum_lab.live_rollout.postgres_runtime import poll_live_market_states
 from crypto_momentum_lab.live_rollout.runtime_config import _LIVE_STARTUP_BUFFER_LIMIT
-from crypto_momentum_lab.live_rollout.session import ResourceOwnershipRegistry
+from crypto_momentum_lab.live_rollout.runtime_session import ResourceOwnershipRegistry
 from crypto_momentum_lab.live_rollout.startup_market_buffer import (
     StartupMarketStateBuffer,
 )
@@ -255,7 +253,7 @@ def build_live_market_state_stream(
     *,
     market_state_source: str,
     startup_market_buffer: StartupMarketStateBuffer | None,
-    strategy: LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     state_repository: PostgresRuntimeMarketStateRepository,
     market_environment: str,
     max_runtime_seconds: float,
@@ -339,8 +337,6 @@ async def collect_startup_market_states(
     try:
         async for state in resilient_market_state_stream(source):
             await buffer.append(state)
-    except asyncio.CancelledError:
-        raise
     except Exception as error:
         buffer.close(error)
         raise

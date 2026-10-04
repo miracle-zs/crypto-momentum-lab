@@ -1,3 +1,4 @@
+
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,6 +15,7 @@ from crypto_momentum_lab.domain.execution.evidence_lifecycle import plan_order_e
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
+    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
@@ -27,7 +29,7 @@ OBSERVED = NOW + timedelta(seconds=1)
 
 @pytest.fixture
 def entry():
-    scope = ExecutionScope("live", "account-3", "TESTUSDT", "LONG")
+    scope = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
     command = TradeCommand(
         "command-1",
         scope.to_position_key(),

@@ -151,6 +151,7 @@ async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         ),
     )
     state = replace(
@@ -186,6 +187,7 @@ async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         ),
     )
     state = replace(
@@ -263,6 +265,7 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         ),
     )
     position = replace(
@@ -291,7 +294,9 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
 
 
 @pytest.mark.parametrize("grace_bars", (1, 8))
-async def test_grace_timeout_timer_does_not_need_a_new_market_state(grace_bars: int) -> None:
+async def test_grace_timeout_timer_does_not_need_a_new_market_state(
+    grace_bars: int,
+) -> None:
     created_at = datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC)
     recovery_plan = OrderExecutionPlan(
         intent_id="recovery-intent",
@@ -319,6 +324,7 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state(grace_bars: 
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=grace_bars,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         )
     )
     state = replace(
@@ -329,9 +335,12 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state(grace_bars: 
         mark_price=Decimal("98"),
     )
     deadline = created_at + timedelta(minutes=15 * grace_bars)
-    assert await manager.requests_for_grace_timeout(
-        now=deadline - timedelta(microseconds=1), state=state, positions=(position,)
-    ) == ()
+    assert (
+        await manager.requests_for_grace_timeout(
+            now=deadline - timedelta(microseconds=1), state=state, positions=(position,)
+        )
+        == ()
+    )
     now = deadline + timedelta(seconds=1)
 
     requests = await manager.requests_for_grace_timeout(
@@ -420,6 +429,7 @@ async def test_stale_recovery_limit_does_not_block_a_new_position_episode() -> N
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         )
     )
     candle = ClosedCandle15m(
@@ -485,6 +495,7 @@ async def test_stale_recovery_rollover_splits_quantities() -> None:
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=1,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         )
     )
     candle = ClosedCandle15m(
@@ -550,6 +561,7 @@ async def test_terminal_batch_keeps_its_own_grace_timeout_without_active_order()
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=8,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         )
     )
     timeout_at = first_exit_at + timedelta(minutes=15 * 8)
@@ -607,7 +619,7 @@ async def test_exit_identity_includes_quantity() -> None:
         bucket_end=datetime(2026, 7, 4, 0, 5, 15, tzinfo=UTC),
     )
     manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
-    position = _long_position()
+    position = replace(_long_position(), quantity=Decimal("5000"))
 
     def build(quantity: Decimal):
         return manager._build_order_request(
@@ -637,7 +649,7 @@ def _config(
     mode: PositionExitMode,
     *,
     candle_grace_bars: int = 0,
-    candle_grace_decision_profit_pct: Decimal | None = None,
+    candle_grace_decision_profit_pct: Decimal = Decimal("0"),
     candle_grace_profit_pct: Decimal = Decimal("0"),
     account_label: str = "test_account",
 ) -> LiveExitConfig:
@@ -738,6 +750,7 @@ async def test_started_grace_is_not_reopened_by_later_candles() -> None:
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=8,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         )
     )
     candle = ClosedCandle15m(
@@ -757,3 +770,46 @@ async def test_started_grace_is_not_reopened_by_later_candles() -> None:
     assert len(requests) == 1
     assert requests[0].candidate.reduce_only
     assert requests[0].candidate.entry_type is EntryType.MARKET
+
+
+@pytest.mark.parametrize("target_batch", [False, True])
+def test_exit_quantity_and_identity_use_current_position_capacity(target_batch):
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    position = _long_position()
+    capacity = position.quantity
+    if target_batch:
+        capacity = Decimal("0.25")
+        position = replace(
+            position,
+            batch_id="target",
+            batches=(
+                ManagedLivePositionBatch(
+                    batch_id="target",
+                    quantity=capacity,
+                    entry_price=position.entry_price,
+                    opened_at=position.opened_at,
+                ),
+                ManagedLivePositionBatch(
+                    batch_id="other",
+                    quantity=Decimal("1"),
+                    entry_price=position.entry_price,
+                    opened_at=position.opened_at,
+                ),
+            ),
+        )
+
+    def build(quantity):
+        return manager._build_order_request(
+            state=_state(),
+            position=position,
+            reason="candle_15m_grace_timeout_8",
+            trigger_at=_state().bucket_end,
+            reference_price=Decimal("99"),
+            quantity=quantity,
+        )
+
+    oversized = build(Decimal("10"))
+    exact = build(capacity)
+    assert oversized.quantity == capacity
+    assert oversized.candidate.features["quantity"] == str(capacity)
+    assert oversized.candidate.candidate_id == exact.candidate.candidate_id

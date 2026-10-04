@@ -32,6 +32,7 @@ from crypto_momentum_lab.market_data.hub import (
     WebSocketMarketStateSource,
     encode_market_state_batch,
 )
+from tests.fixtures.prepared_submission import prepared_submission, submit_prepared
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,
@@ -239,21 +240,28 @@ class _InterruptibleSubmitExchange(FakeExchange):
         self.release_submit = asyncio.Event()
 
     async def submit_order(self, plan) -> ExchangeOrderSnapshot:
-        self.calls.append("submit")
-        self.submit_started.set()
-        await self.release_submit.wait()
-        result = self.submit_result
-        if isinstance(result, Exception):
-            raise result
-        return result
+        await self.emit_submit_boundary(plan, is_request=True)
+        try:
+            self.calls.append("submit")
+            self.submit_started.set()
+            await self.release_submit.wait()
+            result = self.submit_result
+            if isinstance(result, Exception):
+                raise result
+            return result
+        finally:
+            await self.emit_submit_boundary(plan, is_request=False)
 
 
 async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() -> None:
     exchange = _InterruptibleSubmitExchange()
     repository = FakeOrderRepository()
     plan = _plan()
+    await repository.record_order_observation(
+        prepared_submission(plan).submitting_event
+    )
     submitting_task = asyncio.create_task(
-        _machine(exchange, repository).submit(plan)
+        submit_prepared(_machine(exchange, repository), plan)
     )
 
     await asyncio.wait_for(exchange.submit_started.wait(), timeout=1)
@@ -264,7 +272,6 @@ async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() 
     assert [event.state for event in repository.events] == [
         ExchangeOrderState.SUBMITTING
     ]
-    assert repository.plans == [plan]
 
     restarted_result = await _machine(exchange, repository).reconcile_order(plan)
 

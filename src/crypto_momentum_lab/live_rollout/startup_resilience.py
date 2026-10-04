@@ -25,7 +25,9 @@ class LiveStartupRetryableError(RuntimeError):
 
     def __init__(self, cause: Exception) -> None:
         super().__init__(str(cause))
-        self.retry_after_seconds = getattr(cause, "retry_after_seconds", None)
+        self.retry_after_seconds = (
+            cause.retry_after_seconds if isinstance(cause, BinanceRateLimitError) else None
+        )
 
 
 async def run_with_live_startup_backoff(

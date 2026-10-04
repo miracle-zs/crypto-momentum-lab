@@ -132,7 +132,6 @@ class MonitoringMembershipRow(Base):
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     status: Mapped[str] = mapped_column(String(16))
     side: Mapped[str | None] = mapped_column(String(16))
-    left_target_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RawArchiveManifestRow(Base):
@@ -1304,105 +1303,6 @@ class ExecutionReconciliationEventRow(Base):
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
-class ShadowSessionRow(Base):
-    __tablename__ = "shadow_sessions"
-
-    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64))
-    strategy_name: Mapped[str] = mapped_column(String(64))
-    strategy_config_hash: Mapped[str] = mapped_column(String(64))
-    state: Mapped[str] = mapped_column(String(32))
-    account_readiness: Mapped[str] = mapped_column(String(32))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
-class ShadowOrderPlanRow(Base):
-    __tablename__ = "shadow_order_plans"
-
-    order_plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
-    )
-    order_intent_id: Mapped[str] = mapped_column(String(128))
-    symbol: Mapped[str] = mapped_column(String(32))
-    decision_state: Mapped[str] = mapped_column(String(32))
-    account_readiness: Mapped[str] = mapped_column(String(32))
-    market_freshness: Mapped[str] = mapped_column(String(32))
-    risk_result: Mapped[str] = mapped_column(String(32))
-    state_closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    order_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-    __table_args__ = (
-        Index(
-            "uq_shadow_order_plans_run_intent",
-            "run_id",
-            "order_intent_id",
-            unique=True,
-        ),
-        Index("ix_shadow_order_plans_run_created", "run_id", "created_at"),
-        Index(
-            "ix_shadow_order_plans_symbol_decision",
-            "symbol",
-            "decision_state",
-        ),
-    )
-
-
-class ShadowSuppressionEventRow(Base):
-    __tablename__ = "shadow_suppression_events"
-
-    order_plan_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("shadow_order_plans.order_plan_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    client_order_id: Mapped[str] = mapped_column(String(36))
-    suppressed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    reason: Mapped[str] = mapped_column(String(64))
-    order_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
-class ShadowDecisionMetricRow(Base):
-    __tablename__ = "shadow_decision_metrics"
-
-    metric_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
-    )
-    symbol: Mapped[str | None] = mapped_column(String(32))
-    category: Mapped[str] = mapped_column(String(64))
-    reason: Mapped[str | None] = mapped_column(String(128))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-    __table_args__ = (
-        Index(
-            "ix_shadow_decision_metrics_run_category",
-            "run_id",
-            "category",
-        ),
-    )
-
-
-class ShadowDrillResultRow(Base):
-    __tablename__ = "shadow_drill_results"
-
-    drill_result_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
-    )
-    drill_name: Mapped[str] = mapped_column(String(64))
-    outcome: Mapped[str] = mapped_column(String(32))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    details: Mapped[dict[str, object]] = mapped_column(JSONB)
-
-
 class LiveOperatorApprovalRow(Base):
     __tablename__ = "live_operator_approvals"
 
@@ -1504,18 +1404,12 @@ class PositionReservationRow(Base):
     released_quantity: Mapped[Decimal] = mapped_column(
         Numeric(38, 18), nullable=False, default=Decimal("0")
     )
-    expected_projection_version: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
     )
     released_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1658,9 +1552,7 @@ class DatasetManifestRow(Base):
         String(64), nullable=False, default="v1"
     )
     manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    coverage_ratio: Mapped[Decimal] = mapped_column(
-        Numeric(10, 4), nullable=False
-    )
+    coverage_ratio: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
     holes: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -1724,50 +1616,5 @@ class CashFlowCorrectionRow(Base):
             "ix_cash_flow_corrections_account",
             "account_label",
             "effective_at",
-        ),
-    )
-
-
-class AccountPerformanceMetricRow(Base):
-    """Postgres table mapping for durable AccountPerformance metric evaluation
-    snapshots.
-    """
-
-    __tablename__ = "account_performance_metrics"
-
-    metric_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
-    metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    metric_family: Mapped[str] = mapped_column(String(64), nullable=False)
-    metric_version: Mapped[str] = mapped_column(String(32), nullable=False)
-    interval_start: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    interval_end: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    value: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
-    unit: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    source_as_of: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    source_refs: Mapped[list[object]] = mapped_column(
-        JSONB, nullable=False, default=list
-    )
-    details: Mapped[dict[str, object]] = mapped_column(
-        JSONB, nullable=False, default=dict
-    )
-    calculated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-
-    __table_args__ = (
-        Index(
-            "ix_account_perf_metrics_lookup",
-            "account_label",
-            "metric_name",
-            "interval_start",
-            "interval_end",
         ),
     )

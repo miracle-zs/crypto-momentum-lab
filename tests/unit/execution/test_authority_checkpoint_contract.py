@@ -9,9 +9,11 @@ from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     PositionKey,
+)
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
 )
 
 

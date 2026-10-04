@@ -70,17 +70,22 @@ def test_registry_builds_orderflow_runtime_strategy() -> None:
     assert strategy.metadata().name == "orderflow_impulse"
 
 
-def test_registry_allows_account_scoped_orderflow_profile_overrides() -> None:
+def test_registry_preserves_account_scoped_orderflow_profile() -> None:
     runtime_config = build_runtime_config(
         "orderflow_impulse",
         config={
-            "order_flow_impulse_impulse_window_buckets": 4,
-            "order_flow_impulse_confirmation_buckets": 1,
-            "order_flow_impulse_min_return_pct": Decimal("0.01"),
-            "order_flow_impulse_min_aggressive_imbalance": Decimal("0.40"),
-            "order_flow_impulse_min_notional_intensity": Decimal("2"),
-            "order_flow_impulse_min_notional_5m_vs_30m": Decimal("1.50"),
-            "cooldown_buckets": 0,
+            "order_flow_impulse": OrderFlowImpulseConfig(
+                impulse_window_buckets=4,
+                baseline_window_buckets=4,
+                breakout_window_buckets=4,
+                confirmation_buckets=1,
+                min_return_pct=Decimal("0.01"),
+                min_aggressive_imbalance=Decimal("0.40"),
+                min_notional_intensity=Decimal("2"),
+                min_notional_5m_vs_30m=Decimal("1.50"),
+                cooldown_buckets=0,
+                forward_horizon_buckets=(1,),
+            ),
         },
     )
 

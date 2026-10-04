@@ -6,13 +6,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import AsyncContextManager, Protocol
 
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     JournalFactDelta,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     DurableJournalCut,
     JournalPersistResult,
     PositionRecoveryCheckpoint,
@@ -105,9 +108,8 @@ class ExecutionTransactionPort(Protocol):
         self,
         reservations: Sequence[PositionReservation],
         *,
-        expected_projection_version: str | None = None,
-        batch_quantities: Mapping[str, Decimal] | None = None,
-        proven_position_quantity: Decimal | None = None,
+        batch_quantities: Mapping[str, Decimal],
+        proven_position_quantity: Decimal,
     ) -> None: ...
 
     async def update_reservation(
@@ -176,7 +178,10 @@ class ExecutionUnitOfWorkPort(Protocol):
     """Durable reads and atomic transaction seam used by ExecutionBook."""
 
     async def load_position(
-        self, key: PositionKey, *, as_of: datetime,
+        self,
+        key: PositionKey,
+        *,
+        as_of: datetime,
     ) -> DurableExecutionPositionState | None: ...
 
     async def load_journal_cut(
@@ -200,3 +205,58 @@ class ExecutionUnitOfWorkPort(Protocol):
         *,
         account_scope: str | None = None,
     ) -> AsyncContextManager[ExecutionTransactionPort]: ...
+
+
+class CommandRepository(Protocol):
+    async def upsert_execution_command(
+        self,
+        *,
+        command_id: str,
+        client_order_id: str | None,
+        command: str,
+        status: str,
+        requested_at: datetime,
+        details: dict[str, JsonValue],
+    ) -> None: ...
+    async def load_active_execution_commands(
+        self,
+        *,
+        account_label: str | None,
+    ) -> Sequence[Mapping[str, object]]: ...
+    async def load_seen_event_ids(self) -> Sequence[str]: ...
+    async def load_seen_fill_trade_ids(self) -> Sequence[str]: ...
+    async def load_execution_order_watermarks(
+        self,
+        *,
+        account_label: str | None,
+    ) -> Sequence[Mapping[str, object]]: ...
+
+
+class ReservationRepository(Protocol):
+    async def load_reservation(
+        self, reservation_id: str
+    ) -> PositionReservation | None: ...
+    async def load_active_reservations(self) -> tuple[PositionReservation, ...]: ...
+    async def save_reservations(
+        self,
+        reservations: tuple[PositionReservation, ...],
+        *,
+        batch_quantities: dict[str, Decimal],
+    ) -> None: ...
+    async def update_reservation(
+        self,
+        reservation: PositionReservation,
+        release_reason: str | None = None,
+    ) -> None: ...
+
+
+class OrderReadRepository(Protocol):
+    async def load_unresolved_orders(
+        self,
+        run_id: str | None = None,
+    ) -> tuple[PersistedExchangeOrder, ...]: ...
+
+    async def load_order(
+        self,
+        client_order_id: str,
+    ) -> PersistedExchangeOrder | None: ...

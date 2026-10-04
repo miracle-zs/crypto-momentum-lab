@@ -10,13 +10,15 @@ import pytest
 from crypto_momentum_lab.domain.account import AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFillLoadProvenance,
     CoverageEvidence,
     ExitOrderSubmissionFact,
     compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
+)
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     stable_snapshot_anchor_id,
 )

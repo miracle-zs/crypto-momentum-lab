@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
+from functools import lru_cache
+from typing import cast
 from uuid import uuid4
 
-from crypto_momentum_lab.domain.account.models import AccountFillReconciliationCursor
+from crypto_momentum_lab.domain.account.models import (
+    AccountFillEvent,
+    AccountFillReconciliationCursor,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
-    AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
+    ExitOrderSubmissionFact,
     FactCoverageInterval,
     PositionKey,
     PositionLedgerProjection,
@@ -22,6 +29,194 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.projection_codec import (
     compute_projection_digest,
 )
+
+
+@lru_cache(maxsize=None)
+def _dataclass_field_names(cls: type) -> tuple[str, ...]:
+    """Field names per dataclass type; the reflection is not free per fact."""
+    return tuple(field.name for field in fields(cls))
+
+
+def _canonical_value(value: object) -> object:
+    """Canonical, JSON-ready projection of a facts field value."""
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, Decimal):
+        exact = format(value, "f")
+        if "." in exact:
+            exact = exact.rstrip("0").rstrip(".")
+        return "0" if exact in {"", "-0"} else exact
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    if is_dataclass(value):
+        return {
+            name: _canonical_value(getattr(value, name))
+            for name in _dataclass_field_names(cast(type, type(value)))
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, tuple | list):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
+def _canonical_sort_key(element: object) -> str:
+    return json.dumps(element, sort_keys=True, separators=(",", ":"))
+
+
+class CanonicalFactCache:
+    """Canonical encoding per recorded fact, keyed by object identity.
+
+    ``compute_facts_hash`` re-encodes every historical fact on each call, and
+    profiling shows that encoding — not the sort or the digest — dominates the
+    cost: canonicalising 10k facts spends ~0.16s in the walk itself and ~0.05s in
+    JSON, against ~0.01s of sorting and far less for SHA-256.
+
+    Recorded facts are append-only and never mutated, so their canonical element
+    and sort key are computed once and reused. The same element object is handed
+    out on every hit, so callers must treat it as read-only; the only consumer is
+    ``json.dumps`` inside ``compute_facts_hash``.
+
+    Entries key on ``id(fact)`` while holding a strong reference to that fact, so
+    a recycled id can never alias an older entry. A transaction candidate shares
+    the journal's cache; a rolled-back candidate can therefore leave entries for
+    facts that are never published, which is bounded by a few hundred bytes per
+    such fact and never affects correctness (entries are keyed by identity).
+    """
+
+    __slots__ = ("_entries", "hits", "misses")
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[object, object, str]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def entry(self, fact: object) -> tuple[object, str]:
+        key = id(fact)
+        cached = self._entries.get(key)
+        if cached is not None and cached[0] is fact:
+            self.hits += 1
+            return cached[1], cached[2]
+        element = _canonical_value(fact)
+        sort_key = _canonical_sort_key(element)
+        self._entries[key] = (fact, element, sort_key)
+        self.misses += 1
+        return element, sort_key
+
+    def element(self, fact: object) -> object:
+        return self.entry(fact)[0]
+
+    def ordered(self, values: tuple[object, ...]) -> list[object]:
+        pairs = [self.entry(item) for item in values]
+        return [element for element, _ in sorted(pairs, key=lambda pair: pair[1])]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+@dataclass(frozen=True, slots=True)
+class AccountFacts:
+    """Normalized immutable account facts for a given position key."""
+
+    position_key: PositionKey
+    fills: tuple[AccountFillEvent, ...] = ()
+    snapshots: tuple[AccountPositionSnapshot, ...] = ()
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
+    coverage: FactCoverageInterval | None = None
+    has_synthetic_fills: bool = False
+    conflicting_fills: tuple[AccountFillEvent, ...] = ()
+    has_late_events: bool = False
+    stream_scope: AccountFactStreamScope | None = None
+    recovery_checkpoint: PositionRecoveryCheckpoint | None = None
+    fact_conflicts: tuple[AccountFactConflict, ...] = ()
+    integrity_issues: tuple[str, ...] = ()
+    late_fills: tuple[AccountFillEvent, ...] = ()
+    fill_cursor_provenance: AccountFillReconciliationCursor | None = None
+    fill_load_provenance: AccountFillLoadProvenance | None = None
+    prefix_facts_complete: bool = True
+    _cached_facts_hash: str | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False
+    )
+    # Derived encoding cache owned by the journal that produced these facts; it
+    # never participates in equality, hashing or identity.
+    _canonical_fact_cache: CanonicalFactCache | None = field(
+        default=None, repr=False, compare=False, hash=False
+    )
+
+    def __post_init__(self) -> None:
+        if type(self.prefix_facts_complete) is not bool:
+            raise ValueError("prefix_facts_complete must be a boolean")
+        if (
+            self.fill_load_provenance is None
+            and self.coverage is not None
+            and self.coverage.load_provenance is not None
+        ):
+            object.__setattr__(
+                self, "fill_load_provenance", self.coverage.load_provenance
+            )
+        if self.fill_load_provenance is not None and (
+            self.fill_load_provenance.stream_scope != self.stream_scope
+        ):
+            raise ValueError("fill load provenance scope does not match account facts")
+        if self.coverage is not None:
+            if (
+                self.stream_scope is not None
+                and self.coverage.stream_scope != self.stream_scope
+            ):
+                raise ValueError("coverage scope does not match account facts")
+
+    def compute_facts_hash(self) -> str:
+        """Hash every input field that can change identity or projection."""
+        cached = self._cached_facts_hash
+        if cached is not None:
+            return cached
+
+        encoding_cache = self._canonical_fact_cache
+
+        def canonical(value: object) -> object:
+            if encoding_cache is None:
+                return _canonical_value(value)
+            return encoding_cache.element(value)
+
+        def unordered(values: tuple[object, ...]) -> list[object]:
+            if encoding_cache is not None:
+                return encoding_cache.ordered(values)
+            encoded = []
+            for item in values:
+                element = _canonical_value(item)
+                encoded.append((element, _canonical_sort_key(element)))
+            return [element for element, _ in sorted(encoded, key=lambda pair: pair[1])]
+
+        fact_material = {
+            "position_key": canonical(self.position_key),
+            "stream_scope": canonical(self.stream_scope),
+            "fills": unordered(self.fills),
+            "conflicting_fills": unordered(self.conflicting_fills),
+            "snapshots": unordered(self.snapshots),
+            "exit_boundaries": unordered(self.exit_boundaries),
+            "coverage": canonical(self.coverage),
+            "recovery_checkpoint": canonical(self.recovery_checkpoint),
+            "has_synthetic_fills": self.has_synthetic_fills,
+            "has_late_events": self.has_late_events,
+            "fact_conflicts": unordered(self.fact_conflicts),
+            "integrity_issues": sorted(self.integrity_issues),
+            "late_fills": unordered(self.late_fills),
+            "fill_cursor_provenance": canonical(self.fill_cursor_provenance),
+            "fill_load_provenance": canonical(self.fill_load_provenance),
+            "prefix_facts_complete": self.prefix_facts_complete,
+        }
+        encoded = json.dumps(
+            fact_material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        computed = hashlib.sha256(encoded).hexdigest()
+        object.__setattr__(self, "_cached_facts_hash", computed)
+        return computed
+
 
 POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = 3
 

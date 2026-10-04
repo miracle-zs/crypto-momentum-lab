@@ -1,8 +1,8 @@
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Final
+from typing import Final, Protocol
 
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -81,13 +81,6 @@ class PositionOrderFact:
     exit_batch_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class PositionHistory:
-    orders: Sequence[PositionOrderFact]
-    fill_times: Mapping[str, datetime] = field(default_factory=dict)
-    fill_prices: Mapping[str, Decimal] = field(default_factory=dict)
-
-
 _EXIT_SUBMITTED_STATES: Final[frozenset[ExchangeOrderState]] = frozenset(
     {
         ExchangeOrderState.SUBMITTING,
@@ -104,10 +97,21 @@ _EXIT_SUBMITTED_STATES: Final[frozenset[ExchangeOrderState]] = frozenset(
 )
 
 
+class BatchConcurrencyPosition(Protocol):
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def batches(self) -> tuple[ManagedLivePositionBatch, ...]: ...
+    @property
+    def recovery_exit_started_at(self) -> datetime | None: ...
+    @property
+    def closing_order_filled(self) -> bool: ...
+
+
 def count_active_symbol_batch_concurrency(
     symbol: str,
-    managed_positions: Sequence[object] = (),
-    unresolved_orders: Sequence[object] = (),
+    managed_positions: Sequence[BatchConcurrencyPosition] = (),
+    pending_entry_plans: Sequence[OrderExecutionPlan] = (),
 ) -> int:
     """Calculate the active batch entry concurrency for a symbol.
 
@@ -127,32 +131,30 @@ def count_active_symbol_batch_concurrency(
     known_entry_order_ids: set[str] = set()
 
     for p in managed_positions:
-        if getattr(p, "symbol", "") != symbol:
+        if p.symbol != symbol:
             continue
-        batches = getattr(p, "batches", None)
+        batches = p.batches
         if batches:
             for b in batches:
-                has_exit_submitted = (
-                    getattr(b, "exit_order_submitted_at", None) is not None
-                )
-                is_closing_filled = bool(getattr(b, "closing_order_filled", False))
+                has_exit_submitted = b.exit_order_submitted_at is not None
+                is_closing_filled = b.closing_order_filled
                 if not has_exit_submitted and not is_closing_filled:
-                    active_batch_orders += int(getattr(b, "entry_order_count", 1))
-                    entry_ids = getattr(b, "entry_client_order_ids", ()) or ()
+                    active_batch_orders += b.entry_order_count
+                    entry_ids = b.entry_client_order_ids
                     known_entry_order_ids.update(entry_ids)
         else:
-            has_exit_started = getattr(p, "recovery_exit_started_at", None) is not None
-            is_closing_filled = bool(getattr(p, "closing_order_filled", False))
+            has_exit_started = p.recovery_exit_started_at is not None
+            is_closing_filled = p.closing_order_filled
             if not has_exit_started and not is_closing_filled:
                 active_batch_orders += 1
 
     pending_order_count = 0
-    for o in unresolved_orders:
-        if getattr(o, "symbol", "") != symbol:
+    for o in pending_entry_plans:
+        if o.symbol != symbol:
             continue
-        if getattr(o, "reduce_only", False):
+        if o.reduce_only:
             continue
-        client_order_id = getattr(o, "client_order_id", None)
+        client_order_id = o.client_order_id
         if client_order_id and client_order_id in known_entry_order_ids:
             continue
         pending_order_count += 1

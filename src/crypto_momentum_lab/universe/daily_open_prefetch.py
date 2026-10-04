@@ -40,7 +40,7 @@ class DailyOpenPrefetcher:
         *,
         batch_size: int = 50,
         retry_delay_seconds: float = 5.0,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -50,7 +50,7 @@ class DailyOpenPrefetcher:
         self._repository = repository
         self._batch_size = batch_size
         self._retry_delay_seconds = retry_delay_seconds
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._pending: dict[date, set[str]] = {}
         self._active_symbols: frozenset[str] = frozenset()
         self._wake = asyncio.Event()
@@ -128,20 +128,17 @@ class DailyOpenPrefetcher:
             )
 
     async def _run(self) -> None:
-        try:
-            while not self._closed:
-                try:
-                    await asyncio.wait_for(
-                        self._wake.wait(),
-                        timeout=self._seconds_until_next_utc_day(),
-                    )
-                except TimeoutError:
-                    self._enqueue_active_symbols(self._now().date())
-                else:
-                    self._wake.clear()
-                await self._drain_pending()
-        except asyncio.CancelledError:
-            raise
+        while not self._closed:
+            try:
+                await asyncio.wait_for(
+                    self._wake.wait(),
+                    timeout=self._seconds_until_next_utc_day(),
+                )
+            except TimeoutError:
+                self._enqueue_active_symbols(self._now().date())
+            else:
+                self._wake.clear()
+            await self._drain_pending()
 
     async def _drain_pending(self) -> None:
         async with self._work_lock:
@@ -158,8 +155,6 @@ class DailyOpenPrefetcher:
                         utc_day,
                         captured_at=self._now(),
                     )
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     self._pending.setdefault(utc_day, set()).update(batch)
                     log.exception(

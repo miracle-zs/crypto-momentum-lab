@@ -9,17 +9,16 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
 
 
 class Strategy:
-    def __init__(self, requirement: StrategyDataRequirement | None) -> None:
+    def __init__(self, requirement: StrategyDataRequirement) -> None:
         self.requirement = requirement
 
-    def required_data(self) -> StrategyDataRequirement | None:
+    def required_data(self) -> StrategyDataRequirement:
         return self.requirement
 
 
 @pytest.mark.parametrize(
     "requirement, seconds, buckets, limit",
     [
-        (None, 240, 1, 420000),
         (StrategyDataRequirement(15, 1, ("close_price",), 30, False), 255, 1, 420000),
         (StrategyDataRequirement(60, 4, ("close_price",), 120, False), 1200, 4, 120000),
     ],

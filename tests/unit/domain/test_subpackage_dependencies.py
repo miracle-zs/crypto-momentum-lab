@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import ast
-import subprocess
-import sys
 from collections import defaultdict
-from dataclasses import replace
 from pathlib import Path
-
-from crypto_momentum_lab.domain.operational.runtime_metadata import RuntimePlanMetadata
 
 
 def _is_type_checking(node: ast.AST) -> bool:
@@ -137,39 +132,3 @@ def test_dependency_scanner_distinguishes_runtime_and_type_imports() -> None:
     }
     assert visitor.type_imports == {"crypto_momentum_lab.domain.runtime"}
     assert _find_elementary_cycles({"a": {"b"}, "b": {"a"}}) == [["a", "b", "a"]]
-
-
-def test_paper_models_clean_subprocess_import_isolation() -> None:
-    script = (
-        "import sys\n"
-        "from crypto_momentum_lab.domain.strategy.paper_models "
-        "import PaperTradingRunReport\n"
-        "assert 'crypto_momentum_lab.domain.runtime.runtime_plan' "
-        "not in sys.modules\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, f"Import isolation failed: {result.stderr}"
-
-
-def test_paper_report_preserves_concrete_plan_and_persisted_artifacts() -> None:
-    from crypto_momentum_lab.domain.runtime.runtime_plan import RuntimePlanCompiler
-    from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
-        strategy_run_report_rows,
-    )
-    from tests.unit.persistence.postgres.test_strategy_run_repository import (
-        fixture_paper_report,
-    )
-
-    plan: RuntimePlanMetadata = RuntimePlanCompiler.compile(
-        environment="paper",
-        account_label="account-1",
-    )
-    base = fixture_paper_report()
-    report = replace(base, runtime_plan=plan)
-    assert report.runtime_plan is plan
-    assert strategy_run_report_rows(report) == strategy_run_report_rows(base)

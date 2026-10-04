@@ -12,6 +12,11 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,
     StrategyDecision,
 )
+from crypto_momentum_lab.domain.strategy.paper_models import (
+    PaperEntryFilterConfig,
+    PaperExitConfig,
+    PaperPositionStatus,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
     PaperEquitySnapshotRow,
@@ -30,11 +35,6 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     PostgresStrategyRunRepository,
-)
-from crypto_momentum_lab.domain.strategy.paper_models import PaperEntryFilterConfig
-from crypto_momentum_lab.domain.strategy.paper_models import (
-    PaperExitConfig,
-    PaperPositionStatus,
 )
 from tests.unit.persistence.postgres.test_strategy_run_repository import (
     fixture_paper_report,

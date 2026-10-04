@@ -69,8 +69,8 @@ async def test_order_identity_adapter_detaches_events_and_complete_fill_values()
     assert session.scalars.await_count == 2
 
 
-@pytest.mark.parametrize("details", [None, ["malformed"], {"unrelated": "value"}])
-def test_malformed_identity_details_remain_missing_fill_evidence(details):
+@pytest.mark.parametrize("details", [{}, {"unrelated": "value"}])
+def test_identity_details_preserve_explicit_empty_or_unrelated_evidence(details):
     from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
         order_identity_event,
     )
@@ -83,4 +83,4 @@ def test_malformed_identity_details_remain_missing_fill_evidence(details):
         details=details,
     )
     observation = order_identity_event(event)
-    assert observation.details == (details if isinstance(details, dict) else {})
+    assert observation.details == details

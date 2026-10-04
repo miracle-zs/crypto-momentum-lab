@@ -24,14 +24,14 @@ export function chartPayloadSignature(payload) {
   if (!payload) return "";
   if (payload.kind === "equity") {
     const points = payload.points || [];
-    const ptsSig = points.map((p) => `${p.atMs ?? p.time ?? ""}:${p.equity ?? ""}`).join(",");
+    const ptsSig = points.map((p) => `${p.atMs}:${p.equity ?? ""}`).join(",");
     return `equity|${payload.title ?? ""}|${payload.domainStart ?? ""}|${payload.domainEnd ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.baseline ?? ""}|${payload.delta ?? ""}|${payload.lastUp ?? ""}|${ptsSig}`;
   }
   const points = payload.points || [];
   const series = payload.series || [];
-  const ptsTimes = points.map((p) => p.at ?? p.atMs ?? "").join(",");
+  const ptsTimes = points.map((p) => p.at).join(",");
   const seriesSig = series.map((s) => `${s.label ?? ""}:${s.color ?? ""}:${s.delta ?? ""}:${(s.values || []).join(",")}`).join(";");
-  return `${payload.kind || "comparison"}|${payload.title ?? ""}|${payload.domainStart ?? payload.startAt ?? ""}|${payload.domainEnd ?? payload.endAt ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.valueFormat ?? ""}|${ptsTimes}|${seriesSig}`;
+  return `${payload.kind || "comparison"}|${payload.title ?? ""}|${payload.domainStart ?? ""}|${payload.domainEnd ?? ""}|${payload.min ?? ""}|${payload.max ?? ""}|${payload.valueFormat ?? ""}|${ptsTimes}|${seriesSig}`;
 }
 
 const FALLBACK_COLORS = {
@@ -111,8 +111,8 @@ function resolveSeriesColor(color, colors) {
 function axisTime(value, payload) {
   const span = Math.max(
     0,
-    Number(payload.domainEnd ?? payload.endAt)
-      - Number(payload.domainStart ?? payload.startAt),
+    Number(payload.domainEnd)
+      - Number(payload.domainStart),
   );
   if (span <= 2 * 24 * 60 * 60 * 1000) return timeOnly(Number(value));
   if (span <= 45 * 24 * 60 * 60 * 1000) return dateOnly(Number(value));
@@ -180,8 +180,8 @@ function baseOption(payload, colors) {
     xAxis: {
       ...baseAxis(colors),
       type: "time",
-      min: payload.domainStart ?? payload.startAt,
-      max: payload.domainEnd ?? payload.endAt,
+      min: payload.domainStart,
+      max: payload.domainEnd,
       axisLabel: {
         ...baseAxis(colors).axisLabel,
         formatter: (value) => axisTime(value, payload),
@@ -213,8 +213,8 @@ function tooltipTime(params, payload) {
   if (!Number.isFinite(Number(timestamp))) return "暂无时间";
   const span = Math.max(
     0,
-    Number(payload.domainEnd ?? payload.endAt)
-      - Number(payload.domainStart ?? payload.startAt),
+    Number(payload.domainEnd)
+      - Number(payload.domainStart),
   );
   const formatted = span > 180 * 24 * 60 * 60 * 1000
     ? fullDateTime(Number(timestamp))

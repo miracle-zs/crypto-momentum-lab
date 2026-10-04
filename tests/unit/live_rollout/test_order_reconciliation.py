@@ -407,9 +407,14 @@ async def test_ws_replay_does_not_rollback_durable_order(case):
 
 @pytest.mark.asyncio
 async def test_same_millisecond_ws_partial_fills_and_replay_use_durable_idempotence():
+    from unittest.mock import create_autospec
+
+    from crypto_momentum_lab.domain.execution.exchange_contract import (
+        OrderExchangeClient,
+    )
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        )
+    )
 
     order, event = _ws_order_case()
     inserted = {}
@@ -431,8 +436,7 @@ async def test_same_millisecond_ws_partial_fills_and_replay_use_durable_idempote
     repository = Repository()
     # No exchange interface is available: this path must use only WS facts.
     machine = OrderExecutionStateMachine(
-        exchange=object(),
-        repository=repository,
+        exchange=create_autospec(OrderExchangeClient, instance=True, spec_set=True),
         event_repository=repository,
         live_submit_enabled=True,
         on_event=on_event,
@@ -784,7 +788,12 @@ async def test_incomplete_terminal_ws_repair_is_scheduled_without_rest():
         async def reconcile_order(self, _plan):
             pytest.fail("account publication must not await REST repair")
 
-    runtime = LiveOrderReconciliation(Repository(), StateMachine(), "run-1")
+    runtime = LiveOrderReconciliation(
+        Repository(),
+        StateMachine(),
+        "run-1",
+        execution_book=StateMachine.execution_book,
+    )
     await asyncio.wait_for(runtime.reconcile_account_event(event), timeout=1)
     assert "orders" in runtime._requested_tasks
     assert runtime._requested.is_set()
@@ -792,9 +801,16 @@ async def test_incomplete_terminal_ws_repair_is_scheduled_without_rest():
 
 async def test_background_orphan_cancel_rotates_failures_and_never_resubmits():
     order, _ = _ws_order_case()
-    plans = tuple(replace(order.plan, client_order_id=identity, reduce_only=True,
-                          order_type="LIMIT", price=Decimal("100"))
-                  for identity in ("failed-cancel", "other-cancel"))
+    plans = tuple(
+        replace(
+            order.plan,
+            client_order_id=identity,
+            reduce_only=True,
+            order_type="LIMIT",
+            price=Decimal("100"),
+        )
+        for identity in ("failed-cancel", "other-cancel")
+    )
     calls = []
 
     class Repository:
@@ -808,7 +824,9 @@ async def test_background_orphan_cancel_rotates_failures_and_never_resubmits():
                 raise TimeoutError("one exchange cancellation timed out")
             return SimpleNamespace(state=ExchangeOrderState.CANCELED)
 
-    repair = LiveOrderReconciliation(Repository(), Executor(), "run-1", max_order_lookups_per_pass=1)
+    repair = LiveOrderReconciliation(
+        Repository(), Executor(), "run-1", max_order_lookups_per_pass=1
+    )
     repair.request_order_recovery(plans)
     assert calls == []
     assert await repair.reconcile_all()

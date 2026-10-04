@@ -47,7 +47,6 @@ class LiveRuntimeOptionsError(ValueError):
     """Raised when CLI/environment values cannot form a safe live runtime."""
 
 
-_GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
 
@@ -77,10 +76,8 @@ class LiveRunOptions:
     risk_control_hub_url: str | None
     session_id: str | None
     operator: str
-    lease_owner: str | None
     strategy_config_hash: str
     git_commit_hash: str
-    migration_revision: str
     max_runtime_seconds: int
     poll_interval_seconds: float
     checkpoint_every_states: int
@@ -321,7 +318,6 @@ def resolve_live_runtime_config(
     )
 
     session_id = options.session_id
-    lease_owner = options.lease_owner
     strategy = options.strategy
     profile: LiveOrderFlowImpulseProfile
     entry_positive_gainer_top_count: int | None
@@ -341,11 +337,9 @@ def resolve_live_runtime_config(
     target_notional = options.target_notional
     strategy_config_hash = options.strategy_config_hash
     git_commit_hash = options.git_commit_hash
-    migration_revision = options.migration_revision
 
     if manifest_account is None:
         session_id = session_id or "live-manual"
-        lease_owner = lease_owner or "live-worker"
         hedge_mode = True if hedge_mode is None else hedge_mode
         entry_long_only = True if entry_long_only is None else entry_long_only
         entry_price_above_ema5 = (
@@ -407,12 +401,7 @@ def resolve_live_runtime_config(
             raise LiveRuntimeOptionsError(
                 "session id does not match the runtime manifest"
             )
-        if lease_owner is not None and lease_owner != manifest_account.lease_owner:
-            raise LiveRuntimeOptionsError(
-                "lease owner does not match the runtime manifest"
-            )
         session_id = manifest_account.session_id
-        lease_owner = manifest_account.lease_owner
         strategy_inputs = manifest_account.strategy_inputs
         profile = strategy_inputs.profile
         entry_positive_gainer_top_count = (
@@ -479,14 +468,12 @@ def resolve_live_runtime_config(
 
         git_commit_hash = manifest_account.image_commit
 
-        migration_revision = manifest_account.migration_revision
 
         manifest_strategy_hash = runtime_manifest_strategy_config_hash(manifest_account)
         strategy_config_hash = manifest_strategy_hash
 
     if (
         session_id is None
-        or lease_owner is None
         or profile is None
         or entry_order_type is None
         or entry_limit_ttl_seconds is None
@@ -536,10 +523,8 @@ def resolve_live_runtime_config(
             strategy_name=strategy,
             session_id=session_id,
             operator=options.operator,
-            lease_owner=lease_owner,
             strategy_config_hash=strategy_config_hash,
             git_commit_hash=git_commit_hash,
-            migration_revision=migration_revision,
         ),
         market=LiveRuntimeMarket(
             market_environment=options.market_environment,

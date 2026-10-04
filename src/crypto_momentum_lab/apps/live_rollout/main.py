@@ -51,10 +51,6 @@ from crypto_momentum_lab.config import (
     ResolvedBinanceCredentials,
     resolve_role_credentials,
 )
-from crypto_momentum_lab.domain.execution.order_state import (
-    FuturesPositionSide,
-    OrderExecutionPlan,
-)
 from crypto_momentum_lab.domain.live_rollout import (
     LiveOperatorApproval,
     LiveSessionState,
@@ -81,7 +77,6 @@ from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemon
 from crypto_momentum_lab.live_rollout.missing_order_resolution import (
     resolve_missing_live_order as _resolve_missing_live_order,
 )
-from crypto_momentum_lab.live_rollout.plan_runner import run_live_plan as _run_live_plan
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_ENTRY_LIMIT_TTL_SECONDS,
@@ -106,15 +101,6 @@ from crypto_momentum_lab.live_rollout.runtime_options import (
 )
 from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_live_profile_options as _resolve_runtime_profile_options,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
-    resolve_manifest_decimal_option as _resolve_runtime_manifest_decimal,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
-    resolve_manifest_operations as _resolve_runtime_manifest_operations,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
-    resolve_manifest_option as _resolve_runtime_manifest_option,
 )
 from crypto_momentum_lab.live_rollout.runtime_options import (
     runtime_manifest_account_for_cli as _runtime_options_manifest_account,
@@ -356,10 +342,6 @@ def prepare_command(
     git_commit_hash: Annotated[
         str,
         typer.Option("--git-commit-hash"),
-    ] = "",
-    migration_revision: Annotated[
-        str,
-        typer.Option("--migration-revision"),
     ] = "",
     lease_ttl_seconds: Annotated[
         int,
@@ -860,41 +842,6 @@ def _runtime_manifest_strategy_config_hash(
         raise typer.BadParameter(str(error)) from error
 
 
-def _resolve_manifest_option[T](
-    value: T | None,
-    expected: T,
-    option_name: str,
-) -> T:
-    """Use manifest values while rejecting an explicitly conflicting option."""
-
-    try:
-        return _resolve_runtime_manifest_option(value, expected, option_name)
-    except LiveRuntimeOptionsError as error:
-        raise typer.BadParameter(str(error)) from error
-
-
-def _resolve_manifest_decimal_option(
-    value: str | None,
-    expected: Decimal,
-    option_name: str,
-) -> str:
-    try:
-        return _resolve_runtime_manifest_decimal(value, expected, option_name)
-    except LiveRuntimeOptionsError as error:
-        raise typer.BadParameter(str(error)) from error
-
-
-def _resolve_manifest_operations(
-    value: str | None,
-    expected: str,
-    option_name: str,
-) -> str:
-    try:
-        return _resolve_runtime_manifest_operations(value, expected, option_name)
-    except LiveRuntimeOptionsError as error:
-        raise typer.BadParameter(str(error)) from error
-
-
 @app.command("resolve-missing-order")
 def resolve_missing_order_command(
     client_order_id: Annotated[str, typer.Option("--client-order-id")],
@@ -938,69 +885,6 @@ def resolve_missing_order_command(
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
-
-
-@app.command("submit-plan")
-def submit_plan_command(
-    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
-    session_id: Annotated[str, typer.Option("--session-id")] = "live-manual",
-    operator: Annotated[str, typer.Option("--operator")] = "",
-    strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
-    order_plan_json: Annotated[
-        Path | None, typer.Option("--order-plan-json", exists=True, dir_okay=False)
-    ] = None,
-    account_event_hub_url: Annotated[
-        str,
-        typer.Option("--account-event-hub-url"),
-    ] = "ws://execution-account-live:8767",
-    base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
-    api_key_env: Annotated[str, typer.Option("--api-key-env")] = "BINANCE_API_KEY",
-    api_secret_env: Annotated[
-        str, typer.Option("--api-secret-env")
-    ] = "BINANCE_API_SECRET",
-    entry_leverage: Annotated[
-        int, typer.Option("--entry-leverage", min=1, max=125)
-    ] = 1,
-    margin_type: Annotated[
-        str,
-        typer.Option(
-            "--margin-type",
-            help="Entry margin mode: CROSSED or ISOLATED.",
-        ),
-    ] = "CROSSED",
-    confirmation: Annotated[
-        bool, typer.Option("--i-understand-this-places-real-orders")
-    ] = False,
-) -> None:
-    if not confirmation:
-        raise typer.BadParameter("--i-understand-this-places-real-orders is required")
-    if order_plan_json is None:
-        raise typer.BadParameter("--order-plan-json is required")
-    api_key = os.environ.get(api_key_env)
-    api_secret = os.environ.get(api_secret_env)
-    if not api_key or not api_secret:
-        raise typer.BadParameter(f"{api_key_env} and {api_secret_env} are required")
-    plan = _load_plan(order_plan_json)
-    result = asyncio.run(
-        _run_live_plan(
-            database_url=_execution_database_url(database_url),
-            account_label=account_label,
-            strategy_name=strategy,
-            session_id=session_id,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            plan=plan,
-            account_event_hub_url=account_event_hub_url,
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            entry_leverage=entry_leverage,
-            margin_type=margin_type,
-        )
-    )
-    typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
 
 
 @app.command("run")
@@ -1089,10 +973,8 @@ def run_command(
     ] = "ws://execution-account-live:8769",
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     operator: Annotated[str, typer.Option("--operator")] = "",
-    lease_owner: Annotated[str | None, typer.Option("--lease-owner")] = None,
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
-    migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
     max_runtime_seconds: Annotated[
         int, typer.Option("--max-runtime-seconds", min=1)
     ] = 3600,
@@ -1246,10 +1128,8 @@ def run_command(
                 risk_control_hub_url=risk_control_hub_url,
                 session_id=session_id,
                 operator=operator,
-                lease_owner=lease_owner,
                 strategy_config_hash=strategy_config_hash,
                 git_commit_hash=git_commit_hash,
-                migration_revision=migration_revision,
                 max_runtime_seconds=max_runtime_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 checkpoint_every_states=checkpoint_every_states,
@@ -1472,39 +1352,6 @@ def report_command(
             default=str,
         )
     )
-
-
-def _load_plan(path: Path) -> OrderExecutionPlan:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    plan = OrderExecutionPlan(
-        intent_id=str(payload["intent_id"]),
-        run_id=str(payload["run_id"]),
-        client_order_id=str(payload["client_order_id"]),
-        symbol=str(payload["symbol"]),
-        side=str(payload["side"]),
-        order_type=str(payload["order_type"]),
-        quantity=Decimal(str(payload["quantity"])),
-        price=None if payload.get("price") is None else Decimal(str(payload["price"])),
-        reduce_only=bool(payload["reduce_only"]),
-        created_at=datetime.fromisoformat(str(payload["created_at"])),
-        position_side=FuturesPositionSide(
-            str(payload.get("position_side", FuturesPositionSide.BOTH.value))
-        ),
-        quantized=bool(payload.get("quantized", False)),
-        time_in_force=(
-            None
-            if payload.get("time_in_force") is None
-            else str(payload["time_in_force"])
-        ),
-        expires_at=(
-            None
-            if payload.get("expires_at") is None
-            else datetime.fromisoformat(str(payload["expires_at"]))
-        ),
-    )
-    if not plan.quantized:
-        raise typer.BadParameter("order plan must be quantized")
-    return plan
 
 
 def _validate_hex_hash(

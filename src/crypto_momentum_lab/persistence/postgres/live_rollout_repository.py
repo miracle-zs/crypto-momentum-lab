@@ -263,7 +263,7 @@ class PostgresLiveRolloutRepository:
                         failure_reason=failure_reason,
                     )
                 )
-        rowcount = cast(int, getattr(result, "rowcount", 0))
+        rowcount = cast(int, result.rowcount)
         return rowcount == 1
 
     async def _insert(self, model: Any, values: dict[str, object]) -> None:

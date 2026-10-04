@@ -69,7 +69,7 @@ def test_order_identity_conflict_detector() -> None:
     )
 
     err1 = ReservationConflictError(
-        "reservation res_cml_1_0 already exists in terminal status RELEASED"
+        "reservation res_cml_1_0 already exists for command another_command, retry used cml_1"
     )
     assert is_runtime_order_identity_conflict(err1)
 

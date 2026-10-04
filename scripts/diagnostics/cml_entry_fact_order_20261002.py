@@ -115,7 +115,13 @@ async def probe_context(case: str) -> dict:
 
     # These are the same narrow provider setup and context fixture used by the
     # existing unit suite. No DB load or production account is involved.
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = book
     provider._cache_epoch = 7
@@ -125,7 +131,7 @@ async def probe_context(case: str) -> dict:
         open_position_symbols=frozenset({"BTCUSDT"}),
         pending_position_symbols=frozenset(),
         unmanaged_position_symbols=frozenset(),
-        account_snapshot=SimpleNamespace(positions=(snapshot,)),
+        account_snapshot=SimpleNamespace(positions=(snapshot,), sequence=0),
     )
     provider._cached_context = context
     result = await provider._with_execution_book(

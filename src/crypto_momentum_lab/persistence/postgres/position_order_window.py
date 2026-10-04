@@ -4,7 +4,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 
 import structlog
 from sqlalchemy import and_, func, or_, select
@@ -95,36 +94,17 @@ _TERMINAL_ORDER_STATES = frozenset(
 )
 
 
-def _lookup_zero_at(
-    zero_crossing_times: Mapping[Any, datetime] | None,
-    symbol: str,
-    position_side: str | None = None,
-) -> datetime | None:
-    if not zero_crossing_times:
-        return None
-    sym = symbol.strip().upper()
-    pos_side = (position_side or "BOTH").strip().upper()
-    if (sym, pos_side) in zero_crossing_times:
-        return zero_crossing_times[(sym, pos_side)]
-    val = zero_crossing_times.get(sym)
-    if isinstance(val, datetime):
-        return val
-    return None
-
-
 def _is_pre_zero_order(
-    row: ExchangeOrderRow | object,
+    row: ExchangeOrderRow,
     zero_at: datetime | None,
 ) -> bool:
     if zero_at is None:
         return False
-    state = getattr(row, "state", None)
-    is_terminal = state in _TERMINAL_ORDER_STATES
-    created_at = getattr(row, "created_at", None)
-    updated_at = getattr(row, "updated_at", created_at) or created_at
-    if created_at is None or updated_at is None:
-        return False
-    return bool(created_at < zero_at and updated_at < zero_at and is_terminal)
+    return (
+        row.created_at < zero_at
+        and row.updated_at < zero_at
+        and row.state in _TERMINAL_ORDER_STATES
+    )
 
 
 async def _load_order_anchor_events(
@@ -133,7 +113,7 @@ async def _load_order_anchor_events(
     run_id: str,
     active_symbols: Sequence[str],
     lookback_start: datetime,
-    zero_crossing_times: Mapping[Any, datetime] | None = None,
+    zero_crossing_times: Mapping[tuple[str, str], datetime],
 ) -> tuple[tuple[_OrderAnchorEvent, ...], Mapping[str, datetime]]:
     rows = (
         await session.scalars(
@@ -150,11 +130,11 @@ async def _load_order_anchor_events(
     latest_entry_times: dict[str, datetime] = {}
     for row in rows:
         symbol_key = row.symbol.strip().upper()
-        pos_side = getattr(row, "position_side", None) or "BOTH"
-        zero_at = _lookup_zero_at(zero_crossing_times, symbol_key, pos_side)
+        pos_side = row.position_side.strip().upper()
+        zero_at = zero_crossing_times.get((symbol_key, pos_side))
         if _is_pre_zero_order(row, zero_at):
             continue
-        executed = row.executed_quantity or Decimal("0")
+        executed = row.executed_quantity
         if row.reduce_only:
             quantity = executed
             if quantity <= 0 and row.state == ExchangeOrderState.FILLED.value:
@@ -229,7 +209,7 @@ async def load_position_orders_bounded(
         for sym, pos_side, zero_at in zero_rows:
             if zero_at is not None:
                 zero_crossing_times[
-                    (sym.strip().upper(), (pos_side or "BOTH").strip().upper())
+                    (sym.strip().upper(), pos_side.strip().upper())
                 ] = zero_at
 
     events, latest_entry_times = await _load_order_anchor_events(
@@ -279,8 +259,8 @@ async def load_position_orders_bounded(
     row_list: list[ExchangeOrderRow] = []
     for row in rows:
         sym = row.symbol.strip().upper()
-        pos_side = getattr(row, "position_side", None) or "BOTH"
-        zero_at = _lookup_zero_at(zero_crossing_times, sym, pos_side)
+        pos_side = row.position_side.strip().upper()
+        zero_at = zero_crossing_times.get((sym, pos_side))
         if _is_pre_zero_order(row, zero_at):
             continue
         row_list.append(row)
@@ -319,8 +299,8 @@ async def load_position_orders_bounded(
             ).all()
             for extra_row in missing_entry_rows:
                 sym = extra_row.symbol.strip().upper()
-                pos_side = getattr(extra_row, "position_side", None) or "BOTH"
-                zero_at = _lookup_zero_at(zero_crossing_times, sym, pos_side)
+                pos_side = extra_row.position_side.strip().upper()
+                zero_at = zero_crossing_times.get((sym, pos_side))
                 if not _is_pre_zero_order(extra_row, zero_at):
                     row_list.append(extra_row)
                     loaded_client_ids.add(extra_row.client_order_id)

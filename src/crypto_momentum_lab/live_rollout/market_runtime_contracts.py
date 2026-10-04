@@ -9,32 +9,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy.models import (
-    StrategyCheckpoint,
-    StrategyDataRequirement,
-    StrategyDecision,
-)
-
-
-class LiveRuntimeStrategy(Protocol):
-    def required_data(self) -> StrategyDataRequirement | None: ...
-
-    def on_market_state(self, state: MarketState15s) -> StrategyDecision: ...
-
-    def checkpoint(
-        self,
-        *,
-        include_market_state_buffers: bool = True,
-    ) -> StrategyCheckpoint: ...
-
-    def warm_market_state(self, state: MarketState15s) -> None: ...
-
-    def clear_market_state_buffers(self) -> None: ...
-
-    def reset_symbol(self, symbol: str) -> None: ...
 
 
 class LiveMarketStateContinuityError(RuntimeError):

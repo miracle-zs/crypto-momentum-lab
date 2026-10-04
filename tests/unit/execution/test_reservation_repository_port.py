@@ -1,3 +1,5 @@
+from crypto_momentum_lab.domain.strategy import StrategySide
+
 """Awaited reservation recovery and identity failure blocking."""
 
 from dataclasses import replace
@@ -67,14 +69,15 @@ async def test_identity_lookup_failure_blocks_before_save_or_outbox(reservation)
         request_id="request-1",
         scope=scope,
         strategy_name="strategy",
-        strategy_version="1",
         run_id="run",
         decision_ref="decision",
         expected_view_token="*",
         action=TradeCommandType.EXIT,
         requested_quantity=Decimal("1"),
         target_batch_ids=("batch-1",),
+        batch_quantities={"batch-1": Decimal("1")},
         created_at=NOW,
+        side=StrategySide.LONG,
     )
     result = await book.act(request)
     assert isinstance(result, Blocked)
@@ -86,7 +89,9 @@ async def test_identity_lookup_failure_blocks_before_save_or_outbox(reservation)
 
 def test_candidate_lifecycle_preserves_live_repository(reservation) -> None:
     repo = InMemoryPositionReservationRepository()
-    repo.save_reservation(reservation)
+    repo.save_reservations(
+        (reservation,), batch_quantities={reservation.batch_id: Decimal("2")}
+    )
     coordinator = ExecutionCoordinator(repository=repo)
     candidate = coordinator.copy_for_transaction()
     changed = replace(reservation, released_quantity=Decimal("1"))

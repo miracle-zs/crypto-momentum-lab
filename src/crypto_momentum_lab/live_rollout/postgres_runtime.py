@@ -59,10 +59,8 @@ from crypto_momentum_lab.live_rollout.order_identity import (
     _ms_to_dt,
 )
 from crypto_momentum_lab.live_rollout.position_batches import (
-    _average_fill_prices,
     _record_earliest_fill,
     _record_fill_quantity,
-    _record_fill_value,
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
     _classify_live_positions_detailed,
@@ -176,6 +174,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_loaded_at: datetime | None = None
         self._cache_epoch = 0
+        self._last_book_drift_scan_at: datetime | None = None
+        self._reported_stale_book_symbols: frozenset[str] | None = None
         self._cached_rules: dict[str, _SymbolTradingRules] = {}
         self._cached_rules_at: dict[str, datetime] = {}
         self._context_load_lock = asyncio.Lock()
@@ -198,13 +198,13 @@ class PostgresLiveContextProvider(LiveContextReader):
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
-        cache_epoch = getattr(self, "_cache_epoch", 0)
-        cached_context = getattr(self, "_cached_context", None)
-        cached_bucket_start = getattr(self, "_cached_bucket_start", None)
+        cache_epoch = self._cache_epoch
+        cached_context = self._cached_context
+        cached_bucket_start = self._cached_bucket_start
         if cached_context is not None and _context_cache_can_be_reused(
             state=state,
             cached_bucket_start=cached_bucket_start,
-            cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+            cached_loaded_at=self._cached_loaded_at,
             now=now,
             max_age_seconds=self._CONTEXT_CACHE_SECONDS,
             cached_context=cached_context,
@@ -214,13 +214,13 @@ class PostgresLiveContextProvider(LiveContextReader):
             current_context = self._cached_context
             current_bucket_start = self._cached_bucket_start
             if (
-                getattr(self, "_cache_epoch", 0) == cache_epoch
+                self._cache_epoch == cache_epoch
                 and current_context is not None
                 and current_bucket_start is not None
                 and _context_cache_can_be_reused(
                     state=state,
                     cached_bucket_start=current_bucket_start,
-                    cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                    cached_loaded_at=self._cached_loaded_at,
                     now=now,
                     max_age_seconds=self._CONTEXT_CACHE_SECONDS,
                     cached_context=current_context,
@@ -236,18 +236,18 @@ class PostgresLiveContextProvider(LiveContextReader):
                     state,
                 )
 
-        async with self._context_load_guard():
+        async with self._context_load_lock:
             # Another live lane may have refreshed the cache while this call
             # waited for the single-flight lock. Never issue the full account
             # query set when a newer snapshot is already available.
             now = datetime.now(tz=UTC)
-            cache_epoch = getattr(self, "_cache_epoch", 0)
-            cached_context = getattr(self, "_cached_context", None)
-            cached_bucket_start = getattr(self, "_cached_bucket_start", None)
+            cache_epoch = self._cache_epoch
+            cached_context = self._cached_context
+            cached_bucket_start = self._cached_bucket_start
             if cached_context is not None and _context_cache_can_be_reused(
                 state=state,
                 cached_bucket_start=cached_bucket_start,
-                cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                cached_loaded_at=self._cached_loaded_at,
                 now=now,
                 max_age_seconds=self._CONTEXT_CACHE_SECONDS,
                 cached_context=cached_context,
@@ -257,13 +257,13 @@ class PostgresLiveContextProvider(LiveContextReader):
                 current_context = self._cached_context
                 current_bucket_start = self._cached_bucket_start
                 if (
-                    getattr(self, "_cache_epoch", 0) == cache_epoch
+                    self._cache_epoch == cache_epoch
                     and current_context is not None
                     and current_bucket_start is not None
                     and _context_cache_can_be_reused(
                         state=state,
                         cached_bucket_start=current_bucket_start,
-                        cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                        cached_loaded_at=self._cached_loaded_at,
                         now=now,
                         max_age_seconds=self._CONTEXT_CACHE_SECONDS,
                         cached_context=current_context,
@@ -294,7 +294,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         context: LiveDaemonRuntimeContext,
         state: MarketState15s,
     ) -> LiveDaemonRuntimeContext:
-        book: PositionContextBook | None = getattr(self, "_execution_book", None)
+        book: PositionContextBook | None = self._execution_book
         if book is None:
             return context
         if context.open_position_symbols is None:
@@ -305,13 +305,12 @@ class PostgresLiveContextProvider(LiveContextReader):
             # every historical Book scope at each market cut can replay hundreds
             # of journals even though none can represent current exposure.
             return replace(context, managed_positions=())
-        cached_bucket_end = getattr(self, "_cached_book_bucket_end", None)
-        cached_unresolved = getattr(self, "_cached_book_unresolved", None)
-        cached_result = getattr(self, "_cached_book_result", None)
+        cached_bucket_end = self._cached_book_bucket_end
+        cached_unresolved = self._cached_book_unresolved
+        cached_result = self._cached_book_result
         if (
             cached_result is not None
-            and getattr(book, "context_revision", None) is not None
-            and getattr(self, "_cached_book_revision", None) == book.context_revision
+            and self._cached_book_revision == book.context_revision
             and cached_bucket_end == state.bucket_end
             and cached_unresolved == context.unresolved_orders
         ):
@@ -332,7 +331,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         # market decision. Reading an earlier cut hides fills already visible
         # in the current snapshot and falsely triggers repeated self-healing.
         # LiveDecisionFactSource still reads its exact market cut separately.
-        book_revision = getattr(book, "context_revision", None)
+        book_revision = book.context_revision
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
@@ -431,7 +430,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             pending,
             unmanaged,
         )
-        cached_context = getattr(self, "_cached_context", None)
+        cached_context = self._cached_context
         if cached_context is not None and self.is_current(context):
             # Debounce actual Book uncertainty, not the discarded legacy
             # classification. Account updates still invalidate this cache.
@@ -447,7 +446,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             pending_position_symbols=pending,
             unmanaged_position_symbols=unmanaged,
         )
-        request_repair = getattr(self, "_request_position_repair", None)
+        request_repair = self._request_position_repair
         if request_repair is not None:
             request_repair(result)
         return result
@@ -467,7 +466,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         if context.open_position_symbols is None:
             return
         now = datetime.now(tz=UTC)
-        last_scan = getattr(self, "_last_book_drift_scan_at", None)
+        last_scan = self._last_book_drift_scan_at
         if (
             last_scan is not None
             and (now - last_scan).total_seconds() < _BOOK_DRIFT_SCAN_INTERVAL_SECONDS
@@ -486,7 +485,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             or (view.reconciliation_gap is not None and view.reconciliation_gap != 0)
         )
         stale_book_symbols = book_position_symbols - context.open_position_symbols
-        if stale_book_symbols != getattr(self, "_reported_stale_book_symbols", None):
+        if stale_book_symbols != self._reported_stale_book_symbols:
             self._reported_stale_book_symbols = stale_book_symbols
             if stale_book_symbols:
                 log.warning(
@@ -495,13 +494,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                     count=len(stale_book_symbols),
                     sample=sorted(stale_book_symbols)[:5],
                 )
-
-    def _context_load_guard(self) -> asyncio.Lock:
-        lock = getattr(self, "_context_load_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._context_load_lock = lock
-        return lock
 
     async def _load_context(
         self,
@@ -528,17 +520,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             # loading. Fall through and reload the full account/risk context;
             # returning the captured context here could make an entry decision
             # from stale positions or gate state.
-        cache_epoch = getattr(self, "_cache_epoch", 0)
-        realtime_account_snapshot = getattr(
-            self,
-            "_realtime_account_snapshot",
-            None,
-        )
-        realtime_account_state = getattr(
-            self,
-            "_realtime_account_state",
-            None,
-        )
+        cache_epoch = self._cache_epoch
+        realtime_account_snapshot = self._realtime_account_snapshot
+        realtime_account_state = self._realtime_account_state
         risk_config_task = asyncio.create_task(
             _latest_risk_config(
                 self._sessions,
@@ -650,7 +634,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             unresolved_orders=unresolved,
             account_snapshot=realtime_account_snapshot,
             account_snapshot_version=(
-                getattr(self, "_realtime_account_sequence", 0)
+                self._realtime_account_sequence
                 if realtime_account_snapshot is not None
                 else None
             ),
@@ -666,18 +650,23 @@ class PostgresLiveContextProvider(LiveContextReader):
             self._cached_loaded_at = now
         return context
 
+    @property
+    def generation(self) -> int:
+        """One cache revision for prefetching and account-fact invalidation."""
+        return self._cache_epoch
+
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
         """Return whether a context still matches the live provider inputs."""
-        context_epoch = getattr(context, "context_epoch", None)
-        current_epoch = getattr(self, "_cache_epoch", 0)
+        context_epoch = context.context_epoch
+        current_epoch = self._cache_epoch
         if context_epoch is not None and context_epoch != current_epoch:
             return False
-        realtime_seq = getattr(self, "_realtime_account_sequence", 0)
-        snapshot_version = getattr(context, "account_snapshot_version", None)
+        realtime_seq = self._realtime_account_sequence
+        snapshot_version = context.account_snapshot_version
         if snapshot_version is not None:
             return bool(snapshot_version == realtime_seq)
-        if getattr(context, "account_snapshot", None) is not None:
-            return getattr(context.account_snapshot, "sequence", 0) == realtime_seq
+        if context.account_snapshot is not None:
+            return context.account_snapshot.sequence == realtime_seq
         if realtime_seq > 0:
             return False
         return True
@@ -736,7 +725,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         can invalidate this provider several times while a delayed market
         state is still waiting to be evaluated.
         """
-        self._cache_epoch = getattr(self, "_cache_epoch", 0) + 1
+        self._cache_epoch = self._cache_epoch + 1
         self._cached_bucket_start = None
         self._cached_context = None
         self._cached_loaded_at = None
@@ -756,12 +745,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     @property
     def cached_context(self) -> LiveDaemonRuntimeContext | None:
         """Return the latest cached runtime context if available."""
-        return getattr(self, "_cached_context", None)
-
-    def invalidate_trading_rules(self) -> None:
-        """Force the next symbol-rule lookup to reload market metadata."""
-        self._cached_rules.clear()
-        self._cached_rules_at.clear()
+        return self._cached_context
 
     def is_symbol_rules_warmed(self, symbol: str) -> bool:
         """Return whether symbol trading rules are already cached."""
@@ -776,9 +760,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         missing = [s for s in symbols if s not in self._cached_rules]
         if not missing:
             return
-        market_sessions = getattr(self, "_market_sessions", None)
-        if market_sessions is None:
-            market_sessions = self._sessions
+        market_sessions = self._market_sessions
         try:
             loaded_rules = await _load_trading_rules(market_sessions, set(missing))
             for symbol, rules in loaded_rules.items():
@@ -790,13 +772,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                 error_type=type(error).__name__,
                 symbol_count=len(missing),
             )
-
-    def _rules_load_guard(self) -> asyncio.Lock:
-        lock = getattr(self, "_rules_load_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._rules_load_lock = lock
-        return lock
 
     async def _load_symbol_rules(
         self,
@@ -812,7 +787,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         ):
             return cached
 
-        async with self._rules_load_guard():
+        async with self._rules_load_lock:
             # A different lane may have loaded this symbol while this call
             # waited for the rules lock.
             cached = self._cached_rules.get(symbol)
@@ -824,10 +799,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             ):
                 return cached
 
-            tasks = getattr(self, "_rules_load_tasks", None)
-            if tasks is None:
-                tasks = {}
-                self._rules_load_tasks = tasks
+            tasks = self._rules_load_tasks
             task = tasks.get(symbol)
             if task is None:
                 task = asyncio.create_task(
@@ -841,9 +813,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             return await asyncio.shield(task)
         finally:
             if task.done():
-                async with self._rules_load_guard():
-                    tasks = getattr(self, "_rules_load_tasks", None)
-                    if tasks is not None and tasks.get(symbol) is task:
+                async with self._rules_load_lock:
+                    tasks = self._rules_load_tasks
+                    if tasks.get(symbol) is task:
                         tasks.pop(symbol, None)
 
     async def _load_symbol_rules_uncached(
@@ -851,9 +823,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         symbol: str,
         now: datetime,
     ) -> _SymbolTradingRules:
-        market_sessions = getattr(self, "_market_sessions", None)
-        if market_sessions is None:
-            market_sessions = self._sessions
+        market_sessions = self._market_sessions
         loaded_rules = await _load_trading_rules(market_sessions, {symbol})
         symbol_rules = loaded_rules[symbol]
         self._cached_rules[symbol] = symbol_rules
@@ -950,11 +920,10 @@ class PostgresLiveContextProvider(LiveContextReader):
                     ).all()
                 )
             active = [row for row in rows if row.position_amt != 0]
-            if getattr(self, "_execution_book", None) is not None:
+            if self._execution_book is not None:
                 return _book_owned_account_exposure(active, process_at)
             orders: list[ExchangeOrderRow] = []
             entry_fill_times: dict[str, datetime] = {}
-            entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
             account_fill_quantities: dict[str, Decimal] = {}
             order_identity_events: Mapping[
                 str,
@@ -992,12 +961,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                         account_fill.order_id,
                         account_fill.trade_at,
                     )
-                    _record_fill_value(
-                        entry_fill_values,
-                        account_fill.order_id,
-                        account_fill.quantity,
-                        account_fill.price,
-                    )
                     _record_fill_quantity(
                         account_fill_quantities,
                         account_fill.order_id,
@@ -1019,18 +982,12 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.client_order_id,
                             exchange_fill.filled_at,
                         )
-                        _record_fill_value(
-                            entry_fill_values,
-                            exchange_fill.client_order_id,
-                            exchange_fill.quantity,
-                            exchange_fill.price,
-                        )
         active = [row for row in rows if row.position_amt != 0]
         exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
         if active or (
             reconciliation is not None
-            and getattr(reconciliation, "status", None) == "ready"
+            and reconciliation.status == "ready"
         ):
             async with self._sessions() as cursor_session:
                 fill_cursors = (
@@ -1054,13 +1011,14 @@ class PostgresLiveContextProvider(LiveContextReader):
             [order_observation(row) for row in orders],
             unresolved,
             entry_fill_times=entry_fill_times,
-            entry_fill_prices=_average_fill_prices(entry_fill_values),
             exit_batch_ids=exit_batch_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
-            build_managed_positions=getattr(self, "_execution_book", None) is None,
+            build_managed_positions=self._execution_book is None,
+            environment="live",
+            account_label=self._account_label,
         )
         return (
             process_at,
@@ -1096,11 +1054,10 @@ class PostgresLiveContextProvider(LiveContextReader):
         """
         rows: list[AccountPositionSnapshot] = list(snapshot.positions)
         active = [row for row in rows if row.position_amt != 0]
-        if getattr(self, "_execution_book", None) is not None:
+        if self._execution_book is not None:
             return _book_owned_account_exposure(active, snapshot.config.observed_at)
         orders: list[ExchangeOrderRow] = []
         entry_fill_times: dict[str, datetime] = {}
-        entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
         account_fill_quantities: dict[str, Decimal] = {}
         order_identity_events: Mapping[
             str,
@@ -1138,12 +1095,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                         account_fill.order_id,
                         account_fill.trade_at,
                     )
-                    _record_fill_value(
-                        entry_fill_values,
-                        account_fill.order_id,
-                        account_fill.quantity,
-                        account_fill.price,
-                    )
                     _record_fill_quantity(
                         account_fill_quantities,
                         account_fill.order_id,
@@ -1165,12 +1116,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.client_order_id,
                             exchange_fill.filled_at,
                         )
-                        _record_fill_value(
-                            entry_fill_values,
-                            exchange_fill.client_order_id,
-                            exchange_fill.quantity,
-                            exchange_fill.price,
-                        )
         exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
         async with self._sessions() as session:
@@ -1186,7 +1131,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             )
             if (
                 reconciliation is not None
-                and getattr(reconciliation, "status", None) == "ready"
+                and reconciliation.status == "ready"
             ):
                 fill_cursors = (
                     await session.scalars(
@@ -1210,13 +1155,14 @@ class PostgresLiveContextProvider(LiveContextReader):
             [order_observation(row) for row in orders],
             unresolved,
             entry_fill_times=entry_fill_times,
-            entry_fill_prices=_average_fill_prices(entry_fill_values),
             exit_batch_ids=exit_batch_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
-            build_managed_positions=getattr(self, "_execution_book", None) is None,
+            build_managed_positions=self._execution_book is None,
+            environment="live",
+            account_label=self._account_label,
         )
         return (
             snapshot.config.observed_at,
@@ -1266,13 +1212,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         return _resolve_strategy_live_state(control_state, state)
 
 
-async def _load_exit_batch_ids(
-    sessions: async_sessionmaker[AsyncSession],
-    orders: Sequence[ExchangeOrderRow],
-) -> dict[str, str]:
-    return await _load_exit_batch_bindings(sessions, orders)
-
-
 async def _load_exit_batch_bindings(
     sessions: async_sessionmaker[AsyncSession],
     orders: Sequence[ExchangeOrderRow],
@@ -1314,22 +1253,22 @@ def _coverage_evidence_from_sources(
     load_start: datetime | None = None
     checked_through: datetime | None = None
     if fill_cursor is not None:
-        from_id = getattr(fill_cursor, "from_id", None)
-        start_time_ms = getattr(fill_cursor, "start_time_ms", None)
+        from_id = fill_cursor.from_id
+        start_time_ms = fill_cursor.start_time_ms
         if from_id is not None:
             cursor_id = f"fill_from_id:{from_id}"
         elif start_time_ms is not None:
             cursor_id = f"fill_start_ms:{start_time_ms}"
         load_start = _ms_to_dt(start_time_ms)
-        checked_through = getattr(fill_cursor, "last_checked_at", None)
+        checked_through = fill_cursor.last_checked_at
     checkpoint_id: str | None = None
     checkpoint_cut: datetime | None = None
     if (
         reconciliation is not None
-        and getattr(reconciliation, "status", None) == "ready"
+        and reconciliation.status == "ready"
     ):
-        checkpoint_id = getattr(reconciliation, "reconciliation_id", None)
-        checkpoint_cut = getattr(reconciliation, "observed_at", None)
+        checkpoint_id = reconciliation.reconciliation_id
+        checkpoint_cut = reconciliation.observed_at
     return CoverageEvidence(
         fill_cursor_id=cursor_id,
         fill_load_start=load_start,

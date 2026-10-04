@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -380,13 +381,14 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
             return events()
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=coordinator,
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(
             for_symbols=lambda _symbols: (quote,) if with_quote else ()
         ),
         is_transient_error=lambda _error: False,
-        on_account_snapshot=lambda event: snapshots.append(event.event_id),
+        on_account_snapshot=AsyncMock(side_effect=lambda event: snapshots.append(event.event_id)),
         on_exit_failure=lambda _symbol, _failure: pytest.fail(
             "queue admission is not an exit outcome"
         ),
@@ -471,13 +473,14 @@ async def test_context_preparation_does_not_block_account_facts(with_quote):
         )
 
     runtime = LiveAccountEventRuntime(
+        run_id="run-1",
         daemon=coordinator,
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(
             for_symbols=lambda _symbols: (quote,) if with_quote else ()
         ),
         is_transient_error=lambda _error: False,
-        on_account_snapshot=snapshot,
+        on_account_snapshot=AsyncMock(side_effect=snapshot),
     )
     try:
         await asyncio.wait_for(runtime.run(Source()), timeout=1)

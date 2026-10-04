@@ -124,8 +124,6 @@ class LiveRuntimeSupervisor:
         await self._raise_if_unexpected_completion()
         try:
             return await self._tasks.market
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.exception(
                 "live_runtime_market_task_failed",
@@ -202,8 +200,6 @@ class LiveRuntimeSupervisor:
                 phase="task_join",
                 timeout_seconds=self._shutdown_timeout_seconds,
             )
-        except asyncio.CancelledError:
-            raise
         else:
             log.info(
                 "live_runtime_shutdown_completed",
@@ -239,8 +235,6 @@ class LiveRuntimeSupervisor:
                 phase=label,
                 timeout_seconds=round(timeout_seconds, 3),
             )
-        except asyncio.CancelledError:
-            raise
         except Exception:
             log.exception("live_shutdown_phase_failed", phase=label)
         else:

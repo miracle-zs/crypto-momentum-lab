@@ -15,7 +15,6 @@ from crypto_momentum_lab.domain.account.models import (
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
-    AccountFacts,
     AccountFactStreamScope,
     AccountFillLoadProvenance,
     BatchReductionAttribution,
@@ -34,12 +33,12 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 from crypto_momentum_lab.domain.execution.projection_codec import _datetime, _decimal
 from crypto_momentum_lab.domain.execution.recovery_models import (
     POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION,
+    AccountFacts,
     PositionRecoveryCheckpoint,
     RecoverySchemaError,
 )
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     encode_position_snapshot,
-    snapshot_anchor_id,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
 
@@ -50,14 +49,6 @@ class PositionRecoveryCodec:
     """Encode and decode durable facts without permissive field fallbacks."""
 
     encode_scope = staticmethod(projection_codec.encode_scope)
-
-    @classmethod
-    def stable_snapshot_anchor_id(
-        cls,
-        snapshot: AccountPositionSnapshot,
-    ) -> str:
-        """Return a deterministic identity suitable for a zero-snapshot anchor."""
-        return snapshot_anchor_id(cls.encode_snapshot(snapshot))
 
     @classmethod
     def decode_scope(cls, value: object) -> AccountFactStreamScope:

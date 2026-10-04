@@ -26,7 +26,6 @@ from crypto_momentum_lab.persistence.postgres.recovery_relevance import (
 class FactIntegritySummary:
     gaps: int | None
     observed_at: datetime | None
-    verified_position_count: int
 
 
 async def load_fact_integrity(
@@ -155,6 +154,5 @@ async def load_fact_integrity(
         result[account] = FactIntegritySummary(
             invalid if invalid else None if unknown else 0,
             min(confirmed) if confirmed else None,
-            len(confirmed),
         )
     return result

@@ -229,8 +229,6 @@ class _ResponseCache:
                 self._entries[key] = (time.monotonic() + ttl, value)
                 self._refresh_errors.pop(key, None)
                 self._prune(time.monotonic())
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             self._refresh_errors[key] = (time.monotonic(), str(exc))
             logger.warning(

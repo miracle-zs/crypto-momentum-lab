@@ -26,13 +26,20 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
 
 
 def test_is_context_current_rejects_missing_realtime_snapshot_when_active() -> None:
-    provider = PostgresLiveContextProvider.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._cache_epoch = 1
     provider._realtime_account_sequence = 5
 
     now = datetime.now(UTC)
     context_without_snapshot = SimpleNamespace(
         context_epoch=1,
+        account_snapshot_version=None,
         account_snapshot=None,
         account_observed_at=now,
     )
@@ -48,12 +55,19 @@ def test_is_context_current_rejects_missing_realtime_snapshot_when_active() -> N
 
 
 def test_is_context_current_rejects_mismatched_cache_epoch() -> None:
-    provider = PostgresLiveContextProvider.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._cache_epoch = 2
     provider._realtime_account_sequence = 0
 
     stale_context = SimpleNamespace(
         context_epoch=1,
+        account_snapshot_version=None,
         account_snapshot=None,
     )
 
@@ -66,7 +80,13 @@ def test_is_context_current_rejects_mismatched_cache_epoch() -> None:
 
 
 def test_is_context_current_accepts_matching_realtime_snapshot() -> None:
-    provider = PostgresLiveContextProvider.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._cache_epoch = 2
     provider._realtime_account_sequence = 10
 
@@ -88,6 +108,7 @@ def test_is_context_current_accepts_matching_realtime_snapshot() -> None:
 def test_build_position_batches_primary_ledger() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     position = SimpleNamespace(
+        observed_at=None,
         environment="live",
         account_label="primary",
         symbol="BTCUSDT",
@@ -117,9 +138,9 @@ def test_build_position_batches_primary_ledger() -> None:
         side=StrategySide.LONG,
         position_side=FuturesPositionSide.BOTH,
         matching_orders=[order],  # type: ignore[arg-type]
-        fill_times={"e_1": t0},
-        fill_prices={"e_1": Decimal("60000")},
         account_fills=(_trade(order),),
+        environment="live",
+        account_label="primary",
     )
     assert len(batches) == 1
     assert batches[0].quantity == Decimal("10")
@@ -132,6 +153,7 @@ def test_build_position_batches_short_position() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     # Short position: position_amt is negative in exchange snapshot
     position = SimpleNamespace(
+        observed_at=None,
         environment="live",
         account_label="primary",
         symbol="BTCUSDT",
@@ -161,9 +183,9 @@ def test_build_position_batches_short_position() -> None:
         side=StrategySide.SHORT,
         position_side=FuturesPositionSide.BOTH,
         matching_orders=[order],  # type: ignore[arg-type]
-        fill_times={"e_short_1": t0},
-        fill_prices={"e_short_1": Decimal("60000")},
         account_fills=(_trade(order),),
+        environment="live",
+        account_label="primary",
     )
     assert len(batches) == 1
     assert batches[0].quantity == Decimal("10")
@@ -176,6 +198,7 @@ def test_build_position_batches_preserves_recovery_order_fields() -> None:
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     t1 = datetime(2026, 9, 20, 10, 5, tzinfo=UTC)
     position = SimpleNamespace(
+        observed_at=None,
         environment="live",
         account_label="primary",
         symbol="BTCUSDT",
@@ -235,9 +258,9 @@ def test_build_position_batches_preserves_recovery_order_fields() -> None:
         side=StrategySide.LONG,
         position_side=FuturesPositionSide.BOTH,
         matching_orders=[entry_order, exit_limit_order],  # type: ignore[arg-type]
-        fill_times={"e_entry": t0},
-        fill_prices={"e_entry": Decimal("60000")},
         account_fills=(_trade(entry_order),),
+        environment="live",
+        account_label="primary",
     )
     assert len(batches) == 1
     batch = batches[0]
@@ -257,6 +280,7 @@ def test_build_position_batches_discards_stale_fills() -> None:
     t_entry = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
     position = SimpleNamespace(
+        observed_at=None,
         environment="live",
         account_label="account-3",
         symbol="CELRUSDT",
@@ -317,9 +341,9 @@ def test_build_position_batches_discards_stale_fills() -> None:
         side=StrategySide.LONG,
         position_side=FuturesPositionSide.BOTH,
         matching_orders=[entry_order],  # type: ignore[arg-type]
-        fill_times={"e_celr_entry": t_entry},
-        fill_prices={"e_celr_entry": Decimal("0.004386")},
         account_fills=[stale_fill, current_fill],
+        environment="live",
+        account_label="account-3",
     )
     assert len(batches) == 1
     assert batches[0].quantity == Decimal("22799")

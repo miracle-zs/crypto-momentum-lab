@@ -115,8 +115,6 @@ class LiveContextPrefetcher:
                     continue
                 try:
                     context = await pending.task
-                except asyncio.CancelledError:
-                    raise
                 except Exception as error:
                     yield PrefetchedContext(
                         state=pending.state,

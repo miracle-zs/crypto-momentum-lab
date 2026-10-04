@@ -33,11 +33,6 @@ def _batch(state, sequence: int) -> CollectionBatch:
     )
 
 
-class _DummyUsage:
-    def __init__(self, free: int) -> None:
-        self.free = free
-
-
 def test_capacity_guard_cached_snapshot_and_incremental_writes(tmp_path: Path) -> None:
     guard = CapacityGuard(
         root=tmp_path,
@@ -45,7 +40,7 @@ def test_capacity_guard_cached_snapshot_and_incremental_writes(tmp_path: Path) -
         hard_limit_bytes=2000,
         global_warning_free_bytes=500,
         global_pause_free_bytes=100,
-        disk_usage_fn=lambda p: _DummyUsage(free=10000),
+        disk_free_bytes_fn=lambda p: 10000,
         max_snapshot_age_seconds=10.0,
     )
     # First snapshot triggers scan
@@ -77,7 +72,7 @@ def test_capacity_guard_snapshot_expiry_degradation(tmp_path: Path) -> None:
         hard_limit_bytes=2000,
         global_warning_free_bytes=500,
         global_pause_free_bytes=100,
-        disk_usage_fn=lambda p: _DummyUsage(free=10000),
+        disk_free_bytes_fn=lambda p: 10000,
         max_snapshot_age_seconds=1.0,
     )
     guard.scan()
@@ -155,7 +150,7 @@ def test_capacity_guard_concurrent_writes_during_scan_do_not_double_count(tmp_pa
         hard_limit_bytes=20000,
         global_warning_free_bytes=500,
         global_pause_free_bytes=100,
-        disk_usage_fn=lambda p: _DummyUsage(free=100000),
+        disk_free_bytes_fn=lambda p: 100000,
     )
     guard.scan()
 
@@ -184,11 +179,11 @@ def test_capacity_guard_concurrent_writes_during_scan_do_not_double_count(tmp_pa
 
 
 def test_capacity_guard_writes_after_scan_before_snapshot_commit_not_zeroed(tmp_path: Path) -> None:
-    def fake_disk_usage(p: Path) -> _DummyUsage:
+    def fake_disk_usage(p: Path) -> int:
         # A file of 350 bytes is written and recorded after directory traversal before snapshot commit
         (tmp_path / "post_scan.dat").write_bytes(b"x" * 350)
         guard.record_written_bytes(350)
-        return _DummyUsage(free=100000)
+        return 100000
 
     guard = CapacityGuard(
         root=tmp_path,
@@ -196,7 +191,7 @@ def test_capacity_guard_writes_after_scan_before_snapshot_commit_not_zeroed(tmp_
         hard_limit_bytes=20000,
         global_warning_free_bytes=500,
         global_pause_free_bytes=100,
-        disk_usage_fn=fake_disk_usage,
+        disk_free_bytes_fn=fake_disk_usage,
     )
 
     snapshot = guard.scan()
@@ -216,7 +211,7 @@ def test_capacity_guard_writes_between_traversal_return_and_lock_acquisition_not
         hard_limit_bytes=20000,
         global_warning_free_bytes=500,
         global_pause_free_bytes=100,
-        disk_usage_fn=lambda p: _DummyUsage(free=100000),
+        disk_free_bytes_fn=lambda p: 100000,
     )
     guard.scan()
 

@@ -196,19 +196,16 @@ class PostgresOperationalRetentionRepository:
             )
             effective_before = gating.effective_cutoff
 
-        try:
-            if await runtime_state_table_is_partitioned(self._session_factory):
-                observed_at = datetime.now(UTC)
-                await ensure_runtime_state_partitions(
-                    self._session_factory,
-                    through=observed_at + RUNTIME_STATE_PARTITION_LOOKAHEAD,
-                )
-                return await drop_expired_runtime_state_partitions(
-                    self._session_factory,
-                    before=effective_before,
-                )
-        except Exception:
-            _logger.exception("Failed partition maintenance for runtime market states; falling back")
+        if await runtime_state_table_is_partitioned(self._session_factory):
+            observed_at = datetime.now(UTC)
+            await ensure_runtime_state_partitions(
+                self._session_factory,
+                through=observed_at + RUNTIME_STATE_PARTITION_LOOKAHEAD,
+            )
+            return await drop_expired_runtime_state_partitions(
+                self._session_factory,
+                before=effective_before,
+            )
         return await self._delete_batch(
             "runtime_market_states_15s",
             "bucket_start",
@@ -226,8 +223,9 @@ class PostgresOperationalRetentionRepository:
         """Drop or delete strategy runtime events outside the retention window.
 
         Once the table is partitioned by day, whole partitions go away.  The
-        unpartitioned fallback is the small-batch delete used before the
-        cutover; keep it so a rolled-back deployment still ages out history.
+        Fresh databases start with ordinary tables until partition cutover;
+        these use small-batch deletion. Partition errors propagate to the
+        background retention loop instead of selecting another delete path.
         """
         effective_before = before
         if consumer_requirements:
@@ -237,19 +235,16 @@ class PostgresOperationalRetentionRepository:
             )
             effective_before = gating.effective_cutoff
 
-        try:
-            if await event_table_is_partitioned(self._session_factory):
-                observed_at = datetime.now(UTC)
-                await ensure_event_partitions(
-                    self._session_factory,
-                    through=observed_at + EVENT_PARTITION_LOOKAHEAD,
-                )
-                return await drop_expired_event_partitions(
-                    self._session_factory,
-                    before=effective_before,
-                )
-        except Exception:
-            _logger.exception("Failed partition maintenance for strategy runtime events; falling back")
+        if await event_table_is_partitioned(self._session_factory):
+            observed_at = datetime.now(UTC)
+            await ensure_event_partitions(
+                self._session_factory,
+                through=observed_at + EVENT_PARTITION_LOOKAHEAD,
+            )
+            return await drop_expired_event_partitions(
+                self._session_factory,
+                before=effective_before,
+            )
         return await self._delete_batch(
             "strategy_runtime_events",
             "occurred_at",

@@ -157,10 +157,6 @@ class ArchiveJournal:
     def last_materialized_symbol(self) -> str | None:
         return self._last_materialized_symbol
 
-    @property
-    def active_stream_id(self) -> str | None:
-        return self._active_stream_id
-
     def set_active_stream_id(self, stream_id: str | None) -> None:
         self._active_stream_id = stream_id
 

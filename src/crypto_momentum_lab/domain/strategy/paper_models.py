@@ -6,7 +6,6 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.operational.runtime_metadata import RuntimePlanMetadata
 from crypto_momentum_lab.domain.strategy.models import (
     OrderIntentCandidate,
     StrategyCheckpoint,
@@ -109,8 +108,6 @@ class PaperExitConfig:
     candle_grace_profit_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
-        if not isinstance(self.exit_mode, PaperExitMode):
-            object.__setattr__(self, "exit_mode", PaperExitMode(self.exit_mode))
         if self.max_holding_buckets <= 0:
             raise ValueError("max_holding_buckets must be positive")
         if self.state_interval_seconds <= 0:
@@ -243,7 +240,6 @@ class PaperTradingRunReport:
     fill_summary: dict[str, dict[str, FillSummaryValue]]
     portfolio_config: PaperExitConfig = field(default_factory=PaperExitConfig)
     paper_positions: tuple[PaperPosition, ...] = ()
-    runtime_plan: RuntimePlanMetadata | None = None
 
 
 def _is_aware(value: datetime) -> bool:

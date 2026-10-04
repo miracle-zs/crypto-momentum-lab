@@ -8,13 +8,10 @@ from crypto_momentum_lab.domain.universe.membership import (
 )
 from crypto_momentum_lab.domain.universe.models import (
     MarketCandidate,
-    TrackedMembership,
     UniverseSnapshot,
 )
 from crypto_momentum_lab.domain.universe.ports import (
     MonitoringObligationProvider,
-    NoMonitoringObligations,
-    NoUniverseSnapshotObserver,
     UniverseMarketData,
     UniverseRepository,
     UniverseSnapshotObserver,
@@ -39,8 +36,8 @@ class UniverseRefreshService:
         self._repository = repository
         self._config = config
         self._config_hash = config_hash
-        self._obligations = obligations or NoMonitoringObligations()
-        self._observer = observer or NoUniverseSnapshotObserver()
+        self._obligations = obligations
+        self._observer = observer
         self._daily_open_prefetcher = daily_open_prefetcher
 
     async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
@@ -98,17 +95,16 @@ class UniverseRefreshService:
             ranking_depth=self._config.ranking_depth,
             loser_target_count=self._config.loser_target_count,
         )
-        activated = True
-        memberships: tuple[TrackedMembership, ...] = ()
-        if activated:
-            forced = await self._obligations.forced_symbols()
-            memberships = tuple(
-                build_monitoring_memberships(
-                    ranking,
-                    forced_symbols=forced,
-                    extended_gainer_count=self._config.extended_gainer_count,
-                ).values()
-            )
+        forced = (
+            await self._obligations.forced_symbols()
+            if self._obligations is not None
+            else frozenset()
+        )
+        memberships = build_monitoring_memberships(
+            ranking,
+            forced_symbols=forced,
+            extended_gainer_count=self._config.extended_gainer_count,
+        ).values()
 
         snapshot = UniverseSnapshot(
             snapshot_id=uuid5(
@@ -118,11 +114,11 @@ class UniverseRefreshService:
             observed_at=observed_at,
             utc_day=utc_day,
             config_hash=self._config_hash,
-            activated=activated,
+            activated=True,
             ranking=ranking,
             memberships=tuple(sorted(memberships, key=lambda item: item.symbol)),
         )
         await self._repository.save_snapshot(snapshot)
-        if snapshot.activated:
+        if self._observer is not None:
             await self._observer.snapshot_updated(snapshot)
         return snapshot

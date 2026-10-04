@@ -196,7 +196,7 @@ class DashboardQueries:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stale_after_seconds: float = 120.0,
         paper_run_ids: frozenset[str] | None = None,
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
@@ -204,7 +204,7 @@ class DashboardQueries:
         research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
     ) -> None:
         self._session_factory = session_factory
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._stale_after_seconds = stale_after_seconds
         self._paper_run_ids = paper_run_ids
         self._live_cash_flow_adjustments = tuple(
@@ -372,29 +372,6 @@ class DashboardQueries:
             ],
         )
 
-    async def load_cash_flow_adjustments(
-        self,
-    ) -> tuple[LiveCashFlowAdjustment, ...]:
-        """Query authoritative cash flow corrections from postgres."""
-        async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(CashFlowCorrectionRow).order_by(
-                        CashFlowCorrectionRow.effective_at
-                    )
-                )
-            ).all()
-            if rows:
-                return tuple(
-                    LiveCashFlowAdjustment(
-                        account_label=r.account_label,
-                        effective_at=r.effective_at,
-                        amount=r.amount,
-                        cash_flow_type=r.cash_flow_type,
-                    )
-                    for r in rows
-                )
-            return self._live_cash_flow_adjustments
 
     async def account_performance(
         self,

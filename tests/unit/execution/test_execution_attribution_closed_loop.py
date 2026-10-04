@@ -1,3 +1,5 @@
+from crypto_momentum_lab.domain.strategy import StrategySide
+
 """Unit tests for Phase P2 Attribution and Execution Closed Loop per architecture RFC 2026-09-25.
 
 Validates:
@@ -35,16 +37,45 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocator,
     ExitPolicyMode,
     TradeCommand,
     TradeCommandType,
+    plan_exit_allocations,
 )
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.domain.strategy import EntryType
 
 
 def _dt(hour: int, minute: int) -> datetime:
     return datetime(2026, 9, 25, hour, minute, 0, tzinfo=UTC)
+
+
+def _exit_command(
+    view,
+    *,
+    command_id: str,
+    target_batch_ids: tuple[str, ...] | None = None,
+    requested_quantity: Decimal | None = None,
+    policy: ExitPolicyMode = ExitPolicyMode.TARGET_BATCHES_ONLY,
+) -> TradeCommand:
+    allocation = plan_exit_allocations(
+        view,
+        target_batch_ids=target_batch_ids,
+        requested_quantity=requested_quantity,
+        policy=policy,
+    )
+    assert view.active_episode is not None
+    return TradeCommand(
+        command_id=command_id,
+        position_key=view.key,
+        command_type=TradeCommandType.EXIT,
+        side=view.active_episode.side,
+        order_type=EntryType.MARKET,
+        requested_quantity=allocation.total_allocated_quantity,
+        reduce_only=True,
+        allocation_plan=allocation,
+        expected_projection_version=view.projection_version,
+        created_at=_dt(10, 30),
+    )
 
 
 def _setup_two_batch_book() -> tuple[PositionBook, PositionKey]:
@@ -132,8 +163,9 @@ def test_targeted_exit_allocates_exact_batch_not_fifo_first() -> None:
     batch_1, batch_2 = view.batches
 
     # Explicitly target batch 2 (quantity 2.0)
-    cmd = ExitAllocator.create_exit_command(
+    cmd = _exit_command(
         view,
+        command_id="targeted-exit",
         target_batch_ids=(batch_2.batch_id,),
         requested_quantity=Decimal("1.5"),
         policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
@@ -160,7 +192,7 @@ def test_transactional_reservation_prevents_concurrent_double_dipping() -> None:
     assert batch_1.quantity == Decimal("1.0")
 
     # Command A: reserve 0.8 of batch_1
-    cmd_a = ExitAllocator.create_exit_command(
+    cmd_a = _exit_command(
         view,
         command_id="cmd_a",
         target_batch_ids=(batch_1.batch_id,),
@@ -178,7 +210,7 @@ def test_transactional_reservation_prevents_concurrent_double_dipping() -> None:
     )
 
     # Command B: concurrent attempt to reserve 0.5 of batch_1 must fail!
-    cmd_b = ExitAllocator.create_exit_command(
+    cmd_b = _exit_command(
         view,
         command_id="cmd_b",
         target_batch_ids=(batch_1.batch_id,),
@@ -195,8 +227,9 @@ def test_cas_version_fencing_rejects_stale_command() -> None:
     view = book.get_view()
     coordinator = ExecutionCoordinator()
 
-    cmd = ExitAllocator.create_exit_command(
+    cmd = _exit_command(
         view,
+        command_id="stale-projection-exit",
         target_batch_ids=(view.batches[0].batch_id,),
         requested_quantity=Decimal("0.5"),
     )
@@ -258,7 +291,7 @@ def test_reservation_fill_reconciliation_and_release() -> None:
     coordinator = ExecutionCoordinator()
 
     batch_1 = view.batches[0]
-    cmd = ExitAllocator.create_exit_command(
+    cmd = _exit_command(
         view,
         command_id="cmd_order_123",
         target_batch_ids=(batch_1.batch_id,),
@@ -289,18 +322,95 @@ def test_known_batch_exit_can_reserve_with_degraded_view() -> None:
     book, key = _setup_two_batch_book()
     view = replace(book.get_view(), health_status=PositionHealthStatus.INCOMPLETE)
     batch = view.batches[0]
-    allocation = ExitAllocator.plan_exit(
-        view, target_batch_ids=(batch.batch_id,), requested_quantity=Decimal("1"),
-        policy=ExitPolicyMode.TARGET_BATCHES_ONLY, reason="timeout",
+    allocation = plan_exit_allocations(
+        view,
+        target_batch_ids=(batch.batch_id,),
+        requested_quantity=Decimal("1"),
+        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
+        reason="timeout",
     )
     command = TradeCommand(
-        command_id="exit-degraded", position_key=key,
-        command_type=TradeCommandType.EXIT, side=StrategySide.LONG,
-        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
-        reduce_only=True, allocation_plan=allocation,
+        command_id="exit-degraded",
+        position_key=key,
+        command_type=TradeCommandType.EXIT,
+        side=StrategySide.LONG,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("1"),
+        reduce_only=True,
+        allocation_plan=allocation,
         expected_projection_version=view.projection_version,
     )
     reservations = ExecutionCoordinator().reserve_exit(command, view)
     assert len(reservations) == 1
     assert reservations[0].batch_id == batch.batch_id
     assert reservations[0].reserved_quantity == Decimal("1")
+
+
+def test_multi_batch_reservation_failure_publishes_no_partial_state():
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    class FailingRepository(InMemoryPositionReservationRepository):
+        def save_reservations(self, reservations, **kwargs):
+            raise OSError("reservation commit failed")
+
+    position_book, key = _setup_two_batch_book()
+    view = position_book.get_view()
+    repository = FailingRepository()
+    coordinator = ExecutionCoordinator(repository=repository)
+    command = _exit_command(
+        view,
+        command_id="two-batch-exit",
+        policy=ExitPolicyMode.FULL_POSITION_CLOSE,
+    )
+    assert command is not None
+    assert len(command.allocation_plan.allocations) == 2
+    with pytest.raises(OSError, match="reservation commit failed"):
+        coordinator.reserve_exit(command, view)
+    assert coordinator.get_active_reservations(key) == ()
+    assert repository.load_active_reservations(key) == ()
+
+
+async def test_execution_book_preserves_planned_multi_batch_split(monkeypatch) -> None:
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        Accepted,
+        ExecutionBook,
+        ExecutionRequest,
+    )
+
+    position_book, key = _setup_two_batch_book()
+    view = position_book.get_view()
+    first, second = view.batches
+    book = ExecutionBook()
+    monkeypatch.setattr(book, "_ensure_book", lambda _key: position_book)
+    request = ExecutionRequest(
+        request_id="planned-split",
+        scope=ExecutionScope(
+            key.environment, key.account_label, key.symbol, key.position_side
+        ),
+        strategy_name="strategy",
+        run_id="run-1",
+        decision_ref="decision-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.EXIT,
+        requested_quantity=Decimal("1"),
+        target_batch_ids=(first.batch_id, second.batch_id),
+        batch_quantities={
+            first.batch_id: Decimal("0.2"),
+            second.batch_id: Decimal("0.8"),
+        },
+        exit_policy_mode=ExitPolicyMode.TARGET_BATCHES_ONLY,
+        created_at=_dt(10, 30),
+        side=StrategySide.LONG,
+    )
+    result = await book.act(request)
+    assert isinstance(result, Accepted)
+    assert {
+        r.batch_id: r.reserved_quantity for r in result.receipt.reservations
+    } == request.batch_quantities
+    assert {
+        a.batch_id: a.allocated_quantity
+        for a in result.receipt.command.allocation_plan.allocations
+    } == request.batch_quantities

@@ -48,6 +48,10 @@ class StrategyRuntimeState:
         if max_buffer_length <= 0:
             raise ValueError("max_buffer_length must be positive")
 
+        sequence = checkpoint.payload["signal_sequence"]
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("checkpoint signal_sequence must be a nonnegative integer")
+
         self.warmup = dict(checkpoint.warmup_buckets_by_symbol)
         self.cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self.last_processed = dict(checkpoint.last_processed_at_by_symbol)
@@ -62,7 +66,7 @@ class StrategyRuntimeState:
         else:
             self.buffers = {}
             self.warmup = {}
-        self.signal_sequence = _checkpoint_sequence(checkpoint.payload)
+        self.signal_sequence = sequence
 
     def append_market_state(
         self,
@@ -239,12 +243,3 @@ def evaluate_buffered_state[EventT](
         candidates=(candidate,),
         rejections=(),
     )
-
-
-def _checkpoint_sequence(payload: dict[str, JsonValue]) -> int:
-    value = payload.get("signal_sequence", 0)
-    try:
-        sequence = int(str(value))
-    except (TypeError, ValueError):
-        return 0
-    return max(sequence, 0)

@@ -43,8 +43,6 @@ class LiveHealthMonitor:
                     self._health.degraded()
                 else:
                     self._health.heartbeat()
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 log.exception("live_health_marker_failed")
 

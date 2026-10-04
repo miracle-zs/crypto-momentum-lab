@@ -7,7 +7,6 @@ events, runtime context, and the injected submission/context adapters.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -122,9 +121,9 @@ class LiveExitProcessor:
         context_provider: LiveContextProvider,
         apply_context: ExitContextPublisher,
         invalidate_context_cache: Callable[[], None],
-        position_locks: PositionLifecycleLocks | None = None,
-        account_label: str | None = None,
-        request_recovery: Callable[[], None] = lambda: None,
+        position_locks: PositionLifecycleLocks,
+        account_label: str,
+        request_recovery: Callable[[], None],
     ) -> None:
         self._config = config
         self._exit_manager = exit_manager
@@ -137,8 +136,8 @@ class LiveExitProcessor:
         self._context_provider = context_provider
         self._apply_context = apply_context
         self._invalidate_context_cache = invalidate_context_cache
-        self._position_locks = position_locks or PositionLifecycleLocks()
-        self._account_label = account_label or config.run_id
+        self._position_locks = position_locks
+        self._account_label = account_label
         self._request_recovery = request_recovery
         self._requested_recoveries: dict[str, _RequestedExitRecovery] = {}
         self._exit_recovery_attempts: dict[str, int] = {}
@@ -154,80 +153,68 @@ class LiveExitProcessor:
         quote: RealtimeMarketQuote | None = None,
         now: datetime | None = None,
     ) -> ExitLaneOutcome:
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, state.symbol),
-            lambda: self._process_trigger(
-                trigger, state, context, event=event, quote=quote, now=now
-            ),
-        )
-
-    async def _process_trigger(
-        self,
-        trigger: Literal["state", "closed_candle", "grace_timeout", "quote"],
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        *,
-        event: ClosedCandle15mEvent | None = None,
-        quote: RealtimeMarketQuote | None = None,
-        now: datetime | None = None,
-    ) -> ExitLaneOutcome:
-        manager = self._exit_manager
-        if manager is None or not self._is_exit_enabled():
-            return ExitLaneOutcome()
-        if self._telemetry is not None and trigger in ("state", "closed_candle"):
-            await self._telemetry.market_state_received(
-                state,
-                occurred_at=event.received_at if event is not None else self._clock(),
-                lane=LIVE_LANE_EXIT,
-            )
-        self._schedule_pending_exit_recoveries(state=state, context=context)
-        if trigger == "state":
-            if not manager.uses_market_state_exit:
+        async with self._position_locks.hold(
+            live_symbol_position_key(self._account_label, state.symbol)
+        ):
+            manager = self._exit_manager
+            if manager is None or not self._is_exit_enabled():
                 return ExitLaneOutcome()
-            requests = await manager.requests_for_state(
-                state, context.managed_positions
+            if self._telemetry is not None and trigger in ("state", "closed_candle"):
+                await self._telemetry.market_state_received(
+                    state,
+                    occurred_at=event.received_at
+                    if event is not None
+                    else self._clock(),
+                    lane=LIVE_LANE_EXIT,
+                )
+            self._schedule_pending_exit_recoveries(state=state, context=context)
+            if trigger == "state":
+                if not manager.uses_market_state_exit:
+                    return ExitLaneOutcome()
+                requests = await manager.requests_for_state(
+                    state, context.managed_positions
+                )
+            elif trigger == "closed_candle" and event is not None:
+                requests = await manager.requests_for_closed_candle(
+                    event.candle,
+                    context.managed_positions,
+                    latest_quote=quote,
+                    received_at=event.received_at,
+                )
+            elif trigger == "grace_timeout" and now is not None:
+                requests = await manager.requests_for_grace_timeout(
+                    now=now,
+                    state=state,
+                    positions=context.managed_positions,
+                    latest_quote=quote,
+                )
+            elif trigger == "quote" and quote is not None:
+                requests = await manager.requests_for_quote(
+                    quote, context.managed_positions
+                )
+            else:
+                raise ValueError(f"invalid exit trigger: {trigger}")
+            try:
+                approved, submitted, failure = await self._execute_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    invalidate_context=trigger != "closed_candle",
+                )
+            except Exception as error:
+                if (
+                    trigger == "grace_timeout"
+                    and order_identity_errors.is_durable_order_identity_conflict(error)
+                ):
+                    manager.note_order_identity_conflict(state.symbol)
+                raise
+            if event is not None and failure == "candidate_expired":
+                failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
+            return ExitLaneOutcome(
+                approved_intent_count=approved,
+                submitted_order_count=submitted,
+                failure=failure,
             )
-        elif trigger == "closed_candle" and event is not None:
-            requests = await manager.requests_for_closed_candle(
-                event.candle,
-                context.managed_positions,
-                latest_quote=quote,
-                received_at=event.received_at,
-            )
-        elif trigger == "grace_timeout" and now is not None:
-            requests = await manager.requests_for_grace_timeout(
-                now=now,
-                state=state,
-                positions=context.managed_positions,
-                latest_quote=quote,
-            )
-        elif trigger == "quote" and quote is not None:
-            requests = await manager.requests_for_quote(
-                quote, context.managed_positions
-            )
-        else:
-            raise ValueError(f"invalid exit trigger: {trigger}")
-        try:
-            approved, submitted, failure = await self._process_requests(
-                requests,
-                state=state,
-                context=context,
-                invalidate_context=trigger != "closed_candle",
-            )
-        except Exception as error:
-            if (
-                trigger == "grace_timeout"
-                and order_identity_errors.is_durable_order_identity_conflict(error)
-            ):
-                manager.note_order_identity_conflict(state.symbol)
-            raise
-        if event is not None and failure == "candidate_expired":
-            failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
-        return ExitLaneOutcome(
-            approved_intent_count=approved,
-            submitted_order_count=submitted,
-            failure=failure,
-        )
 
     def _schedule_pending_exit_recoveries(
         self,
@@ -309,12 +296,10 @@ class LiveExitProcessor:
         for root in tuple(self._requested_recoveries)[:limit]:
             work = self._requested_recoveries[root]
             try:
-                context = await self._context_provider(work.state)
                 result = await self._recover_unknown_exit(
                     plan=work.plan,
                     known_executed_quantity=work.known_executed_quantity,
                     state=work.state,
-                    context=context,
                     source_candidate=work.source_candidate,
                     reference_price=work.reference_price,
                     recovery_entry_type=work.recovery_entry_type,
@@ -366,7 +351,6 @@ class LiveExitProcessor:
         plan: OrderExecutionPlan,
         known_executed_quantity: Decimal,
         state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
         source_candidate: OrderIntentCandidate | None = None,
         reference_price: Decimal | None = None,
         recovery_entry_type: EntryType | None = None,
@@ -409,7 +393,9 @@ class LiveExitProcessor:
 
         fresh_context = await self._context_provider(state)
 
-        async def apply_observation() -> OrderExecutionResult | None:
+        async with self._position_locks.hold(
+            live_symbol_position_key(self._account_label, state.symbol)
+        ):
             latest = self._requested_recoveries.get(root)
             if latest is not None and latest.plan != plan:
                 return None
@@ -427,11 +413,6 @@ class LiveExitProcessor:
                 current_attempt=current_attempt,
                 now=now,
             )
-
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, state.symbol),
-            apply_observation,
-        )
 
     async def _apply_exit_recovery_observation(
         self,
@@ -651,8 +632,6 @@ class LiveExitProcessor:
         try:
             refreshed = await self._context_provider(state)
             self._apply_context(refreshed)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.warning(
                 "exit_context_refresh_deferred",
@@ -751,19 +730,19 @@ class LiveExitProcessor:
         reference_price: Decimal | None = None,
         invalidate_context: bool = True,
     ) -> tuple[int, int, str | None]:
-        """Serialize scheduled/manual request batches with normal exits."""
-        return await self._position_locks.run(
-            live_symbol_position_key(self._account_label, state.symbol),
-            lambda: self._process_requests(
+        """Serialize scheduled/manual batches with other lifecycle operations."""
+        async with self._position_locks.hold(
+            live_symbol_position_key(self._account_label, state.symbol)
+        ):
+            return await self._execute_requests(
                 requests,
                 state=state,
                 context=context,
                 reference_price=reference_price,
                 invalidate_context=invalidate_context,
-            ),
-        )
+            )
 
-    async def _process_requests(
+    async def _execute_requests(
         self,
         requests: tuple[LiveExitRequest, ...],
         *,
@@ -772,7 +751,7 @@ class LiveExitProcessor:
         reference_price: Decimal | None = None,
         invalidate_context: bool = True,
     ) -> tuple[int, int, str | None]:
-        """Execute exit requests while their account/symbol actor is held."""
+        """Execute requests while the caller holds the lifecycle lock."""
         approved = 0
         submitted = 0
         failure: str | None = None
@@ -1133,11 +1112,11 @@ def _rebase_exit_request(
 ) -> LiveExitOrderRequest | None:
     """Rebuild a reduce-only quantity/allocation against the latest position."""
     candidate = request.candidate
-    managed_positions = getattr(context, "managed_positions", None)
-    if not candidate.reduce_only or managed_positions is None:
+    managed_positions = context.managed_positions
+    if not candidate.reduce_only:
         return request
     raw_side = candidate.features.get("position_side")
-    candidate_side = getattr(candidate.side, "value", candidate.side)
+    candidate_side = candidate.side.value
     position = next(
         (
             item
@@ -1146,7 +1125,7 @@ def _rebase_exit_request(
             and (
                 item.position_side.value == raw_side
                 if raw_side is not None
-                else getattr(item.side, "value", item.side) == candidate_side
+                else item.side.value == candidate_side
             )
         ),
         None,
@@ -1159,7 +1138,7 @@ def _rebase_exit_request(
     allocations: list[dict[str, str]] | None = None
     if isinstance(raw_allocations, list) and raw_allocations:
         available: dict[str, Decimal] = {
-            batch.batch_id: batch.quantity for batch in getattr(position, "batches", ())
+            batch.batch_id: batch.quantity for batch in position.batches
         }
         if not available and position.batch_id:
             available[position.batch_id] = position.quantity
@@ -1189,7 +1168,7 @@ def _rebase_exit_request(
         candidate,
         quantity,
         allocations=allocations,
-        projection_version=getattr(position, "projection_version", None),
+        projection_version=position.projection_version,
     )
     return LiveExitOrderRequest(candidate=resized_candidate, quantity=quantity)
 

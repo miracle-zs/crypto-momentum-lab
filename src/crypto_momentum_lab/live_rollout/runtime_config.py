@@ -21,9 +21,7 @@ _BINANCE_SHARED_REQUEST_PACER_PATH_ENV = "CML_BINANCE_SHARED_REQUEST_PACER_PATH"
 _BINANCE_SHARED_COMMAND_PACER_PATH_ENV = "CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH"
 _DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
 _LIVE_STARTUP_BUFFER_LIMIT = 100_000
-_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
-_LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
-_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+_LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 
 
@@ -46,15 +44,6 @@ def _live_strategy_config(
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
         "order_flow_impulse": event_config,
-        "order_flow_impulse_impulse_window_buckets": (profile.impulse_window_buckets),
-        "order_flow_impulse_confirmation_buckets": (profile.confirmation_buckets),
-        "order_flow_impulse_min_return_pct": profile.min_return_pct,
-        "order_flow_impulse_min_aggressive_imbalance": (
-            profile.min_aggressive_imbalance
-        ),
-        "order_flow_impulse_min_notional_intensity": (profile.min_notional_intensity),
-        "order_flow_impulse_min_notional_5m_vs_30m": (profile.min_notional_5m_vs_30m),
-        "cooldown_buckets": profile.cooldown_buckets,
     }
 
 
@@ -112,10 +101,8 @@ class LiveRuntimeIdentity:
     strategy_name: str
     session_id: str
     operator: str
-    lease_owner: str
     strategy_config_hash: str
     git_commit_hash: str
-    migration_revision: str
 
 
 @dataclass(frozen=True, slots=True)

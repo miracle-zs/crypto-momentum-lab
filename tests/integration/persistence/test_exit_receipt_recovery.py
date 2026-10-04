@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -44,7 +45,7 @@ async def test_exchange_filled_receipt_requires_exact_account_order_trade_sum(
     now = datetime.now(UTC)
     command = TradeCommand(
         "exit-" + account,
-        PositionKey("live", account, "BTCUSDT", "LONG"),
+        PositionKey("live", account, "BTCUSDT", FuturesPositionSide.LONG),
         TradeCommandType.EXIT,
         StrategySide.LONG,
         EntryType.MARKET,

@@ -24,8 +24,6 @@ def metrics(events):
     closed = filled[filled.closed.eq(True) & filled.exit_at.notna()]
     cash = closed.groupby("exit_at").net_pnl_usdt.sum().sort_index().cumsum()
     peak = cash.cummax().clip(lower=0)
-    # Keep the old event-order DD as a separately labelled compatibility metric.
-    legacy_cash = closed.net_pnl_usdt.cumsum()
     margin = (
         pd.concat(
             [
@@ -43,9 +41,6 @@ def metrics(events):
         "closed": len(closed),
         "pnl": float(closed.net_pnl_usdt.sum()),
         "realized_dd": float((peak - cash).max()) if len(cash) else 0.0,
-        "legacy_dd": float((legacy_cash.cummax().clip(lower=0) - legacy_cash).max())
-        if len(closed)
-        else 0.0,
         "margin": float(margin.max()) if len(margin) else 0.0,
         "win_rate": float(closed.net_pnl_usdt.gt(0).mean()) if len(closed) else 0.0,
     }
@@ -191,15 +186,15 @@ def main():
         "近期与基准窗口不重叠，缺桶或分母为零时不放行。",
         "既有 intensity 的基准只有 4 个桶（1 分钟）；本轮比较三个成交额持续放量窗口。",
         "",
-        "|参数组|条件|收益 U|按平仓时间回撤 U|旧口径回撤 U|峰值保证金 U|平仓数|",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "|参数组|条件|收益 U|按平仓时间回撤 U|峰值保证金 U|平仓数|",
+        "|---|---|---:|---:|---:|---:|",
     ]
     for selection in selections:
         for key in ("baseline", "full_sample_best"):
             r = selection[key]
             lines.append(
                 f"|{r['profile']} {key}|{r['feature']} ≥ {r['threshold']}|"
-                f"{r['pnl']:.2f}|{r['realized_dd']:.2f}|{r['legacy_dd']:.2f}|"
+                f"{r['pnl']:.2f}|{r['realized_dd']:.2f}|"
                 f"{r['margin']:.0f}|{r['closed']}|"
             )
         b, t = selection["baseline"], selection["chronological_choice"]

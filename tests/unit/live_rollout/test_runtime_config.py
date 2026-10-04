@@ -36,10 +36,8 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
             strategy_name="orderflow_impulse",
             session_id="session-1",
             operator="operator-1",
-            lease_owner="worker-1",
             strategy_config_hash="a" * 64,
             git_commit_hash="b" * 40,
-            migration_revision="20260911_0040",
         ),
         market=LiveRuntimeMarket(
             market_environment="live",

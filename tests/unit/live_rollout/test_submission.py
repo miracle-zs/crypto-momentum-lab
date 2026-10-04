@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -28,6 +29,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
+from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
     LiveSubmissionConfig,
@@ -74,10 +76,7 @@ class RecordingCoordinator:
 
     async def prepare_and_execute(self, plan, *, preparation):
         self.events.append("prepare")
-        values = {
-            f.name: getattr(preparation, f.name)
-            for f in fields(preparation)
-        }
+        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)}
         prepared = await self.repository.prepare_submission_in_session(
             None,
             plan=plan,
@@ -104,10 +103,10 @@ def _submission(
 ) -> LiveCandidateSubmission:
     state_machine.configure_submission(
         repository,
-
         clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
+        position_locks=PositionLifecycleLocks(),
         risk_gateway=RiskGateway(
             limits=limits
             or FixedLiveLimits(
@@ -142,8 +141,11 @@ async def test_submission_prepares_without_static_fencing_before_exchange() -> N
         BlockingBackend,
         OrderExecutionCoordinator,
     )
+
     backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     submission = _submission(
         repository=repository,
         state_machine=coordinator,
@@ -168,6 +170,8 @@ async def test_submission_prepares_without_static_fencing_before_exchange() -> N
     assert call["environment"] == "live"
     assert call["account_label"] == "primary"
     assert call["strategy_name"] == "compression_breakout"
+    assert call["plan"].strategy_name == candidate.strategy_name
+    assert call["plan"].strategy_version == candidate.strategy_version
 
 
 @pytest.mark.parametrize(("budget", "accepted"), [("20", False), ("25", True)])
@@ -231,7 +235,7 @@ async def test_submission_strictly_obeys_requested_quantity() -> None:
     # Total position on BTCUSDT is 0.0007 BTC.
     # Caller requests 0.0004 BTC.
     # Submission layer must NEVER silently absorb dust or inflate requested quantities!
-    # Sizing/dust absorption decisions belong strictly to ExitAllocator.
+    # Sizing/dust absorption decisions belong strictly to exit allocation planning.
     pos = ManagedLivePosition(
         symbol="BTCUSDT",
         side=StrategySide.LONG,
@@ -571,8 +575,6 @@ async def test_submission_entry_trade_command_carries_projection_version() -> No
     assert command.expected_projection_version == "pv_entry_token_123"
 
 
-
-
 @pytest.mark.asyncio
 async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
     rules_eth = SymbolTradingRules(
@@ -738,25 +740,44 @@ async def test_exit_submission_bypasses_entry_pause_through_real_coordinator():
         BlockingBackend,
         OrderExecutionCoordinator,
     )
+
     repository = RecordingPreparedRepository()
+
     class Backend(BlockingBackend):
         async def submit(self, plan, **kwargs):
             result = await super().submit(plan, **kwargs)
             return replace(result, plan=plan)
 
     backend = Backend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    coordinator = OrderExecutionCoordinator(
+        backend=backend, account_label="primary", execution_book=ExecutionBook()
+    )
     submission = _submission(repository=repository, state_machine=coordinator)
     coordinator.block_entry_submissions()
-    context = replace(_runtime_context(), managed_positions=(ManagedLivePosition(
-        symbol="BTCUSDT", side=StrategySide.LONG, position_side=FuturesPositionSide.BOTH,
-        quantity=Decimal("0.0007"), entry_price=Decimal("10000"), opened_at=NOW,
-    ),))
+    context = replace(
+        _runtime_context(),
+        managed_positions=(
+            ManagedLivePosition(
+                symbol="BTCUSDT",
+                side=StrategySide.LONG,
+                position_side=FuturesPositionSide.BOTH,
+                quantity=Decimal("0.0007"),
+                entry_price=Decimal("10000"),
+                opened_at=NOW,
+            ),
+        ),
+    )
     try:
         result = await submission.execute(
-            replace(_intent(), reduce_only=True, entry_type=EntryType.MARKET,
-                    features={"position_side": "BOTH"}),
-            requested_quantity=Decimal("0.0004"), state=_state(), context=context,
+            replace(
+                _intent(),
+                reduce_only=True,
+                entry_type=EntryType.MARKET,
+                features={"position_side": "BOTH"},
+            ),
+            requested_quantity=Decimal("0.0004"),
+            state=_state(),
+            context=context,
             reference_price=Decimal("10000"),
         )
         assert result is not None

@@ -4,7 +4,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,16 +62,8 @@ def order_identity_event(row: ExchangeOrderEventRow) -> OrderIdentityEvent:
         exchange_order_id=row.exchange_order_id,
         state=row.state,
         occurred_at=row.occurred_at,
-        details=dict(row.details) if isinstance(row.details, Mapping) else {},
+        details=dict(row.details),
     )
-
-
-def _fill_raw_payload(raw: object, *, is_system: bool) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if isinstance(raw, dict):
-        payload.update(raw)
-    payload["is_system"] = is_system
-    return payload
 
 
 async def load_order_identity_metadata(
@@ -125,7 +116,7 @@ async def load_order_identity_metadata(
     symbol_since = since
     if symbol_since is None:
         order_times = [
-            order.created_at for order in orders if getattr(order, "created_at", None)
+            order.created_at for order in orders if order.created_at
         ]
         if order_times:
             symbol_since = min(order_times) - timedelta(hours=24)
@@ -179,10 +170,10 @@ async def load_order_identity_metadata(
             fee=Decimal(str(row.fee)),
             fee_asset=row.fee_asset,
             trade_at=row.trade_at,
-            raw_payload=_fill_raw_payload(
-                row.raw_payload,
-                is_system=str(row.order_id) in system_order_id_set,
-            ),
+            raw_payload={
+                **row.raw_payload,
+                "is_system": str(row.order_id) in system_order_id_set,
+            },
         )
         for row in account_fills
     )

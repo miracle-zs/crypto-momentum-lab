@@ -1,15 +1,13 @@
-"""Per-position asynchronous actors for the live order lifecycle."""
+"""Per-position mutual exclusion for complete live lifecycle operations."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-
-T = TypeVar("T")
 
 
 def live_symbol_position_key(account_label: str, symbol: str) -> PositionKey:
@@ -33,9 +31,8 @@ class PositionLifecycleLocks:
         self._idle = asyncio.Event()
         self._idle.set()
 
-    async def run(
-        self, key: PositionKey, operation: Callable[[], Awaitable[T]]
-    ) -> T:
+    @asynccontextmanager
+    async def hold(self, key: PositionKey) -> AsyncIterator[None]:
         if self._closed or self._draining:
             raise RuntimeError("position lifecycle is closed or draining")
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -43,7 +40,7 @@ class PositionLifecycleLocks:
         self._idle.clear()
         try:
             async with lock:
-                return await operation()
+                yield
         finally:
             self._active -= 1
             if self._active == 0:

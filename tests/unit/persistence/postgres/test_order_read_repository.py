@@ -47,7 +47,7 @@ def database():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("quantity", [None, Decimal("0.5")])
+@pytest.mark.parametrize("quantity", [Decimal("0"), Decimal("0.5")])
 async def test_load_preserves_durable_order_fields_and_quantity_baseline(quantity):
     repository, session = database()
     session.scalar.return_value = row(quantity)
@@ -60,7 +60,7 @@ async def test_load_preserves_durable_order_fields_and_quantity_baseline(quantit
     assert result.plan.quantized is True
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
     assert result.exchange_order_id == "exchange"
-    assert result.executed_quantity == (quantity or Decimal("0"))
+    assert result.executed_quantity == quantity
     query = session.scalar.await_args.args[0]
     assert query.compile().params["client_order_id_1"] == "order"
     session.begin.assert_not_called()
@@ -128,3 +128,26 @@ async def test_market_order_uses_prepared_price_before_legacy_exposure_claim(bul
         restored = await repository.load_order("order")
         assert session.scalars.await_count == (0 if prepared_price else 1)
     assert restored.plan.reference_price == Decimal(prepared_price or "100")
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+async def test_reference_price_lookup_failure_is_not_missing_evidence(bulk):
+    repository, session = database()
+    order = row()
+    order.price = None
+    order.order_type = "MARKET"
+    order.time_in_force = None
+    metadata = Mock(all=Mock(return_value=[]))
+    failure = RuntimeError("reference price query unavailable")
+    session.scalar.return_value = order
+    if bulk:
+        session.scalars.return_value = Mock(all=Mock(return_value=[order]))
+        session.execute.side_effect = [metadata, failure]
+        operation = repository.load_unresolved_orders()
+    else:
+        session.execute.return_value = metadata
+        session.scalars.side_effect = failure
+        operation = repository.load_order("order")
+
+    with pytest.raises(RuntimeError, match="reference price query unavailable"):
+        await operation

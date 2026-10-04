@@ -1,3 +1,4 @@
+
 """Tests for PostgresDecisionTraceRepository and live trace recording wiring (R2)."""
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
+    EffectivePolicy,
     FrozenDecisionInputs,
     PolicyState,
     create_authoritative_async_decision_filter,
@@ -39,6 +41,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     MarketRevisionRefRow,
 )
 from crypto_momentum_lab.tools.reproduce_decision import audit_decision_trace
+from tests.fixtures.symbol_rules import btc_lot_rules
 
 
 def _make_market_state(symbol: str = "BTCUSDT") -> MarketState15s:
@@ -398,7 +401,12 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
         "orderflow_impulse",
         fact_provider=provide_facts,
         durable_decision_commit=durable_commit,
-        target_notional=Decimal("500"),
+        effective_policy_provider=lambda _state: EffectivePolicy(
+            policy_id="policy_orderflow_impulse",
+            strategy_name="orderflow_impulse",
+            target_notional=Decimal("500"),
+            symbol_lot_rules=btc_lot_rules(),
+        ),
     )
 
     from crypto_momentum_lab.domain.strategy.models import (
@@ -450,6 +458,9 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
     assert trace.account_label == "primary"
     assert trace.strategy_name == "orderflow_impulse"
     assert "market_state" in trace.trace_payload
+    assert trace.trace_payload["policy_parameters"]["symbol_lot_rules"]["symbol"] == (
+        "BTCUSDT"
+    )
     assert "policy_parameters" in trace.trace_payload
     assert "prior_policy_state" in trace.trace_payload
     assert (
@@ -458,8 +469,10 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sizing_kind", [None, "fixed", "equity"])
 async def test_audit_decision_trace_reproducibility(
     monkeypatch: pytest.MonkeyPatch,
+    sizing_kind: str | None,
 ) -> None:
     session = _FakeAsyncSession()
     t0 = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
@@ -516,6 +529,33 @@ async def test_audit_decision_trace_reproducibility(
         entry_threshold=Decimal("65000.00"),
         target_notional=Decimal("1000.00"),
     )
+    if sizing_kind is not None:
+        from crypto_momentum_lab.domain.strategy.sizing import (
+            EquityFractionSizingModel,
+            FixedNotionalSizingModel,
+        )
+
+        if sizing_kind == "fixed":
+            sizing_model = FixedNotionalSizingModel(
+                target_notional=policy.target_notional,
+                max_leverage=Decimal("5"),
+                max_slippage_budget_bps=Decimal("10"),
+                resize_tolerance=Decimal("0.05"),
+            )
+        else:
+            sizing_model = EquityFractionSizingModel(
+                fraction_of_equity=Decimal("0.10"),
+                min_notional_floor=Decimal("10"),
+                max_notional_cap=Decimal("1000.00"),
+                max_leverage=Decimal("5"),
+                max_slippage_budget_bps=Decimal("10"),
+                resize_tolerance=Decimal("0.05"),
+            )
+        policy = replace(
+            policy,
+            sizing_model=sizing_model,
+            symbol_lot_rules=btc_lot_rules(),
+        )
     prior_state = PolicyState(policy_version=1)
     ref2 = replace(ref, revision_id=f"{ref.revision_id}:derived")
     inp = replace(
@@ -655,7 +695,9 @@ async def test_audit_decision_trace_reproducibility(
     assert refs_audit["error"] == (
         "DecisionFrame market revisions differ from the trace revisions"
     )
-    assert audit_res["next_policy_state_version"] == 2
+    assert audit_res["next_policy_state_version"] == (
+        res.next_policy_state.policy_version
+    )
 
 
 @pytest.mark.asyncio

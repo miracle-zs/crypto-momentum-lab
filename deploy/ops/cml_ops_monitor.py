@@ -1368,45 +1368,6 @@ def _parse_started_at(raw: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def evaluate_rss_growth(
-    *,
-    service: str,
-    current_bytes: int | None,
-    previous_bytes: int | None,
-    growth_bytes: int,
-) -> tuple[Alert, ...]:
-    """Backward-compatible one-sample helper for older callers.
-
-    The production monitor uses :func:`evaluate_container_memory_growth`,
-    which has a time-window baseline and consecutive-sample guard.  Keeping
-    this helper avoids breaking small external diagnostics that imported the
-    old function name.
-    """
-
-    if (
-        current_bytes is None
-        or previous_bytes is None
-        or growth_bytes <= 0
-        or current_bytes - previous_bytes < growth_bytes
-    ):
-        return ()
-    return (
-        Alert(
-            "rss_growth",
-            "warning",
-            f"Container {service} memory grew beyond the previous sample",
-            {
-                "service": service,
-                "previous_bytes": previous_bytes,
-                "current_bytes": current_bytes,
-                "growth_bytes": current_bytes - previous_bytes,
-                "threshold_bytes": growth_bytes,
-                "metric_source": "legacy_compatibility_helper",
-            },
-        ),
-    )
-
-
 class CommandRunner(Protocol):
     def run(self, args: Sequence[str], *, timeout_seconds: float) -> str: ...
 
@@ -1459,19 +1420,13 @@ def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
     last_start = None
     timestamp = values.get("ExecMainStartTimestamp", "")
     if timestamp:
-        # `--timestamp=unix` renders as "@<epoch>"; the default rendering is
-        # "Tue 2026-09-29 08:29:11 CST", accepted below as a fallback.
+        # The command requests --timestamp=unix, rendered as "@<epoch>".
         try:
             last_start = datetime.fromtimestamp(
                 float(timestamp.lstrip("@")), tz=_BEIJING_TIMEZONE
             )
         except ValueError:
-            try:
-                last_start = datetime.strptime(
-                    timestamp, "%a %Y-%m-%d %H:%M:%S %Z"
-                ).replace(tzinfo=_BEIJING_TIMEZONE)
-            except ValueError:
-                last_start = None
+            last_start = None
     status_text = values.get("ExecMainStatus", "")
     exec_main_status = int(status_text) if status_text.lstrip("-").isdigit() else None
     return SystemdUnitState(
@@ -1492,8 +1447,7 @@ def read_systemd_unit_state(
 ) -> SystemdUnitState | None:
     """Read one unit's state, or ``None`` when this host has no usable systemd.
 
-    ``--timestamp=unix`` keeps the parse independent of the host locale; the
-    default rendering is accepted too so an older systemctl still works.
+    ``--timestamp=unix`` keeps the parse independent of the host locale.
     """
     if not unit.strip():
         return None

@@ -8,7 +8,6 @@ in as the already-separated lanes and coordinators.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import (
     AsyncIterable,
     AsyncIterator,
@@ -28,6 +27,7 @@ from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
+from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
@@ -64,7 +64,7 @@ class LiveMarketLoop:
         self,
         *,
         run_id: str,
-        strategy: market_runtime_contracts.LiveRuntimeStrategy,
+        strategy: RuntimeStrategy,
         context_prefetcher: LiveContextPrefetcher,
         runtime_cache: LiveRuntimeCacheMaintenance,
         scheduled_controller: ScheduledRiskWindowController,
@@ -83,11 +83,11 @@ class LiveMarketLoop:
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         request_order_cleanup: Callable[
             [tuple[OrderExecutionPlan, ...]], None
-        ] = lambda plans: None,
+        ],
         decision_filter: (
             Callable[
                 [StrategyDecision, MarketState15s],
-                Awaitable[StrategyDecision] | StrategyDecision,
+                Awaitable[StrategyDecision],
             ]
             | None
         ) = None,
@@ -118,15 +118,6 @@ class LiveMarketLoop:
         self._decision_fact_binder = decision_fact_binder
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
-        self._active_state_at: datetime | None = None
-
-    @property
-    def active_state_at(self) -> datetime | None:
-        return self._active_state_at
-
-    @property
-    def market_gap_generation(self) -> int:
-        return self._market_gap_generation
 
     def notify_market_state_gap(self, *, reason: str) -> None:
         if not reason.strip():
@@ -160,11 +151,11 @@ class LiveMarketLoop:
         self._entry_lane.reset()
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
-        max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
-        state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
+        data_requirement = self._strategy.required_data()
+        max_gap_seconds = data_requirement.max_gap_seconds
+        state_interval_seconds = data_requirement.base_state_interval_seconds
         async for prefetched in prefetched_states:
             state = prefetched.state
-            self._active_state_at = state.bucket_start
             if state.is_backfill:
                 self._strategy.warm_market_state(state)
                 self._record_processed_state(state, saved_at=state.bucket_end)
@@ -253,17 +244,11 @@ class LiveMarketLoop:
                     occurred_at=prefetched.received_at,
                     lane=LIVE_LANE_ENTRY,
                 )
-                market_state_progress = getattr(
-                    self._telemetry,
-                    "market_state_progress",
-                    None,
+                self._telemetry.market_state_progress(
+                    state,
+                    occurred_at=prefetched.received_at,
+                    received_at=prefetched.received_at,
                 )
-                if callable(market_state_progress):
-                    market_state_progress(
-                        state,
-                        occurred_at=prefetched.received_at,
-                        received_at=prefetched.received_at,
-                    )
             gap_generation = self._market_gap_generation
             if gap_generation > self._strategy_gap_reset_generation_by_symbol.get(
                 state.symbol,
@@ -365,11 +350,7 @@ class LiveMarketLoop:
             if self._decision_fact_binder is not None:
                 self._decision_fact_binder(context)
             if self._decision_filter is not None:
-                filtered = self._decision_filter(decision, state)
-                if inspect.isawaitable(filtered):
-                    decision = await filtered
-                else:
-                    decision = filtered
+                decision = await self._decision_filter(decision, state)
             decision_recorded_at = self._clock()
             if self._telemetry is not None:
                 await self._telemetry.strategy_decision(
@@ -426,8 +407,6 @@ class LiveMarketLoop:
             return ()
         try:
             states = tuple(await loader(error))
-        except asyncio.CancelledError:
-            raise
         except Exception as recovery_error:
             log.warning(
                 "live_strategy_market_state_gap_recovery_failed",
@@ -447,8 +426,6 @@ class LiveMarketLoop:
                     recovered,
                     saved_at=self._clock(),
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception as recovery_error:
             self._strategy.reset_symbol(error.symbol)
             self._checkpoint_coordinator.forget_symbol(error.symbol)
@@ -474,7 +451,7 @@ class LiveMarketLoop:
 
 def _strategy_decision_details(
     *,
-    strategy: market_runtime_contracts.LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     state: MarketState15s,
     last_processed_at: datetime | None,
     recovered_bucket_count: int,
@@ -489,13 +466,8 @@ def _strategy_decision_details(
         "input_data_complete": state.data_complete,
         "input_missing_agg_trade_count": state.missing_agg_trade_count,
     }
-    for attribute, key in (
-        ("buffered_state_count", "strategy_buffered_state_count"),
-        ("buffered_symbol_count", "strategy_buffered_symbol_count"),
-    ):
-        value = getattr(strategy, attribute, None)
-        if isinstance(value, int) and not isinstance(value, bool):
-            details[key] = value
+    details["strategy_buffered_state_count"] = strategy.buffered_state_count
+    details["strategy_buffered_symbol_count"] = strategy.buffered_symbol_count
     if hub_cursor_provider is None:
         return details
     try:
@@ -515,25 +487,6 @@ def _strategy_decision_details(
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
         details["hub_sequence"] = sequence
     return details
-
-
-def _strategy_max_gap_seconds(
-    strategy: market_runtime_contracts.LiveRuntimeStrategy,
-) -> int | None:
-    requirement = strategy.required_data()
-    return None if requirement is None else int(requirement.max_gap_seconds)
-
-
-def _strategy_state_interval_seconds(
-    strategy: market_runtime_contracts.LiveRuntimeStrategy,
-) -> int:
-    requirement = strategy.required_data()
-    interval_seconds = (
-        15 if requirement is None else int(requirement.base_state_interval_seconds)
-    )
-    if interval_seconds <= 0:
-        raise ValueError("strategy state interval must be positive")
-    return interval_seconds
 
 
 def _empty_heartbeat_eligible(
@@ -580,7 +533,7 @@ def _validate_market_state_continuity(
 
 def _reset_strategy_for_gap(
     *,
-    strategy: market_runtime_contracts.LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
     symbol: str,
     current_at: datetime,
     last_processed_at: datetime | None,
@@ -596,7 +549,7 @@ def _reset_strategy_for_gap(
 def _is_complete_gap_recovery(
     error: market_runtime_contracts.LiveMarketStateContinuityError,
     states: Sequence[MarketState15s],
-    strategy: market_runtime_contracts.LiveRuntimeStrategy,
+    strategy: RuntimeStrategy,
 ) -> bool:
     if (
         error.observed_delta_seconds <= 0
@@ -618,12 +571,12 @@ def _is_complete_gap_recovery(
         return False
     if tuple(state.bucket_start for state in ordered) != expected:
         return False
-    if any(not bool(getattr(state, "data_complete", False)) for state in ordered):
+    if any(not state.data_complete for state in ordered):
         return False
     requirement = strategy.required_data()
-    required_fields = () if requirement is None else requirement.required_fields
+    required_fields = requirement.required_fields
     return all(
-        all(getattr(state, field, None) is not None for field in required_fields)
+        all(getattr(state, field) is not None for field in required_fields)
         for state in ordered
     )
 

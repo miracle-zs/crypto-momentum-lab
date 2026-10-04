@@ -5,7 +5,7 @@ plans.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
@@ -18,9 +18,12 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    QuantizationRejection,
-)
+
+
+@dataclass(frozen=True, slots=True)
+class QuantizationRejection:
+    reason: str
+    details: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,45 +124,17 @@ def plan_order_execution(
 
     client_order_id = command.client_order_id(run_id)
 
-    allocations = (
-        tuple(command.allocation_plan.allocations)
-        if command.allocation_plan and command.allocation_plan.allocations
-        else ()
-    )
-    if allocations:
-        alloc_sum = sum(
-            (a.allocated_quantity for a in allocations),
-            start=Decimal("0"),
-        )
-        if alloc_sum != quantized_quantity:
-            if len(allocations) == 1:
-                allocations = (
-                    ExitAllocation(
-                        batch_id=allocations[0].batch_id,
-                        allocated_quantity=quantized_quantity,
-                    ),
-                )
-            else:
-                adjusted: list[ExitAllocation] = []
-                remaining = quantized_quantity
-                for a in allocations:
-                    if remaining <= Decimal("0"):
-                        break
-                    take = min(a.allocated_quantity, remaining)
-                    adjusted.append(
-                        ExitAllocation(
-                            batch_id=a.batch_id,
-                            allocated_quantity=take,
-                        )
-                    )
-                    remaining -= take
-                if remaining > Decimal("0") and adjusted:
-                    last = adjusted[-1]
-                    adjusted[-1] = ExitAllocation(
-                        batch_id=last.batch_id,
-                        allocated_quantity=last.allocated_quantity + remaining,
-                    )
-                allocations = tuple(adjusted)
+    allocations: tuple[ExitAllocation, ...] = ()
+    if command.allocation_plan is not None:
+        adjusted: list[ExitAllocation] = []
+        remaining = quantized_quantity
+        for allocation in command.allocation_plan.allocations:
+            if remaining <= 0:
+                break
+            quantity = min(allocation.allocated_quantity, remaining)
+            adjusted.append(replace(allocation, allocated_quantity=quantity))
+            remaining -= quantity
+        allocations = tuple(adjusted)
     batch_id = (
         allocations[0].batch_id
         if len(allocations) == 1
@@ -190,8 +165,6 @@ def plan_order_execution(
         allocations=allocations,
         projection_version=command.expected_projection_version,
         batch_quantities=batch_quantities,
-        strategy_name=getattr(command, "strategy_name", None),
-        strategy_version=getattr(command, "strategy_version", None),
         reference_price=reference_price,
     )
 

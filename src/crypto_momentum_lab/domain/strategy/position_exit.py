@@ -28,8 +28,6 @@ class PositionExitPolicy:
     candle_confirmation_count: int = 1
 
     def __post_init__(self) -> None:
-        if not isinstance(self.mode, PositionExitMode):
-            object.__setattr__(self, "mode", PositionExitMode(self.mode))
         if self.max_holding_seconds is not None and self.max_holding_seconds <= 0:
             raise ValueError("max_holding_seconds must be positive")
         if self.minimum_holding_seconds < 0:

@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import pytest
+
+import crypto_momentum_lab.persistence.postgres.operational_retention as retention
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
     _account_balance_hourly_duplicate_statement,
@@ -86,3 +89,24 @@ async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff()
     assert repository._prune_account_snapshot_table.await_count > 0
     for call in repository._prune_account_snapshot_table.await_args_list:
         assert call.kwargs["before"] == consumer_watermark
+
+
+@pytest.mark.parametrize(
+    "method, partition_check, ensure_partitions",
+    [
+        ("prune_runtime_market_states", "runtime_state_table_is_partitioned", "ensure_runtime_state_partitions"),
+        ("prune_strategy_runtime_events", "event_table_is_partitioned", "ensure_event_partitions"),
+    ],
+)
+async def test_partition_failure_does_not_switch_to_row_deletion(
+    monkeypatch, method, partition_check, ensure_partitions
+) -> None:
+    monkeypatch.setattr(retention, partition_check, AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        retention, ensure_partitions, AsyncMock(side_effect=RuntimeError("partition DDL failed"))
+    )
+    repository = PostgresOperationalRetentionRepository(AsyncMock())
+    repository._delete_batch = AsyncMock()
+    with pytest.raises(RuntimeError, match="partition DDL failed"):
+        await getattr(repository, method)(before=datetime(2026, 10, 1, tzinfo=UTC))
+    repository._delete_batch.assert_not_awaited()

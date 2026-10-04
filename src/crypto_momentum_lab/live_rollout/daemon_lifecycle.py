@@ -43,7 +43,7 @@ class LiveDaemonLifecycle:
             [AsyncIterable[MarketState15s]], Awaitable[LiveDaemonResult]
         ],
         set_run_active: Callable[[bool], None],
-        position_locks: PositionLifecycleLocks | None = None,
+        position_locks: PositionLifecycleLocks,
         shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         if not run_id.strip():
@@ -95,8 +95,6 @@ class LiveDaemonLifecycle:
                         run_id=self._run_id,
                         timeout_seconds=self._shutdown_timeout_seconds,
                     )
-                except asyncio.CancelledError:
-                    raise
             if self._exit_manager is not None:
                 try:
                     async with asyncio.timeout(self._shutdown_timeout_seconds):
@@ -108,8 +106,6 @@ class LiveDaemonLifecycle:
                         timeout_seconds=self._shutdown_timeout_seconds,
                     )
                     shutdown_failure = "exit_lane_shutdown_timed_out"
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     log.exception(
                         "live_exit_lane_shutdown_failed",
@@ -125,30 +121,25 @@ class LiveDaemonLifecycle:
                     run_id=self._run_id,
                     timeout_seconds=self._shutdown_timeout_seconds,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 log.exception(
                     "live_checkpoint_shutdown_failed",
                     run_id=self._run_id,
                 )
-            if self._position_locks is not None:
-                try:
-                    async with asyncio.timeout(self._shutdown_timeout_seconds):
-                        await self._position_locks.drain()
-                except TimeoutError:
-                    log.warning(
-                        "live_position_actor_shutdown_timed_out",
-                        run_id=self._run_id,
-                        timeout_seconds=self._shutdown_timeout_seconds,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    log.exception(
-                        "live_position_actor_shutdown_failed",
-                        run_id=self._run_id,
-                    )
+            try:
+                async with asyncio.timeout(self._shutdown_timeout_seconds):
+                    await self._position_locks.drain()
+            except TimeoutError:
+                log.warning(
+                    "live_position_actor_shutdown_timed_out",
+                    run_id=self._run_id,
+                    timeout_seconds=self._shutdown_timeout_seconds,
+                )
+            except Exception:
+                log.exception(
+                    "live_position_actor_shutdown_failed",
+                    run_id=self._run_id,
+                )
             self._set_run_active(False)
         if result is None:
             raise RuntimeError("live daemon stopped without a result")

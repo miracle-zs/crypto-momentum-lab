@@ -9,7 +9,7 @@ This module aggregates performance telemetry across four domains:
 
 import math
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, text
@@ -200,7 +200,7 @@ class PerformanceQueries:
         total_latencies: list[float] = []
 
         for row in checkpoint_rows:
-            details = row.details if isinstance(row.details, Mapping) else {}
+            details = row.details
             label, phase = _account_label_and_phase(row.run_id)
             total_ms = (
                 _as_float(details.get("total_ms"))
@@ -304,7 +304,6 @@ class PerformanceQueries:
         market_delay_ms = None
         if (
             latest_market_progress is not None
-            and isinstance(latest_market_progress.details, Mapping)
             and latest_market_progress.details.get("market_delay_ms") is not None
         ):
             market_delay_ms = round(
@@ -352,7 +351,6 @@ class PerformanceQueries:
             observed_at=observed_at,
             market_delay_ms=market_delay_ms,
             realtime_closure_delay_seconds=realtime_closure_delay_seconds,
-            simulated_close_drop_count=0,
             missing_agg_trade_count=missing_agg_trade_count,
             quality_events_count_1h=quality_events_count,
         )

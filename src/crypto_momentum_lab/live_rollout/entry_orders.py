@@ -47,10 +47,10 @@ class LiveLimitOrderLifecycle:
         self,
         *,
         cancel_order: CancelOrder,
-        clock: Clock | None = None,
+        clock: Clock = lambda: datetime.now(UTC),
     ) -> None:
         self._cancel_order = cancel_order
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stopped = False
 
@@ -117,8 +117,6 @@ class LiveLimitOrderLifecycle:
             await asyncio.sleep(delay)
         try:
             result = await self._cancel_order(plan)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             log.warning(
                 "live_entry_limit_expiry_cancel_failed",

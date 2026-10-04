@@ -4,7 +4,6 @@ from decimal import Decimal
 from urllib.parse import parse_qs
 
 import httpx
-import pytest
 
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
@@ -21,9 +20,6 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
 )
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    quantize_order_plan,
-)
 from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
     plan_order_execution,
 )
@@ -32,8 +28,7 @@ from tests.fixtures.live_market import _state
 from tests.unit.live_rollout.test_exits import _config, _long_position
 
 
-@pytest.mark.parametrize("planner", ("command", "intent"))
-async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> None:
+async def test_grace_limit_reaches_exchange_with_explicit_gtc() -> None:
     candle = ClosedCandle15m(
         symbol="BTCUSDT",
         candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
@@ -46,6 +41,7 @@ async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> N
             PositionExitMode.CANDLE_15M,
             candle_grace_bars=8,
             candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
         ),
     )
     state = replace(
@@ -70,34 +66,25 @@ async def test_grace_limit_reaches_exchange_with_explicit_gtc(planner: str) -> N
         max_quantity=Decimal("100"),
         min_notional=Decimal("5"),
     )
-    if planner == "command":
-        command = TradeCommand(
-            command_id=candidate.candidate_id,
-            position_key=PositionKey(
-                environment="live",
-                account_label="test_account",
-                symbol=candidate.symbol,
-                position_side=position.position_side,
-            ),
-            command_type=TradeCommandType.EXIT,
-            side=candidate.side,
-            order_type=candidate.entry_type,
-            limit_price=candidate.limit_price,
-            requested_quantity=request.quantity,
-            reduce_only=True,
-            created_at=candidate.created_at,
-        )
-        plan = plan_order_execution(
-            command, rules, run_id=candidate.run_id, reference_price=Decimal("99")
-        ).plan
-    else:
-        plan = quantize_order_plan(
-            candidate,
-            rules,
-            reference_price=Decimal("99"),
-            resize_tolerance=Decimal("0.2"),
-            requested_quantity=request.quantity,
-        )
+    command = TradeCommand(
+        command_id=candidate.candidate_id,
+        position_key=PositionKey(
+            environment="live",
+            account_label="test_account",
+            symbol=candidate.symbol,
+            position_side=position.position_side,
+        ),
+        command_type=TradeCommandType.EXIT,
+        side=candidate.side,
+        order_type=candidate.entry_type,
+        limit_price=candidate.limit_price,
+        requested_quantity=request.quantity,
+        reduce_only=True,
+        created_at=candidate.created_at,
+    )
+    plan = plan_order_execution(
+        command, rules, run_id=candidate.run_id, reference_price=Decimal("99")
+    ).plan
     assert isinstance(plan, OrderExecutionPlan)
     bodies = []
 

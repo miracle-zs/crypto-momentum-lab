@@ -7,6 +7,7 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
 )
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.execution_account.binance.client import BinanceUsdMTradeClient
+from tests.fixtures.prepared_submission import submit_prepared
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,
@@ -22,7 +23,7 @@ async def test_timeout_then_not_found_is_durable_unknown_state() -> None:
     )
     repository = FakeOrderRepository()
 
-    result = await _machine(exchange, repository).submit(_plan())
+    result = await submit_prepared(_machine(exchange, repository), _plan())
 
     assert exchange.calls == [
         "submit",
@@ -79,7 +80,7 @@ async def test_read_timeout_after_acceptance_recovers_without_second_post() -> N
     )
     repository = FakeOrderRepository()
     try:
-        result = await _machine(client, repository).submit(plan)
+        result = await submit_prepared(_machine(client, repository), plan)
         recovered = await _machine(client, repository).reconcile_order(plan)
     finally:
         await client.aclose()

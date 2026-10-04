@@ -1,3 +1,4 @@
+from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from tests.unit.live_rollout.test_gates import _risk_config as gate_risk_config
 
 """Golden Path End-to-End Tests.
@@ -66,9 +67,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
-    PostgresOrderPlanRepository,
-)
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     PostgresOrderReadRepository,
 )
@@ -80,6 +78,9 @@ from crypto_momentum_lab.persistence.postgres.repository import (
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
+from tests.fixtures.order_rows import (
+    OrderRows,
+)
 from tests.unit.execution_account.orders.test_state_machine import FakeExchange
 from tests.unit.live_rollout.test_gates import _context as gate_context
 
@@ -185,28 +186,32 @@ class DynamicFillingFakeExchange(FakeExchange):
         self.state = state
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
-        self.calls.append("submit")
-        fill_price = plan.price or Decimal("30000")
-        fill = ExchangeOrderFill(
-            fill_id=f"fill-{plan.client_order_id}",
-            client_order_id=plan.client_order_id,
-            exchange_trade_id=f"trade-{plan.client_order_id}",
-            price=fill_price,
-            quantity=plan.quantity,
-            fee=Decimal("0.01"),
-            fee_asset="USDT",
-            filled_at=NOW,
-            details={},
-        )
-        return ExchangeOrderSnapshot(
-            client_order_id=plan.client_order_id,
-            exchange_order_id=f"exchange-{plan.client_order_id}",
-            state=self.state,
-            observed_at=NOW,
-            executed_quantity=plan.quantity,
-            average_price=fill_price,
-            fills=(fill,),
-        )
+        await self.emit_submit_boundary(plan, is_request=True)
+        try:
+            self.calls.append("submit")
+            fill_price = plan.price or Decimal("30000")
+            fill = ExchangeOrderFill(
+                fill_id=f"fill-{plan.client_order_id}",
+                client_order_id=plan.client_order_id,
+                exchange_trade_id=f"trade-{plan.client_order_id}",
+                price=fill_price,
+                quantity=plan.quantity,
+                fee=Decimal("0.01"),
+                fee_asset="USDT",
+                filled_at=NOW,
+                details={},
+            )
+            return ExchangeOrderSnapshot(
+                client_order_id=plan.client_order_id,
+                exchange_order_id=f"exchange-{plan.client_order_id}",
+                state=self.state,
+                observed_at=NOW,
+                executed_quantity=plan.quantity,
+                average_price=fill_price,
+                fills=(fill,),
+            )
+        finally:
+            await self.emit_submit_boundary(plan, is_request=False)
 
 
 _created_coordinators: list[OrderExecutionCoordinator] = []
@@ -223,7 +228,7 @@ async def close_submission_coordinators():
 
 async def _build_submission_service(
     *,
-    order_repo: PostgresOrderPlanRepository,
+    order_repo: OrderRows,
     sessions: async_sessionmaker[AsyncSession],
     exchange: FakeExchange,
     limits: FixedLiveLimits | None = None,
@@ -231,7 +236,6 @@ async def _build_submission_service(
 ) -> LiveCandidateSubmission:
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=order_repo,
         event_repository=PostgresOrderEventRepository(sessions),
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -282,6 +286,7 @@ async def _build_submission_service(
         clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
+        position_locks=PositionLifecycleLocks(),
         risk_gateway=RiskGateway(
             limits=limits
             or FixedLiveLimits(
@@ -352,7 +357,7 @@ async def _seed_live_session(
 async def test_golden_path_full_trading_lifecycle(
     repository: PostgresUniverseRepository,
     order_repository: tuple[
-        PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]
+        OrderRows, async_sessionmaker[AsyncSession]
     ],
 ) -> None:
     """End-to-end golden path:
@@ -663,7 +668,7 @@ async def test_golden_path_full_trading_lifecycle(
 
 async def test_golden_path_risk_gate_blocks_excessive_exposure(
     order_repository: tuple[
-        PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]
+        OrderRows, async_sessionmaker[AsyncSession]
     ],
 ) -> None:
     """Verifies that the Golden Path correctly blocks candidates that violate risk bounds."""

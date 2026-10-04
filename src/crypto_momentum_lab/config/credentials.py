@@ -2,7 +2,6 @@ import hashlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import NoReturn
 
 from crypto_momentum_lab.config.models import (
     BinanceCredentialConfig,
@@ -87,7 +86,10 @@ def resolve_binance_credentials(
     if not missing:
         return _resolved_from_reference(role, reference, values)
 
-    _raise_missing(role, reference, missing)
+    joined_names = ", ".join(missing)
+    raise CredentialResolutionError(
+        f"{role.value} credential variables are missing or blank: {joined_names}"
+    )
 
 
 def credential_config_for_role(
@@ -174,17 +176,6 @@ def _missing_names(
             (reference.api_secret_env, values.get(reference.api_secret_env)),
         )
         if value is None or not value.strip()
-    )
-
-
-def _raise_missing(
-    role: BinanceCredentialRole,
-    reference: BinanceCredentialRef,
-    missing: tuple[str, ...],
-) -> NoReturn:
-    joined_names = ", ".join(missing)
-    raise CredentialResolutionError(
-        f"{role.value} credential variables are missing or blank: {joined_names}"
     )
 
 

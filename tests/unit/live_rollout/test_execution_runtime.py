@@ -12,16 +12,14 @@ def arguments():
     return dict(
         sessions=async_sessionmaker(),
         exchange=Mock(),
-        order_repository=Mock(),
         event_repository=Mock(),
+        submission_repository=Mock(),
         account_label="account-3",
         strategy_name="momentum",
-        callbacks=runtime.LiveExecutionCallbacks(
-            on_event=callback,
-            on_before_submit=callback,
-            on_exchange_request=callback,
-            on_exchange_response=callback,
-        ),
+        on_event=callback,
+        on_before_submit=callback,
+        on_exchange_request=callback,
+        on_exchange_response=callback,
     )
 
 
@@ -65,5 +63,56 @@ async def test_failed_or_cancelled_restore_never_exposes_submission(monkeypatch,
     with pytest.raises(type(error)):
         await runtime.build_live_execution_runtime(**args)
     constructor.assert_not_called()
-    args["exchange"].assert_not_called()
-    assert not args["exchange"].method_calls
+    args["exchange"].submit_order.assert_not_called()
+    args["exchange"].query_order_by_client_id.assert_not_called()
+    args["exchange"].cancel_order_by_client_id.assert_not_called()
+
+
+@pytest.mark.parametrize("order_type", ["market", "limit"])
+def test_live_policy_uses_entry_configuration_and_only_candle_exits(order_type):
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from crypto_momentum_lab.domain.strategy.models import EntryType, StrategySide
+    from crypto_momentum_lab.domain.strategy.position_exit import position_exit_reason
+
+    policy = runtime.build_live_policy(
+        config=SimpleNamespace(
+            strategy=SimpleNamespace(entry_order_type=EntryType(order_type))
+        ),
+        target_notional=Decimal("100"),
+        risk_config=SimpleNamespace(max_open_positions=500),
+        strategy_name="orderflow_impulse",
+    )
+    assert policy.order_type is EntryType(order_type)
+    assert (
+        policy.target_notional == policy.sizing_model.target_notional == Decimal("100")
+    )
+    assert policy.max_open_positions == 500
+    opened = datetime(2026, 10, 2, 3, 15, 3, tzinfo=UTC)
+    assert (
+        position_exit_reason(
+            held_until=opened + timedelta(minutes=20, seconds=12),
+            opened_at=opened,
+            symbol="USUSDT",
+            side=StrategySide.LONG,
+            policy=policy.exit_policy,
+            closed_candle=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("notional", ["0", "-100"])
+def test_live_policy_rejects_non_positive_notional(notional):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError, match="target_notional must be positive"):
+        runtime.build_live_policy(
+            config=SimpleNamespace(),
+            target_notional=Decimal(notional),
+            risk_config=SimpleNamespace(),
+            strategy_name="orderflow_impulse",
+        )

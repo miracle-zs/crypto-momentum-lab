@@ -5,9 +5,10 @@ from decimal import Decimal
 from typing import Any
 
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
+from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
 
 
-def verify_decision_trace(trace: Any | None, decision_id: str) -> dict[str, Any]:
+def verify_decision_trace(trace: DecisionTrace | None, decision_id: str) -> dict[str, Any]:
     """Verify a trace already loaded by an outer adapter."""
     try:
         if trace is None:
@@ -37,7 +38,7 @@ def verify_decision_trace(trace: Any | None, decision_id: str) -> dict[str, Any]
                 "reproduced": False,
             }
 
-        payload = trace.trace_payload or {}
+        payload = trace.trace_payload
 
         if payload.get("trace_schema_version") != 1:
             return {
@@ -118,10 +119,8 @@ def verify_decision_trace(trace: Any | None, decision_id: str) -> dict[str, Any]
 
         revisions_summary = []
         for ref in trace.evaluated_market_refs:
-            if not getattr(ref, "revision_id", None) or not getattr(
-                ref, "content_hash", None
-            ):
-                rev_id = getattr(ref, "revision_id", "?")
+            if not ref.revision_id or not ref.content_hash:
+                rev_id = ref.revision_id
                 return {
                     "decision_id": trace.decision_id,
                     "status": "EVIDENCE_INSUFFICIENT",
@@ -135,11 +134,7 @@ def verify_decision_trace(trace: Any | None, decision_id: str) -> dict[str, Any]
                     "bucket_start": ref.bucket_start.isoformat(),
                     "bucket_end": ref.bucket_end.isoformat(),
                     "content_hash": ref.content_hash,
-                    "visibility_mode": (
-                        ref.visibility_mode.value
-                        if hasattr(ref.visibility_mode, "value")
-                        else str(ref.visibility_mode)
-                    ),
+                    "visibility_mode": ref.visibility_mode.value,
                 }
             )
 

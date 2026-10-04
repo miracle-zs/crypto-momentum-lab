@@ -93,7 +93,7 @@ runtime:
   migration_revision: "20260911_0040"
 accounts:
   - label: primary
-    strategy: "${STRATEGY:-orderflow_impulse}"
+    strategy: "${STRATEGY:-invalid_default_strategy}"
     session_id: live-primary-v1
     lease_owner: live-worker
     profile_ref: profile.yaml
@@ -119,9 +119,9 @@ accounts:
 
     manifest = load_live_runtime_manifest(
         path,
-        environment={"IMAGE_COMMIT": "b" * 40, "STRATEGY": "custom"},
+        environment={"IMAGE_COMMIT": "b" * 40, "STRATEGY": "orderflow_impulse"},
     )
-    assert manifest.account("primary").strategy == "custom"
+    assert manifest.account("primary").strategy == "orderflow_impulse"
 
     with pytest.raises(RuntimeManifestError, match="IMAGE_COMMIT is required"):
         load_live_runtime_manifest(path, environment={})
@@ -184,3 +184,28 @@ accounts:
 
     with pytest.raises(RuntimeManifestError, match="duplicate runtime account"):
         load_live_runtime_manifest(path, environment={})
+
+
+def test_manifest_accepts_trading_configuration_without_compliance_metadata(tmp_path):
+    import yaml
+
+    document = yaml.safe_load(Path("deploy/live-runtime.yaml").read_text())
+    for account in document["accounts"]:
+        account.pop("image_commit", None)
+    document.pop("runtime")
+    for account in document["accounts"]:
+        account.pop("lease_owner", None)
+        account.pop("migration_revision", None)
+    path = tmp_path / "trading.yaml"
+    path.write_text(yaml.safe_dump(document))
+    manifest = load_live_runtime_manifest(path, environment={})
+    assert manifest.account("primary").execution_inputs.candle_grace_bars == 8
+    assert manifest.account("account-4").strategy_inputs.entry_order_type.value == "limit"
+
+
+def test_unknown_strategy_does_not_produce_unset_hash(tmp_path):
+    source = Path("deploy/live-runtime.yaml").read_text()
+    path = tmp_path / "runtime.yaml"
+    path.write_text(source.replace("orderflow_impulse", "unknown_strategy"))
+    with pytest.raises(RuntimeManifestError, match="unknown_strategy"):
+        load_live_runtime_manifest(path, environment={"CML_CODE_COMMIT": "a" * 40})

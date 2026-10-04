@@ -12,7 +12,6 @@ from crypto_momentum_lab.research_collector.models import (
     SourceKind,
 )
 from crypto_momentum_lab.research_collector.storage import (
-    LocalBatchSpool,
     ParquetWindowSink,
 )
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
@@ -42,20 +41,6 @@ def _batch(
         ),
         source_kind=source_kind,
     )
-
-
-def test_local_spool_round_trips_selected_batch(tmp_path) -> None:
-    state = fixture_state("BTCUSDT", 0)
-    spool = LocalBatchSpool(tmp_path / "spool", max_bytes=1024**2)
-    selection = _selection(state.symbol, state.bucket_start)
-
-    record = spool.write(_batch(state, 1), selection, (state,))
-    loaded = spool.pending_records()
-
-    assert len(loaded) == 1
-    assert loaded[0].path == record.path
-    assert loaded[0].collection_batch.states == (state,)
-    assert loaded[0].selection == selection
 
 
 def test_parquet_sink_deduplicates_and_keeps_existing_on_payload_conflict(

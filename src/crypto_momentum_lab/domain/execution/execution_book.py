@@ -27,7 +27,6 @@ from crypto_momentum_lab.domain.execution.command_models import (
     ExecutionScope,
     OutboxEntry,
 )
-from crypto_momentum_lab.domain.execution.command_repository import CommandRepository
 from crypto_momentum_lab.domain.execution.cumulative_report import (
     plan_cumulative_report,
     plan_watermark_publication,
@@ -84,7 +83,6 @@ from crypto_momentum_lab.domain.execution.observation_models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExitAllocation,
-    FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
@@ -92,11 +90,13 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.ports import (
+    CommandRepository,
     DecisionCommitConflict,
     ExecutionEvidenceIdentity,
     ExecutionTradeIdentity,
     ExecutionTransactionPort,
     ExecutionUnitOfWorkPort,
+    ReservationRepository,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
     PositionBook,
@@ -131,16 +131,13 @@ from crypto_momentum_lab.domain.execution.recovery_codec import (
 from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
 )
-from crypto_momentum_lab.domain.execution.reservation_repository import (
-    ReservationRepository,
-)
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
-    ExitAllocator,
     ExitPolicyMode,
     PositionReservation,
     TradeCommand,
     TradeCommandType,
+    plan_exit_allocations,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
@@ -237,19 +234,18 @@ class ExecutionRequest:
     request_id: str
     scope: ExecutionScope
     strategy_name: str
-    strategy_version: str
     run_id: str
     decision_ref: str
     expected_view_token: str
     action: TradeCommandType
     requested_quantity: Decimal
+    side: StrategySide = field(kw_only=True)
     order_type: str = "MARKET"
     limit_price: Decimal | None = None
     reduce_only: bool = False
     target_batch_ids: tuple[str, ...] = ()
     batch_quantities: Mapping[str, Decimal] | None = None
-    exit_policy_mode: ExitPolicyMode = ExitPolicyMode.CONSOLIDATE_ELIGIBLE
-    expected_projection_version: str | None = None
+    exit_policy_mode: ExitPolicyMode = ExitPolicyMode.TARGET_BATCHES_ONLY
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -593,6 +589,10 @@ class ExecutionBook:
     @property
     def coordinator(self) -> ExecutionCoordinator:
         return self._coordinator
+
+    @property
+    def has_reservation_repository(self) -> bool:
+        return self._reservation_repo is not None
 
     @property
     def has_command_repository(self) -> bool:
@@ -1390,7 +1390,10 @@ class ExecutionBook:
         self,
         request: ExecutionRequest,
         *,
-        prepare_submission: Callable[[ExecutionTransactionPort | None], Awaitable[PreparedOrderSubmission]] | None = None,
+        prepare_submission: Callable[
+            [ExecutionTransactionPort | None], Awaitable[PreparedOrderSubmission]
+        ]
+        | None = None,
     ) -> ExecutionActResult:
         """Accept a command atomically when backed by the durable UoW."""
         if self._execution_unit_of_work is None:
@@ -1413,7 +1416,9 @@ class ExecutionBook:
                 )
             candidate = self._staged_copy(key=key)
             try:
-                account_scope = f"{key.environment}:{key.account_label}:{request.strategy_name}"
+                account_scope = (
+                    f"{key.environment}:{key.account_label}:{request.strategy_name}"
+                )
                 async with self._execution_unit_of_work.transaction(
                     key, account_scope=account_scope
                 ) as tx:
@@ -1476,7 +1481,6 @@ class ExecutionBook:
                         }
                         await tx.save_reservations(
                             result.receipt.reservations,
-                            expected_projection_version=current_view.projection_version,
                             batch_quantities=batch_capacities,
                             proven_position_quantity=current_view.total_quantity,
                         )
@@ -1485,14 +1489,16 @@ class ExecutionBook:
                         if prepared.plan.reduce_only and request.target_batch_ids:
                             journal = candidate._ensure_journal(key)
                             for batch_id in dict.fromkeys(request.target_batch_ids):
-                                journal.record_boundary(ExitOrderSubmissionFact(
-                                    order_id=f"{request.request_id}:{batch_id}",
-                                    submitted_at=prepared.plan.created_at,
-                                    symbol=key.symbol,
-                                    position_side=key.position_side,
-                                    client_order_id=request.request_id,
-                                    target_batch_id=batch_id,
-                                ))
+                                journal.record_boundary(
+                                    ExitOrderSubmissionFact(
+                                        order_id=f"{request.request_id}:{batch_id}",
+                                        submitted_at=prepared.plan.created_at,
+                                        symbol=key.symbol,
+                                        position_side=key.position_side,
+                                        client_order_id=request.request_id,
+                                        target_batch_id=batch_id,
+                                    )
+                                )
                             boundary_facts = journal.read_cut()
                             persisted = await tx.persist_facts(
                                 scope=stream_scope,
@@ -1505,7 +1511,8 @@ class ExecutionBook:
                                 raise RuntimeError("exit boundary persistence conflict")
                             candidate._journal_revisions[canon] = persisted.revision
                         await candidate._apply_command_transition(
-                            request.request_id, DispatchState.DISPATCHING,
+                            request.request_id,
+                            DispatchState.DISPATCHING,
                             at=prepared.submitting_event.occurred_at,
                         )
                         result = replace(result, prepared_submission=prepared)
@@ -1598,76 +1605,43 @@ class ExecutionBook:
             )
 
         # 4. Command building and reservation calculation
-        episode = view.active_episode
-        if episode is not None:
-            side = episode.side
-        elif key.position_side == FuturesPositionSide.SHORT:
-            side = StrategySide.SHORT
-        else:
-            side = StrategySide.LONG
+        side = request.side
 
-        order_type = (
-            EntryType(request.order_type.lower())
-            if isinstance(request.order_type, str)
-            else request.order_type
-        )
+        order_type = EntryType(request.order_type.lower())
 
         reservations: tuple[PositionReservation, ...] = ()
         if request.action == TradeCommandType.EXIT:
-            alloc_plan = ExitAllocator.plan_exit(
-                view,
-                target_batch_ids=(request.target_batch_ids or None),
-                requested_quantity=request.requested_quantity,
-                policy=request.exit_policy_mode,
-                reason=f"exit_{request.decision_ref}",
-            )
-
-            if alloc_plan is None or alloc_plan.total_allocated_quantity <= Decimal(
-                "0"
-            ):
-                if request.target_batch_ids:
-                    if request.batch_quantities:
-                        allocations = tuple(
-                            ExitAllocation(
-                                batch_id=bid,
-                                allocated_quantity=request.batch_quantities.get(
-                                    bid,
-                                    request.requested_quantity
-                                    / len(request.target_batch_ids),
-                                ),
-                            )
-                            for bid in request.target_batch_ids
+            if request.target_batch_ids and request.batch_quantities is not None:
+                alloc_plan = ExitAllocationPlan(
+                    position_key=key,
+                    allocations=tuple(
+                        ExitAllocation(
+                            batch_id=bid,
+                            allocated_quantity=request.batch_quantities[bid],
                         )
-                    else:
-                        qty_per_batch = request.requested_quantity / len(
-                            request.target_batch_ids
-                        )
-                        allocations = tuple(
-                            ExitAllocation(
-                                batch_id=bid,
-                                allocated_quantity=qty_per_batch,
-                            )
-                            for bid in request.target_batch_ids
-                        )
-                    alloc_plan = ExitAllocationPlan(
-                        position_key=key,
-                        allocations=allocations,
-                        total_allocated_quantity=request.requested_quantity,
-                        policy=request.exit_policy_mode,
-                        reason=f"exit_{request.decision_ref}",
-                        projection_version=effective_view_token,
-                    )
-                else:
-                    return Blocked(
-                        reason=(
-                            "Insufficient active batch capacity for "
-                            "requested exit quantity"
-                        ),
-                        diagnostics=(
-                            f"Requested: {request.requested_quantity}, "
-                            f"Total active: {view.total_quantity}",
-                        ),
-                    )
+                        for bid in request.target_batch_ids
+                    ),
+                    total_allocated_quantity=request.requested_quantity,
+                    policy=request.exit_policy_mode,
+                    reason=f"exit_{request.decision_ref}",
+                    projection_version=effective_view_token,
+                )
+            else:
+                alloc_plan = plan_exit_allocations(
+                    view,
+                    target_batch_ids=(request.target_batch_ids or None),
+                    requested_quantity=request.requested_quantity,
+                    policy=request.exit_policy_mode,
+                    reason=f"exit_{request.decision_ref}",
+                )
+            if alloc_plan.total_allocated_quantity <= 0:
+                return Blocked(
+                    reason="Insufficient active batch capacity for requested exit quantity",
+                    diagnostics=(
+                        f"Requested: {request.requested_quantity}, "
+                        f"Total active: {view.total_quantity}",
+                    ),
+                )
 
             command = TradeCommand(
                 command_id=request.request_id,
@@ -1720,14 +1694,10 @@ class ExecutionBook:
                     res_list.append(r)
                 reservations = tuple(res_list)
 
-            batch_quantities_dict = (
-                {
-                    alloc.batch_id: alloc.allocated_quantity
-                    for alloc in alloc_plan.allocations
-                }
-                if alloc_plan
-                else None
-            )
+            batch_quantities_dict = {
+                alloc.batch_id: alloc.allocated_quantity
+                for alloc in alloc_plan.allocations
+            }
 
             if self._reservation_repo is not None:
                 to_save: list[PositionReservation] = []
@@ -1767,19 +1737,9 @@ class ExecutionBook:
                     to_save.append(res)
 
                 if to_save:
-                    expected_ver = (
-                        request.expected_projection_version
-                        if request.expected_projection_version is not None
-                        else (
-                            None
-                            if request.expected_view_token in ("*", "pv_initial")
-                            else request.expected_view_token
-                        )
-                    )
                     try:
                         await self._reservation_repo.save_reservations(
                             tuple(to_save),
-                            expected_projection_version=expected_ver,
                             batch_quantities=batch_quantities_dict,
                         )
                     except Exception as save_err:
@@ -1889,6 +1849,12 @@ class ExecutionBook:
     def get_outbox(self, command_id: str) -> OutboxEntry | None:
         """Returns the outbox record for command_id if found."""
         return self._outbox_by_command_id.get(command_id)
+
+    def require_command_recovery(self, command_id: str) -> None:
+        """Keep settlement work recoverable without rewriting the order fact."""
+        if not command_id.strip():
+            raise ValueError("recovery command identity must not be empty")
+        self._recovery_required_commands.add(command_id)
 
     def command_requires_recovery(self, command_id: str) -> bool:
         """Expose the command's dispatch/settlement gate to its repair owner."""
@@ -2100,7 +2066,7 @@ class ExecutionBook:
             if entry.external_order_id:
                 self._recovery_required_commands.discard(entry.external_order_id)
         try:
-            await self._persist_transition(entry, plan.updated)
+            await self._persist_transition(plan.updated)
         except Exception:
             if plan.requires_reconciliation:
                 # A submit may have reached the exchange. Seal against resubmit
@@ -2117,7 +2083,6 @@ class ExecutionBook:
 
     async def _persist_transition(
         self,
-        previous: OutboxEntry,
         updated: OutboxEntry,
     ) -> None:
         await self._persist_outbox_state(updated)
@@ -2219,7 +2184,9 @@ class ExecutionBook:
 
         async with self._mutation_lock(key):
             if self._persistence_failed and not self._stream_scopes:
-                raise RuntimeError("execution facts require initial durable restoration")
+                raise RuntimeError(
+                    "execution facts require initial durable restoration"
+                )
             # A truly flat position on exchange with no active local exposure,
             # reservations, or pending commands can adopt or confirm the stream
             # epoch in memory without cloning the book or opening a database
@@ -2750,28 +2717,6 @@ class ExecutionBook:
                     f"execution evidence was not durably accepted: {err}"
                 ) from err
 
-    async def adopt_stream_checkpoint(
-        self,
-        evidence: ExecutionEvidence,
-    ) -> ExecutionObserveResult:
-        """Adopt a stream only from a complete, typed source recovery proof."""
-        if self._execution_unit_of_work is None:
-            return EvidenceConflict(
-                evidence_id=evidence.evidence_id,
-                reason="stream checkpoint adoption requires a durable execution book",
-            )
-        if (
-            evidence.coverage_evidence is None
-            or evidence.fill_load_provenance is None
-            or evidence.stream_id is None
-            or evidence.stream_epoch is None
-        ):
-            return EvidenceConflict(
-                evidence_id=evidence.evidence_id,
-                reason="stream checkpoint adoption requires typed source provenance",
-            )
-        return await self.observe(evidence)
-
     async def _observe_mutating(
         self,
         evidence: ExecutionEvidence,
@@ -2878,7 +2823,7 @@ class ExecutionBook:
                     )
                 if entry.external_order_id is None:
                     bound = replace(entry, external_order_id=event.exchange_order_id)
-                    await self._persist_transition(entry, bound)
+                    await self._persist_transition(bound)
                     watermark_key = self._order_watermark_key(key, entry.command_id)
                     trade_delta = account_trade_delta(
                         entry.command_id,
@@ -3110,7 +3055,7 @@ class ExecutionBook:
                 assert outbox is not None
                 if event_plan.requires_dispatch_reconciliation:
                     self._dispatch_reconciliation_required_commands.add(cmd_id)
-                await self._persist_transition(outbox, event_plan.updated)
+                await self._persist_transition(event_plan.updated)
                 if event_plan.release_reason is not None:
                     released_qty += await self._release_command_reservations(
                         cmd_id,

@@ -8,7 +8,7 @@ the collector useful for both live capture and deterministic backfill.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -141,21 +141,6 @@ class JournalRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ArchiveProgress:
-    """Point-in-time three-stage progress of the durable archive pipeline."""
-
-    environment: str
-    stream_id: str | None
-    received_sequence: int | None
-    accepted_sequence: int | None
-    materialized_sequence: int | None
-    last_materialized_bucket: datetime | None
-    last_materialized_symbol: str | None
-    pending_records: int
-    pending_bytes: int
-
-
-@dataclass(frozen=True, slots=True)
 class SelectedSymbol:
     """Point-in-time explanation for why a symbol was retained."""
 
@@ -237,7 +222,6 @@ class CollectionReceipt:
     selected_rows: int
     duplicate_rows: int = 0
     committed_rows: int = 0
-    committed_sequence: int | None = None
     skipped_rows: int = 0
     durable_receipt: DurableReceipt | None = None
 
@@ -318,20 +302,13 @@ class SymbolSelector(Protocol):
 
 
 class CollectionSource(Protocol):
-    def batches(self) -> AsyncIterator[MarketStateBatch]:
+    def stop(self) -> None: ...
+
+    def set_resume_cursor(
+        self, *, stream_id: str | None, sequence: int | None
+    ) -> None: ...
+
+    def resume_after_recovery(self, *, stream_id: str, sequence: int) -> None: ...
+
+    def batches(self) -> AsyncGenerator[MarketStateBatch, None]:
         """Return an async iterator of ``MarketStateBatch`` objects."""
-
-
-class CollectionSink(Protocol):
-    def append(
-        self,
-        collection_batch: CollectionBatch,
-        selection: SelectionSnapshot,
-    ) -> object:
-        """Append a batch to the sink's durable-window implementation."""
-
-    def flush_ready(self, latest_bucket_start: datetime) -> object:
-        """Flush windows that are beyond the late-event tolerance."""
-
-    def flush_all(self) -> object:
-        """Flush all buffered windows durably."""

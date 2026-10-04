@@ -611,7 +611,7 @@ class PostgresAccountRepository:
                     open_order_count=row.open_order_count,
                     fill_count=row.fill_count,
                     mismatch_count=row.mismatch_count,
-                    details=cast(dict[str, JsonValue], dict(row.details or {})),
+                    details=cast(dict[str, JsonValue], dict(row.details)),
                     projection_schema_version=row.projection_schema_version,
                     projected_at=row.projected_at,
                 )

@@ -89,7 +89,7 @@ def _cash_balance(context: LiveDaemonRuntimeContext) -> Decimal | None:
     balances = [
         balance.wallet_balance
         for balance in snapshot.balances
-        if getattr(balance, "asset", "").upper() in {"USDT", "USDC", "BUSD"}
+        if balance.asset.upper() in {"USDT", "USDC", "BUSD"}
     ]
     if not balances:
         return None
@@ -132,9 +132,7 @@ def frozen_decision_inputs_from_context(
     if context.active_halts:
         return None
     risk_config = context.risk_config
-    risk_version = getattr(risk_config, "config_hash", None) or (
-        f"risk_{risk_config.created_at.isoformat()}"
-    )
+    risk_version = risk_config.config_hash
     universe_version = (
         f"univ_{context.context_epoch}"
         if context.context_epoch is not None
@@ -163,7 +161,7 @@ class LiveDecisionFactSource:
         register_account_stream: AccountStreamRegistrar | None = None,
         decision_unit_of_work: DecisionUnitOfWorkPort | None = None,
         hedge_mode: bool = True,
-        request_exit_recovery: Callable[[], None] = lambda: None,
+        request_exit_recovery: Callable[[], None],
         obsolete_exit_reasons: frozenset[str] = frozenset(),
     ) -> None:
         if not account_label.strip() or not strategy_name.strip():
@@ -405,7 +403,7 @@ class LiveDecisionFactSource:
             )
             receipt = await self._decision_uow.commit_decision(commit)
 
-            if getattr(receipt, "is_replay", False):
+            if receipt.is_replay:
                 # UoW returns the original durable receipt for an exact retry.
                 # Its trace may still contain an entry candidate or an exit
                 # command; neither may be released a second time here. Pending
@@ -475,7 +473,7 @@ class LiveDecisionFactSource:
         for decision_id, command in pending:
             view = await self._read_book_view(command)
             total_qty = (
-                getattr(view, "total_quantity", None) if view is not None else None
+                view.total_quantity if view is not None else None
             )
             if command.reason in self._obsolete_exit_reasons or (
                 total_qty is not None and total_qty <= Decimal("0")
@@ -485,8 +483,6 @@ class LiveDecisionFactSource:
                     continue
                 try:
                     disposition = await recovery(command)
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     log.exception(
                         "durable_exit_receipt_recovery_deferred",
@@ -524,8 +520,6 @@ class LiveDecisionFactSource:
                 continue
             try:
                 await self._dispatch_exit(decision_id, command)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 # The durable row remains PENDING until the coordinator gives
                 # an accepted result and its acknowledgement is persisted.
@@ -582,10 +576,10 @@ class LiveDecisionFactSource:
             stream_id=self._stream_id,
             stream_epoch=self._stream_epoch,
         )
-        total_qty = getattr(view, "total_quantity", None)
+        total_qty = view.total_quantity
         return (
             view.stream_scope == expected_scope
-            and (total_qty is None or total_qty > Decimal("0"))
+            and total_qty > Decimal("0")
             and view.projection_version == command.expected_projection_version
             and command.allocation_plan is not None
             and command.allocation_plan.projection_version
@@ -615,8 +609,6 @@ class LiveDecisionFactSource:
             return
         try:
             result = await handler(command)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             # A submitted exit can await account facts or have an unknown POST
             # outcome. Retain its durable row and reservation for reconciliation;

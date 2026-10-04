@@ -32,7 +32,6 @@ async def observe_evidence_group(
     released = Decimal("0")
     recovery_required = False
     diagnostics: list[str] = []
-    last_result: Applied | Duplicate | None = None
     for fill in fills:
         internal_id = f"{evidence.evidence_id}\x1ftrade:{fill.trade_id}"
         one_fill = replace(
@@ -55,7 +54,6 @@ async def observe_evidence_group(
         forget_identity(_evidence_identity(one_fill))
         if isinstance(fill_result, (EvidenceConflict, WaitingForEvidence)):
             return replace(fill_result, evidence_id=evidence.evidence_id)
-        last_result = fill_result
         if isinstance(fill_result, Applied):
             consumed += fill_result.consumed_quantity
             released += fill_result.released_quantity
@@ -68,25 +66,14 @@ async def observe_evidence_group(
         return base_result
     if isinstance(base_result, Duplicate):
         return base_result
-    if isinstance(base_result, Applied):
-        consumed += base_result.consumed_quantity
-        released += base_result.released_quantity
-        recovery_required = recovery_required or base_result.recovery_required
-        diagnostics.extend(base_result.diagnostics)
-        return replace(
-            base_result,
-            consumed_quantity=consumed,
-            released_quantity=released,
-            recovery_required=recovery_required,
-            diagnostics=tuple(dict.fromkeys(diagnostics)),
-        )
-    if isinstance(last_result, Applied):
-        return replace(
-            last_result,
-            evidence_id=evidence.evidence_id,
-            consumed_quantity=consumed,
-            released_quantity=released,
-            recovery_required=recovery_required,
-            diagnostics=tuple(dict.fromkeys(diagnostics)),
-        )
-    return base_result
+    consumed += base_result.consumed_quantity
+    released += base_result.released_quantity
+    recovery_required = recovery_required or base_result.recovery_required
+    diagnostics.extend(base_result.diagnostics)
+    return replace(
+        base_result,
+        consumed_quantity=consumed,
+        released_quantity=released,
+        recovery_required=recovery_required,
+        diagnostics=tuple(dict.fromkeys(diagnostics)),
+    )

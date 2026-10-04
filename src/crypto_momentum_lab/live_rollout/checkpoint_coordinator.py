@@ -150,12 +150,6 @@ class LiveCheckpointCoordinator:
     def last_processed_at(self, symbol: str) -> datetime | None:
         return self._last_processed_at_by_symbol.get(symbol)
 
-    @property
-    def latest_watermark(self) -> datetime | None:
-        if self._last_processed_at_by_symbol:
-            return max(self._last_processed_at_by_symbol.values())
-        return self._last_saved_at
-
     def forget_symbol(self, symbol: str) -> None:
         self._last_processed_at_by_symbol.pop(symbol, None)
 
@@ -181,8 +175,7 @@ class LiveCheckpointCoordinator:
             should_checkpoint = True
 
         if not should_checkpoint and self._checkpoint_every_seconds > 0:
-            ref_dt = state.bucket_end if state.bucket_end is not None else saved_at
-            ts = int(round(ref_dt.timestamp()))
+            ts = int(round(state.bucket_end.timestamp()))
             interval = int(round(self._checkpoint_every_seconds))
             phase = int(round(self._checkpoint_phase_seconds))
             current_cycle = ts // interval
@@ -211,27 +204,6 @@ class LiveCheckpointCoordinator:
         self._dirty = False
         self._dirty_since_monotonic = None
         self._last_saved_at = None
-
-    def check_dirty_age(self, now_monotonic: float | None = None) -> bool:
-        """Check if elapsed time since last save exceeds max_dirty_age_seconds."""
-        if not self._started or not self._dirty or self._last_saved_at is None:
-            return False
-        self._sync_persisted_progress()
-        now_mono = perf_counter() if now_monotonic is None else now_monotonic
-        if now_mono - self._last_persisted_monotonic < self._max_dirty_age_seconds:
-            return False
-        token = self._writer.submit(
-            _checkpoint_for_persistence(
-                self._strategy,
-                hub_cursor_provider=self._hub_cursor_provider,
-            ),
-            self._last_saved_at,
-        )
-        self._last_submitted_token = token
-        self._dirty = False
-        self._dirty_since_monotonic = None
-        self._last_saved_at = None
-        return True
 
     async def save_final(self, timeout_seconds: float | None = None) -> bool:
         if self._dirty and self._last_saved_at is not None:

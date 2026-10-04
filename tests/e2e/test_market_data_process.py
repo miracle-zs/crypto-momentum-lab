@@ -197,7 +197,6 @@ def _active_snapshot(symbol: str) -> UniverseSnapshot:
                 symbol,
                 MembershipStatus.TARGET,
                 RankingSide.GAINER,
-                None,
             ),
         ),
     )

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -17,6 +18,7 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeOrderAlreadyAbsentError,
     ExchangeSubmissionTimeoutError,
 )
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -39,6 +41,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
+    StrategySide,
     universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
@@ -69,6 +72,7 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
+from tests.fixtures.live_context_reader import context_reader
 from tests.fixtures.live_market import (
     FakeStrategy,
     _intent,
@@ -482,7 +486,7 @@ async def test_terminal_entry_event_releases_in_memory_reservation() -> None:
     plan = exchange.plans[0]
     assert daemon._pending_entries.snapshot()
 
-    daemon.observe_entry_order_event(
+    daemon.pending_entries.observe_order_event(
         plan,
         ExchangeOrderEvent(
             event_id="filled-event",
@@ -562,7 +566,9 @@ async def test_live_daemon_filters_new_entries_by_pool_and_closed_ema() -> None:
 
 
 @pytest.mark.parametrize(("entry_price", "submitted"), [("30001", 1), ("30000", 0)])
-async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas(entry_price, submitted) -> None:
+async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas(
+    entry_price, submitted
+) -> None:
     exchange = PlanAwareExchange()
 
     async def load_symbols(_observed_at: datetime) -> frozenset[str]:
@@ -606,8 +612,6 @@ async def test_live_daemon_continues_running_when_candidate_risk_rejects() -> No
     assert result.halt_reason is None
     assert result.submitted_order_count == 0
     assert exchange.calls == []
-
-
 
 
 async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> None:
@@ -772,7 +776,7 @@ async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() 
     recovery = CurrentPositionExitRecovery()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -793,6 +797,8 @@ async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() 
         exit_recovery_client=recovery,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -820,7 +826,7 @@ async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
     recovery = CurrentPositionExitRecovery()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -865,6 +871,8 @@ async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
         exit_recovery_client=recovery,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1074,7 +1082,7 @@ async def test_grace_timeout_resizes_intent_after_cancel_fill() -> None:
     )
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1151,7 +1159,7 @@ async def test_market_unavailable_blocks_entries_but_keeps_exit_lane_enabled() -
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -1171,6 +1179,8 @@ async def test_market_unavailable_blocks_entries_but_keeps_exit_lane_enabled() -
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1212,7 +1222,7 @@ async def test_absent_recovery_order_falls_back_to_market_exit() -> None:
     )
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1236,6 +1246,8 @@ async def test_absent_recovery_order_falls_back_to_market_exit() -> None:
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0.0088"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1261,7 +1273,7 @@ async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> Non
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -1281,6 +1293,8 @@ async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> Non
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1402,7 +1416,7 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -1422,6 +1436,8 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1450,12 +1466,18 @@ async def test_live_daemon_continues_with_unmanaged_account_position(capacity) -
         del state
         return replace(
             _runtime_context(),
-            risk_config=replace(_runtime_context().risk_config, max_open_positions=capacity),
+            risk_config=replace(
+                _runtime_context().risk_config, max_open_positions=capacity
+            ),
             open_position_symbols=frozenset({"ETHUSDT"}),
             unmanaged_position_symbols=frozenset({"ETHUSDT"}),
         )
 
-    daemon = _daemon(exchange=exchange, context_provider=position_context, max_open_positions=capacity)
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        max_open_positions=capacity,
+    )
 
     result = await daemon.run(_states())
 
@@ -1480,6 +1502,8 @@ async def test_pending_account_position_does_not_block_entry_lane() -> None:
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1508,7 +1532,7 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     reopen_time = datetime(2026, 7, 4, 2, 0, tzinfo=UTC)
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1538,6 +1562,8 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1599,7 +1625,7 @@ async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1619,6 +1645,8 @@ async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1643,7 +1671,7 @@ async def test_scheduled_flatten_targets_exchange_position_before_market_state_a
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1682,6 +1710,8 @@ async def test_scheduled_flatten_targets_exchange_position_before_market_state_a
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1710,7 +1740,10 @@ async def test_scheduled_flatten_targets_exchange_position_before_market_state_a
 @pytest.mark.parametrize("wait_for_exit", [False, True])
 @pytest.mark.parametrize("start_minute", [45, 55])
 async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
-    unmanaged_symbols, cancel_failed, wait_for_exit, start_minute,
+    unmanaged_symbols,
+    cancel_failed,
+    wait_for_exit,
+    start_minute,
 ) -> None:
     exit_sent = asyncio.Event()
 
@@ -1725,7 +1758,7 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     current_time = [scheduled_now]
     position = ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("30000"),
@@ -1750,11 +1783,13 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
                 account_label="primary",
                 symbol="BTCUSDT",
                 position_side="LONG",
-                position_amt=Decimal("0"),
+                position_amt=Decimal("0") if exit_sent.is_set() else position.quantity,
                 entry_price=Decimal("30000"),
                 mark_price=Decimal("30000"),
                 unrealized_pnl=Decimal("0"),
-                notional=Decimal("0"),
+                notional=Decimal("0")
+                if exit_sent.is_set()
+                else position.quantity * position.entry_price,
                 leverage=10,
                 margin_type="CROSSED",
                 observed_at=current_time[0],
@@ -1776,6 +1811,8 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
         context_provider=position_context,
         exit_manager=LiveExitManager(
             config=LiveExitConfig(
+                account_label="primary",
+                candle_grace_decision_profit_pct=Decimal("0"),
                 run_id="run-1",
                 strategy_name="compression_breakout",
                 strategy_version="v0",
@@ -1790,9 +1827,13 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     )
     daemon._scheduled_controller.observe_state(_state())
 
-    failure = await asyncio.wait_for(daemon.process_scheduled_risk_window(now=scheduled_now), timeout=2)
+    failure = await asyncio.wait_for(
+        daemon.process_scheduled_risk_window(now=scheduled_now), timeout=2
+    )
 
-    assert failure == ("scheduled_entry_order_cancel_failed:OSError" if cancel_failed else None)
+    assert failure == (
+        "scheduled_entry_order_cancel_failed:OSError" if cancel_failed else None
+    )
     assert daemon.entry_enabled is False
     assert cancellation_calls == [()]
     assert len(exchange.plans) == 1
@@ -1903,7 +1944,6 @@ def _daemon(
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=order_repository,
         event_repository=order_repository,
         live_submit_enabled=True,
         clock=lambda: NOW,
@@ -1926,6 +1966,7 @@ def _daemon(
         backend=machine,
         account_label="test_account",
         environment="live",
+        execution_book=ExecutionBook(),
     )
     _created_coordinators.append(coordinator)
     submission_repository = repository or FakeLiveRepository()
@@ -1944,7 +1985,7 @@ def _daemon(
         submission_repository=submission_repository,
         persist_checkpoint=checkpoint_repository.save_checkpoint,
         state_machine=coordinator,
-        context_provider=context_provider or default_context,
+        context_provider=context_reader(context_provider or default_context),
         signal_recorder=signal_recorder,
         config=LiveDaemonConfig(
             run_id="run-1",
@@ -1966,6 +2007,7 @@ def _daemon(
         clock=clock or (lambda: NOW),
         cancel_unfilled_entry_orders=cancel_unfilled_entry_orders,
         fetch_exchange_positions=fetch_exchange_positions,
+        request_exit_recovery=Mock(),
     )
 
 
@@ -1997,22 +2039,28 @@ class RecordingSignalRecorder:
         del candidate, state, recorded_at, account_context, filter_context
 
 
-class PlanAwareExchange:
+class PlanAwareExchange(FakeExchange):
     def __init__(self) -> None:
+        self.on_request = None
+        self.on_response = None
         self.calls: list[str] = []
         self.plans: list[OrderExecutionPlan] = []
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
-        self.calls.append("submit")
-        self.plans.append(plan)
-        return ExchangeOrderSnapshot(
-            client_order_id=plan.client_order_id,
-            exchange_order_id="exchange-1",
-            state=ExchangeOrderState.ACKNOWLEDGED,
-            observed_at=NOW,
-            executed_quantity=Decimal("0"),
-            average_price=Decimal("0"),
-        )
+        await self.emit_submit_boundary(plan, is_request=True)
+        try:
+            self.calls.append("submit")
+            self.plans.append(plan)
+            return ExchangeOrderSnapshot(
+                client_order_id=plan.client_order_id,
+                exchange_order_id="exchange-1",
+                state=ExchangeOrderState.ACKNOWLEDGED,
+                observed_at=NOW,
+                executed_quantity=Decimal("0"),
+                average_price=Decimal("0"),
+            )
+        finally:
+            await self.emit_submit_boundary(plan, is_request=False)
 
     async def query_order_by_client_id(
         self,
@@ -2041,18 +2089,22 @@ class AbsentRecoveryExchange(PlanAwareExchange):
 
 class TimeoutThenAcknowledgedExitExchange(PlanAwareExchange):
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
-        self.calls.append("submit")
-        self.plans.append(plan)
-        if len(self.plans) == 1:
-            raise ExchangeSubmissionTimeoutError("submit timed out")
-        return ExchangeOrderSnapshot(
-            client_order_id=plan.client_order_id,
-            exchange_order_id="exchange-recovery",
-            state=ExchangeOrderState.ACKNOWLEDGED,
-            observed_at=NOW,
-            executed_quantity=Decimal("0"),
-            average_price=Decimal("0"),
-        )
+        await self.emit_submit_boundary(plan, is_request=True)
+        try:
+            self.calls.append("submit")
+            self.plans.append(plan)
+            if len(self.plans) == 1:
+                raise ExchangeSubmissionTimeoutError("submit timed out")
+            return ExchangeOrderSnapshot(
+                client_order_id=plan.client_order_id,
+                exchange_order_id="exchange-recovery",
+                state=ExchangeOrderState.ACKNOWLEDGED,
+                observed_at=NOW,
+                executed_quantity=Decimal("0"),
+                average_price=Decimal("0"),
+            )
+        finally:
+            await self.emit_submit_boundary(plan, is_request=False)
 
 
 class UnknownCancelExchange(TimeoutThenAcknowledgedExitExchange):
@@ -2191,10 +2243,6 @@ async def _states() -> AsyncIterator:
     yield _state()
 
 
-
-
-
-
 async def test_history_replay_reaches_live_decision_without_loading_live_context():
     exchange = PlanAwareExchange()
     calls = []
@@ -2248,8 +2296,6 @@ async def test_submission_and_checkpoint_persistence_are_independent():
     assert len(submissions.approved) == 1
     assert saved
     assert all(item[0] == "run-1" for item in saved)
-
-
 
 
 @pytest.mark.parametrize("waiting_on", ["cancellation", "verification"])
@@ -2326,11 +2372,17 @@ async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capa
     fresh = _runtime_context()
 
     class Provider:
+        generation = 0
+
+        def is_current(self, context):
+            return True
+
         async def __call__(self, state):
             calls.append("load")
             return fresh
 
         def invalidate(self, event=None):
+            self.generation += 1
             calls.append("invalidate")
 
     daemon = _daemon(exchange=PlanAwareExchange(), context_provider=Provider())
@@ -2375,10 +2427,17 @@ async def test_exit_exception_does_not_stop_later_market_states():
                 raise RuntimeError("one exit observation failed")
             return ()
 
-    manager = ExitManager(config=LiveExitConfig(
-        run_id="run-1", strategy_name="compression_breakout", strategy_version="v0",
-        strategy_config_hash="a" * 64, policy=PositionExitPolicy(max_holding_seconds=30),
-    ))
+    manager = ExitManager(
+        config=LiveExitConfig(
+            account_label="primary",
+            candle_grace_decision_profit_pct=Decimal("0"),
+            run_id="run-1",
+            strategy_name="compression_breakout",
+            strategy_version="v0",
+            strategy_config_hash="a" * 64,
+            policy=PositionExitPolicy(max_holding_seconds=30),
+        )
+    )
     exchange = PlanAwareExchange()
     daemon = _daemon(exchange=exchange, exit_manager=manager)
 
@@ -2386,8 +2445,11 @@ async def test_exit_exception_does_not_stop_later_market_states():
         first = _state()
         yield first
         await asyncio.wait_for(failed.wait(), timeout=1)
-        yield replace(first, bucket_start=first.bucket_start + timedelta(seconds=15),
-                      bucket_end=first.bucket_end + timedelta(seconds=15))
+        yield replace(
+            first,
+            bucket_start=first.bucket_start + timedelta(seconds=15),
+            bucket_end=first.bucket_end + timedelta(seconds=15),
+        )
 
     result = await daemon.run(states())
     assert result.processed_state_count == 2
@@ -2401,16 +2463,34 @@ async def test_orphan_exit_cleanup_is_enqueued_without_foreground_cancel():
     )
     from tests.unit.execution_account.orders.test_state_machine import _plan
 
-    plan = replace(_plan(), reduce_only=True, side="SELL", order_type="LIMIT", price=Decimal("30000"))
+    plan = replace(
+        _plan(),
+        reduce_only=True,
+        side="SELL",
+        order_type="LIMIT",
+        price=Decimal("30000"),
+    )
     requested = []
     exchange = PlanAwareExchange()
 
     async def context(state):
-        return replace(_runtime_context(), unresolved_orders=(PersistedExchangeOrder(
-            plan, ExchangeOrderState.ACKNOWLEDGED, "123", NOW,
-        ),))
+        return replace(
+            _runtime_context(),
+            unresolved_orders=(
+                PersistedExchangeOrder(
+                    plan,
+                    ExchangeOrderState.ACKNOWLEDGED,
+                    "123",
+                    NOW,
+                ),
+            ),
+        )
 
-    daemon = _daemon(exchange=exchange, context_provider=context, request_order_cleanup=requested.append)
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=context,
+        request_order_cleanup=requested.append,
+    )
     result = await daemon.run(_states())
     assert result.halt_reason is None
     assert requested == [(plan,)]

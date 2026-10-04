@@ -90,40 +90,12 @@ type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
 type DurableStatePersistedCallback = Callable[[datetime], None]
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ClosedMarketStatePublisherConfig:
-    realtime_closure_delay_seconds: float
-    durable_closure_delay_seconds: float
+    realtime_closure_delay_seconds: float = 0.4
+    durable_closure_delay_seconds: float = 3.0
     persistence_queue_size: int = 128
     persistence_retry_seconds: float = 1.0
-
-    def __init__(
-        self,
-        *,
-        realtime_closure_delay_seconds: float = 0.4,
-        durable_closure_delay_seconds: float = 3.0,
-        persistence_queue_size: int = 128,
-        persistence_retry_seconds: float = 1.0,
-    ) -> None:
-        # Existing research fixtures still pass one delay.  Treat it as both
-        # clocks so those callers retain their original semantics.
-        object.__setattr__(
-            self,
-            "realtime_closure_delay_seconds",
-            realtime_closure_delay_seconds,
-        )
-        object.__setattr__(
-            self,
-            "durable_closure_delay_seconds",
-            durable_closure_delay_seconds,
-        )
-        object.__setattr__(self, "persistence_queue_size", persistence_queue_size)
-        object.__setattr__(
-            self,
-            "persistence_retry_seconds",
-            persistence_retry_seconds,
-        )
-        self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.realtime_closure_delay_seconds <= 0:
@@ -252,7 +224,7 @@ class ClosedMarketStatePublisher:
         self,
         *,
         repository: ClosedStateRepository,
-        config: ClosedMarketStatePublisherConfig | None = None,
+        config: ClosedMarketStatePublisherConfig = ClosedMarketStatePublisherConfig(),
         realtime_state_sink: RealtimeStateSink | None = None,
         realtime_quote_sink: RealtimeQuoteSink | None = None,
         on_durable_state_persisted: DurableStatePersistedCallback | None = None,
@@ -261,7 +233,7 @@ class ClosedMarketStatePublisher:
         self._realtime_state_sink = realtime_state_sink
         self._realtime_quote_sink = realtime_quote_sink
         self._on_durable_state_persisted = on_durable_state_persisted
-        self._config = ClosedMarketStatePublisherConfig() if config is None else config
+        self._config = config
         self._accumulators_by_bucket: dict[_BucketKey, MarketState15sAccumulator] = {}
         self._latest_book_ticker_by_bucket: dict[
             _BucketKey,
@@ -919,8 +891,6 @@ class ClosedMarketStatePublisher:
                         await self._persist_batch(command)
                 finally:
                     queue.task_done()
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self._durable_failure = error
             self._log.exception(
@@ -946,8 +916,6 @@ class ClosedMarketStatePublisher:
                         # market-state persistence or the capture loop.
                         self._log.exception("runtime_state_health_marker_failed")
                 return
-            except asyncio.CancelledError:
-                raise
             except ValueError:
                 # Validation and non-mergeable state conflicts are permanent
                 # for this command.  Retrying them forever would leave the
@@ -975,8 +943,6 @@ class ClosedMarketStatePublisher:
             try:
                 await self._repository.mark_incomplete(gap)
                 return
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._durable_sink_failure_count += 1
                 self._log.exception(

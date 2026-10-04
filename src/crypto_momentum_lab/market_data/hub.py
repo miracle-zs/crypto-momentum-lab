@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -140,7 +140,7 @@ class MarketStateBatch:
 
     def get_revision(self, symbol: str) -> MarketRevisionRef | None:
         for r in self.revision_refs:
-            if getattr(r, "symbol", None) == symbol:
+            if r.symbol == symbol:
                 return r
         return None
 
@@ -153,15 +153,12 @@ class _MarketStateQueueOverflow:
 _MarketStateQueueItem = MarketStateBatch | _MarketStateQueueOverflow | Exception
 
 
-async def _close_async_iterator(iterator: object) -> None:
+async def _close_async_iterator(iterator: AsyncGenerator[MarketStateBatch, None]) -> None:
     """Close an async iterator after a nested cancellation race settles."""
 
-    close = getattr(iterator, "aclose", None)
-    if not callable(close):
-        return
     for attempt in range(_ASYNC_GENERATOR_CLOSE_RETRIES):
         try:
-            await close()
+            await iterator.aclose()
             return
         except RuntimeError as error:
             if (
@@ -268,8 +265,8 @@ class MarketStateHub:
       PostgreSQL persistence remains the independent durable adapter.
     """
 
-    def __init__(self, config: MarketStateHubConfig | None = None) -> None:
-        self._config = config or MarketStateHubConfig()
+    def __init__(self, config: MarketStateHubConfig = MarketStateHubConfig()) -> None:
+        self._config = config
         self._server: Server | None = None
         self._bound_host: str | None = None
         self._bound_port: int | None = None
@@ -562,11 +559,8 @@ class MarketStateHub:
         connection: ServerConnection,
         queue: asyncio.Queue[str],
     ) -> None:
-        try:
-            while True:
-                await connection.send(await queue.get())
-        except (ConnectionClosed, asyncio.CancelledError):
-            raise
+        while True:
+            await connection.send(await queue.get())
 
 
 class WebSocketMarketStateSource:
@@ -578,13 +572,13 @@ class WebSocketMarketStateSource:
         url: str,
         environment: str,
         consumer_id: str,
-        config: MarketStateHubConfig | None = None,
+        config: MarketStateHubConfig = MarketStateHubConfig(),
         on_connection_change: Callable[[bool, str | None], None] | None = None,
         on_batch: Callable[[MarketStateBatch], None] | None = None,
         on_cursor_change: Callable[[str, int], None] | None = None,
         fail_on_replay_unavailable: bool = False,
         preserve_sequence_on_overflow: bool = False,
-        client_receive_queue_size: int | None = None,
+        client_receive_queue_size: int = _CLIENT_RECEIVE_QUEUE_SIZE,
         availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
@@ -593,22 +587,18 @@ class WebSocketMarketStateSource:
             raise ValueError("environment must not be empty")
         if not consumer_id.strip():
             raise ValueError("consumer_id must not be empty")
-        if client_receive_queue_size is not None and client_receive_queue_size <= 0:
+        if client_receive_queue_size <= 0:
             raise ValueError("client_receive_queue_size must be positive")
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
-        self._config = config or MarketStateHubConfig()
+        self._config = config
         self._on_connection_change = on_connection_change
         self._on_batch = on_batch
         self._on_cursor_change = on_cursor_change
         self._fail_on_replay_unavailable = fail_on_replay_unavailable
         self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
-        self._client_receive_queue_size = (
-            client_receive_queue_size
-            if client_receive_queue_size is not None
-            else _CLIENT_RECEIVE_QUEUE_SIZE
-        )
+        self._client_receive_queue_size = client_receive_queue_size
         self._availability_clock = availability_clock
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
@@ -645,7 +635,7 @@ class WebSocketMarketStateSource:
     def __aiter__(self) -> AsyncIterator[MarketState15s]:
         return self._iterate()
 
-    def batches(self) -> AsyncIterator[MarketStateBatch]:
+    def batches(self) -> AsyncGenerator[MarketStateBatch, None]:
         """Return the batch-level view used by durable consumers."""
 
         return self._iterate_batches()
@@ -691,7 +681,7 @@ class WebSocketMarketStateSource:
         finally:
             await _close_async_iterator(batches)
 
-    async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
+    async def _iterate_batches(self) -> AsyncGenerator[MarketStateBatch, None]:
         # Local checkpoint/spool recovery precedes consumption and is not
         # transport unavailability. Retain the clock across later reconnects.
         availability_clock = self.availability_clock
@@ -794,10 +784,7 @@ class WebSocketMarketStateSource:
                             else "market_state_replaying"
                         )
                         self._notify_connection_change(False, reason)
-                        availability_clock.mark_connected(
-                            needs_recovery=True,
-                            reason=reason,
-                        )
+                        availability_clock.mark_connected(needs_recovery=True)
                     reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_MarketStateQueueItem] = asyncio.Queue(
                         maxsize=self._client_receive_queue_size
@@ -827,9 +814,7 @@ class WebSocketMarketStateSource:
                                     False,
                                     "market_state_consumer_lagged",
                                 )
-                                availability_clock.mark_recovering(
-                                    "market_state_consumer_lagged"
-                                )
+                                availability_clock.mark_recovering()
                                 raise MarketStateHubSequenceGap(
                                     "market-state consumer queue overflowed; "
                                     f"skipped through sequence={item.latest_sequence}"
@@ -888,8 +873,6 @@ class WebSocketMarketStateSource:
                             reader_task,
                             return_exceptions=True,
                         )
-            except asyncio.CancelledError:
-                raise
             except (
                 ConnectionClosed,
                 OSError,
@@ -909,7 +892,7 @@ class WebSocketMarketStateSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                availability_clock.mark_disrupted(str(error))
+                availability_clock.mark_disrupted()
                 availability_clock.check_timeout(
                     error_factory=MarketStateHubError,
                     custom_message=(
@@ -950,8 +933,6 @@ class WebSocketMarketStateSource:
                 # Without this fairness point a burst can be drained and
                 # coalesced before the consumer receives its first batch.
                 await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self._enqueue_market_state_reader_error(receive_queue, error)
 

@@ -22,7 +22,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    AccountFacts,
     AccountFactStreamScope,
     BatchReductionAttribution,
     DiscrepancyKind,
@@ -38,6 +37,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerProjection,
 )
 from crypto_momentum_lab.domain.execution.recovery_models import (
+    AccountFacts,
     PositionRecoveryCheckpoint,
     StreamCheckpointAdoption,
     compute_checkpoint_chain_hash,
@@ -473,7 +473,7 @@ class PositionLedger:
 
             # If no active episode, this fill initiates a new episode
             if active_episode is None:
-                if bool((fill.raw_payload or {}).get("reduce_only", False)):
+                if bool(fill.raw_payload.get("reduce_only", False)):
                     continue
                 if (
                     self._position_key.position_side == FuturesPositionSide.LONG
@@ -1289,7 +1289,7 @@ def _same_fill(first: AccountFillEvent, second: AccountFillEvent) -> bool:
 
 
 def _is_synthetic_fill(fill: AccountFillEvent) -> bool:
-    return bool((fill.raw_payload or {}).get("synthetic_from_order", False))
+    return bool(fill.raw_payload.get("synthetic_from_order", False))
 
 
 def _checkpoint_error(

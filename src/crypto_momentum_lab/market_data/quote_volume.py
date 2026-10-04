@@ -70,7 +70,7 @@ class Binance24hQuoteVolumePublisher:
         symbols_filter: Callable[[], Collection[str] | None] | None = None,
         environment: str = "research",
         refresh_interval_seconds: float = _DEFAULT_REFRESH_INTERVAL_SECONDS,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -81,7 +81,7 @@ class Binance24hQuoteVolumePublisher:
         self._symbols_filter = symbols_filter
         self._environment = environment
         self._refresh_interval_seconds = refresh_interval_seconds
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock
         self._task: asyncio.Task[None] | None = None
         self._refresh_failure_count = 0
         self._last_refresh_at: datetime | None = None
@@ -145,8 +145,6 @@ class Binance24hQuoteVolumePublisher:
         while True:
             try:
                 refreshed_count = await self.refresh_once()
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 self._refresh_failure_count += 1
                 log.warning(

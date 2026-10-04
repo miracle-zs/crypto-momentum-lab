@@ -28,7 +28,6 @@ def test_initial_state_is_connecting_and_times_out():
     )
 
     assert clock.state == StreamAvailabilityState.CONNECTING
-    assert not clock.has_ever_been_ready
     assert clock.remaining_budget() == 30.0
 
     current_time += 15.0
@@ -52,7 +51,7 @@ def test_startup_flapping_still_governed_by_startup_timeout():
     )
 
     current_time += 10.0
-    clock.mark_disrupted("tcp connection failed")
+    clock.mark_disrupted()
     current_time += 5.0
     clock.mark_connecting()
     clock.check_timeout()
@@ -79,7 +78,6 @@ def test_transition_to_ready_clears_timers_and_idle_does_not_timeout():
     clock.mark_ready()
 
     assert clock.state == StreamAvailabilityState.READY
-    assert clock.has_ever_been_ready
     assert clock.remaining_budget() == float("inf")
 
     # Idle for 3600 seconds (e.g. quiet market) - must never timeout
@@ -110,7 +108,7 @@ def test_disruption_after_ready_starts_timer_at_disconnect_not_process_start():
     clock.check_timeout()
 
     # Network drops
-    clock.mark_disrupted("connection closed")
+    clock.mark_disrupted()
     assert clock.state == StreamAvailabilityState.DISRUPTED
     assert clock.remaining_budget() == 10.0  # Fresh 10s budget, NOT 5005s elapsed!
 
@@ -118,12 +116,18 @@ def test_disruption_after_ready_starts_timer_at_disconnect_not_process_start():
     current_time += 5.0
     clock.check_timeout()
     assert clock.remaining_budget() == 5.0
+    clock.mark_disrupted()
+    assert clock.remaining_budget() == 5.0
 
     # Reconnects after 6 seconds total disruption
     current_time += 1.0
     clock.mark_connected(needs_recovery=False)
     assert clock.state == StreamAvailabilityState.READY
     assert clock.remaining_budget() == float("inf")
+
+    current_time += 100.0
+    clock.mark_disrupted()
+    assert clock.remaining_budget() == 10.0
 
 
 def test_disruption_timeout_triggers_when_budget_exceeded():
@@ -140,7 +144,7 @@ def test_disruption_timeout_triggers_when_budget_exceeded():
     clock.mark_ready()
 
     current_time += 100.0
-    clock.mark_disrupted("connection reset")
+    clock.mark_disrupted()
 
     current_time += 10.0
     with pytest.raises(CustomStreamError, match="disruption timeout of 10.0s exceeded"):
@@ -163,17 +167,17 @@ def test_recovery_flow_and_timeout():
 
     # Stream reset or full snapshot required mid-session
     current_time += 100.0
-    clock.mark_connected(needs_recovery=True, reason="stream_reset")
+    clock.mark_connected(needs_recovery=True)
     assert clock.state == StreamAvailabilityState.RECOVERING
     assert clock.remaining_budget() == 20.0
 
     # 10 seconds into recovery, connection briefly flaps for 2 seconds
     current_time += 10.0
-    clock.mark_disrupted("transient disconnect")
+    clock.mark_disrupted()
     assert clock.state == StreamAvailabilityState.DISRUPTED
 
     current_time += 2.0
-    clock.mark_connected(needs_recovery=True, reason="reconnected_still_recovering")
+    clock.mark_connected(needs_recovery=True)
     assert clock.state == StreamAvailabilityState.RECOVERING
     # The recovery clock should preserve the overall recovery start (12s total elapsed, 8s left)
     assert clock.remaining_budget() == 8.0

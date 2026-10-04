@@ -12,6 +12,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderProjectionConflictError,
 )
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitMode,
@@ -51,7 +52,7 @@ def _event():
 def _position():
     return ManagedLivePosition(
         symbol="BTCUSDT",
-        side="long",
+        side=StrategySide.LONG,
         position_side=FuturesPositionSide.LONG,
         quantity=Decimal("0.001"),
         entry_price=Decimal("31000"),
@@ -63,7 +64,7 @@ def _position():
 
 def _manager(ttl=60):
     return LiveExitManager(
-        config=LiveExitConfig(
+        config=LiveExitConfig(account_label="primary", candle_grace_decision_profit_pct=Decimal("0"),
             run_id="run-1",
             strategy_name="compression_breakout",
             strategy_version="v0",

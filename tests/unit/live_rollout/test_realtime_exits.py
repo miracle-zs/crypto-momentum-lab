@@ -17,7 +17,7 @@ from crypto_momentum_lab.live_rollout.exits import (
 
 async def test_requests_for_quote_returns_empty_tuple() -> None:
     manager = LiveExitManager(
-        config=LiveExitConfig(
+        config=LiveExitConfig(account_label="primary", candle_grace_decision_profit_pct=Decimal("0"),
             run_id="run-1",
             strategy_name="strategy",
             strategy_version="v1",
@@ -53,7 +53,7 @@ async def test_requests_for_quote_returns_empty_tuple() -> None:
 
 async def test_candle_exit_mode_ignores_realtime_quotes() -> None:
     manager = LiveExitManager(
-        config=LiveExitConfig(
+        config=LiveExitConfig(account_label="primary", candle_grace_decision_profit_pct=Decimal("0"),
             run_id="run-1",
             strategy_name="strategy",
             strategy_version="v1",

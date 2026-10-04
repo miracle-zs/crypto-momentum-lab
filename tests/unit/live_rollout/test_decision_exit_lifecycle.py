@@ -3,8 +3,6 @@ from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import MagicMock
 
-import pytest
-
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -12,7 +10,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderPreSubmissionError,
     OrderSubmissionPreparation,
     PreparedOrderSubmission,
 )
@@ -29,7 +26,6 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
-    OrderExecutionStateMachine,
 )
 
 NOW = datetime(2026, 9, 30, 0, 0, 0, tzinfo=UTC)
@@ -39,7 +35,9 @@ class RecordingOrderRepository:
     def __init__(self) -> None:
         self.prepare_calls: list[dict[str, Any]] = []
 
-    async def prepare_submission_in_session(self, session, **kwargs: Any) -> PreparedOrderSubmission:
+    async def prepare_submission_in_session(
+        self, session, **kwargs: Any
+    ) -> PreparedOrderSubmission:
         self.prepare_calls.append(kwargs)
         plan = cast(OrderExecutionPlan, kwargs["plan"])
         return PreparedOrderSubmission(
@@ -64,9 +62,11 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
 
     async def fake_prepare_and_execute(plan, *, preparation):
         from dataclasses import fields
-        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
-                  }
-        prepared = await repository.prepare_submission_in_session(None, plan=plan, prepared_at=NOW, **values)
+
+        values = {f.name: getattr(preparation, f.name) for f in fields(preparation)}
+        prepared = await repository.prepare_submission_in_session(
+            None, plan=plan, prepared_at=NOW, **values
+        )
         assert prepared is not None
         prepared_submissions.append(prepared)
         return OrderExecutionResult(
@@ -164,9 +164,11 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
         res = await mock_coordinator.prepare_and_execute(
             plan,
             preparation=OrderSubmissionPreparation(
-                intent=intent, evaluation=evaluation,
+                intent=intent,
+                evaluation=evaluation,
                 environment="live" if active_lease is not None else None,
-                account_label=account_label, strategy_name=strategy_name,
+                account_label=account_label,
+                strategy_name=strategy_name,
             ),
         )
         if res is None:
@@ -221,44 +223,3 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
     assert plan.client_order_id == "cmd_exit_dec_YBUSDT_12345"
     assert plan.reduce_only is True
     assert plan.quantity == Decimal("1102")
-
-
-async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> None:
-    """Pre-exchange failures must be classified as before_exchange_post and marked rejected."""
-
-    class FailingRepo:
-        async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
-            raise RuntimeError("Database connection dropped or FK violation")
-
-    mock_exchange = MagicMock()
-    machine = OrderExecutionStateMachine(
-        exchange=mock_exchange,
-        repository=FailingRepo(),
-        event_repository=FailingRepo(),
-        live_submit_enabled=True,
-        clock=lambda: NOW,
-    )
-
-    plan = OrderExecutionPlan(
-        intent_id="intent-1",
-        run_id="run-1",
-        client_order_id="cmd-fail-1",
-        symbol="YBUSDT",
-        side="SELL",
-        order_type="MARKET",
-        quantity=Decimal("100"),
-        price=None,
-        reduce_only=True,
-        created_at=NOW,
-        quantized=True,
-    )
-
-    # State machine must wrap pre-submission failure in OrderPreSubmissionError
-    with pytest.raises(OrderPreSubmissionError) as exc_info:
-        await machine.submit(plan)
-
-    assert "pre-submission failed: Database connection dropped or FK violation" in str(
-        exc_info.value
-    )
-    # The exchange was NEVER called
-    mock_exchange.submit_order.assert_not_called()

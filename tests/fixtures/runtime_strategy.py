@@ -9,6 +9,15 @@ from crypto_momentum_lab.domain.strategy import (
 
 
 class FakeStrategy:
+    buffered_symbol_count = 0
+    buffered_state_count = 0
+
+    def cache_protected_symbols(self) -> frozenset[str]:
+        return frozenset()
+
+    def prune_inactive_symbols(self, **kwargs) -> tuple[str, ...]:
+        return ()
+
     def __init__(self) -> None:
         self.restored_checkpoint: StrategyCheckpoint | None = None
         self.processed: list[MarketState15s] = []

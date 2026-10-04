@@ -111,7 +111,6 @@ def _trade_command_payload(command: TradeCommand) -> dict[str, Any]:
                 ],
                 "total_allocated_quantity": str(plan.total_allocated_quantity),
                 "policy": plan.policy.value,
-                "absorbed_dust": str(plan.absorbed_dust),
                 "unallocated_remainder": str(plan.unallocated_remainder),
                 "reason": plan.reason,
                 "projection_version": plan.projection_version,
@@ -136,17 +135,17 @@ def _trade_command_from_payload(payload: dict[str, Any]) -> TradeCommand:
         symbol=str(key_data["symbol"]),
         position_side=FuturesPositionSide(str(key_data["position_side"])),
     )
-    plan_data = payload.get("allocation_plan")
+    plan_data = payload["allocation_plan"]
     plan = None
-    if isinstance(plan_data, dict):
-        batch_quantities = plan_data.get("batch_quantities")
+    if plan_data is not None:
+        batch_quantities = plan_data["batch_quantities"]
         plan = ExitAllocationPlan(
             position_key=key,
             allocations=tuple(
                 ExitAllocation(
                     batch_id=str(row["batch_id"]),
                     allocated_quantity=Decimal(str(row["allocated_quantity"])),
-                    entry_price=Decimal(str(row.get("entry_price", "0"))),
+                    entry_price=Decimal(str(row["entry_price"])),
                 )
                 for row in plan_data["allocations"]
             ),
@@ -154,16 +153,13 @@ def _trade_command_from_payload(payload: dict[str, Any]) -> TradeCommand:
                 str(plan_data["total_allocated_quantity"])
             ),
             policy=ExitPolicyMode(str(plan_data["policy"])),
-            absorbed_dust=Decimal(str(plan_data.get("absorbed_dust", "0"))),
-            unallocated_remainder=Decimal(
-                str(plan_data.get("unallocated_remainder", "0"))
-            ),
-            reason=str(plan_data.get("reason", "")),
-            projection_version=plan_data.get("projection_version"),
-            reservation_id=plan_data.get("reservation_id"),
+            unallocated_remainder=Decimal(str(plan_data["unallocated_remainder"])),
+            reason=str(plan_data["reason"]),
+            projection_version=plan_data["projection_version"],
+            reservation_id=plan_data["reservation_id"],
             batch_quantities=(
                 {key: Decimal(str(value)) for key, value in batch_quantities.items()}
-                if isinstance(batch_quantities, dict)
+                if batch_quantities is not None
                 else None
             ),
         )
@@ -176,17 +172,17 @@ def _trade_command_from_payload(payload: dict[str, Any]) -> TradeCommand:
         requested_quantity=Decimal(str(payload["requested_quantity"])),
         limit_price=(
             Decimal(str(payload["limit_price"]))
-            if payload.get("limit_price") is not None
+            if payload["limit_price"] is not None
             else None
         ),
         reduce_only=bool(payload["reduce_only"]),
         allocation_plan=plan,
-        reason=str(payload.get("reason", "")),
+        reason=str(payload["reason"]),
         created_at=datetime.fromisoformat(str(payload["created_at"])),
-        fencing_token=payload.get("fencing_token"),
-        idempotency_key=payload.get("idempotency_key"),
-        expected_projection_version=payload.get("expected_projection_version"),
-        reservation_id=payload.get("reservation_id"),
+        fencing_token=payload["fencing_token"],
+        idempotency_key=payload["idempotency_key"],
+        expected_projection_version=payload["expected_projection_version"],
+        reservation_id=payload["reservation_id"],
     )
 
 

@@ -1,6 +1,5 @@
 """Awaited in-memory reservation repository for current execution-port tests."""
 
-from datetime import datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
@@ -19,13 +18,10 @@ class InMemoryPositionReservationRepository:
     async def save_reservation(
         self,
         reservation: PositionReservation,
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
         batch_quantity: Decimal | None = None,
     ) -> None:
         await self.save_reservations(
             (reservation,),
-            expected_projection_version=expected_projection_version,
             batch_quantities=(
                 {reservation.batch_id: batch_quantity}
                 if batch_quantity is not None
@@ -36,8 +32,6 @@ class InMemoryPositionReservationRepository:
     async def save_reservations(
         self,
         reservations: tuple[PositionReservation, ...],
-        expected_projection_version: str | None = None,
-        expires_at: datetime | None = None,
         batch_quantities: dict[str, Decimal] | None = None,
     ) -> None:
         batch_quantities = batch_quantities or {}

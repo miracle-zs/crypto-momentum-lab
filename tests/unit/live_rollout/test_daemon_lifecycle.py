@@ -9,6 +9,7 @@ from crypto_momentum_lab.live_rollout.daemon_lifecycle import (
 )
 from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
+from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 
 
 class FakeCheckpointCoordinator:
@@ -78,6 +79,7 @@ async def test_lifecycle_owns_lane_start_stop_and_result_aggregation() -> None:
         return LiveDaemonResult(7, 11, 13, None, None)
 
     lifecycle = LiveDaemonLifecycle(
+        position_locks=PositionLifecycleLocks(),
         run_id="run-1",
         checkpoint_coordinator=cast(object, FakeCheckpointCoordinator(events)),
         exit_lane=cast(object, FakeExitLane(events)),
@@ -112,6 +114,7 @@ async def test_lifecycle_stops_lanes_when_market_loop_fails() -> None:
         raise RuntimeError("market loop failed")
 
     lifecycle = LiveDaemonLifecycle(
+        position_locks=PositionLifecycleLocks(),
         run_id="run-1",
         checkpoint_coordinator=cast(object, FakeCheckpointCoordinator(events)),
         exit_lane=cast(object, FakeExitLane(events)),
@@ -142,6 +145,7 @@ async def test_lifecycle_bounds_exit_lane_shutdown() -> None:
         return LiveDaemonResult(1, 0, 0, None, None)
 
     lifecycle = LiveDaemonLifecycle(
+        position_locks=PositionLifecycleLocks(),
         run_id="run-1",
         checkpoint_coordinator=cast(object, FakeCheckpointCoordinator(events)),
         exit_lane=cast(object, HangingExitLane(events)),

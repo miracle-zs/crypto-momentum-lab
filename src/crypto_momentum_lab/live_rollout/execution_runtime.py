@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.decision.decision_engine import EffectivePolicy
 from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeBoundaryCallback,
     OrderExchangeClient,
@@ -20,10 +23,11 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionRepository,
 )
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot
-from crypto_momentum_lab.domain.runtime import (
-    RuntimePlan,
-    RuntimePlanCompiler,
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    PositionExitMode,
+    PositionExitPolicy,
 )
+from crypto_momentum_lab.domain.strategy.sizing import FixedNotionalSizingModel
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
@@ -31,7 +35,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderEventCallback,
     OrderEventRepository,
     OrderExecutionStateMachine,
-    OrderPlanRepository,
     OrderPreSubmissionCallback,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
@@ -52,14 +55,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class LiveExecutionCallbacks:
-    on_event: OrderEventCallback
-    on_before_submit: OrderPreSubmissionCallback
-    on_exchange_request: ExchangeBoundaryCallback
-    on_exchange_response: ExchangeBoundaryCallback
-
-
-@dataclass(frozen=True, slots=True)
 class LiveExecutionRuntime:
     book: ExecutionBook
     coordinator: OrderExecutionCoordinator
@@ -69,25 +64,25 @@ async def build_live_execution_runtime(
     *,
     sessions: async_sessionmaker[AsyncSession],
     exchange: OrderExchangeClient,
-    order_repository: OrderPlanRepository,
     event_repository: OrderEventRepository,
     account_label: str,
     strategy_name: str,
-    callbacks: LiveExecutionCallbacks,
-    submission_repository: OrderSubmissionRepository | None = None,
-    submission_clock: Callable[[], datetime] | None = None,
+    on_event: OrderEventCallback,
+    on_before_submit: OrderPreSubmissionCallback,
+    on_exchange_request: ExchangeBoundaryCallback,
+    on_exchange_response: ExchangeBoundaryCallback,
+    submission_repository: OrderSubmissionRepository,
+    submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> LiveExecutionRuntime:
     backend = OrderExecutionStateMachine(
         exchange=exchange,
-        repository=order_repository,
         event_repository=event_repository,
         live_submit_enabled=True,
         clock=lambda: datetime.now(tz=UTC),
-        on_event=callbacks.on_event,
-        on_before_submit=callbacks.on_before_submit,
-        on_exchange_request=callbacks.on_exchange_request,
-        on_exchange_response=callbacks.on_exchange_response,
-        serialize_commands=False,
+        on_event=on_event,
+        on_before_submit=on_before_submit,
+        on_exchange_request=on_exchange_request,
+        on_exchange_response=on_exchange_response,
     )
     reservations = AsyncPostgresPositionReservationRepository(
         sessions,
@@ -113,8 +108,6 @@ async def build_live_execution_runtime(
         backend=backend,
         account_label=account_label,
         environment="live",
-        reservation_repository=reservations,
-        domain_coordinator=domain_coordinator,
         execution_book=book,
         submission_repository=submission_repository,
         submission_clock=submission_clock,
@@ -122,34 +115,45 @@ async def build_live_execution_runtime(
     return LiveExecutionRuntime(book=book, coordinator=coordinator)
 
 
-def compile_live_runtime_plan(
+def build_live_policy(
     *,
     config: LiveRuntimeConfig,
     target_notional: Decimal,
     risk_config: RiskConfigSnapshot,
-    account_label: str,
     strategy_name: str,
-) -> RuntimePlan:
-    """Compile the live trading policy from strategy and risk settings."""
-    plan_overrides = {
-        "target_notional": target_notional,
-        "order_type": (
-            "market" if getattr(config.strategy, "market_orders", False) else "limit"
-        ),
-        "max_open_positions": risk_config.max_open_positions,
-        "max_account_drawdown": getattr(risk_config, "max_account_drawdown", "0.10"),
-        "max_gross_notional": risk_config.max_gross_notional,
-        "max_order_notional": getattr(
-            risk_config, "max_order_notional", target_notional
-        ),
-        # Live exits belong to LiveExitManager (closed candle + grace).
-        # Never inject a second, time-based exit through the entry policy.
-        "max_holding_seconds": None,
-    }
-    return RuntimePlanCompiler.compile(
-        environment="live",
-        account_label=account_label,
+) -> EffectivePolicy:
+    """Build the policy consumed by live decisions, without deployment metadata."""
+    if target_notional <= 0:
+        raise ValueError("target_notional must be positive")
+    order_type = config.strategy.entry_order_type
+    # Preserve the durable policy identity used by existing decision records.
+    identity = hashlib.sha256(
+        json.dumps(
+            {
+                "strategy_name": strategy_name,
+                "entry_threshold": None,
+                "order_type": order_type.value,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()[:16]
+    return EffectivePolicy(
+        policy_id=identity,
         strategy_name=strategy_name,
-        overrides=plan_overrides,
-        strict=True,
+        policy_version=1,
+        entry_threshold=None,
+        order_type=order_type,
+        target_notional=target_notional,
+        max_open_positions=risk_config.max_open_positions,
+        sizing_model=FixedNotionalSizingModel(
+            target_notional=target_notional,
+            max_leverage=Decimal("5.0"),
+            max_slippage_budget_bps=Decimal("10.0"),
+            resize_tolerance=Decimal("0.05"),
+        ),
+        # Closed candles and grace exits have their own live owner.
+        exit_policy=PositionExitPolicy(
+            max_holding_seconds=None,
+            mode=PositionExitMode.CANDLE_15M,
+        ),
     )

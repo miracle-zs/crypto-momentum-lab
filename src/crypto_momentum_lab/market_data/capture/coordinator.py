@@ -1,6 +1,5 @@
 import asyncio
-import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -42,9 +41,9 @@ class QualityRepository(Protocol):
     ) -> None: ...
 
 
-type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], object]
-type EnvelopeSink = Callable[[RawEnvelope], object]
-type GapSink = Callable[[AggTradeGap], object]
+type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], Awaitable[None]]
+type EnvelopeSink = Callable[[RawEnvelope], Awaitable[None]]
+type GapSink = Callable[[AggTradeGap], Awaitable[None]]
 
 
 class EnvelopeRecovery(Protocol):
@@ -53,6 +52,8 @@ class EnvelopeRecovery(Protocol):
     async def expand(
         self,
         batch: tuple[RawEnvelope, ...],
+        *,
+        bypass_network: bool = False,
     ) -> "EnvelopeRecoveryBatch": ...
 
 
@@ -163,13 +164,9 @@ class CaptureCoordinator:
             processing_batch = batch
             if self._envelope_recovery is not None:
                 bypass = self._queue.size > self._recovery_bypass_queue_threshold
-                try:
-                    recovery = await self._envelope_recovery.expand(
-                        batch,
-                        **{"bypass_network": bypass},
-                    )
-                except TypeError:
-                    recovery = await self._envelope_recovery.expand(batch)
+                recovery = await self._envelope_recovery.expand(
+                    batch, bypass_network=bypass
+                )
                 processing_batch = recovery.envelopes
                 await self._publish_gaps(recovery.unrecovered_gaps)
 
@@ -212,9 +209,7 @@ class CaptureCoordinator:
         )
         await self._save_quality_events(quality_events)
         if acknowledgement is not None and self._acknowledgement_sink is not None:
-            result = self._acknowledgement_sink(acknowledgement)
-            if inspect.isawaitable(result):
-                await result
+            await self._acknowledgement_sink(acknowledgement)
 
     def _requires_side_effect_processing(self, envelope: RawEnvelope) -> bool:
         # bookTicker is a realtime-only latest-value stream in the server
@@ -235,14 +230,7 @@ class CaptureCoordinator:
         values = tuple(events)
         if not values:
             return
-        batch_method = getattr(self._repository, "save_quality_events", None)
-        if batch_method is None:
-            for event in values:
-                await self._repository.save_quality_event(event)
-            return
-        result = batch_method(values)
-        if inspect.isawaitable(result):
-            await result
+        await self._repository.save_quality_events(values)
 
     async def _publish_batch(
         self,
@@ -252,9 +240,7 @@ class CaptureCoordinator:
         if sink is None:
             return
         for index, envelope in enumerate(batch, start=1):
-            result = sink(envelope)
-            if inspect.isawaitable(result):
-                await result
+            await sink(envelope)
             if index % self._cooperative_yield_every == 0:
                 await asyncio.sleep(0)
 
@@ -262,9 +248,7 @@ class CaptureCoordinator:
         if self._gap_sink is None:
             return
         for gap in gaps:
-            result = self._gap_sink(gap)
-            if inspect.isawaitable(result):
-                await result
+            await self._gap_sink(gap)
 
     async def stop(self) -> None:
         self._stopping = True

@@ -82,7 +82,7 @@ class AccountPositionExpectation:
         expires_at = plan.expires_at or (
             registered_at + timedelta(seconds=_DEFAULT_MARKET_EXPECTATION_TTL_SECONDS)
         )
-        position_side = getattr(plan.position_side, "value", plan.position_side)
+        position_side = plan.position_side.value
         return cls(
             environment=environment,
             account_label=account_label,

@@ -11,11 +11,10 @@ and account-balance lookup from the normal live order path.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -74,7 +73,7 @@ _SNAPSHOT_KINDS = frozenset(
 )
 
 AccountPositionExpectationCallback = Callable[
-    [AccountPositionExpectation], None | Awaitable[None]
+    [AccountPositionExpectation], None
 ]
 
 
@@ -332,11 +331,11 @@ class AccountEventHub:
 
     def __init__(
         self,
-        config: AccountEventHubConfig | None = None,
+        config: AccountEventHubConfig = AccountEventHubConfig(),
         *,
         on_position_expectation: AccountPositionExpectationCallback | None = None,
     ) -> None:
-        self._config = config or AccountEventHubConfig()
+        self._config = config
         self._on_position_expectation = on_position_expectation
         self._server: Server | None = None
         self._bound_host: str | None = None
@@ -782,9 +781,7 @@ class AccountEventHub:
                 "account position expectation registration is not enabled"
             )
         expectation = decode_account_position_expectation(request)
-        callback_result = callback(expectation)
-        if inspect.isawaitable(callback_result):
-            await callback_result
+        callback(expectation)
         await connection.send(
             json.dumps(
                 {
@@ -804,12 +801,9 @@ class AccountEventHub:
         queue: asyncio.Queue[str],
         writer_start: asyncio.Event,
     ) -> None:
-        try:
-            await writer_start.wait()
-            while True:
-                await connection.send(await queue.get())
-        except (ConnectionClosed, asyncio.CancelledError):
-            raise
+        await writer_start.wait()
+        while True:
+            await connection.send(await queue.get())
 
 
 class WebSocketAccountEventSource:
@@ -822,7 +816,7 @@ class WebSocketAccountEventSource:
         environment: str,
         account_label: str,
         consumer_id: str,
-        config: AccountEventHubConfig | None = None,
+        config: AccountEventHubConfig = AccountEventHubConfig(),
         on_recovery: Callable[[str], None] | None = None,
         availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
@@ -838,7 +832,7 @@ class WebSocketAccountEventSource:
         self._environment = environment
         self._account_label = account_label
         self._consumer_id = consumer_id
-        self._config = config or AccountEventHubConfig()
+        self._config = config
         self._on_recovery = on_recovery
         self._availability_clock = availability_clock or StreamAvailabilityClock(
             StreamAvailabilityConfig(
@@ -995,15 +989,13 @@ class WebSocketAccountEventSource:
                             reader_task,
                             return_exceptions=True,
                         )
-            except asyncio.CancelledError:
-                raise
             except (
                 ConnectionClosed,
                 OSError,
                 TimeoutError,
                 AccountEventHubError,
-            ) as error:
-                self._availability_clock.mark_disrupted(str(error))
+            ):
+                self._availability_clock.mark_disrupted()
                 self._availability_clock.check_timeout(
                     error_factory=AccountEventHubError,
                     custom_message="account-event hub unavailable beyond timeout",
@@ -1022,7 +1014,7 @@ class WebSocketAccountEventSource:
         self._require_full_snapshot = True
         self._recovery_count += 1
         self._last_recovery_reason = reason
-        self._availability_clock.mark_recovering(reason)
+        self._availability_clock.mark_recovering()
         if self._on_recovery is not None:
             try:
                 self._on_recovery(reason)
@@ -1099,8 +1091,6 @@ class WebSocketAccountEventSource:
                 )
                 self._enqueue_account_event(receive_queue, event)
                 await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self._enqueue_account_event_reader_error(receive_queue, error)
 
@@ -1148,7 +1138,7 @@ class WebSocketAccountPositionExpectationPublisher:
         url: str,
         environment: str,
         account_label: str,
-        config: AccountEventHubConfig | None = None,
+        config: AccountEventHubConfig = AccountEventHubConfig(),
     ) -> None:
         for value, field_name in (
             (url, "url"),
@@ -1160,7 +1150,7 @@ class WebSocketAccountPositionExpectationPublisher:
         self._url = url
         self._environment = environment
         self._account_label = account_label
-        self._config = config or AccountEventHubConfig()
+        self._config = config
 
     async def register(self, expectation: AccountPositionExpectation) -> None:
         if (

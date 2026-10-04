@@ -1,8 +1,7 @@
 """Unified runtime session lifecycle and resource ownership.
 
-As specified in the system evolution blueprint (Astra §8), the RuntimeSession
-is the single lifecycle owner exposed to orchestration and CLI runners:
-- Explicit 7-stage state machine: CONSTRUCTING -> RECOVERING -> READY ->
+RuntimeSession owns active work and ordered resource cleanup:
+- Normal operation has one RUNNING state; shutdown records its resource phases:
   DRAINING -> PERSISTING -> CLOSING -> STOPPED;
 - Single ownership registry ensuring reverse-dependency cleanup on construction
   failure without orphan tasks or engines;
@@ -43,9 +42,7 @@ _CLOSE_PHASE_MAX_SECONDS = 25.0
 class SessionLifecycleState(StrEnum):
     """Explicit point-in-time state of a live runtime session."""
 
-    CONSTRUCTING = "constructing"
-    RECOVERING = "recovering"
-    READY = "ready"
+    RUNNING = "running"
     DRAINING = "draining"
     PERSISTING = "persisting"
     CLOSING = "closing"
@@ -176,7 +173,7 @@ class RuntimeSession:
         self._transition_terminal_state = transition_terminal_state
         self._health = health
         self._shutdown_budget_seconds = shutdown_budget_seconds
-        self._state = SessionLifecycleState.READY
+        self._state = SessionLifecycleState.RUNNING
         self._state_lock = asyncio.Lock()
         self._stop_requested = asyncio.Event()
         self._stop_reason: str | None = None
@@ -197,13 +194,7 @@ class RuntimeSession:
     def shutdown_result(self) -> ShutdownResult | None:
         return self._shutdown_result
 
-    def set_recovering(self) -> None:
-        """Mark session in recovery phase prior to entering READY."""
-        self._state = SessionLifecycleState.RECOVERING
 
-    def set_ready(self) -> None:
-        """Mark session ready for active signal generation."""
-        self._state = SessionLifecycleState.READY
 
     def request_stop(self, reason: str = "operator_requested") -> None:
         """Request a cooperative shutdown from an external caller."""
@@ -214,7 +205,7 @@ class RuntimeSession:
 
     async def run(self) -> LiveDaemonResult:
         """Run the live runtime supervisor until completion, halt, or stop request."""
-        self._state = SessionLifecycleState.READY
+        self._state = SessionLifecycleState.RUNNING
         supervisor_task = asyncio.create_task(
             self._supervisor.run(),
             name=f"live-supervisor:{self._run_id}",
@@ -423,12 +414,7 @@ class RuntimeSession:
                     max(0.01, total_deadline - perf_counter()),
                 )
                 async with asyncio.timeout(close_timeout):
-                    close_res = await self._lifecycle.close()
-                    lifecycle_failures: tuple[str, ...] = ()
-                    if isinstance(close_res, (list, tuple)):
-                        lifecycle_failures = tuple(close_res)
-                    elif hasattr(self._lifecycle, "close_failures"):
-                        lifecycle_failures = tuple(self._lifecycle.close_failures)
+                    lifecycle_failures = await self._lifecycle.close()
 
                     if lifecycle_failures:
                         failures.extend(lifecycle_failures)

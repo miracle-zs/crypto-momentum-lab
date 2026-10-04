@@ -255,10 +255,6 @@ class _ArchiveWriter:
         await asyncio.to_thread(writer._open)
         return writer
 
-    @property
-    def uncompressed_bytes(self) -> int:
-        return self._uncompressed_bytes
-
     def should_rotate_for(self, row_size: int) -> bool:
         return self._row_count > 0 and (
             self._uncompressed_bytes + row_size > self._rotation_uncompressed_bytes
@@ -347,7 +343,9 @@ class _ArchiveWriter:
                 generation,
             )
             self._subscription_generation_max = max(
-                self._subscription_generation_max if self._subscription_generation_max is not None else generation,
+                self._subscription_generation_max
+                if self._subscription_generation_max is not None
+                else generation,
                 generation,
             )
         if envelope.exchange_event_at is not None:

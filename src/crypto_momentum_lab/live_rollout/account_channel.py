@@ -1,7 +1,6 @@
 """Runtime policy for account-event fan-out in live execution."""
 
 import asyncio
-import inspect
 from collections import deque
 from collections.abc import AsyncIterable, Awaitable, Callable
 
@@ -44,12 +43,12 @@ class LiveAccountEventRuntime:
         latest_market_states: LatestMarketStateCache,
         latest_market_quotes: LatestMarketQuoteCache,
         order_reconciliation: AccountEventOrderReconciler | None = None,
-        run_id: str | None = None,
+        run_id: str,
         telemetry: AccountFillSink | None = None,
         is_transient_error: Callable[[Exception], bool],
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
-        on_account_snapshot: Callable[[AccountEvent], Awaitable[None] | None]
+        on_account_snapshot: Callable[[AccountEvent], Awaitable[None]]
         | None = None,
         on_account_snapshot_recovery: Callable[[str], None] | None = None,
     ) -> None:
@@ -86,7 +85,7 @@ class LiveAccountEventRuntime:
                 await asyncio.sleep(0.1 * (attempt + 1))
 
     async def _process_event(self, event: AccountEvent) -> Exception | None:
-        reconciliation_run_id = self._reconciliation_run_id
+        reconciliation_run_id = self._run_id
         applying_snapshot = False
         reconciling_order = False
         try:
@@ -101,16 +100,14 @@ class LiveAccountEventRuntime:
                     reconciling_order = True
                     await self._order_reconciliation.reconcile_account_event(event)
                     reconciling_order = False
-            event_run_id = self._reconciliation_run_id
+            event_run_id = self._run_id
             # ORDER_TRADE_UPDATE can carry both the account projection and
             # the order identity. Reconcile the order first so the live
             # context cannot observe a newly opened position before its
             # matching entry fill/order state is durable.
             if self._on_account_snapshot is not None:
                 applying_snapshot = True
-                result = self._on_account_snapshot(event)
-                if inspect.isawaitable(result):
-                    await result
+                await self._on_account_snapshot(event)
                 applying_snapshot = False
             # Observability must not prevent real trade facts from reaching
             # the durable Book and the account projection.
@@ -152,8 +149,6 @@ class LiveAccountEventRuntime:
                         reason=failure,
                     )
                     continue
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             if (
                 reconciling_order
@@ -198,7 +193,7 @@ class LiveAccountEventRuntime:
         if trade_id is None:
             log.warning(
                 "live_account_fill_missing_trade_id",
-                run_id=self._reconciliation_run_id,
+                run_id=self._run_id,
                 symbol=event.symbol,
             )
             return True
@@ -206,7 +201,7 @@ class LiveAccountEventRuntime:
         if key in self._seen_fill_keys:
             log.info(
                 "live_account_fill_duplicate_ignored",
-                run_id=self._reconciliation_run_id,
+                run_id=self._run_id,
                 symbol=key[0],
                 trade_id=trade_id,
             )
@@ -229,15 +224,10 @@ class LiveAccountEventRuntime:
             # worker and rebuild all durable projections.
             log.exception(
                 "live_account_snapshot_recovery_callback_failed",
-                run_id=self._reconciliation_run_id,
+                run_id=self._run_id,
                 reason=reason,
             )
 
-    @property
-    def _reconciliation_run_id(self) -> str:
-        if self._order_reconciliation is not None:
-            return self._order_reconciliation.run_id
-        return self._run_id or "unknown"
 
 
 __all__ = ["LiveAccountEventRuntime"]

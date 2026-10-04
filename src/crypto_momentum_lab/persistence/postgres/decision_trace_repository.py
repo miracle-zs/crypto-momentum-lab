@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -128,7 +128,7 @@ class PostgresDecisionTraceRepository:
                 lineage = {"source_epoch": ref.source_epoch}
                 if ref.observed_at is not None:
                     lineage["observed_at"] = ref.observed_at.isoformat()
-                visibility = getattr(ref.visibility_mode, "value", ref.visibility_mode)
+                visibility = ref.visibility_mode.value
                 ref_row = {
                     "revision_id": ref.revision_id,
                     "scope": ref.scope,
@@ -310,7 +310,7 @@ class PostgresDecisionTraceRepository:
             if row is None:
                 return None
 
-            rev_ids = [str(r) for r in (row.evaluated_revision_ids or [])]
+            rev_ids = [str(r) for r in row.evaluated_revision_ids]
             refs: list[MarketRevisionRef] = []
             if rev_ids:
                 stmt_rev = select(MarketRevisionRefRow).where(
@@ -356,36 +356,7 @@ class PostgresDecisionTraceRepository:
                 trace_payload=dict(row.trace_payload),
             )
 
-    async def count_decision_traces(self, account_label: str | None = None) -> int:
-        """Returns the total number of decision traces recorded."""
-        async with self._session_factory() as session:
-            stmt = select(func.count(DecisionTraceRow.decision_id))
-            if account_label is not None:
-                stmt = stmt.where(DecisionTraceRow.account_label == account_label)
-            res = await session.execute(stmt)
-            count = res.scalar()
-            return int(count or 0)
 
-    async def load_latest_decision_trace(
-        self, strategy_name: str, account_label: str
-    ) -> DecisionTrace | None:
-        """Loads the most recent DecisionTrace recorded for strategy and account."""
-        decision_id: str | None = None
-        async with self._session_factory() as session:
-            stmt = (
-                select(DecisionTraceRow.decision_id)
-                .where(
-                    DecisionTraceRow.strategy_name == strategy_name,
-                    DecisionTraceRow.account_label == account_label,
-                )
-                .order_by(DecisionTraceRow.decision_time.desc())
-                .limit(1)
-            )
-            res = await session.execute(stmt)
-            decision_id = res.scalar_one_or_none()
-        if decision_id is None:
-            return None
-        return await self.load_decision_trace(decision_id)
 
 
 __all__ = ["PostgresDecisionTraceRepository"]

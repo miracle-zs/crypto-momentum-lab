@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -28,9 +29,9 @@ async def test_telemetry_failure_does_not_skip_order_observers() -> None:
         ) -> None:
             observed.append("daemon")
 
-    runtime = LiveOrderEventRuntime(telemetry=Telemetry())  # type: ignore[arg-type]
+    runtime = LiveOrderEventRuntime(telemetry=Telemetry(), request_recovery=Mock())  # type: ignore[arg-type]
     runtime.set_entry_order_lifecycle(Lifecycle())  # type: ignore[arg-type]
-    runtime.set_daemon(Daemon())  # type: ignore[arg-type]
+    runtime.set_entry_observer(Daemon().observe_entry_order_event)  # type: ignore[arg-type]
 
     await runtime.handle(
         SimpleNamespace(symbol="BTCUSDT", client_order_id="entry-1"),  # type: ignore[arg-type]
@@ -40,10 +41,13 @@ async def test_telemetry_failure_does_not_skip_order_observers() -> None:
     assert observed == ["lifecycle", "daemon"]
 
 
-@pytest.mark.parametrize("state", [
-    ExchangeOrderState.ACKNOWLEDGED,
-    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-])
+@pytest.mark.parametrize(
+    "state",
+    [
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    ],
+)
 async def test_only_unknown_order_results_request_repair(state):
     from unittest.mock import AsyncMock, Mock
 

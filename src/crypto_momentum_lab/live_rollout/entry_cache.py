@@ -41,7 +41,6 @@ class EntryEmaProvider(Protocol):
     ) -> int: ...
 
 
-SymbolLoader = Callable[[datetime], Awaitable[frozenset[str]]]
 UniverseLoader = Callable[
     [datetime],
     Awaitable["LiveEntryUniverseData | None"],
@@ -177,21 +176,15 @@ class LiveEntryFilterCache:
         self,
         *,
         ema_provider: EntryEmaProvider,
-        symbol_loader: SymbolLoader | None = None,
-        universe_loader: UniverseLoader | None = None,
-        config: EntryFilterCacheConfig | None = None,
-        clock: Clock | None = None,
+        universe_loader: UniverseLoader,
+        config: EntryFilterCacheConfig = EntryFilterCacheConfig(),
+        clock: Clock = lambda: datetime.now(UTC),
         on_ready: ReadyCallback | None = None,
     ) -> None:
-        if symbol_loader is None and universe_loader is None:
-            raise ValueError("symbol_loader or universe_loader is required")
-        if symbol_loader is not None and universe_loader is not None:
-            raise ValueError("symbol_loader and universe_loader are exclusive")
         self._ema_provider = ema_provider
-        self._symbol_loader = symbol_loader
         self._universe_loader = universe_loader
-        self._config = config or EntryFilterCacheConfig()
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._config = config
+        self._clock = clock
         self._on_ready = on_ready
         self._provider_lock = threading.Lock()
         self._stop_event = asyncio.Event()
@@ -289,32 +282,20 @@ class LiveEntryFilterCache:
             try:
                 await task
             except asyncio.CancelledError:
-                if (
-                    current is not None
-                    and getattr(current, "cancelling", lambda: 0)() > 0
-                ):
+                if current is not None and current.cancelling() > 0:
                     raise
 
     async def _refresh(self, observed_at: datetime) -> None:
         started = time.monotonic()
         self._refresh_count += 1
         try:
-            universe_data: LiveEntryUniverseData | None = None
-            if self._universe_loader is not None:
-                universe_data = await self._universe_loader(observed_at)
-                if universe_data is None:
-                    universe_data = LiveEntryUniverseData(
-                        symbols=frozenset(),
-                        snapshot=None,
-                    )
-                symbols = universe_data.symbols
-            else:
-                symbol_loader = self._symbol_loader
-                if symbol_loader is None:
-                    return
-                symbols = await symbol_loader(observed_at)
-        except asyncio.CancelledError:
-            raise
+            universe_data = await self._universe_loader(observed_at)
+            if universe_data is None:
+                universe_data = LiveEntryUniverseData(
+                    symbols=frozenset(),
+                    snapshot=None,
+                )
+            symbols = universe_data.symbols
         except Exception as error:
             self._refresh_failure_count += 1
             self._log_refresh_failure("symbol_pool", error)
@@ -323,9 +304,8 @@ class LiveEntryFilterCache:
         bucket = _bucket_start_15s(observed_at)
         loaded, failed = await self._prefetch(symbols, observed_at)
         self._symbols_by_bucket[bucket] = symbols
-        if universe_data is not None:
-            self._universe_data_by_bucket[bucket] = universe_data
-        self._prune_pool_history(bucket)
+        self._universe_data_by_bucket[bucket] = universe_data
+        self._prune_pool_history()
         self._prune_ema_provider(observed_at, symbols)
         self._ready = bool(symbols)
         self._last_refresh_at = observed_at
@@ -368,8 +348,6 @@ class LiveEntryFilterCache:
                         symbol,
                         observed_at,
                     )
-                except asyncio.CancelledError:
-                    raise
                 except Exception as error:
                     log.warning(
                         "live_entry_filter_snapshot_failed",
@@ -401,7 +379,7 @@ class LiveEntryFilterCache:
                 observed_at=observed_at,
             )
 
-    def _prune_pool_history(self, latest_bucket: datetime) -> None:
+    def _prune_pool_history(self) -> None:
         if len(self._symbols_by_bucket) <= 32:
             return
         retained = sorted(self._symbols_by_bucket)[-32:]
@@ -459,20 +437,14 @@ class LiveEntrySymbolCache:
     def __init__(
         self,
         *,
-        symbol_loader: SymbolLoader | None = None,
-        universe_loader: UniverseLoader | None = None,
-        config: EntryFilterCacheConfig | None = None,
-        clock: Clock | None = None,
+        universe_loader: UniverseLoader,
+        config: EntryFilterCacheConfig = EntryFilterCacheConfig(),
+        clock: Clock = lambda: datetime.now(UTC),
         on_ready: ReadyCallback | None = None,
     ) -> None:
-        if symbol_loader is None and universe_loader is None:
-            raise ValueError("symbol_loader or universe_loader is required")
-        if symbol_loader is not None and universe_loader is not None:
-            raise ValueError("symbol_loader and universe_loader are exclusive")
-        self._symbol_loader = symbol_loader
         self._universe_loader = universe_loader
-        self._config = config or EntryFilterCacheConfig()
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._config = config
+        self._clock = clock
         self._on_ready = on_ready
         self._stop_event = asyncio.Event()
         self._run_task: asyncio.Task[None] | None = None
@@ -533,31 +505,19 @@ class LiveEntrySymbolCache:
             try:
                 await task
             except asyncio.CancelledError:
-                if (
-                    current is not None
-                    and getattr(current, "cancelling", lambda: 0)() > 0
-                ):
+                if current is not None and current.cancelling() > 0:
                     raise
 
     async def _refresh(self, observed_at: datetime) -> None:
         self._refresh_count += 1
         try:
-            universe_data: LiveEntryUniverseData | None = None
-            if self._universe_loader is not None:
-                universe_data = await self._universe_loader(observed_at)
-                if universe_data is None:
-                    universe_data = LiveEntryUniverseData(
-                        symbols=frozenset(),
-                        snapshot=None,
-                    )
-                symbols = universe_data.symbols
-            else:
-                symbol_loader = self._symbol_loader
-                if symbol_loader is None:
-                    return
-                symbols = await symbol_loader(observed_at)
-        except asyncio.CancelledError:
-            raise
+            universe_data = await self._universe_loader(observed_at)
+            if universe_data is None:
+                universe_data = LiveEntryUniverseData(
+                    symbols=frozenset(),
+                    snapshot=None,
+                )
+            symbols = universe_data.symbols
         except Exception as error:
             log.warning(
                 "live_entry_symbol_cache_refresh_failed",
@@ -566,8 +526,7 @@ class LiveEntrySymbolCache:
             return
         bucket = _bucket_start_15s(observed_at)
         self._symbols_by_bucket[bucket] = symbols
-        if universe_data is not None:
-            self._universe_data_by_bucket[bucket] = universe_data
+        self._universe_data_by_bucket[bucket] = universe_data
         if len(self._symbols_by_bucket) > 32:
             retained = sorted(self._symbols_by_bucket)[-32:]
             retained_set = set(retained)

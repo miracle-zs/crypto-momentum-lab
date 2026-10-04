@@ -80,7 +80,6 @@ def snapshot_factory() -> Callable[..., UniverseSnapshot]:
                     symbol,
                     MembershipStatus.TARGET,
                     RankingSide.GAINER,
-                    None,
                 ),
             ),
         )

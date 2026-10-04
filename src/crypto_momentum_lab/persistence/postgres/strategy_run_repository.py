@@ -1,15 +1,11 @@
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from decimal import Decimal
-from enum import StrEnum
 from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy.paper_models import (
     PaperPosition,
     PaperTradingRunReport,
@@ -21,6 +17,10 @@ from crypto_momentum_lab.persistence.postgres.models import (
     StrategyCheckpointRow,
     StrategyRunRow,
     StrategySignalRow,
+)
+from crypto_momentum_lab.persistence.postgres.serialization import (
+    jsonable,
+    normalize_for_compare,
 )
 
 type RowModel = (
@@ -103,7 +103,7 @@ def strategy_run_report_rows(
             "schema_version": report.schema_version,
             "source_paths": list(report.run.source_paths),
             "source_description": report.source_description,
-            "execution_config": _jsonable(
+            "execution_config": jsonable(
                 {
                     **asdict(report.execution_config),
                     "portfolio": asdict(report.portfolio_config),
@@ -115,9 +115,9 @@ def strategy_run_report_rows(
             "candidate_count": len(report.candidates),
             "fill_count": len(report.paper_fills),
             "pending_candidate_count": report.pending_candidate_count,
-            "rejection_summary": _jsonable(report.rejection_summary),
-            "summary_counts": _jsonable(report.summary_counts),
-            "fill_summary": _jsonable(report.fill_summary),
+            "rejection_summary": jsonable(report.rejection_summary),
+            "summary_counts": jsonable(report.summary_counts),
+            "fill_summary": jsonable(report.fill_summary),
         },
         signals=tuple(strategy_signal_row(signal) for signal in report.signals),
         candidates=tuple(
@@ -132,23 +132,23 @@ def strategy_run_report_rows(
         ),
         checkpoint={
             "run_id": report.run.run_id,
-            "last_processed_at_by_symbol": _jsonable(
+            "last_processed_at_by_symbol": jsonable(
                 report.final_checkpoint.last_processed_at_by_symbol
             ),
-            "warmup_buckets_by_symbol": _jsonable(
+            "warmup_buckets_by_symbol": jsonable(
                 report.final_checkpoint.warmup_buckets_by_symbol
             ),
-            "cooldown_buckets_remaining_by_symbol": _jsonable(
+            "cooldown_buckets_remaining_by_symbol": jsonable(
                 report.final_checkpoint.cooldown_buckets_remaining_by_symbol
             ),
-            "payload": _jsonable(report.final_checkpoint.payload),
+            "payload": jsonable(report.final_checkpoint.payload),
             "saved_at": report.generated_at,
         },
     )
 
 
 def core_fields_match(left: dict[str, object], right: dict[str, object]) -> bool:
-    return _normalize_for_compare(left) == _normalize_for_compare(right)
+    return normalize_for_compare(left) == normalize_for_compare(right)
 
 
 class PostgresStrategyRunRepository:
@@ -300,8 +300,8 @@ def strategy_signal_row(signal: Any) -> dict[str, object]:
         "detected_at": signal.detected_at,
         "source_state_at": signal.source_state_at,
         "reason": signal.reason,
-        "features": _jsonable(signal.features),
-        "reference_prices": _jsonable(signal.reference_prices),
+        "features": jsonable(signal.features),
+        "reference_prices": jsonable(signal.reference_prices),
     }
 
 
@@ -322,7 +322,7 @@ def order_intent_candidate_row(candidate: Any) -> dict[str, object]:
         "expires_at": candidate.expires_at,
         "created_at": candidate.created_at,
         "reason": candidate.reason,
-        "features": _jsonable(candidate.features),
+        "features": jsonable(candidate.features),
     }
 
 
@@ -431,44 +431,3 @@ def _model_values(row: object) -> dict[str, object]:
         column.name: getattr(row_any, column.name)
         for column in row_any.__table__.columns
     }
-
-
-def _jsonable(value: object) -> JsonValue:
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
-
-
-def _normalize_for_compare(value: object) -> object:
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, dict):
-        return {
-            str(key): _normalize_for_compare(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, list | tuple):
-        return [_normalize_for_compare(item) for item in value]
-    return value

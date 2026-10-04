@@ -33,8 +33,6 @@ async def _resilient_stream[StreamItem](
         try:
             async for item in source:
                 yield item
-        except asyncio.CancelledError:
-            raise
         except error_type as error:
             if fatal_error_type is not None and isinstance(
                 error,

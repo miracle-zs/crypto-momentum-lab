@@ -1,7 +1,7 @@
 """SimulationExecution adapter driving AccountJournal with explicit FillModel.
 
 Obeys Astra Architecture Blueprint 2026-09-25:
-- Explicit versioned FillModel (slippage, fee, queue delay, funding rate);
+- Explicit versioned FillModel (slippage and fee);
 - No magical 'hit price = fill at mid' shortcuts;
 - Generates reproducible AccountFillEvent driving authoritative AccountJournal;
 - Shared batch attribution and reconciliation contract across live and paper.
@@ -40,8 +40,6 @@ class FillModel:
     model_version: str = "conservative_v1"
     slippage_bps: Decimal = Decimal("5.0")  # 5 bps slippage
     fee_rate: Decimal = Decimal("0.0005")  # 0.05% taker fee
-    queue_delay_seconds: Decimal = Decimal("0.1")
-    funding_rate_hourly: Decimal = Decimal("0.00001")
 
     def __post_init__(self) -> None:
         if not self.model_version.strip():
@@ -202,11 +200,7 @@ class SimulationExecutionAdapter:
 
         # Determine exit direction: exiting SHORT requires BUY; exiting LONG requires
         # SELL
-        pos_side_str = getattr(
-            command.position_key.position_side,
-            "value",
-            str(command.position_key.position_side),
-        ).upper()
+        pos_side_str = command.position_key.position_side.value.upper()
         is_short = command.side in (
             StrategySide.SHORT,
             "SHORT",

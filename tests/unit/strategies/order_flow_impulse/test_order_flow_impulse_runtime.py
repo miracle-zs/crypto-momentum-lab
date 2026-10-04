@@ -113,7 +113,7 @@ def test_orderflow_impulse_restores_checkpoint() -> None:
         last_processed_at_by_symbol={"BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)},
         warmup_buckets_by_symbol={"BTCUSDT": 7},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
-        payload={},
+        payload={"signal_sequence": 0},
     )
 
     strategy.restore_checkpoint(checkpoint)
@@ -346,3 +346,27 @@ def _state(
         first_received_at=bucket_start,
         last_received_at=bucket_start + timedelta(seconds=15),
     )
+
+
+@pytest.mark.parametrize("sequence", [-1, "2", None, True])
+def test_checkpoint_invalid_signal_sequence_does_not_reset_identity(sequence):
+    strategy = _strategy()
+    _last_decision(strategy, _impulse_states())
+    checkpoint = strategy.checkpoint()
+    bad_checkpoint = replace(
+        checkpoint, payload={**checkpoint.payload, "signal_sequence": sequence}
+    )
+    with pytest.raises(ValueError, match="signal_sequence"):
+        strategy.restore_checkpoint(bad_checkpoint)
+    assert strategy.checkpoint() == checkpoint
+
+
+def test_checkpoint_missing_signal_sequence_is_not_a_fresh_run():
+    strategy = _strategy()
+    _last_decision(strategy, _impulse_states())
+    checkpoint = strategy.checkpoint()
+    payload = dict(checkpoint.payload)
+    del payload["signal_sequence"]
+    with pytest.raises(KeyError, match="signal_sequence"):
+        strategy.restore_checkpoint(replace(checkpoint, payload=payload))
+    assert strategy.checkpoint() == checkpoint

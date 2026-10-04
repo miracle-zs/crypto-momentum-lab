@@ -9,6 +9,7 @@ import pytest
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
+    AccountFillEvent,
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import (
@@ -31,7 +32,6 @@ from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
-    LiveContextReader,
     LiveDaemonRuntimeContext,
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
@@ -54,10 +54,13 @@ from tests.unit.live_rollout.test_gates import _risk_config as gate_risk_config
 NOW = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
 
 
-def test_classifies_position_opened_by_current_run_as_managed() -> None:
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+@pytest.mark.parametrize("account_label", ["primary", "account-3"])
+def test_classifies_position_opened_by_current_run_as_managed(account_label) -> None:
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position()],
         [_order(reduce_only=False, side="BUY")],
+        environment="live",
+        account_label=account_label,
     )
 
     assert unmanaged == frozenset()
@@ -66,16 +69,20 @@ def test_classifies_position_opened_by_current_run_as_managed() -> None:
     assert managed[0].quantity == Decimal("0.5")
     assert managed[0].closing_order_filled is False
 
+    assert managed[0].account_label == account_label
+
 
 def test_marks_external_position_as_unmanaged() -> None:
-    managed, _pending, unmanaged = _classify_live_positions_detailed([_position()], [])
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
+        [_position()], [], environment="live", account_label="primary"
+    )
 
     assert managed == ()
     assert unmanaged == frozenset({"BTCUSDT"})
 
 
 def test_recent_unfilled_current_run_entry_is_pending_not_unmanaged() -> None:
-    managed, pending, unmanaged = _classify_live_positions_detailed(
+    managed, pending, unmanaged = _classify_with_trade_fixtures(
         [_position(observed_at=NOW + timedelta(seconds=25))],
         [
             _order(
@@ -87,6 +94,8 @@ def test_recent_unfilled_current_run_entry_is_pending_not_unmanaged() -> None:
                 exchange_order_id="exchange-entry-1",
             )
         ],
+        environment="live",
+        account_label="primary",
     )
 
     assert managed == ()
@@ -95,7 +104,7 @@ def test_recent_unfilled_current_run_entry_is_pending_not_unmanaged() -> None:
 
 
 def test_stale_unfilled_current_run_entry_remains_unmanaged() -> None:
-    managed, pending, unmanaged = _classify_live_positions_detailed(
+    managed, pending, unmanaged = _classify_with_trade_fixtures(
         [_position(observed_at=NOW + timedelta(seconds=61))],
         [
             _order(
@@ -107,6 +116,8 @@ def test_stale_unfilled_current_run_entry_remains_unmanaged() -> None:
                 exchange_order_id="exchange-entry-1",
             )
         ],
+        environment="live",
+        account_label="primary",
     )
 
     assert managed == ()
@@ -115,7 +126,7 @@ def test_stale_unfilled_current_run_entry_remains_unmanaged() -> None:
 
 
 def test_filled_close_suppresses_duplicate_exit_during_account_sync_lag() -> None:
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position()],
         [
             _order(
@@ -125,6 +136,8 @@ def test_filled_close_suppresses_duplicate_exit_during_account_sync_lag() -> Non
             ),
             _order(reduce_only=False, side="BUY"),
         ],
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -137,7 +150,7 @@ def test_prior_exit_does_not_suppress_a_reopened_position() -> None:
     old_exit_created_at = NOW + timedelta(seconds=10)
     old_exit_filled_at = NOW + timedelta(seconds=30)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position()],
         [
             _order(
@@ -159,6 +172,8 @@ def test_prior_exit_does_not_suppress_a_reopened_position() -> None:
                 updated_at=old_entry_at,
             ),
         ],
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -172,7 +187,7 @@ def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
     old_exit_created_at = NOW + timedelta(seconds=10)
     old_exit_filled_at = NOW + timedelta(seconds=30)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("0.5"))],
         [
             _order(
@@ -206,6 +221,8 @@ def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
             "old-entry": old_entry_at,
             "add-on-entry": add_on_fill_at,
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -216,7 +233,7 @@ def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
 def test_partial_close_does_not_suppress_remaining_position() -> None:
     entry_fill_at = NOW + timedelta(seconds=20)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("0.5"))],
         [
             _order(
@@ -238,6 +255,8 @@ def test_partial_close_does_not_suppress_remaining_position() -> None:
             ),
         ],
         entry_fill_times={"entry": entry_fill_at},
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -249,7 +268,7 @@ def test_close_larger_than_remaining_position_does_not_suppress_it() -> None:
     add_on_fill_at = NOW + timedelta(seconds=20)
     close_fill_at = add_on_fill_at + timedelta(seconds=5)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         # The add-on lot was closed, while the original lot remains open.
         [_position(position_amt=Decimal("0.5"))],
         [
@@ -285,6 +304,8 @@ def test_close_larger_than_remaining_position_does_not_suppress_it() -> None:
             "old-entry": old_entry_at,
             "add-on-entry": add_on_fill_at,
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -298,7 +319,7 @@ def test_position_batches_split_at_exit_order_and_use_latest_entry_time() -> Non
     latest_second_entry_at = NOW + timedelta(minutes=87)
     second_exit_at = NOW + timedelta(minutes=105)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("4470"))],
         [
             _order(
@@ -361,6 +382,8 @@ def test_position_batches_split_at_exit_order_and_use_latest_entry_time() -> Non
             "second-entry-one": second_entry_at,
             "second-entry-two": latest_second_entry_at,
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -397,7 +420,7 @@ def test_classifies_remaining_recovery_quantity_after_partial_fill() -> None:
         executed_quantity=Decimal("0.400"),
     )
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("0.727"))],
         [
             _order(
@@ -408,6 +431,8 @@ def test_classifies_remaining_recovery_quantity_after_partial_fill() -> None:
             )
         ],
         unresolved=(unresolved,),
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -418,7 +443,7 @@ def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> Non
     old_entry_at = NOW
     partial_entry_fill_at = NOW + timedelta(seconds=25)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position()],
         [
             _order(
@@ -440,6 +465,8 @@ def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> Non
             "old-order": old_entry_at,
             "partial-order": partial_entry_fill_at,
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -451,7 +478,7 @@ def test_late_fill_after_an_exit_is_a_new_position_episode() -> None:
     pending_entry_created_at = NOW + timedelta(seconds=5)
     pending_entry_fill_at = NOW + timedelta(seconds=25)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position()],
         [
             _order(
@@ -470,6 +497,8 @@ def test_late_fill_after_an_exit_is_a_new_position_episode() -> None:
             ),
         ],
         entry_fill_times={"late-entry": pending_entry_fill_at},
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -483,7 +512,7 @@ def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
     old_exit_filled_at = NOW + timedelta(seconds=15)
     pending_entry_created_at = NOW + timedelta(seconds=20)
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("0.25"))],
         [
             _order(
@@ -514,6 +543,8 @@ def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
                 client_order_id="old-entry",
             ),
         ],
+        environment="live",
+        account_label="primary",
     )
 
     assert managed == ()
@@ -592,7 +623,7 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
         ),
     ]
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("386"))],
         orders,
         exit_batch_ids={
@@ -601,6 +632,8 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
             "current-close": "BTCUSDT:LONG:current-entry",
             "reopened-close": "BTCUSDT:LONG:reopened-entry",
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -662,10 +695,12 @@ def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
             client_order_id="current-entry",
         ),
     ]
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("266"))],
         orders,
         exit_batch_ids={"old-close-4542": "BTCUSDT:LONG:old-entry-a"},
+        environment="live",
+        account_label="primary",
     )
     assert unmanaged == frozenset()
     assert len(managed[0].batches) == 1
@@ -724,12 +759,14 @@ def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
         ),
     ]
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("4595"))],
         orders,
         exit_batch_ids={
             "reused-exit": "BTCUSDT:LONG:old-entry",
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -746,7 +783,7 @@ def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -
     current_entry_at = NOW + timedelta(days=30)
     legacy_client_id = "legacy-zero-fill-exit"
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [
             _position(
                 symbol="MINAUSDT",
@@ -794,6 +831,8 @@ def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -
                 ),
             )
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -804,7 +843,7 @@ def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -
 
 def test_active_zero_fill_legacy_identity_collision_remains_blocked() -> None:
     legacy_client_id = "legacy-active-zero-fill-exit"
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(symbol="MINAUSDT", position_amt=Decimal("926"))],
         [
             _order(
@@ -843,6 +882,8 @@ def test_active_zero_fill_legacy_identity_collision_remains_blocked() -> None:
                 ),
             )
         },
+        environment="live",
+        account_label="primary",
     )
 
     assert managed == ()
@@ -858,7 +899,13 @@ def test_draining_control_survives_a_later_operational_halt() -> None:
 async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
     execution_sessions = object()
     market_sessions = object()
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._sessions = execution_sessions
     provider._market_sessions = market_sessions
     provider._cached_rules = {}
@@ -883,7 +930,13 @@ async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
 
 
 async def test_symbol_rule_load_is_single_flight(monkeypatch) -> None:
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._sessions = object()
     provider._market_sessions = object()
     provider._cached_rules = {}
@@ -956,7 +1009,13 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
             return SessionContext(self.session)
 
     session = Session()
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._sessions = SessionFactory(session)
     provider._account_label = "primary"
     provider._run_id = "run-1"
@@ -1014,7 +1073,13 @@ async def test_position_view_uses_hub_snapshot_without_account_queries() -> None
         positions=(),
         open_orders=(),
     )
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._sessions = SessionFactory()
     provider._account_label = "primary"
     provider._run_id = "run-1"
@@ -1040,6 +1105,7 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
     monkeypatch,
 ) -> None:
     class Book:
+        context_revision = 0
         calls = 0
 
         async def list_position_views(self, **_kwargs):
@@ -1062,7 +1128,13 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
         lambda *_args, **_kwargs: (stale_lot,),
     )
     for account_snapshot in (SimpleNamespace(positions=()), None):
-        provider = object.__new__(PostgresLiveContextProvider)
+        provider = PostgresLiveContextProvider(
+            session_factory=lambda: None,
+            account_label="primary",
+            run_id="test-run",
+            strategy_name="test-strategy",
+            strategy_config_hash="test-config",
+        )
         provider._account_label = "primary"
         book = Book()
         provider._execution_book = book
@@ -1081,7 +1153,13 @@ async def test_execution_book_does_not_manage_position_absent_from_account_view(
         assert result.open_position_symbols == frozenset()
         assert book.calls == 0
 
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = Book()
     context = replace(
@@ -1100,6 +1178,7 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
     monkeypatch,
 ) -> None:
     class Book:
+        context_revision = 0
         async def list_position_views(self, **_kwargs):
             return (
                 SimpleNamespace(
@@ -1119,7 +1198,13 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
         "crypto_momentum_lab.live_rollout.postgres_runtime.log.warning",
         lambda *args, **kwargs: warnings.append((args, kwargs)),
     )
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = Book()
     context = replace(_runtime_context(), open_position_symbols=frozenset({"ETHUSDT"}))
@@ -1138,6 +1223,7 @@ async def test_execution_book_reads_only_current_exposure_scopes(monkeypatch) ->
     calls: list[dict] = []
 
     class Book:
+        context_revision = 0
         def get_active_stream(self, environment, account_label):
             return None
 
@@ -1149,7 +1235,13 @@ async def test_execution_book_reads_only_current_exposure_scopes(monkeypatch) ->
         "crypto_momentum_lab.live_rollout.postgres_runtime.managed_live_positions_from_views",
         lambda *_args, **_kwargs: (),
     )
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = Book()
     context = replace(
@@ -1178,6 +1270,7 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
     calls: list[dict] = []
 
     class Book:
+        context_revision = 0
         async def list_position_views(self, **kwargs):
             calls.append(kwargs)
             return ()
@@ -1186,7 +1279,13 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
         "crypto_momentum_lab.live_rollout.postgres_runtime.managed_live_positions_from_views",
         lambda *_args, **_kwargs: (),
     )
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = Book()
     context = replace(_runtime_context(), open_position_symbols=frozenset({"BTCUSDT"}))
@@ -1199,8 +1298,13 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
 
 
 def test_postgres_live_context_provider_implements_live_context_reader() -> None:
-    provider = object.__new__(PostgresLiveContextProvider)
-    assert isinstance(provider, LiveContextReader)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
 
     provider._cache_epoch = 10
     provider._cached_bucket_start = NOW
@@ -1235,7 +1339,13 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     )
     cached = _runtime_context()
     expected_rule = cached.trading_rules["BTCUSDT"]
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._strategy_name = cached.gate_context.strategy_name
     provider._strategy_config_hash = cached.gate_context.strategy_config_hash
@@ -1324,7 +1434,13 @@ async def test_next_market_bucket_reuses_fresh_context_cache() -> None:
     cached_loaded_at = datetime.now(tz=UTC)
     cached = _runtime_context()
     expected_rule = cached.trading_rules["BTCUSDT"]
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._cached_bucket_start = cached_loaded_at
     provider._cached_loaded_at = cached_loaded_at
     provider._cached_context = cached
@@ -1394,7 +1510,13 @@ async def test_context_reload_survives_cache_invalidation_during_rule_load(
 ) -> None:
     state = SimpleNamespace(symbol="BTCUSDT", bucket_start=NOW)
     cached = _runtime_context()
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._strategy_name = cached.gate_context.strategy_name
     provider._strategy_config_hash = cached.gate_context.strategy_config_hash
@@ -1661,10 +1783,12 @@ def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> Non
         ),
     ]
 
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
+    managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(symbol="MARSCOINUSDT", position_amt=Decimal("1077"))],
         orders,
         exit_batch_ids={},
+        environment="live",
+        account_label="primary",
     )
 
     assert unmanaged == frozenset()
@@ -1722,6 +1846,7 @@ async def test_load_order_anchor_events_tracks_latest_entry_times() -> None:
         run_id="run-1",
         active_symbols=("BTCUSDT",),
         lookback_start=NOW - timedelta(days=7),
+        zero_crossing_times={},
     )
     assert latest_entry_times == {"BTCUSDT": NOW - timedelta(minutes=1)}
     assert _opening_anchors_from_events(events, ("BTCUSDT",)) == {}
@@ -1966,11 +2091,13 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
-        AccountFacts,
         AccountFactStreamScope,
         PositionKey,
     )
-    from crypto_momentum_lab.domain.execution.recovery_models import DurableJournalCut
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
 
     key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
     scope = AccountFactStreamScope.for_position_key(
@@ -2013,7 +2140,13 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
         def __call__(self):
             return self
 
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._execution_book = book
     provider._sessions = Sessions()
@@ -2044,15 +2177,24 @@ async def test_current_exposure_is_not_repaired_at_a_historical_market_cut(
 
 
 @pytest.mark.parametrize("operation", ["context", "drift"])
-async def test_unknown_account_exposure_does_not_authorize_book_actions(operation) -> None:
+async def test_unknown_account_exposure_does_not_authorize_book_actions(
+    operation,
+) -> None:
     class Book:
+        context_revision = 0
         async def list_position_views(self, **_kwargs):
             raise AssertionError("unknown exposure must not trigger a Book scan")
 
         def get_active_stream(self, *_args):
             raise AssertionError("unknown exposure must not trigger repair")
 
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._execution_book = Book()
     stale_position = SimpleNamespace(symbol="BTCUSDT")
     context = replace(
@@ -2078,26 +2220,43 @@ async def test_unknown_account_exposure_does_not_authorize_book_actions(operatio
         assert result.managed_positions == ()
         assert result.unmanaged_position_symbols == frozenset({"ETHUSDT"})
     else:
-        await provider._observe_book_drift(book=provider._execution_book, context=context)
+        await provider._observe_book_drift(
+            book=provider._execution_book, context=context
+        )
 
 
 async def test_context_reads_request_repair_without_database_or_book_writes():
     from unittest.mock import AsyncMock, Mock
 
     requests = []
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._account_label = "primary"
     provider._run_id = "run-1"
     provider._sessions = Mock(
-        side_effect=AssertionError("position context reads must not open a database session")
+        side_effect=AssertionError(
+            "position context reads must not open a database session"
+        )
     )
     provider._market_sessions = Mock(
-        side_effect=AssertionError("position context reads must not open a market session")
+        side_effect=AssertionError(
+            "position context reads must not open a market session"
+        )
     )
     provider._execution_book = SimpleNamespace(
+        context_revision=0,
         list_position_views=AsyncMock(return_value=()),
-        observe=AsyncMock(side_effect=AssertionError("context reads must not write facts")),
-        act=AsyncMock(side_effect=AssertionError("context reads must not execute commands")),
+        observe=AsyncMock(
+            side_effect=AssertionError("context reads must not write facts")
+        ),
+        act=AsyncMock(
+            side_effect=AssertionError("context reads must not execute commands")
+        ),
         reload_position=AsyncMock(
             side_effect=AssertionError("context reads must not reload persistent facts")
         ),
@@ -2109,7 +2268,9 @@ async def test_context_reads_request_repair_without_database_or_book_writes():
         open_position_symbols=frozenset({"BTCUSDT"}),
         account_snapshot=SimpleNamespace(positions=(_position(),)),
     )
-    result = await provider._with_execution_book(context, SimpleNamespace(bucket_end=NOW))
+    result = await provider._with_execution_book(
+        context, SimpleNamespace(bucket_end=NOW)
+    )
     provider._sessions.assert_not_called()
     provider._market_sessions.assert_not_called()
     provider._execution_book.list_position_views.assert_awaited_once_with(
@@ -2124,7 +2285,13 @@ async def test_context_reads_request_repair_without_database_or_book_writes():
 
 @pytest.mark.asyncio
 async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = object.__new__(PostgresLiveContextProvider)
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
     provider._cached_rules = {}
     provider._cached_rules_at = {}
     provider._sessions = None
@@ -2143,6 +2310,7 @@ async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) 
         return {s: rule for s in symbols}
 
     import crypto_momentum_lab.live_rollout.postgres_runtime as pr
+
     monkeypatch.setattr(pr, "_load_trading_rules", fake_load_trading_rules)
 
     assert not provider.is_symbol_rules_warmed("BTCUSDT")
@@ -2150,3 +2318,26 @@ async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) 
     await provider.warm_symbol_rules(["BTCUSDT"], NOW)
 
     assert provider.is_symbol_rules_warmed("BTCUSDT")
+
+
+def _classify_with_trade_fixtures(positions, orders, *args, **kwargs):
+    """Provide explicit trade fixtures for order/position lifecycle scenarios."""
+    fills = []
+    fill_times = kwargs.get("entry_fill_times", {})
+    for index, order in enumerate(orders):
+        quantity = order.executed_quantity
+        order_id = order.exchange_order_id or order.client_order_id or f"fixture-order-{index}"
+        filled_at = fill_times.get(order_id) or fill_times.get(order.client_order_id)
+        if quantity <= 0 and filled_at is None:
+            continue
+        price = next(position.entry_price for position in positions if position.symbol == order.symbol)
+        fills.append(AccountFillEvent(
+            environment=kwargs["environment"], account_label=kwargs["account_label"],
+            symbol=order.symbol, trade_id=f"fixture-trade-{index}", order_id=order_id,
+            side=order.side, price=price, quantity=quantity if quantity > 0 else order.quantity,
+            realized_pnl=Decimal("0"), fee=Decimal("0"), fee_asset="USDT",
+            trade_at=filled_at or order.created_at,
+            raw_payload={"positionSide": order.position_side, "is_system": True,
+                         "client_order_id": order.client_order_id, "reduce_only": order.reduce_only},
+        ))
+    return _classify_live_positions_detailed(positions, orders, *args, account_fills=tuple(fills), **kwargs)

@@ -1,3 +1,5 @@
+from tests.fixtures.symbol_rules import btc_lot_rules
+
 """Unit tests for pure DecisionEngine (R3).
 
 Tests:
@@ -10,7 +12,6 @@ Tests:
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.market.decision_trace_service import (
     DecisionTraceService,
+    ReplayEvaluation,
 )
 from crypto_momentum_lab.domain.market.market_book import (
     InMemoryMarketBookRepository,
@@ -47,7 +49,6 @@ from crypto_momentum_lab.domain.market.revision_models import (
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import (
     FixedNotionalSizingModel,
-    default_symbol_lot_rules,
 )
 
 
@@ -457,7 +458,7 @@ def test_decision_input_hash_sensitivity() -> None:
     ) != compute_decision_input_hash(inp, pol_sizing2, state)
 
     # 8. Changing policy symbol_lot_rules alters hash
-    base_rules = default_symbol_lot_rules("BTCUSDT")
+    base_rules = btc_lot_rules()
     pol_lot1 = replace(
         policy,
         symbol_lot_rules=replace(base_rules, step_size=Decimal("0.001")),
@@ -496,24 +497,15 @@ def test_decision_input_hash_preserves_zero_remaining_batch_quantity() -> None:
     flat = _make_flat_position_view("BTCUSDT")
     policy = EffectivePolicy(policy_id="pol", strategy_name="strategy")
     state = PolicyState()
-    batch_zero = SimpleNamespace(
+    batch_zero = PositionLedgerBatch(
         batch_id="batch-zero",
         episode_id="ep-zero",
-        quantity=Decimal("0.5"),
+        quantity=Decimal("0"),
         original_quantity=Decimal("1.0"),
-        remaining_quantity=Decimal("0"),
         entry_price=Decimal("65000"),
         opened_at=t0,
     )
-    batch_open = SimpleNamespace(
-        batch_id="batch-zero",
-        episode_id="ep-zero",
-        quantity=Decimal("0.5"),
-        original_quantity=Decimal("1.0"),
-        remaining_quantity=Decimal("0.5"),
-        entry_price=Decimal("65000"),
-        opened_at=t0,
-    )
+    batch_open = replace(batch_zero, quantity=Decimal("0.5"))
     inp = DecisionInput(
         symbol="BTCUSDT",
         market_ref=mref,
@@ -612,7 +604,7 @@ def test_decision_trace_from_result_and_replay() -> None:
     replay_pass = trace_service.replay_decision(
         trace.decision_id,
         replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: decide(inp, state, policy),
+        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state, policy)),
     )
     assert replay_pass.reproduced is True
     assert replay_pass.divergence_explanation is None
@@ -622,7 +614,7 @@ def test_decision_trace_from_result_and_replay() -> None:
     replay_fail_notional = trace_service.replay_decision(
         trace.decision_id,
         replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: decide(inp, state, policy_changed),
+        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state, policy_changed)),
     )
     assert replay_fail_notional.reproduced is False
     assert replay_fail_notional.divergence_explanation is not None
@@ -633,7 +625,7 @@ def test_decision_trace_from_result_and_replay() -> None:
     replay_fail_version = trace_service.replay_decision(
         trace.decision_id,
         replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        policy_evaluator=lambda envs: decide(inp, state_diff_v, policy),
+        policy_evaluator=lambda envs: _replay_evaluation(decide(inp, state_diff_v, policy)),
     )
     assert replay_fail_version.reproduced is False
     assert replay_fail_version.divergence_explanation is not None
@@ -852,3 +844,13 @@ async def test_reproduce_decision_with_batches_and_sizing() -> None:
             trace.decision_id, trace_override=tampered_trace
         )
         assert audit_tampered["status"] == "UNREPRODUCIBLE"
+
+
+def _replay_evaluation(result) -> ReplayEvaluation:
+    return ReplayEvaluation(
+        intent_produced=result.intent is not None,
+        rejection_reason=result.rejection_reason,
+        notional=result.intent.desired_notional if result.intent is not None else None,
+        input_hash=result.input_hash,
+        next_policy_version=result.next_policy_state.policy_version,
+    )

@@ -1,9 +1,13 @@
 import asyncio
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID
+
+import pytest
 
 from crypto_momentum_lab.domain.market.models import (
     AggTradeGap,
@@ -100,8 +104,8 @@ class FakeCaptureRepository:
     def __init__(self) -> None:
         self.quality_events: list[QualityEvent] = []
 
-    async def save_quality_event(self, event: QualityEvent) -> None:
-        self.quality_events.append(event)
+    async def save_quality_events(self, events: Iterable[QualityEvent]) -> None:
+        self.quality_events.extend(events)
 
     async def save_process_state(self, **kwargs: Any) -> None:
         return None
@@ -139,7 +143,7 @@ async def test_ack_is_emitted_only_after_archive_returns(
         archive=archive,
         quality=FakeQualityTracker(),
         repository=FakeCaptureRepository(),
-        acknowledgement_sink=acknowledgements.append,
+        acknowledgement_sink=AsyncMock(side_effect=acknowledgements.append),
     )
 
     task = asyncio.create_task(coordinator.run())
@@ -214,7 +218,7 @@ async def test_archived_envelope_sink_runs_after_successful_batch_in_queue_order
         quality=FakeQualityTracker(),
         repository=FakeCaptureRepository(),
         acknowledgement_sink=None,
-        archived_envelope_sink=published.append,
+        archived_envelope_sink=AsyncMock(side_effect=published.append),
     )
 
     task = asyncio.create_task(coordinator.run())
@@ -243,7 +247,7 @@ async def test_realtime_envelope_sink_runs_before_archive(
         archive=archive,
         quality=FakeQualityTracker(),
         repository=FakeCaptureRepository(),
-        realtime_envelope_sink=published.append,
+        realtime_envelope_sink=AsyncMock(side_effect=published.append),
     )
 
     task = asyncio.create_task(coordinator.run())
@@ -258,7 +262,7 @@ async def test_realtime_envelope_sink_runs_before_archive(
     await task
 
 
-async def test_realtime_envelope_sink_yields_between_synchronous_events(
+async def test_realtime_envelope_sink_yields_between_immediate_callbacks(
     raw_envelope: RawEnvelope,
 ) -> None:
     coordinator = CaptureCoordinator(
@@ -276,7 +280,7 @@ async def test_realtime_envelope_sink_yields_between_synchronous_events(
     marker_task = asyncio.create_task(marker())
     try:
         await coordinator._publish_batch(
-            lambda envelope: envelope,
+            AsyncMock(return_value=None),
             (raw_envelope,),
         )
         assert marker_ran.is_set()
@@ -297,7 +301,7 @@ async def test_coordinator_only_archives_selected_streams(
         archive=archive,
         quality=FakeQualityTracker(),
         repository=FakeCaptureRepository(),
-        realtime_envelope_sink=published.append,
+        realtime_envelope_sink=AsyncMock(side_effect=published.append),
         archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
     )
     liquidation = replace(
@@ -445,14 +449,14 @@ async def test_coordinator_publishes_recovered_events_and_unrecovered_gaps(
         archive=ControlledArchive(),
         quality=FakeQualityTracker(),
         repository=FakeCaptureRepository(),
-        realtime_envelope_sink=published.append,
+        realtime_envelope_sink=AsyncMock(side_effect=published.append),
         envelope_recovery=FakeEnvelopeRecovery(
             AggTradeRecoveryBatch(
                 envelopes=(recovered, raw_envelope),
                 unrecovered_gaps=(gap,),
             )
         ),
-        gap_sink=gaps.append,
+        gap_sink=AsyncMock(side_effect=gaps.append),
         archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
     )
 
@@ -496,3 +500,26 @@ async def test_coordinator_bypasses_gap_recovery_under_queue_congestion(
     await task
 
     assert True in fake_recovery.bypass_calls
+
+
+async def test_recovery_type_error_does_not_retry_without_bypass_argument(raw_envelope):
+    class BrokenRecovery(FakeEnvelopeRecovery):
+        async def expand(self, batch, *, bypass_network=False):
+            self.bypass_calls.append(bypass_network)
+            raise TypeError("invalid recovery payload")
+
+    recovery = BrokenRecovery(AggTradeRecoveryBatch((), ()))
+    queue = BoundedEnvelopeQueue(max_events=10, max_bytes=100000)
+    coordinator = CaptureCoordinator(
+        queue=queue,
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        envelope_recovery=recovery,
+    )
+    await coordinator.submit(raw_envelope)
+    envelope = await queue.get()
+    with pytest.raises(TypeError, match="invalid recovery payload"):
+        await coordinator._process_batch((envelope,))
+    assert recovery.bypass_calls == [False]
+    await queue.join()

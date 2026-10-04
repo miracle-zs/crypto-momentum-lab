@@ -22,6 +22,7 @@ import structlog
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
+    ConnectionLifecycleEvent,
     RawEnvelope,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
@@ -177,11 +178,11 @@ class BinanceClosedCandle15mFeed:
         *,
         config: ClosedCandle15mFeedConfig,
         backfill_source: ClosedCandleBackfillSource | None = None,
-        clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._config = config
         self._backfill_source = backfill_source
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock
         self._symbols: frozenset[str] = frozenset()
         self._generation = 0
         self._connection: BinanceWebSocketConnection | None = None
@@ -360,14 +361,14 @@ class BinanceClosedCandle15mFeed:
     async def _discard_envelope(self, envelope: RawEnvelope) -> None:
         del envelope
 
-    async def _observe_lifecycle(self, event: object) -> None:
+    async def _observe_lifecycle(self, event: ConnectionLifecycleEvent) -> None:
         log.info(
             "live_closed_candle_feed_connection",
             consumer_id=self._config.consumer_id,
-            opened=getattr(event, "opened", None),
-            reason=getattr(event, "reason", None),
+            opened=event.opened,
+            reason=event.reason,
         )
-        if getattr(event, "opened", False):
+        if event.opened:
             now = self._clock()
             last_recovery_at = self._last_connection_recovery_at
             if last_recovery_at is not None and now - last_recovery_at < timedelta(
@@ -402,8 +403,6 @@ class BinanceClosedCandle15mFeed:
                     symbol=symbol,
                     through=through,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 log.warning(
                     "live_closed_candle_backfill_failed",

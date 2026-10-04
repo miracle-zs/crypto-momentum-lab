@@ -52,7 +52,7 @@ class DatasetId(StrEnum):
     GENERIC = "generic"
 
 
-DATASET_PHYSICAL_TABLES: dict[DatasetId | str, tuple[str, ...]] = {
+DATASET_PHYSICAL_TABLES: dict[DatasetId, tuple[str, ...]] = {
     DatasetId.MARKET_DATA: (
         "runtime_market_states_15s",
         "contract_metadata",
@@ -99,7 +99,7 @@ TABLE_TO_DATASET: dict[str, DatasetId] = {
     "contract_metadata": DatasetId.CONTRACT_METADATA,
 }
 
-DATASET_PARENT: dict[DatasetId | str, DatasetId] = {
+DATASET_PARENT: dict[DatasetId, DatasetId] = {
     DatasetId.MARKET_STATES: DatasetId.MARKET_DATA,
     DatasetId.CONTRACT_METADATA: DatasetId.MARKET_DATA,
     DatasetId.ACCOUNT_BALANCES: DatasetId.ACCOUNT_SNAPSHOTS,
@@ -108,7 +108,7 @@ DATASET_PARENT: dict[DatasetId | str, DatasetId] = {
     DatasetId.ACCOUNT_RECONCILIATION: DatasetId.ACCOUNT_SNAPSHOTS,
 }
 
-DATASET_CHILDREN: dict[DatasetId | str, tuple[DatasetId, ...]] = {
+DATASET_CHILDREN: dict[DatasetId, tuple[DatasetId, ...]] = {
     DatasetId.MARKET_DATA: (
         DatasetId.MARKET_STATES,
         DatasetId.CONTRACT_METADATA,
@@ -126,22 +126,16 @@ DATASET_CHILDREN: dict[DatasetId | str, tuple[DatasetId, ...]] = {
 class DatasetScope:
     """Unified dataset scope binding logical identity, environment, and account."""
 
-    dataset_id: DatasetId | str
+    dataset_id: DatasetId
     environment: str = "live"
     account_label: str | None = None
     custom_name: str | None = None
 
     @property
-    def id_value(self) -> str:
-        if isinstance(self.dataset_id, DatasetId):
-            return self.dataset_id.value
-        return str(self.dataset_id)
-
-    @property
     def canonical_id(self) -> str:
         if self.custom_name and self.dataset_id == DatasetId.GENERIC:
             return self.custom_name
-        base = self.id_value
+        base = self.dataset_id.value
         if self.account_label:
             return f"{base}_{self.account_label}"
         return base
@@ -169,12 +163,12 @@ class DatasetScope:
 
     def related_dataset_names(self) -> tuple[str, ...]:
         """Set of dataset/table names that share recovery dependencies with scope."""
-        names = {self.canonical_id, self.id_value}
+        names = {self.canonical_id, self.dataset_id.value}
         if self.custom_name:
             names.add(self.custom_name)
         if self.account_label:
-            names.add(f"{self.id_value}_{self.account_label}")
-            names.add(f"{self.id_value}_{self.environment}_{self.account_label}")
+            names.add(f"{self.dataset_id.value}_{self.account_label}")
+            names.add(f"{self.dataset_id.value}_{self.environment}_{self.account_label}")
 
         tables = DATASET_PHYSICAL_TABLES.get(self.dataset_id, ())
         for t in tables:
@@ -200,32 +194,13 @@ class DatasetScope:
 
 
 def resolve_dataset_scope(
-    name_or_scope: str | DatasetScope,
+    name: str,
     *,
     environment: str = "live",
     account_label: str | None = None,
 ) -> DatasetScope:
-    """Resolve a table name, legacy alias, or scope into a canonical DatasetScope."""
-    if isinstance(name_or_scope, DatasetScope):
-        resolved_env = (
-            environment if environment != "live" else name_or_scope.environment
-        )
-        resolved_acc = (
-            account_label if account_label is not None else name_or_scope.account_label
-        )
-        if (
-            resolved_env != name_or_scope.environment
-            or resolved_acc != name_or_scope.account_label
-        ):
-            return DatasetScope(
-                dataset_id=name_or_scope.dataset_id,
-                environment=resolved_env,
-                account_label=resolved_acc,
-                custom_name=name_or_scope.custom_name,
-            )
-        return name_or_scope
-
-    raw = name_or_scope.strip()
+    """Resolve a dataset name into its table and account scope."""
+    raw = name.strip()
     if not raw:
         raise ValueError("dataset name must not be empty")
 
@@ -239,13 +214,6 @@ def resolve_dataset_scope(
             dataset_id=DatasetId.ACCOUNT_SNAPSHOTS,
             environment=environment,
             account_label=account_label or extracted_acc,
-        )
-
-    if raw == "account_snapshots":
-        return DatasetScope(
-            dataset_id=DatasetId.ACCOUNT_SNAPSHOTS,
-            environment=environment,
-            account_label=account_label,
         )
 
     # Check physical tables
