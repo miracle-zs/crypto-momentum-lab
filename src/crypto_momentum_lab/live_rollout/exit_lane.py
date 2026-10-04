@@ -29,7 +29,6 @@ class ExitLaneOutcome:
     approved_intent_count: int = 0
     submitted_order_count: int = 0
     failure: str | None = None
-    fatal_failure: bool = False
 
     def merge(self, other: ExitLaneOutcome) -> ExitLaneOutcome:
         return ExitLaneOutcome(
@@ -40,13 +39,10 @@ class ExitLaneOutcome:
                 self.submitted_order_count + other.submitted_order_count
             ),
             failure=(
-                self.failure
-                if self.fatal_failure
-                else other.failure
-                if other.fatal_failure
-                else self.failure or other.failure
+                other.failure
+                if self.failure is None or is_pending_exit_evaluation(self.failure)
+                else self.failure
             ),
-            fatal_failure=self.fatal_failure or other.fatal_failure,
         )
 
 
@@ -103,12 +99,6 @@ class ExitExecutionLane:
     @property
     def started(self) -> bool:
         return self._started
-
-    @property
-    def failure(self) -> str | None:
-        if not self._outcome.fatal_failure:
-            return None
-        return self._outcome.failure
 
     async def start(self) -> None:
         if self._started:
@@ -264,7 +254,6 @@ class ExitExecutionLane:
             )
             return ExitLaneOutcome(
                 failure=f"exit_execution_failed:{type(error).__name__}",
-                fatal_failure=True,
             )
 
     async def _run_quote_work(self, work: _QuoteLaneWork) -> ExitLaneOutcome:
@@ -281,7 +270,6 @@ class ExitExecutionLane:
             )
             return ExitLaneOutcome(
                 failure=f"quote_exit_execution_failed:{type(error).__name__}",
-                fatal_failure=True,
             )
 
     def record_recovery_outcome(self, symbol: str, outcome: ExitLaneOutcome) -> None:
@@ -293,25 +281,16 @@ class ExitExecutionLane:
         if self._on_outcome is not None:
             try:
                 self._on_outcome(symbol, outcome)
-            except Exception as error:
+            except Exception:
                 log.exception("live_exit_outcome_publication_failed", symbol=symbol)
-                self._outcome = self._outcome.merge(
-                    ExitLaneOutcome(
-                        failure=f"exit_outcome_publication_failed:{type(error).__name__}",
-                        fatal_failure=True,
-                    )
-                )
-        if outcome.failure is not None and not is_pending_exit_evaluation(outcome.failure):
-            if outcome.fatal_failure:
-                log.error(
-                    "live_exit_lane_failed_closed",
-                    reason=outcome.failure,
-                )
-            else:
-                log.warning(
-                    "live_exit_lane_recoverable_failure",
-                    reason=outcome.failure,
-                )
+        if outcome.failure is not None and not is_pending_exit_evaluation(
+            outcome.failure
+        ):
+            log.warning(
+                "live_exit_work_failed",
+                symbol=symbol,
+                reason=outcome.failure,
+            )
 
     def _mark_idle_if_ready(self) -> None:
         if self._idle is not None and self._outstanding_work == 0:

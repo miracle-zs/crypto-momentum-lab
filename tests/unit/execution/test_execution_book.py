@@ -589,7 +589,7 @@ async def test_execution_book_act_stale_view_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_book_act_blocked_when_not_ready() -> None:
+async def test_execution_book_accepts_entry_with_pending_coverage() -> None:
     book = ExecutionBook()
     scope = _scope()
     view = await book.read(scope)
@@ -608,8 +608,8 @@ async def test_execution_book_act_blocked_when_not_ready() -> None:
 
     # Not ready because coverage is unconfirmed
     result = await book.act(req)
-    assert isinstance(result, Blocked)
-    assert "not ready for trade" in result.reason
+    assert isinstance(result, Accepted)
+    assert not view.is_ready_for_trade
 
 
 @pytest.mark.asyncio
@@ -1504,7 +1504,7 @@ async def test_restored_dispatch_latch_requires_durable_resolution(
         assert command_id in book._dispatch_reconciliation_required_commands
         blocked = await book.act(
             ExecutionRequest(
-                request_id=f"new-entry-{command_id}",
+                request_id=command_id,
                 scope=scope,
                 strategy_name="trend_v1",
                 strategy_version="1.0.0",
@@ -3029,7 +3029,7 @@ async def test_restore_deduplicates_equal_command_rows_and_rejects_conflicts(
 
 
 @pytest.mark.asyncio
-async def test_restore_active_reservations_divergence_blocks_submission_and_provides_recovery() -> (
+async def test_restore_preserves_diverged_reservations_and_provides_recovery() -> (
     None
 ):
     from unittest.mock import AsyncMock
@@ -3100,9 +3100,6 @@ async def test_restore_active_reservations_divergence_blocks_submission_and_prov
 
     from contextlib import asynccontextmanager
 
-    from crypto_momentum_lab.domain.execution.execution_book import (
-        ExecutionRecoveryPending,
-    )
 
     class StubUow:
         async def load_positions(self, **kwargs):
@@ -3147,33 +3144,10 @@ async def test_restore_active_reservations_divergence_blocks_submission_and_prov
     assert len(active_res) == 1
     assert active_res[0].reservation_id == "res-1"
 
-    # Invariant 2: Order submission on diverged position must be blocked
-    request = ExecutionRequest(
-        request_id="test-req",
-        scope=ExecutionScope(
-            environment=key.environment,
-            account_label=key.account_label,
-            symbol=key.symbol,
-            position_side=key.position_side,
-        ),
-        strategy_name="trend",
-        strategy_version="1",
-        run_id="run-1",
-        decision_ref="decision-1",
-        expected_view_token="pv_test",
-        action=TradeCommandType.ENTRY,
-        requested_quantity=Decimal("1"),
-    )
-    result = await book.act(request)
-    assert isinstance(result, ExecutionRecoveryPending)
-    assert f"reservation_divergence:{key.canonical_id}" in result.diagnostics
-
     # Invariant 3: Provide recovery entry point (reconcile_reservation_divergence)
     reconciled = await book.reconcile_reservation_divergence(key, force=True)
     assert reconciled is True
     # Still preserves the active reservation
     assert len(book.get_active_reservations(key)) == 1
 
-    # Once reconciled, new order submission is unblocked
-    result2 = await book.act(request)
-    assert not isinstance(result2, ExecutionRecoveryPending)
+    assert not book.command_requires_recovery(f"reservation_divergence:{key.canonical_id}")

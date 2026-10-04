@@ -261,7 +261,6 @@ class ExecutionCoordinator:
         """Transactionally reserves batch quantities for an exit trade command.
 
         Raises:
-            ExecutionReadinessError: If PositionView is not ready for trading;
             VersionConflictError: If command version mismatches view version;
             ReservationConflictError: If batch has insufficient quantity.
         """
@@ -269,13 +268,6 @@ class ExecutionCoordinator:
             raise ValueError(
                 f"Command position key {command.position_key.canonical_id} does not "
                 f"match view position key {view.key.canonical_id}"
-            )
-
-        if not view.is_ready_for_trade:
-            raise ExecutionReadinessError(
-                f"PositionView for {view.key.canonical_id} is not ready for trade "
-                f"(health={view.health_status.value}, gap={view.reconciliation_gap}, "
-                f"unallocated={view.unallocated_quantity})"
             )
 
         if (

@@ -1,14 +1,13 @@
 """Control-plane callbacks shared by the live execution lanes.
 
-The account-event consumer and lease heartbeat run independently from the
-market loop.  This module owns the small amount of state they publish into
+The account-event consumer runs independently from the market loop.  This module owns the small amount of state they publish into
 the entry gate and the context providers, so the application composition root
 does not also become the owner of recovery semantics.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -18,9 +17,7 @@ from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
-from crypto_momentum_lab.domain.risk import TradingLease
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.telemetry_ports import ConsumerHealthSink
 
 log = structlog.get_logger(__name__)
@@ -64,30 +61,21 @@ class LiveControlPlaneContextProvider(Protocol):
 
     def invalidate_account_snapshot(self) -> None: ...
 
-    def update_lease(self, lease: TradingLease) -> None: ...
 
-
-LeaseReacquirer = Callable[
-    [LiveGateContext],
-    Awaitable[TradingLease | None],
-]
 Clock = Callable[[], datetime]
 
 
 class LiveControlPlaneRuntime:
-    """Publish account and lease control-plane state to live decision gates."""
+    """Publish account and market availability to live entry checks."""
 
     def __init__(
         self,
         *,
         session_id: str,
         context_provider: LiveControlPlaneContextProvider,
-        load_lease_gate: Callable[[], Awaitable[LiveGateContext]],
-        reacquire_lease: LeaseReacquirer,
         market_state_available: bool,
         notify_market_state_gap: Callable[[str], None],
         refresh_entry_gate: Callable[[], None],
-        mark_database_ok: Callable[[], None],
         telemetry: ConsumerHealthSink | None = None,
         clock: Clock | None = None,
         strategy_warmup_ready: bool = False,
@@ -98,15 +86,11 @@ class LiveControlPlaneRuntime:
             raise TypeError("strategy_warmup_ready must be a bool")
         self._session_id = session_id
         self._context_provider = context_provider
-        self._load_lease_gate = load_lease_gate
-        self._reacquire_lease = reacquire_lease
         self._notify_market_state_gap = notify_market_state_gap
         self._refresh_entry_gate = refresh_entry_gate
-        self._mark_database_ok = mark_database_ok
         self._telemetry = telemetry
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._account_snapshot_available = True
-        self._lease_heartbeat_degraded = False
         self._market_state_available = market_state_available
         self._market_state_unavailable_reason = (
             "market_state_hub_ready"
@@ -123,10 +107,6 @@ class LiveControlPlaneRuntime:
     @property
     def account_snapshot_available(self) -> bool:
         return self._account_snapshot_available
-
-    @property
-    def lease_heartbeat_degraded(self) -> bool:
-        return self._lease_heartbeat_degraded
 
     @property
     def market_state_available(self) -> bool:
@@ -240,40 +220,6 @@ class LiveControlPlaneRuntime:
             session_id=self._session_id,
         )
 
-    async def recover_live_lease(self) -> TradingLease | None:
-        """Reload only authorization facts before reacquiring a missing lease."""
-        if not self._account_snapshot_available or not self._market_state_available:
-            return None
-        gate = await self._load_lease_gate()
-        # A disconnect while the read was in flight must not authorize recovery.
-        if not self._account_snapshot_available or not self._market_state_available:
-            return None
-        return await self._reacquire_lease(gate)
-
-    def on_lease_renewed(self, lease: TradingLease) -> None:
-        """Publish a committed lease renewal to the live context reader."""
-
-        self._lease_heartbeat_degraded = False
-        self._context_provider.update_lease(lease)
-        self._refresh_entry_gate()
-        self._mark_database_ok()
-        log.info(
-            "live_lease_renewed",
-            session_id=self._session_id,
-            lease_id=lease.lease_id,
-            lease_expires_at=lease.expires_at.isoformat(),
-        )
-
-    def on_lease_error(self, error: Exception) -> None:
-        """Fail closed after a heartbeat renewal failure."""
-
-        self._lease_heartbeat_degraded = True
-        self._refresh_entry_gate()
-        log.warning(
-            "live_lease_renewal_failed",
-            session_id=self._session_id,
-            error_type=type(error).__name__,
-        )
 
 
 __all__ = [

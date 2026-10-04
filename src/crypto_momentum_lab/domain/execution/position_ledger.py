@@ -418,13 +418,11 @@ class PositionLedger:
                 return
             if boundary.target_batch_id is not None:
                 for i, b in enumerate(current_batches):
-                    if (
-                        b.batch_id == boundary.target_batch_id
-                        and b.exit_order_submitted_at is None
-                    ):
-                        current_batches[i] = replace(
-                            b, exit_order_submitted_at=boundary.submitted_at
-                        )
+                    if b.batch_id == boundary.target_batch_id:
+                        if b.exit_order_submitted_at is None:
+                            current_batches[i] = replace(
+                                b, exit_order_submitted_at=boundary.submitted_at
+                            )
                         return
             for i in range(len(current_batches) - 1, -1, -1):
                 b = current_batches[i]

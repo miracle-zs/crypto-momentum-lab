@@ -35,7 +35,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
-    SubmitPolicy,
 )
 
 NOW = datetime(2026, 10, 2, 12, 30, tzinfo=UTC)
@@ -48,7 +47,7 @@ class EventRepository:
     async def save_planned_order(self, plan):
         pass
 
-    async def append_order_event(self, event):
+    async def record_order_observation(self, event, fills=()):
         self.events.append(event)
         return True
 
@@ -173,7 +172,6 @@ async def test_incomplete_fill_waits_for_price_without_crash_or_second_post(
             exchange=exchange,
             repository=repository,
             event_repository=repository,
-            submit_policy=SubmitPolicy.LIVE_SUBMIT,
             live_submit_enabled=True,
             clock=lambda: NOW,
         )

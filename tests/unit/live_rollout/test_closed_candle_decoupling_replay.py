@@ -93,8 +93,8 @@ def pending_signal(monkeypatch):
 @pytest.mark.parametrize(
     "ttl, delay, expected_posts", [(60, 30, 1), (60, 224, 0), (300, 224, 1)]
 )
-async def test_original_candle_ttl_survives_wait_and_duplicate_delivery(
-    ttl, delay, expected_posts, pending_signal
+async def test_original_candle_ttl_survives_late_and_duplicate_delivery(
+    ttl, delay, expected_posts
 ):
     exchange = PlanAwareExchange()
     now = NOW
@@ -129,17 +129,8 @@ async def test_original_candle_ttl_survives_wait_and_duplicate_delivery(
         yield _event()
         yield _event()
 
-    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
-    try:
-        await asyncio.wait_for(pending_signal.wait(), 1)
-        assert exchange.plans == []
-        now += timedelta(seconds=delay)
-        context = replace(context, pending_position_symbols=frozenset())
-        runtime.note_account_facts_changed(("BTCUSDT",))
-        await asyncio.wait_for(task, 1)
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    now += timedelta(seconds=delay)
+    await asyncio.wait_for(runtime.run_closed_candle_channel(source=source()), 1)
     assert len(exchange.plans) == expected_posts
     if expected_posts:
         plan = exchange.plans[0]
@@ -157,12 +148,12 @@ async def test_projection_conflict_rebuilds_real_allocation_before_post(pending_
     attempted = []
 
     class Repository(FakeLiveRepository):
-        async def prepare_submission(self, **kwargs):
+        async def prepare_submission_in_session(self, session, **kwargs):
             plan = kwargs["plan"]
             attempted.append(plan)
             if plan.projection_version == "pv1":
                 raise OrderProjectionConflictError("projection advanced")
-            return await super().prepare_submission(**kwargs)
+            return await super().prepare_submission_in_session(session, **kwargs)
 
     context = replace(
         _runtime_context(),
@@ -220,60 +211,6 @@ async def test_projection_conflict_rebuilds_real_allocation_before_post(pending_
         allocation.allocated_quantity for allocation in plan.allocations
     ) == Decimal("0.002")
     assert plan.client_order_id != old_id
-    assert not runtime._pending_candles
-
-
-async def test_pending_candle_expires_without_another_account_event(pending_signal):
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-
-    def clock():
-        return NOW + timedelta(seconds=loop.time() - started)
-
-    context = replace(
-        _runtime_context(),
-        pending_position_symbols=frozenset({"BTCUSDT"}),
-        managed_positions=(_position(),),
-        open_position_symbols=frozenset({"BTCUSDT"}),
-    )
-    context_reads = []
-
-    async def provider(state):
-        context_reads.append(state)
-        return context
-
-    exchange = PlanAwareExchange()
-    daemon = _daemon(
-        exchange=exchange,
-        context_provider=provider,
-        exit_manager=_manager(1),
-        clock=clock,
-    )
-    failures = []
-    runtime = LiveExitChannelRuntime(
-        daemon=daemon,
-        latest_market_quotes=SimpleNamespace(for_symbols=lambda symbols: ()),
-        latest_market_states=SimpleNamespace(),
-        is_transient_error=lambda error: False,
-        closed_candle_expires_at=daemon.closed_candle_expires_at,
-        clock=clock,
-        on_exit_failure=lambda symbol, reason: failures.append(reason),
-    )
-
-    async def source():
-        yield _event()
-
-    task = asyncio.create_task(runtime.run_closed_candle_channel(source=source()))
-    try:
-        await asyncio.wait_for(pending_signal.wait(), 1)
-        reads_before_expiry = len(context_reads)
-        await asyncio.wait_for(task, 2)
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-    assert len(context_reads) == reads_before_expiry
-    assert exchange.plans == []
-    assert failures == ["closed_candle_evaluation_expired:BTCUSDT"]
     assert not runtime._pending_candles
 
 

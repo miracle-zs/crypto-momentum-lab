@@ -1,22 +1,16 @@
-"""Tests for unmanaged position debounce and context cache short-TTL recovery."""
+"""Context cache age limits for clean and pending position facts."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     _context_cache_can_be_reused,
 )
 from tests.unit.live_rollout.test_daemon import (
-    PlanAwareExchange,
-    _daemon,
     _runtime_context,
 )
 
@@ -124,43 +118,3 @@ def test_context_cache_same_bucket_never_bypasses_max_age() -> None:
         max_age_seconds=30,
         cached_context=clean_context,
     )
-
-
-@pytest.mark.asyncio
-async def test_market_loop_debounces_unmanaged_position_and_recovers() -> None:
-    """When an unmanaged position appears briefly and clears, daemon does not halt."""
-    now = datetime(2026, 8, 4, 0, 0, 0, tzinfo=UTC)
-    exchange = PlanAwareExchange()
-    call_count = 0
-
-    async def dynamic_context(state: object) -> LiveDaemonRuntimeContext:
-        nonlocal call_count
-        call_count += 1
-        del state
-        # First call has unmanaged position, second call clears it
-        unmanaged = frozenset({"ETHUSDT"}) if call_count == 1 else frozenset()
-        return replace(
-            _runtime_context(),
-            open_position_symbols=frozenset({"ETHUSDT"}) if unmanaged else frozenset(),
-            unmanaged_position_symbols=unmanaged,
-        )
-
-    daemon = _daemon(
-        exchange=exchange,
-        context_provider=dynamic_context,
-        unmanaged_halt_debounce_seconds=15.0,
-    )
-
-    async def states() -> AsyncIterator[MarketState15s]:
-        # State 1 at t=0
-        yield _market_state("ETHUSDT", bucket_start=now)
-        # State 2 at t=15s
-        yield _market_state("ETHUSDT", bucket_start=now + timedelta(seconds=15))
-
-    result = await daemon.run(states())
-
-    # Daemon processed both states without halting because unmanaged position resolved!
-    assert result.processed_state_count == 2
-    assert result.halt_reason is None
-    # Entries were blocked during debounce on state 1, resumed on state 2
-    assert exchange.calls == ["submit"]

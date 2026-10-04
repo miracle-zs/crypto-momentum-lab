@@ -1,9 +1,10 @@
-"""Fail-closed composition of live entry control gates."""
+"""Single live entry control; reconciliation is diagnostic."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -11,17 +12,22 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
 
+if TYPE_CHECKING:
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        CoordinatedOrderExecutionPort,
+    )
+
 log = structlog.get_logger()
 
 
 class LiveEntryControlGate:
-    """Own prerequisite, risk, schedule, and position-sync entry gates."""
+    """Own entry prerequisites, manual controls, and scheduled limits."""
 
     def __init__(
         self,
         *,
         run_id: str,
-        state_machine: object,
+        state_machine: CoordinatedOrderExecutionPort,
         scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         is_symbol_warmed: Callable[[str], bool] | None = None,
@@ -41,9 +47,7 @@ class LiveEntryControlGate:
         self._risk_control_entry_block_reason = "risk_control_clear"
         self._scheduled_entry_blocked = False
         self._scheduled_entry_block_reason = "outside_scheduled_risk_window"
-        self._pending_position_symbols: frozenset[str] = frozenset()
         self._entry_filter_cache_ready = True
-        self._exit_failure_by_symbol: dict[str, str] = {}
 
     @property
     def entry_enabled(self) -> bool:
@@ -68,10 +72,6 @@ class LiveEntryControlGate:
         """Check whether entry is allowed for a specific symbol."""
         if not self.entry_enabled:
             return False, self.entry_enabled_reason
-        if symbol in self._pending_position_symbols:
-            return False, f"account_position_sync_pending:{symbol}"
-        if symbol in self._exit_failure_by_symbol:
-            return False, f"exit_failure:{symbol}:{self._exit_failure_by_symbol[symbol]}"
         if self._is_symbol_warmed is not None and not self._is_symbol_warmed(symbol):
             if self._on_unwarmed_symbol is not None:
                 self._on_unwarmed_symbol(symbol)
@@ -81,12 +81,6 @@ class LiveEntryControlGate:
     def _outside_scheduled_window(self) -> bool:
         # This read is synchronous even when cancellation/verification awaits I/O.
         return self._schedule is None or self._schedule.is_entry_allowed(self._clock())
-
-    def set_pending_position_symbols(
-        self,
-        symbols: Collection[str],
-    ) -> None:
-        self._pending_position_symbols = frozenset(symbols)
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         if not isinstance(enabled, bool):
@@ -106,31 +100,6 @@ class LiveEntryControlGate:
             run_id=self._run_id,
         )
 
-    def set_exit_failure(
-        self,
-        symbol: str,
-        failure: str | None,
-    ) -> bool:
-        """Remember an exit failure until that symbol recovers.
-
-        Returns True if the stored failure state for symbol changed, False otherwise.
-        """
-
-        if not symbol.strip():
-            raise ValueError("symbol must not be empty")
-        if failure is None:
-            if symbol in self._exit_failure_by_symbol:
-                del self._exit_failure_by_symbol[symbol]
-                return True
-            return False
-        if not failure.strip():
-            raise ValueError("failure must not be empty when present")
-        previous = self._exit_failure_by_symbol.get(symbol)
-        if previous == failure:
-            return False
-        self._exit_failure_by_symbol[symbol] = failure
-        return True
-
     def set_entry_filter_cache_ready(self, ready: bool) -> None:
         """Set whether the configured entry filter cache can admit entries."""
 
@@ -141,22 +110,18 @@ class LiveEntryControlGate:
     def refresh_entry_prerequisites(
         self,
         *,
-        lease_heartbeat_degraded: bool,
         session_draining: bool,
         market_state_available: bool,
         market_state_unavailable_reason: str,
-        account_snapshot_available: bool,
         strategy_warmup_ready: bool,
         strategy_warmup_reason: str = "strategy_warmup_ready",
     ) -> None:
         """Apply external live prerequisites in their fail-closed priority."""
 
         for value, field_name in (
-            (lease_heartbeat_degraded, "lease_heartbeat_degraded"),
             (session_draining, "session_draining"),
             (strategy_warmup_ready, "strategy_warmup_ready"),
             (market_state_available, "market_state_available"),
-            (account_snapshot_available, "account_snapshot_available"),
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{field_name} must be a bool")
@@ -165,12 +130,7 @@ class LiveEntryControlGate:
         if not market_state_unavailable_reason.strip():
             raise ValueError("market_state_unavailable_reason must not be empty")
 
-        if lease_heartbeat_degraded:
-            self.set_entry_enabled(
-                False,
-                reason="lease_heartbeat_degraded",
-            )
-        elif session_draining:
+        if session_draining:
             self.set_entry_enabled(False, reason="session_draining")
         elif not strategy_warmup_ready:
             self.set_entry_enabled(False, reason=strategy_warmup_reason)
@@ -229,20 +189,11 @@ class LiveEntryControlGate:
         ):
             return
         state_changed = self._scheduled_entry_blocked != blocked
-        if blocked:
-            # Close the daemon gate before asking the coordinator to drain.
-            self._scheduled_entry_blocked = True
-            self._scheduled_entry_block_reason = reason
-            self._set_coordinator_entry_gate(blocked=True)
-        else:
-            # Do not reopen the daemon gate if the coordinator rejected the
-            # transition; the next schedule poll can retry it safely.
-            if not self._set_coordinator_entry_gate(
-                blocked=self._risk_control_entry_blocked,
-            ):
-                return
-            self._scheduled_entry_blocked = False
-            self._scheduled_entry_block_reason = reason
+        self._scheduled_entry_blocked = blocked
+        self._scheduled_entry_block_reason = reason
+        self._set_coordinator_entry_gate(
+            blocked=blocked or self._risk_control_entry_blocked,
+        )
         log.warning(
             "live_scheduled_entry_gate_changed",
             blocked=blocked,
@@ -257,29 +208,11 @@ class LiveEntryControlGate:
         if not reason.strip():
             raise ValueError("reason must not be empty")
 
-    def _set_coordinator_entry_gate(self, *, blocked: bool) -> bool:
-        method_name = (
-            "block_entry_submissions" if blocked else "unblock_entry_submissions"
-        )
-        method = getattr(self._state_machine, method_name, None)
-        if not callable(method):
-            return True
-        try:
-            method()
-        except Exception as error:
-            log.exception(
-                "live_coordinator_entry_gate_update_failed",
-                run_id=self._run_id,
-                blocked=blocked,
-                error_type=type(error).__name__,
-            )
-            if not blocked:
-                self._scheduled_entry_blocked = True
-                self._scheduled_entry_block_reason = (
-                    "scheduled_entry_gate_update_failed"
-                )
-            return False
-        return True
+    def _set_coordinator_entry_gate(self, *, blocked: bool) -> None:
+        if blocked:
+            self._state_machine.block_entry_submissions()
+        else:
+            self._state_machine.unblock_entry_submissions()
 
 
 __all__ = ["LiveEntryControlGate"]

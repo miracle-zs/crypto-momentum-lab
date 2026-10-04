@@ -33,7 +33,6 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
     None
 ):
     provider = _Provider()
-    pending_updates: list[frozenset[str]] = []
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     published: list[frozenset[str]] = []
 
@@ -44,9 +43,7 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
         run_id="run-1",
         context_provider=cast(LiveContextReader, provider),
         sync_pending_entry_plans=lambda context: None,
-        set_pending_position_symbols=lambda symbols: pending_updates.append(
-            frozenset(symbols)
-        ),
+
         update_managed_symbols=lambda positions, orders: cache_updates.append(
             (frozenset(positions), frozenset(orders))
         ),
@@ -70,7 +67,6 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
 
     expected_symbols = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT"})
     assert runtime.managed_position_symbols == expected_symbols
-    assert pending_updates == [frozenset({"SOLUSDT"})]
     assert cache_updates == [(expected_symbols, frozenset({"ADAUSDT"}))]
     assert published == [expected_symbols]
 
@@ -86,7 +82,7 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
         run_id="run-1",
         context_provider=cast(LiveContextReader, provider),
         sync_pending_entry_plans=synced.append,
-        set_pending_position_symbols=lambda _symbols: None,
+
         update_managed_symbols=lambda positions, orders: cache_updates.append(
             (frozenset(positions), frozenset(orders))
         ),
@@ -145,7 +141,7 @@ def test_context_runtime_with_live_context_reader() -> None:
         run_id="run-reader",
         context_provider=reader,
         sync_pending_entry_plans=lambda context: None,
-        set_pending_position_symbols=lambda _s: None,
+
         update_managed_symbols=lambda _p, _o: None,
     )
     dummy_context = cast(LiveDaemonRuntimeContext, SimpleNamespace())
@@ -183,7 +179,7 @@ def test_invalidator_internal_type_error_is_not_called_again():
     runtime = LiveContextRuntime(run_id="run-1",
         context_provider=SimpleNamespace(invalidate=invalidate),
         sync_pending_entry_plans=lambda context: None,
-        set_pending_position_symbols=lambda symbols: None,
+
         update_managed_symbols=lambda positions, orders: None)
     runtime.invalidate()
     assert calls == [None]
@@ -200,15 +196,15 @@ async def test_context_applies_all_memory_views_before_subscription_target_updat
         pending_position_symbols=frozenset({"ETHUSDT"}), unresolved_orders=()))
 
     def notify(symbols):
-        assert order == ["entries", "pending", "cache"]
+        assert order == ["entries", "cache"]
         assert runtime.managed_position_symbols == symbols
         provider.current = False
         runtime.apply_context(context)
-        assert order == ["entries", "pending", "cache"]
+        assert order == ["entries", "cache"]
 
     runtime = LiveContextRuntime(run_id="run-1", context_provider=provider,
         sync_pending_entry_plans=lambda context: order.append("entries"),
-        set_pending_position_symbols=lambda symbols: order.append("pending"),
+
         update_managed_symbols=lambda positions, orders: order.append("cache"),
         on_managed_position_symbols=notify)
     runtime.apply_context(context)

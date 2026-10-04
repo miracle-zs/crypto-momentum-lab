@@ -483,7 +483,6 @@ class LiveEntrySymbolCache:
             LiveEntryUniverseData,
         ] = {}
         self._refresh_count = 0
-        self._refresh_failure_count = 0
 
     @property
     def ready(self) -> bool:
@@ -560,7 +559,6 @@ class LiveEntrySymbolCache:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self._refresh_failure_count += 1
             log.warning(
                 "live_entry_symbol_cache_refresh_failed",
                 error_type=type(error).__name__,

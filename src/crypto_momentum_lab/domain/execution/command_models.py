@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 
 
 class DispatchState(StrEnum):
-    """Authoritative lifecycle states for outbound trade commands."""
+    """Local dispatch/settlement projection; exchange order rows own wire state."""
 
     PREPARED = "prepared"
     DISPATCHING = "dispatching"

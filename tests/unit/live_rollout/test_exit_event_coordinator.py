@@ -30,19 +30,20 @@ from crypto_momentum_lab.live_rollout.exit_processor import LiveExitProcessor
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
 )
-from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 from tests.fixtures.live_market import _state
+from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("trigger", ["market", "quote"])
-async def test_inflight_account_updates_defer_exit_without_poisoning_lane(trigger):
+async def test_inflight_account_updates_do_not_veto_exit_evaluation(trigger):
     provider = PostgresLiveContextProvider(
-        session_factory=object(), account_label="primary", run_id="run",
-        strategy_name="strategy", strategy_config_hash="config",
-        git_commit_hash="commit", migration_revision="migration",
-        lease_owner="owner", approval_id="approval",
+        session_factory=object(),
+        account_label="primary",
+        run_id="run",
+        strategy_name="strategy",
+        strategy_config_hash="config",
     )
     changing = True
     reads = []
@@ -54,13 +55,16 @@ async def test_inflight_account_updates_defer_exit_without_poisoning_lane(trigge
             provider.invalidate_account_snapshot()
         return context
 
-    provider._load_context_once = load_once
+    provider._load_context = load_once
     processor = _Processor()
     coordinator, events = _coordinator(processor=processor, lane=_Lane())
     coordinator._context_provider = provider._load_context
     outcomes = []
-    lane = ExitExecutionLane(coordinator.process_market_work, coordinator.process_quote_work,
-                             on_outcome=lambda symbol, outcome: outcomes.append(outcome))
+    lane = ExitExecutionLane(
+        coordinator.process_market_work,
+        coordinator.process_quote_work,
+        on_outcome=lambda symbol, outcome: outcomes.append(outcome),
+    )
     await lane.start()
     try:
         state = _state()
@@ -69,17 +73,15 @@ async def test_inflight_account_updates_defer_exit_without_poisoning_lane(trigge
         else:
             await lane.submit_market(state)
         await asyncio.wait_for(lane._idle.wait(), 1)
-        assert len(reads) == 3
-        assert processor.calls == []
-        assert events["publish"] == []
-        assert lane.failure is None
-        assert not outcomes[-1].fatal_failure
-        assert outcomes[-1].failure == f"pending_live_context:{state.symbol}"
+        assert len(reads) == 1
+        assert len(processor.calls) == 1
+        assert len(events["publish"]) == 1
+        assert outcomes[-1].failure is None
         changing = False
         await lane.submit_market(state)
         await asyncio.wait_for(lane._idle.wait(), 1)
-        assert len(processor.calls) == 1
-        assert provider.is_current(processor.calls[0][-1])
+        assert len(processor.calls) == 2
+        assert provider.is_current(processor.calls[-1][-1])
         assert outcomes[-1].failure is None
     finally:
         await lane.stop()
@@ -433,9 +435,7 @@ async def test_account_consumer_publishes_next_snapshot_while_exit_work_is_waiti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_quote", [False, True])
-async def test_context_preparation_does_not_block_account_facts(
-    with_quote
-):
+async def test_context_preparation_does_not_block_account_facts(with_quote):
     from crypto_momentum_lab.execution_account.hub import AccountEvent
     from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 
@@ -522,7 +522,7 @@ async def test_context_preparation_does_not_block_account_facts(
 
 
 @pytest.mark.asyncio
-async def test_pending_position_is_published_and_blocks_background_exit_decision():
+async def test_pending_position_is_published_without_blocking_exit_decision():
     processor = _Processor()
     pending = cast(
         LiveDaemonRuntimeContext,
@@ -538,23 +538,24 @@ async def test_pending_position_is_published_and_blocks_background_exit_decision
     assert await coordinator.process_account_event(state) is None
     assert events["provider"] == []
     result = await coordinator.process_market_work(state)
-    assert result.failure == "pending_live_positions:BTCUSDT"
+    assert result.failure is None
     assert events["publish"] == [pending]
-    assert processor.calls == []
+    assert len(processor.calls) == 1
 
 
-async def test_unrelated_context_runtime_error_remains_fatal():
+async def test_context_runtime_error_is_recorded_for_failed_exit_work():
     coordinator, events = _coordinator(processor=_Processor(), lane=_Lane())
 
     async def load(state):
         raise RuntimeError("database failure")
 
     coordinator._context_provider = load
-    lane = ExitExecutionLane(coordinator.process_market_work, coordinator.process_quote_work)
+    lane = ExitExecutionLane(
+        coordinator.process_market_work, coordinator.process_quote_work
+    )
     await lane.start()
     await lane.submit_market(_state())
     outcome = await asyncio.wait_for(lane.stop(), 1)
-    assert outcome.fatal_failure
+    assert outcome.failure is not None
     assert outcome.failure == "exit_execution_failed:RuntimeError"
-    assert lane.failure == outcome.failure
     assert events["publish"] == []

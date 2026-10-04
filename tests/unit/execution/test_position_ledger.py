@@ -462,7 +462,6 @@ def test_position_ledger_nested_raw_payload_position_side_matches_and_closes() -
     assert not proj.diagnostics
 
 
-
 @pytest.mark.parametrize("client_id", [None, "entry-client", "", 12, True, {}, []])
 def test_payload_client_order_id_is_optional_text_without_changing_quantity(client_id):
     key = _key()
@@ -477,3 +476,46 @@ def test_payload_client_order_id_is_optional_text_without_changing_quantity(clie
     assert len(projection.active_batches) == 1
     expected = client_id if isinstance(client_id, str) else None
     assert projection.active_batches[0].client_order_id == expected
+
+
+def test_repeated_targeted_exit_boundary_never_starts_another_batch() -> None:
+    key = _key()
+    opened_at = datetime(2026, 10, 4, 0, 0, tzinfo=UTC)
+    first_exit_at = opened_at + timedelta(minutes=15)
+    fills = (
+        _fill("entry-1", "BUY", "1", "100", opened_at, order_id="entry-1"),
+        _fill(
+            "entry-2",
+            "BUY",
+            "2",
+            "100",
+            opened_at + timedelta(minutes=20),
+            order_id="entry-2",
+        ),
+    )
+    ledger = PositionLedger(key)
+    initial = ledger.project(AccountFacts(position_key=key, fills=fills))
+    target = initial.active_batches[0].batch_id
+    boundary = ExitOrderSubmissionFact(
+        order_id="exit-1",
+        submitted_at=first_exit_at,
+        symbol=key.symbol,
+        position_side=key.position_side,
+        target_batch_id=target,
+    )
+    projection = ledger.project(
+        AccountFacts(
+            position_key=key,
+            fills=fills,
+            exit_boundaries=(
+                boundary,
+                replace(
+                    boundary,
+                    order_id="exit-2",
+                    submitted_at=opened_at + timedelta(minutes=45),
+                ),
+            ),
+        )
+    )
+    assert projection.active_batches[0].exit_order_submitted_at == first_exit_at
+    assert projection.active_batches[1].exit_order_submitted_at is None

@@ -32,7 +32,6 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
-    OrderExchangeSubmitGuard,
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
@@ -814,13 +813,10 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
         *,
         priority: int = _COMMAND_BACKGROUND_PRIORITY,
-        on_before_post: Callable[[], Awaitable[None]] | None = None,
         on_request_started: Callable[[], Awaitable[None]] | None = None,
         on_response_received: Callable[[], Awaitable[None]] | None = None,
     ) -> object:
         await self._command_request_pacer.wait(priority=priority)
-        if on_before_post is not None:
-            await on_before_post()
         if on_request_started is not None:
             await on_request_started()
         signed_params = self._signed_params(params)
@@ -922,7 +918,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         entry_leverage: int | None = None,
         margin_type: str | None = None,
         leverage_fallback_steps: int = 2,
-        on_before_order_submit: OrderExchangeSubmitGuard | None = None,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
     ) -> None:
@@ -957,15 +952,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         self._configured_leverage_by_symbol: dict[str, int] = {}
         self._configured_margin_type_by_symbol: dict[str, str] = {}
         self._margin_type_lock = asyncio.Lock()
-        self._on_before_order_submit = on_before_order_submit
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
-
-    def set_before_order_submit_guard(
-        self,
-        guard: OrderExchangeSubmitGuard | None,
-    ) -> None:
-        self._on_before_order_submit = guard
 
     def set_exchange_boundary_callbacks(
         self,
@@ -1110,17 +1098,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     )
                 params["goodTillDate"] = int(plan.expires_at.timestamp() * 1000)
 
-        async def _check_fence() -> None:
-            if self._on_before_order_submit is not None:
-                try:
-                    await self._on_before_order_submit(plan, self._now())
-                except OrderPreSubmissionError:
-                    raise
-                except Exception as exc:
-                    raise OrderPreSubmissionError(
-                        f"pre-submission guard failed: {exc}"
-                    ) from exc
-
         async def _notify_request_started() -> None:
             if self._on_exchange_request is not None:
                 try:
@@ -1158,12 +1135,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     if plan.reduce_only
                     else _COMMAND_ENTRY_PRIORITY
                 ),
-                on_before_post=_check_fence,
                 on_request_started=_notify_request_started,
                 on_response_received=_notify_response_received,
             )
         except ValueError as exc:
-            # Pre-submission guards wrap their errors as OrderPreSubmissionError.
             # A decode failure escaping the order POST cannot prove rejection.
             raise ExchangeSubmissionTimeoutError(
                 "Binance order submit returned an unreadable response; outcome unknown"

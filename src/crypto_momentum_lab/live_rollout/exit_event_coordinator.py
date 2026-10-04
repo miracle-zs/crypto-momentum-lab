@@ -13,10 +13,6 @@ from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
-from crypto_momentum_lab.live_rollout.context import (
-    LiveContextChangedDuringLoad,
-    exit_position_block_reason,
-)
 
 if TYPE_CHECKING:
     from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
@@ -129,10 +125,7 @@ class LiveExitEventCoordinator:
         """Load current context when an existing exit worker executes a trigger."""
         if not self._exit_enabled():
             return ExitLaneOutcome()
-        context, failure = await self._load_context(state)
-        if failure is not None:
-            return ExitLaneOutcome(failure=failure)
-        assert context is not None
+        context = await self._load_context(state)
         return await self._exit_processor.process_state(state, context)
 
     async def process_quote_work(
@@ -142,10 +135,7 @@ class LiveExitEventCoordinator:
     ) -> ExitLaneOutcome:
         if not self._exit_enabled() or quote.symbol != state.symbol:
             return ExitLaneOutcome()
-        context, failure = await self._load_context(state)
-        if failure is not None:
-            return ExitLaneOutcome(failure=failure)
-        assert context is not None
+        context = await self._load_context(state)
         return await self._exit_processor.process_quote(quote, state, context)
 
     async def process_closed_candle(
@@ -163,10 +153,7 @@ class LiveExitEventCoordinator:
             received_at=event.received_at,
             quote=latest_quote,
         )
-        context, failure = await self._load_context(state)
-        if failure is not None:
-            return failure
-        assert context is not None
+        context = await self._load_context(state)
         outcome = await self._exit_processor.process_closed_candle(
             event,
             state,
@@ -193,10 +180,7 @@ class LiveExitEventCoordinator:
 
         if not self._exit_enabled():
             return None
-        context, failure = await self._load_context(state)
-        if failure is not None:
-            return failure
-        assert context is not None
+        context = await self._load_context(state)
         outcome = await self._exit_processor.process_grace_timeout(
             state,
             now,
@@ -215,13 +199,10 @@ class LiveExitEventCoordinator:
     async def _load_context(
         self,
         state: MarketState15s,
-    ) -> tuple[LiveDaemonRuntimeContext | None, str | None]:
-        try:
-            context = await self._context_provider(state)
-        except LiveContextChangedDuringLoad:
-            return None, f"pending_live_context:{state.symbol}"
+    ) -> LiveDaemonRuntimeContext:
+        context = await self._context_provider(state)
         self._apply_context(context)
-        return context, exit_position_block_reason(context, state.symbol)
+        return context
 
 
 def _market_state_for_closed_candle(

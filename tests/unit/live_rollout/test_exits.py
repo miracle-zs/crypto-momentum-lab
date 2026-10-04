@@ -728,3 +728,36 @@ def _quote(state):
         bid_price=state.last_bid_price,
         ask_price=state.last_ask_price,
     )
+
+
+async def test_started_grace_is_not_reopened_by_later_candles() -> None:
+    started_at = datetime(2026, 7, 4, 0, 30, tzinfo=UTC)
+    position = replace(
+        _long_position(),
+        recovery_exit_started_at=started_at,
+        recovery_order_plan=None,
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=8,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        )
+    )
+    candle = ClosedCandle15m(
+        symbol=position.symbol,
+        candle_start=started_at,
+        candle_end=started_at + timedelta(minutes=15),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    assert await manager.requests_for_closed_candle(candle, (position,)) == ()
+    due_at = started_at + timedelta(minutes=120)
+    requests = await manager.requests_for_grace_timeout(
+        now=due_at,
+        state=replace(_state(), bucket_end=due_at),
+        positions=(position,),
+    )
+    assert len(requests) == 1
+    assert requests[0].candidate.reduce_only
+    assert requests[0].candidate.entry_type is EntryType.MARKET

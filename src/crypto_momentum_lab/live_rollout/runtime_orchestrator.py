@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 import crypto_momentum_lab.live_rollout.session_state as session_state
-import crypto_momentum_lab.live_rollout.shadow_preflight as shadow_preflight
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_async_decision_filter,
 )
@@ -40,10 +39,8 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionPreparation,
 )
-from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.live_rollout import (
-    LiveOperatorApproval,
     LiveSessionState,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -52,11 +49,8 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
     RuntimeMetadataSnapshot,
     compute_trading_rules_hash,
 )
-from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, TradingLease
+from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
-from crypto_momentum_lab.domain.runtime import (
-    CapabilityEvaluator,
-)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -80,7 +74,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
-    SubmitPolicy,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
@@ -110,7 +103,6 @@ from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycl
 from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 from crypto_momentum_lab.live_rollout.execution_runtime import (
     LiveExecutionCallbacks,
-    build_capability_evidence_provider,
     build_live_execution_runtime,
     compile_live_runtime_plan,
 )
@@ -123,22 +115,11 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
 )
-from crypto_momentum_lab.live_rollout.gates import (
-    LiveGateContext,
-    evaluate_live_gate,
-)
 from crypto_momentum_lab.live_rollout.health_monitor import LiveHealthMonitor
 from crypto_momentum_lab.live_rollout.hub_cursor import (
     LiveHubCursorState,
     hub_cursor_for_startup,
     hub_cursor_from_checkpoint_payload,
-)
-from crypto_momentum_lab.live_rollout.lease import (
-    LeaseHeartbeatConfig,
-    LiveLeaseHeartbeat,
-)
-from crypto_momentum_lab.live_rollout.lease_recovery import (
-    maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
 )
 from crypto_momentum_lab.live_rollout.market_assembly import (
     LiveChannelSources,
@@ -172,7 +153,6 @@ from crypto_momentum_lab.live_rollout.position_self_healing import (
 )
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
-    live_limits_from_approval,
 )
 from crypto_momentum_lab.live_rollout.readiness import (
     LiveReadinessPublisher,
@@ -186,9 +166,7 @@ from crypto_momentum_lab.live_rollout.risk_control import (
 from crypto_momentum_lab.live_rollout.runtime_config import (
     _BINANCE_SHARED_COMMAND_PACER_PATH_ENV,
     _BINANCE_SHARED_REQUEST_PACER_PATH_ENV,
-    _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
     _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
-    _LIVE_LEASE_RENEW_BEFORE_SECONDS,
     _LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
     LiveRuntimeConfig,
     _live_strategy_config,
@@ -240,7 +218,6 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     is_retryable_live_startup_error as _is_retryable_live_startup_error,
 )
-from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFence
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
@@ -262,14 +239,14 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
     PostgresLiveSignalRepository,
 )
+from crypto_momentum_lab.persistence.postgres.order_read_repository import (
+    PostgresOrderReadRepository,
+)
 from crypto_momentum_lab.persistence.postgres.position_repair import (
     PostgresPositionRepairUnitOfWork,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_context import (
-    load_latest_account_state as _latest_account_state,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_risk_config as _latest_risk_config,
@@ -331,7 +308,6 @@ async def run_live_daemon(
     strategy_name = config.identity.strategy_name
     session_id = config.identity.session_id
     operator = config.identity.operator
-    lease_owner = config.identity.lease_owner
     strategy_config_hash = config.identity.strategy_config_hash
     git_commit_hash = config.identity.git_commit_hash
     migration_revision = config.identity.migration_revision
@@ -368,9 +344,6 @@ async def run_live_daemon(
     checkpoint_every_seconds = config.lifecycle.checkpoint_every_seconds
     checkpoint_phase_seconds = config.lifecycle.checkpoint_phase_seconds
     persist_exchange_operations = config.lifecycle.persist_exchange_operations
-    acknowledge_missing_shadow_preflight = (
-        config.lifecycle.acknowledge_missing_shadow_preflight
-    )
 
     base_url = config.credentials.base_url
     api_key = config.credentials.api_key
@@ -392,7 +365,6 @@ async def run_live_daemon(
     health = LocalHealthWriter.from_environment()
     live_readiness: LiveReadinessPublisher | None = None
     session: RuntimeSession | None = None
-    active_lease: TradingLease | None = None
 
     def mark_live_database_ok() -> None:
         if health is None:
@@ -477,11 +449,8 @@ async def run_live_daemon(
         execution_factory = persistence.factories.execution_factory
         market_factory = persistence.factories.market_factory
         observability_factory = persistence.factories.observability_factory
-        heartbeat_factory = persistence.factories.heartbeat_factory
 
-        shadow_repository = persistence.repositories.shadow_repository
         live_repository = persistence.repositories.live_repository
-        risk_repository = persistence.repositories.risk_repository
         heartbeat_live_repository = persistence.repositories.heartbeat_live_repository
         heartbeat_risk_repository = persistence.repositories.heartbeat_risk_repository
         order_repository = persistence.repositories.order_repository
@@ -527,9 +496,6 @@ async def run_live_daemon(
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
             account_label=account_label,
-            strategy_name=strategy_name,
-            strategy_version="v0",
-            config_hash=strategy_config_hash,
             code_commit=git_commit_hash,
             quote_volume_provider=volume_cache,
             persist=signal_repository.save_signals,
@@ -654,44 +620,6 @@ async def run_live_daemon(
             risk_config=risk_config,
             account_label=account_label,
             strategy_name=strategy_name,
-            git_commit_hash=git_commit_hash,
-            migration_revision=migration_revision,
-            active_lease=active_lease,
-        )
-        capability_evaluator = CapabilityEvaluator()
-
-        approval: LiveOperatorApproval | None = None
-        evidence_provider = build_capability_evidence_provider(
-            account_label=account_label,
-            runtime_plan=runtime_plan,
-            get_active_lease=lambda: active_lease,
-            is_entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
-            get_context=lambda: fact_source.current_context,
-            get_market_age=lambda: (
-                float(live_readiness._latest_market_state_age_seconds)
-                if live_readiness is not None
-                and live_readiness._latest_market_state_age_seconds is not None
-                else None
-            ),
-            has_api_key=lambda: bool(
-                account_label and getattr(client, "_api_key", None)
-            ),
-            get_approval=lambda: approval,
-        )
-
-        submission_fence = LiveSubmissionFence(
-            environment="live",
-            risk_state=heartbeat_risk_repository,
-            account_label=account_label,
-            strategy_name=strategy_name,
-            lease_owner=lease_owner,
-            code_generation=git_commit_hash,
-            active_lease=lambda: active_lease,
-            entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
-            capability_evaluator=capability_evaluator,
-            runtime_plan=runtime_plan,
-            evidence_provider=evidence_provider,
-            clock=lambda: datetime.now(tz=UTC),
         )
 
         execution_runtime = await build_live_execution_runtime(
@@ -704,7 +632,6 @@ async def run_live_daemon(
             callbacks=LiveExecutionCallbacks(
                 on_event=order_event_runtime.handle,
                 on_before_submit=register_expected_entry,
-                on_before_exchange_submit=submission_fence.validate,
                 on_exchange_request=telemetry.exchange_request_started,
                 on_exchange_response=telemetry.exchange_response_received,
             ),
@@ -799,19 +726,9 @@ async def run_live_daemon(
                 preparation=OrderSubmissionPreparation(
                     intent=intent,
                     evaluation=evaluation,
-                    environment="live" if active_lease is not None else None,
+                    environment="live",
                     account_label=account_label,
                     strategy_name=strategy_name,
-                    required_lease_owner=(
-                        lease_owner if active_lease is not None else None
-                    ),
-                    required_lease_id=(
-                        active_lease.lease_id if active_lease is not None else None
-                    ),
-                    required_code_generation=(
-                        git_commit_hash if active_lease is not None else None
-                    ),
-                    required_session_id=session_id,
                 ),
             )
             if res is None:
@@ -848,28 +765,27 @@ async def run_live_daemon(
             pending = await fact_source.recover_pending_exits(limit=5)
             return pending or (daemon is not None and daemon.has_pending_exit_recovery)
 
+        repair_order_repository = PostgresOrderReadRepository(
+            persistence.factories.heartbeat_factory
+        )
         order_reconciliation = LiveOrderReconciliation(
-            order_repository=order_read_repository,
+            order_repository=repair_order_repository,
             state_machine=execution_coordinator,
             run_id=session_id,
             recover_exits=recover_decision_exits,
             recover_commands=lambda reconcile_order: recover_restored_commands(
                 book=execution_book,
                 coordinator=execution_coordinator,
-                orders=order_read_repository,
+                orders=repair_order_repository,
                 reconcile_order=reconcile_order,
             ),
         )
-        await order_reconciliation.reconcile_all(include_confirmed=True)
-        log_startup_phase("order_state_reconciled")
+        # Restore local facts at startup; remote uncertainty is repaired by the
+        # supervised background worker after the trading channels are running.
+        log_startup_phase("local_order_state_restored")
         draining = await session_state.session_is_draining(live_repository, session_id)
         if not draining:
             await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
-        approval = await live_repository.load_active_approval(
-            account_label=account_label,
-            strategy_name=strategy_name,
-            now=now,
-        )
         unresolved = await order_read_repository.load_unresolved_orders(session_id)
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
@@ -877,46 +793,6 @@ async def run_live_daemon(
         ownership_registry.register("entry_order_lifecycle", entry_order_lifecycle.stop)
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
-        active_lease = await risk_repository.load_active_lease(
-            "live", account_label, now
-        )
-        gate_context = LiveGateContext(
-            now=now,
-            live_submit_enabled=True,
-            account_label=account_label,
-            strategy_name=strategy_name,
-            strategy_config_hash=strategy_config_hash,
-            git_commit_hash=git_commit_hash,
-            database_migration_revision=migration_revision,
-            required_lease_owner=lease_owner,
-            requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            active_lease=active_lease,
-            risk_config=risk_config,
-            approval=approval,
-            account_state=await _latest_account_state(
-                execution_factory,
-                account_label,
-            ),
-            active_halts=await risk_repository.load_active_halts("live", account_label),
-            unresolved_order_states=tuple(item.state for item in unresolved),
-        )
-        active_lease = await _maybe_auto_reacquire_live_lease(
-            session_state_reader=live_repository,
-            risk_repository=risk_repository,
-            gate_context=gate_context,
-            session_id=session_id,
-            draining=draining,
-            lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
-        )
-        gate_context = replace(gate_context, active_lease=active_lease)
-        gate = evaluate_live_gate(gate_context)
-        if not gate.approved:
-            raise RuntimeError(f"live gate blocked: {','.join(gate.reasons)}")
-        if approval is None:
-            raise RuntimeError("live approval is required")
-        if active_lease is None:
-            raise RuntimeError("live lease is required")
-
         strategy_config = _live_strategy_config(profile)
         computed_hash = _live_strategy_config_hash(
             strategy_name,
@@ -933,17 +809,6 @@ async def run_live_daemon(
                 computed=computed_hash,
                 configured=strategy_config_hash,
             )
-        if not draining:
-            await session_lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
-        await shadow_preflight.warn_if_shadow_preflight_missing(
-            shadow_repository,
-            strategy_name=strategy_name,
-            strategy_config_hash=strategy_config_hash,
-            account_label=account_label,
-            session_id=session_id,
-            acknowledged=acknowledge_missing_shadow_preflight,
-        )
-
         strategy = build_runtime_strategy(
             strategy_name,
             config=strategy_config,
@@ -1065,10 +930,6 @@ async def run_live_daemon(
                 strategy,
                 expected_symbols=startup_warmup_symbols,
             )
-        notional_cap, max_positions, max_loss, max_gross = live_limits_from_approval(
-            approval=approval,
-            risk_config=risk_config,
-        )
         candle_assembly = assemble_live_candle_sources(
             exit_mode=exit_mode,
             base_url=base_url,
@@ -1149,10 +1010,6 @@ async def run_live_daemon(
             run_id=session_id,
             strategy_name=strategy_name,
             strategy_config_hash=strategy_config_hash,
-            git_commit_hash=git_commit_hash,
-            migration_revision=migration_revision,
-            lease_owner=lease_owner,
-            approval_id=approval.approval_id,
             request_position_repair=position_repair.request,
         )
         context_provider.set_execution_book(execution_book)
@@ -1197,16 +1054,19 @@ async def run_live_daemon(
 
         daemon = LiveStrategyDaemon(
             request_exit_recovery=order_reconciliation.request_exit_recovery,
-            cached_context_provider=lambda: context_provider.cached_context,
-            is_symbol_warmed=lambda s: entry_runtime.is_symbol_warmed(s) and context_provider.is_symbol_rules_warmed(s),
+            request_order_cleanup=order_reconciliation.request_order_recovery,
+            is_symbol_warmed=lambda s: (
+                entry_runtime.is_symbol_warmed(s)
+                and context_provider.is_symbol_rules_warmed(s)
+            ),
             on_unwarmed_symbol=entry_runtime.trigger_symbol_warmup,
             strategy=strategy,
             risk_gateway=RiskGateway(
                 limits=FixedLiveLimits(
-                    notional_cap=notional_cap,
-                    max_open_positions=max_positions,
-                    max_daily_loss=max_loss,
-                    max_gross_exposure=max_gross,
+                    notional_cap=risk_config.max_order_notional,
+                    max_open_positions=risk_config.max_open_positions,
+                    max_daily_loss=risk_config.max_daily_loss,
+                    max_gross_exposure=risk_config.max_gross_notional,
                     max_concurrency_per_symbol=max_concurrency_per_symbol,
                 ),
             ),
@@ -1250,11 +1110,7 @@ async def run_live_daemon(
                     ),
                 ),
                 decision_fact_binder=fact_source.bind_context,
-                readiness_provider=lambda symbol: (
-                    daemon.evaluate_readiness(symbol=symbol)
-                    if daemon is not None
-                    else ExecutionReadiness.INDEPENDENT_EXECUTABLE
-                ),
+
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -1321,18 +1177,12 @@ async def run_live_daemon(
                 reason=risk_reason,
             )
             daemon.refresh_entry_prerequisites(
-                lease_heartbeat_degraded=(
-                    control_plane_runtime.lease_heartbeat_degraded
-                ),
                 session_draining=draining,
                 strategy_warmup_ready=control_plane_runtime.strategy_warmup_ready,
                 strategy_warmup_reason=(control_plane_runtime.strategy_warmup_reason),
                 market_state_available=control_plane_runtime.market_state_available,
                 market_state_unavailable_reason=(
                     control_plane_runtime.market_state_unavailable_reason
-                ),
-                account_snapshot_available=(
-                    control_plane_runtime.account_snapshot_available
                 ),
             )
             live_readiness.update_entry_gate(
@@ -1343,29 +1193,9 @@ async def run_live_daemon(
                 entry_enabled_reason=daemon.entry_enabled_reason,
             )
 
-        async def reacquire_live_lease(
-            gate_context: LiveGateContext,
-        ) -> TradingLease | None:
-            return await _maybe_auto_reacquire_live_lease(
-                session_state_reader=heartbeat_live_repository,
-                risk_repository=heartbeat_risk_repository,
-                gate_context=gate_context,
-                session_id=session_id,
-                draining=await session_state.session_is_draining(
-                    heartbeat_live_repository,
-                    session_id,
-                ),
-                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
-            )
-
-        async def load_lease_gate() -> LiveGateContext:
-            return await context_provider.load_lease_gate(heartbeat_factory)
-
         control_plane_runtime = LiveControlPlaneRuntime(
             session_id=session_id,
             context_provider=context_provider,
-            load_lease_gate=load_lease_gate,
-            reacquire_lease=reacquire_live_lease,
             market_state_available=(
                 True
                 if startup_market_buffer is None
@@ -1380,7 +1210,6 @@ async def run_live_daemon(
                 lambda reason: daemon.notify_market_state_gap(reason=reason)
             ),
             refresh_entry_gate=refresh_entry_enabled,
-            mark_database_ok=mark_live_database_ok,
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
         )
@@ -1401,23 +1230,10 @@ async def run_live_daemon(
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
         )
-        lease_heartbeat = LiveLeaseHeartbeat(
-            repository=heartbeat_risk_repository,
-            lease=active_lease,
-            owner=lease_owner,
-            config=LeaseHeartbeatConfig(
-                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
-                renew_before_seconds=_LIVE_LEASE_RENEW_BEFORE_SECONDS,
-                poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
-            ),
-            on_renewed=control_plane_runtime.on_lease_renewed,
-            on_error=control_plane_runtime.on_lease_error,
-            recover=control_plane_runtime.recover_live_lease,
-        )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
-            if daemon.set_exit_failure(symbol, failure):
-                refresh_entry_enabled()
+            if failure is not None:
+                log.warning("live_exit_failure_observed", symbol=symbol, reason=failure)
 
         def on_entry_filter_cache_ready(ready: bool) -> None:
             daemon.set_entry_filter_cache_ready(ready)
@@ -1595,7 +1411,6 @@ async def run_live_daemon(
             entry_filter_cache_task,
             entry_symbol_cache_task,
         ) = entry_runtime.start()
-        lease_task = asyncio.create_task(lease_heartbeat.run())
         order_reconciliation.request_recovery()
         reconcile_task = asyncio.create_task(order_reconciliation.run_requested())
         local_health_task: asyncio.Task[None] | None = None
@@ -1607,7 +1422,6 @@ async def run_live_daemon(
                 is_degraded=lambda: (
                     market_task.done()
                     or account_task.done()
-                    or lease_task.done()
                     or (risk_control_task is not None and risk_control_task.done())
                 ),
             )
@@ -1633,7 +1447,6 @@ async def run_live_daemon(
             tasks=LiveRuntimeTasks(
                 market=market_task,
                 account=account_task,
-                lease=lease_task,
                 reconcile=reconcile_task,
                 startup_market=startup_market_state_task,
                 quote=quote_task,

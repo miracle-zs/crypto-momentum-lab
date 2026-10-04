@@ -23,9 +23,6 @@ class RuntimePlanMetadata(Protocol):
     def runtime_generation(self) -> str: ...
 
     @property
-    def fencing_epoch(self) -> int: ...
-
-    @property
     def compiled_at(self) -> datetime: ...
 
 

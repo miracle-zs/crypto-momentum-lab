@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -33,6 +34,25 @@ NOW = datetime(2026, 8, 22, tzinfo=UTC)
 class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
     def __init__(self, *args: Any, environment: str = "live", **kwargs: Any) -> None:
         super().__init__(*args, environment=environment, **kwargs)
+
+    async def _atomic_prepare_submission(self, plan, preparation):
+        """Memory repositories have no SQL session; production must use a UoW."""
+        if self.execution_book.has_execution_unit_of_work:
+            return await super()._atomic_prepare_submission(plan, preparation)
+        from dataclasses import fields
+        values = {field.name: getattr(preparation, field.name) for field in fields(preparation)}
+
+        async def prepare(_tx):
+            return await self._submission_repository.prepare_submission_in_session(
+                None, plan=plan, prepared_at=self._submission_clock(), **values,
+            )
+
+        if self._reservation_repository is None:
+            return await prepare(None)
+        request = await self._build_execution_request(plan)
+        result = await self.execution_book.act(request, prepare_submission=prepare)
+        self._handle_act_result(plan, result)
+        return result.prepared_submission
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if plan.projection_version is None and self._execution_book is not None:
@@ -171,36 +191,24 @@ async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
     await coordinator.aclose()
 
 
-async def test_same_position_is_serial_and_exit_has_priority_over_entry() -> None:
+async def test_slow_reconcile_does_not_block_same_symbol_exit() -> None:
     backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-    )
-
-    reconcile_task = asyncio.create_task(
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    recovery = asyncio.create_task(
         coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
     )
     await backend.query_started.wait()
-    entry_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
-    )
-    exit_task = asyncio.create_task(
-        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
-    )
-    await asyncio.sleep(0)
-    assert backend.calls == ["reconcile:BTCUSDT"]
-
-    backend.release_query.set()
-    await asyncio.gather(reconcile_task, entry_task, exit_task)
-
-    assert backend.calls == [
-        "reconcile:BTCUSDT",
-        "submit:BTCUSDT:exit",
-        "submit:BTCUSDT:entry",
-    ]
-    assert exit_task.result().state is ExchangeOrderState.ACKNOWLEDGED
-    await coordinator.aclose()
+    try:
+        result = await asyncio.wait_for(
+            coordinator.submit(_plan("BTCUSDT", reduce_only=True)),
+            timeout=1,
+        )
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        assert not recovery.done()
+    finally:
+        backend.release_query.set()
+        await recovery
+        await coordinator.aclose()
 
 
 async def test_scheduler_close_releases_queued_submitters() -> None:
@@ -311,7 +319,7 @@ async def test_prepare_and_execute_serializes_reconcile_after_prepare() -> None:
     release_prepare = asyncio.Event()
 
     class Repository:
-        async def prepare_submission(self, **kwargs):
+        async def prepare_submission_in_session(self, session, **kwargs):
             prepare_started.set()
             await release_prepare.wait()
             return _prepared(kwargs["plan"])
@@ -398,7 +406,7 @@ def _prepared(plan: OrderExecutionPlan):
 
 
 async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
-    backend = BlockingBackend()
+    backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -408,9 +416,13 @@ async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
 
     # First command is picked up and blocks backend
     block_task = asyncio.create_task(
-        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+        coordinator.submit(
+            replace(
+                _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
+            )
+        )
     )
-    await backend.query_started.wait()
+    await backend.submit_started.wait()
 
     # Now queue 2 entry commands (fills queue to entry_limit = 2)
     e1_task = asyncio.create_task(
@@ -433,13 +445,13 @@ async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
     await asyncio.sleep(0.01)
 
     # Unblock backend and let all tasks drain
-    backend.release_query.set()
+    backend.release_submit.set()
     await asyncio.gather(block_task, e1_task, e2_task, exit_task)
     await coordinator.aclose()
 
 
 async def test_coordinator_queue_max_wait_timeout() -> None:
-    backend = BlockingBackend()
+    backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -448,9 +460,13 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
 
     # Block the worker
     block_task = asyncio.create_task(
-        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+        coordinator.submit(
+            replace(
+                _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
+            )
+        )
     )
-    await backend.query_started.wait()
+    await backend.submit_started.wait()
 
     # Queue an entry command
     entry_task = asyncio.create_task(
@@ -461,7 +477,7 @@ async def test_coordinator_queue_max_wait_timeout() -> None:
     await asyncio.sleep(0.08)
 
     # Unblock the worker; the entry command waited > 0.05s so it fails with timeout
-    backend.release_query.set()
+    backend.release_submit.set()
     await block_task
 
     with pytest.raises(
@@ -503,7 +519,7 @@ async def test_coordinator_idle_worker_reclamation() -> None:
 
 
 async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
-    backend = BlockingBackend()
+    backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -512,9 +528,13 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
 
     # Worker starts and hangs on query without releasing
     block_task = asyncio.create_task(
-        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+        coordinator.submit(
+            replace(
+                _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
+            )
+        )
     )
-    await backend.query_started.wait()
+    await backend.submit_started.wait()
 
     # Entry command submitted while worker is hung.
     # The caller must time out within max_queue_wait_seconds
@@ -523,13 +543,13 @@ async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
     ):
         await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
-    backend.release_query.set()
+    backend.release_submit.set()
     await block_task
     await coordinator.aclose()
 
 
 async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> None:
-    backend = BlockingBackend()
+    backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         account_label="primary",
@@ -537,11 +557,15 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
         exit_headroom=2,  # entry limit = 2
     )
 
-    # Block worker with a reconcile
+    # Block worker with a real submission
     block_task = asyncio.create_task(
-        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+        coordinator.submit(
+            replace(
+                _plan("BTCUSDT", reduce_only=False), client_order_id="blocking-post"
+            )
+        )
     )
-    await backend.query_started.wait()
+    await backend.submit_started.wait()
 
     # Fill entry capacity (limit = 2)
     e1_task = asyncio.create_task(
@@ -561,7 +585,7 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
     cancel_task = asyncio.create_task(coordinator.cancel_order(non_reduce_only_plan))
     await asyncio.sleep(0.01)
 
-    backend.release_query.set()
+    backend.release_submit.set()
     await asyncio.gather(block_task, e1_task, e2_task)
     cancel_res = await cancel_task
     assert cancel_res.state is ExchangeOrderState.CANCELED
@@ -746,13 +770,12 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     ):
         await coordinator.submit(plan)
 
-    with pytest.raises(
-        OrderPreSubmissionError, match="Failed to create position reservation"
-    ):
-        await coordinator.prepare_and_execute(
-            plan,
-            preparation=_submission_preparation(plan),
-        )
+    raw = _RealOrderExecutionCoordinator(backend=backend, environment="live", account_label="primary")
+    raw.configure_submission(AsyncMock())
+    with pytest.raises(OrderPreSubmissionError, match="requires an execution transaction"):
+        await raw.prepare_and_execute(plan, preparation=_submission_preparation(plan))
+    assert backend.calls == []
+    await raw.aclose()
 
     await coordinator.aclose()
 
@@ -1933,8 +1956,9 @@ async def test_observation_failure_after_post_keeps_unknown_reservation() -> Non
     )
 
     try:
-        with pytest.raises(RuntimeError, match="acknowledgement write failed"):
-            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        result = await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        assert book.command_requires_recovery(plan.client_order_id)
 
         assert backend.calls == ["submit:BTCUSDT:exit"]
         assert book.get_outbox(plan.client_order_id).state is DispatchState.UNKNOWN
@@ -1988,8 +2012,9 @@ async def test_unknown_write_failure_seals_local_outbox_after_post() -> None:
     )
 
     try:
-        with pytest.raises(RuntimeError, match="unknown write failed"):
-            await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        result = await asyncio.wait_for(coordinator.submit(plan), timeout=1)
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        assert book.command_requires_recovery(plan.client_order_id)
 
         outbox = book.get_outbox(plan.client_order_id)
         assert outbox is not None
@@ -2736,8 +2761,7 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
     from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        SubmitPolicy,
-    )
+        )
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -2759,7 +2783,7 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
             return snapshot
 
     class Repository:
-        async def append_order_event(self, event):
+        async def record_order_observation(self, event, fills=()):
             if any(item.event_id == event.event_id for item in events):
                 return False
             events.append(event)
@@ -2769,7 +2793,6 @@ async def test_ws_fact_commits_while_same_position_rest_recovery_is_waiting(
         exchange=Exchange(),
         repository=object(),
         event_repository=Repository(),
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         serialize_commands=serialize_commands,
     )
@@ -2805,15 +2828,14 @@ async def test_closed_coordinator_rejects_independent_fact():
 async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_without_rest():
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        SubmitPolicy,
-    )
+        )
     from crypto_momentum_lab.live_rollout.gates import order_state_is_uncertain
 
     events = []
     plan = _plan("BTCUSDT", reduce_only=False)
 
     class Repository:
-        async def append_order_event(self, event):
+        async def record_order_observation(self, event, fills=()):
             events.append(event)
             return True
 
@@ -2821,7 +2843,6 @@ async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_witho
         exchange=object(),
         repository=object(),
         event_repository=Repository(),
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
     )
@@ -2857,57 +2878,6 @@ def _submission_preparation(plan):
     )
 
 
-@pytest.mark.parametrize("reason", ["entry_paused", "context_invalidated"])
-async def test_final_admission_reads_current_state_after_dequeue(reason):
-    backend = BlockingSubmitBackend()
-    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
-    admitted = [True]
-    prepared_ids = []
-    first = _plan("BTCUSDT", reduce_only=False)
-    from dataclasses import replace
-
-    queued = replace(first, intent_id="queued-intent", client_order_id="queued-order")
-
-    class Admission:
-        def rejection_reason(self, plan, preparation):
-            return None if admitted[0] else reason
-
-    class Repository:
-        async def prepare_submission(self, **kwargs):
-            plan = kwargs["plan"]
-            prepared_ids.append(plan.client_order_id)
-            return _prepared(plan)
-
-    coordinator.configure_submission(Repository(), admission=Admission())
-    first_task = asyncio.create_task(
-        coordinator.prepare_and_execute(
-            first,
-            preparation=_submission_preparation(first),
-        )
-    )
-    queued_task = None
-    try:
-        await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
-        queued_task = asyncio.create_task(
-            coordinator.prepare_and_execute(
-                queued,
-                preparation=_submission_preparation(queued),
-            )
-        )
-        await asyncio.sleep(0)
-        admitted[0] = False
-        backend.release_submit.set()
-        first_result = await asyncio.wait_for(first_task, timeout=1)
-        assert first_result.prepared_at == _prepared(first).submitting_event.occurred_at
-        assert await asyncio.wait_for(queued_task, timeout=1) is None
-        assert prepared_ids == [first.client_order_id]
-        assert backend.calls == ["submit:BTCUSDT:entry"]
-    finally:
-        backend.release_submit.set()
-        await asyncio.gather(
-            first_task, *([queued_task] if queued_task else []), return_exceptions=True
-        )
-        await coordinator.aclose()
 
 
 async def test_preparation_failure_never_calls_exchange():
@@ -2915,7 +2885,7 @@ async def test_preparation_failure_never_calls_exchange():
     coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
 
     class Repository:
-        async def prepare_submission(self, **kwargs):
+        async def prepare_submission_in_session(self, session, **kwargs):
             raise OSError("prepare transaction failed")
 
     coordinator.configure_submission(Repository())
@@ -2930,133 +2900,6 @@ async def test_preparation_failure_never_calls_exchange():
         await coordinator.aclose()
 
 
-async def test_recovery_admission_rejects_entry_without_terminating_scheduler():
-    from dataclasses import replace
-    from unittest.mock import AsyncMock
-
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-    from tests.unit.execution.test_terminal_settlement import (
-        SCOPE,
-        ObservationUnitOfWork,
-        evidence,
-    )
-
-    # Exercise the actual restored-settlement rejection, not a mocked exception.
-    book = ExecutionBook(execution_unit_of_work=ObservationUnitOfWork())
-    book._persistence_failed = False
-    await book.observe(evidence("current-stream"))
-    from crypto_momentum_lab.domain.execution.trade_command import (
-        TradeCommand,
-        TradeCommandType,
-    )
-    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-
-    command = TradeCommand(
-        "old",
-        SCOPE.to_position_key(),
-        TradeCommandType.ENTRY,
-        StrategySide.LONG,
-        EntryType.MARKET,
-        Decimal(1),
-        created_at=NOW,
-    )
-    book.register_prepared_command(command, SCOPE)
-    event = ExchangeOrderEvent(
-        "old-terminal", "old", ExchangeOrderState.FILLED, NOW, "111", {}
-    )
-    await book.observe(evidence("old-terminal", order_event=event))
-    assert book.command_requires_recovery("old")
-    backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-        execution_book=book,
-        reservation_repository=AsyncMock(),
-    )
-    repository = AsyncMock()
-    coordinator.configure_submission(repository)
-    plan = replace(
-        _plan("BTCUSDT", reduce_only=False),
-        position_side=SCOPE.position_side,
-        projection_version=(await book.read(SCOPE)).projection_version,
-    )
-    try:
-        for _ in range(2):
-            assert (
-                await coordinator.prepare_and_execute(
-                    plan,
-                    preparation=_submission_preparation(plan),
-                )
-                is None
-            )
-        assert backend.calls == []
-        repository.prepare_submission.assert_not_awaited()
-        assert book.command_requires_recovery("old")
-        assert book.get_outbox(plan.client_order_id) is None
-    finally:
-        await coordinator.aclose()
-
-
-async def test_rejected_context_does_not_consume_command_identity():
-    from unittest.mock import AsyncMock
-
-    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
-    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-
-    book = ExecutionBook()
-    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
-    await book.observe(
-        ExecutionEvidence(
-            "flat",
-            scope,
-            NOW,
-            snapshot=AccountPositionSnapshot(
-                "live",
-                "primary",
-                "BTCUSDT",
-                "BOTH",
-                Decimal(0),
-                Decimal(0),
-                Decimal(100),
-                Decimal(0),
-                Decimal(0),
-                1,
-                "cross",
-                NOW,
-                {},
-            ),
-        )
-    )
-    backend = BlockingBackend()
-    coordinator = OrderExecutionCoordinator(
-        backend=backend,
-        account_label="primary",
-        execution_book=book,
-        reservation_repository=AsyncMock(),
-    )
-
-    class Admission:
-        def rejection_reason(self, plan, preparation):
-            return "submission_context_invalidated"
-
-    repository = AsyncMock()
-    coordinator.configure_submission(repository, admission=Admission())
-    plan = _plan("BTCUSDT", reduce_only=False)
-    try:
-        assert (
-            await coordinator.prepare_and_execute(
-                plan,
-                preparation=_submission_preparation(plan),
-            )
-            is None
-        )
-        assert book.get_outbox(plan.client_order_id) is None
-        assert backend.calls == []
-        repository.prepare_submission.assert_not_awaited()
-    finally:
-        await coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -3136,7 +2979,7 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
     from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
     from tests.fixtures.async_reservations import InMemoryPositionReservationRepository
 
-    backend = BlockingBackend()
+    backend = BlockingSubmitBackend()
     reservation_repo = InMemoryPositionReservationRepository()
     book = ExecutionBook(reservation_repository=reservation_repo)
     coordinator = OrderExecutionCoordinator(
@@ -3178,10 +3021,16 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
         quantized=True,
     )
 
-    # 1. Block the scheduler worker with a reconcile task
+    # 1. Block the scheduler worker with a real submission task
     blocking_plan = _plan("BTCUSDT", reduce_only=True)
-    block_task = asyncio.create_task(coordinator.reconcile_order(blocking_plan))
-    await backend.query_started.wait()
+    async def blocking_cancel(plan):
+        backend.submit_started.set()
+        await backend.release_submit.wait()
+        return _result(plan, ExchangeOrderState.CANCELED)
+
+    backend.cancel_order = blocking_cancel
+    block_task = asyncio.create_task(coordinator.cancel_order(blocking_plan))
+    await backend.submit_started.wait()
 
     # 2. Queue the entry submission while worker is blocked
     submit_task = asyncio.create_task(coordinator.submit(plan))
@@ -3192,7 +3041,7 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
     assert cancel_res.state is ExchangeOrderState.CANCELED
 
     # 4. Unblock worker and let queue drain
-    backend.release_query.set()
+    backend.release_submit.set()
     await block_task
     submit_res = await submit_task
     assert submit_res.state is ExchangeOrderState.CANCELED
@@ -3262,3 +3111,142 @@ async def test_in_flight_submission_cancellation_records_unknown_pending_reconci
     assert book.command_requires_recovery(plan.client_order_id)
 
     await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale", [False, True])
+async def test_submission_checks_projection_without_an_extra_book_read(stale):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+
+    book = ExecutionBook()
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    version = (await book.read(scope)).projection_version
+    plan = replace(
+        _plan("BTCUSDT", reduce_only=False),
+        projection_version="stale-version" if stale else version,
+    )
+    book.read = AsyncMock(side_effect=AssertionError("redundant projection read"))
+    backend = BlockingBackend()
+    coordinator = _RealOrderExecutionCoordinator(
+        backend=backend,
+        environment="live",
+        account_label="primary",
+        execution_book=book,
+        reservation_repository=AsyncMock(),
+    )
+    try:
+        if stale:
+            with pytest.raises(OrderPreSubmissionError, match="stale view"):
+                await coordinator.submit(plan)
+            assert backend.calls == []
+        else:
+            result = await coordinator.submit(plan)
+            assert result.state is ExchangeOrderState.ACKNOWLEDGED
+            assert backend.calls == ["submit:BTCUSDT:entry"]
+        book.read.assert_not_awaited()
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projection_fails", [False, True])
+async def test_entry_ack_returns_before_projection_and_shutdown_drains_in_order(
+    projection_fails,
+):
+    from dataclasses import replace
+
+    started, release = asyncio.Event(), asyncio.Event()
+    observed = []
+    backend = BlockingBackend()
+    coordinator = _RealOrderExecutionCoordinator(
+        backend=backend, account_label="primary", environment="live"
+    )
+    first = _plan("BTCUSDT", reduce_only=False)
+    second = replace(first, client_order_id="second-entry", intent_id="second-intent")
+
+    async def project(plan, result):
+        started.set()
+        await release.wait()
+        observed.append(plan.client_order_id)
+        if projection_fails:
+            raise OSError("projection unavailable")
+
+    coordinator._observe_order_result_in_execution_book = project
+    closing = None
+    try:
+        result = await asyncio.wait_for(coordinator.submit(first), timeout=1)
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert observed == []
+        assert (
+            await asyncio.wait_for(coordinator.submit(second), timeout=1)
+        ).state is ExchangeOrderState.ACKNOWLEDGED
+        closing = asyncio.create_task(coordinator.aclose())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        release.set()
+        await asyncio.wait_for(closing, timeout=1)
+        assert observed == [first.client_order_id, second.client_order_id]
+        assert (
+            coordinator.execution_book.command_requires_recovery(first.client_order_id)
+            is projection_fails
+        )
+        assert backend.calls == ["submit:BTCUSDT:entry", "submit:BTCUSDT:entry"]
+    finally:
+        release.set()
+        if closing is not None:
+            await closing
+        await coordinator.aclose()
+
+
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_recovery_waits_for_same_order_post_even_if_caller_cancels(cancel_waiter):
+    backend = BlockingSubmitBackend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    plan = _plan("BTCUSDT", reduce_only=False)
+    submit = asyncio.create_task(coordinator.submit(plan))
+    await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
+    if cancel_waiter:
+        submit.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await submit
+    recovery = asyncio.create_task(coordinator.reconcile_order(plan))
+    try:
+        await asyncio.sleep(0)
+        assert not backend.query_started.is_set()
+        backend.release_submit.set()
+        await asyncio.wait_for(backend.query_started.wait(), timeout=1)
+        assert backend.calls == ["submit:BTCUSDT:entry", "reconcile:BTCUSDT"]
+    finally:
+        backend.release_submit.set()
+        backend.release_query.set()
+        await recovery
+        if not cancel_waiter:
+            await submit
+        await coordinator.aclose()
+
+
+async def test_absence_fact_does_not_wait_behind_another_order_post():
+    class Backend(BlockingSubmitBackend):
+        async def mark_absent_reconciled(self, plan, *, details):
+            return _result(plan, ExchangeOrderState.ABSENT_RECONCILED)
+
+    backend = Backend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    posting = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
+    await asyncio.wait_for(backend.submit_started.wait(), timeout=1)
+    absent_plan = replace(_plan("BTCUSDT", reduce_only=True), client_order_id="proven-absent")
+    try:
+        observed = await asyncio.wait_for(
+            coordinator.mark_absent_reconciled(absent_plan, details={"reason": "verified_absence"}),
+            timeout=1,
+        )
+        assert observed.state is ExchangeOrderState.ABSENT_RECONCILED
+        assert not posting.done()
+    finally:
+        backend.release_submit.set()
+        await posting
+        await coordinator.aclose()

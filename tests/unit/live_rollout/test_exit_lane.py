@@ -77,8 +77,7 @@ async def test_outcome_callback_failure_does_not_leave_shutdown_waiting_forever(
     await lane.start()
     await lane.submit_market(_state())
     outcome = await asyncio.wait_for(lane.stop(), timeout=1)
-    assert outcome.fatal_failure
-    assert outcome.failure == "exit_outcome_publication_failed:RuntimeError"
+    assert outcome == ExitLaneOutcome()
 
 
 async def test_older_account_trigger_keeps_newer_price_and_state():
@@ -124,6 +123,6 @@ async def test_older_account_trigger_keeps_newer_price_and_state():
 
 def test_real_fault_takes_priority_over_pending_evaluation_in_both_orders():
     pending = ExitLaneOutcome(failure="pending_live_context:BTCUSDT")
-    fatal = ExitLaneOutcome(failure="exit_execution_failed:RuntimeError", fatal_failure=True)
+    fatal = ExitLaneOutcome(failure="exit_execution_failed:RuntimeError")
     assert pending.merge(fatal) == fatal
     assert fatal.merge(pending) == fatal

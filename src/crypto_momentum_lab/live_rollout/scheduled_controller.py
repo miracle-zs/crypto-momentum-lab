@@ -139,10 +139,6 @@ class ScheduledRiskWindowController:
         self._startup_market_timeout_seconds = startup_market_timeout_seconds
         self._market_state_observed = False
         self._latest_market_states: dict[str, MarketState15s] = {}
-        self._latest_exchange_positions: dict[
-            tuple[str, str],
-            AccountPositionSnapshot,
-        ] = {}
         self._scheduled_window_lock = asyncio.Lock()
         self._scheduled_window_day: date | None = None
         self._scheduled_entry_orders_cancelled = False
@@ -243,35 +239,41 @@ class ScheduledRiskWindowController:
                 True,
                 reason="scheduled_risk_window",
             )
-            if not self._scheduled_entry_orders_cancelled:
-                cancellation_failure = await self._cancel_scheduled_entry_orders()
-                if cancellation_failure is not None:
-                    return cancellation_failure
-                self._scheduled_entry_orders_cancelled = True
-                if phase is not ScheduledRiskWindowPhase.FLATTENING:
-                    self._scheduled_deadline_entry_orders_cancelled = True
 
-            if (
-                phase is ScheduledRiskWindowPhase.DEADLINE
-                and not self._scheduled_deadline_entry_orders_cancelled
+            async def cancel_pending_entries() -> str | None:
+                needs_cancel = not self._scheduled_entry_orders_cancelled or (
+                    phase is ScheduledRiskWindowPhase.DEADLINE
+                    and not self._scheduled_deadline_entry_orders_cancelled
+                )
+                if not needs_cancel:
+                    return None
+                failure = await self._cancel_scheduled_entry_orders()
+                if failure is None:
+                    self._scheduled_entry_orders_cancelled = True
+                    if phase is not ScheduledRiskWindowPhase.FLATTENING:
+                        self._scheduled_deadline_entry_orders_cancelled = True
+                return failure
+
+            if phase in (
+                ScheduledRiskWindowPhase.FLATTENING,
+                ScheduledRiskWindowPhase.DEADLINE,
             ):
-                cancellation_failure = await self._cancel_scheduled_entry_orders()
-                if cancellation_failure is not None:
-                    return cancellation_failure
-                self._scheduled_deadline_entry_orders_cancelled = True
-
-            if phase is ScheduledRiskWindowPhase.FLATTENING:
-                return await self._submit_scheduled_flatten(
-                    observed_at,
-                    force=False,
+                # Opening-order cleanup never owns the confirmed-position exit path.
+                cancellation_failure, flatten_failure = await asyncio.gather(
+                    cancel_pending_entries(),
+                    self._submit_scheduled_flatten(
+                        observed_at,
+                        force=phase is ScheduledRiskWindowPhase.DEADLINE,
+                    ),
+                    return_exceptions=True,
                 )
-            if phase is ScheduledRiskWindowPhase.DEADLINE:
-                return await self._submit_scheduled_flatten(
-                    observed_at,
-                    force=True,
-                )
+                for outcome in (cancellation_failure, flatten_failure):
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                return flatten_failure or cancellation_failure
 
-            failure: str | None = None
+            cancellation_failure = await cancel_pending_entries()
+            failure = cancellation_failure
             if not self._scheduled_positions_verified:
                 # If the process first sees the window after 07:58, still make
                 # one market reduce-only attempt before the authoritative
@@ -678,7 +680,6 @@ class ScheduledRiskWindowController:
         """
 
         cached_states = self._latest_scheduled_states()
-        self._latest_exchange_positions = {}
         if self._fetch_exchange_positions is None:
             return cached_states, None
         try:
@@ -701,11 +702,6 @@ class ScheduledRiskWindowController:
                 else None,
             )
 
-        self._latest_exchange_positions = {
-            (position.symbol, position.position_side): position
-            for position in exchange_positions
-            if position.position_amt != 0
-        }
 
         active_positions = {
             position.symbol: position

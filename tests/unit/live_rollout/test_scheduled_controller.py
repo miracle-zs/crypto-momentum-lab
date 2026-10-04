@@ -257,32 +257,3 @@ async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> 
     assert result == (
         "scheduled_entry_submission_drain_failed:OSError" if mode == "failure" else None
     )
-
-
-async def test_verified_schedule_retries_reopen_after_coordinator_failure():
-    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
-    from tests.unit.live_rollout.test_entry_control import _StateMachine
-
-    now = datetime(2026, 7, 4, 2, tzinfo=UTC)
-    machine = _StateMachine()
-    gate = LiveEntryControlGate(run_id="test-run", state_machine=machine)
-    gate.set_scheduled_entry_blocked(True, reason="scheduled_risk_window")
-    controller = ScheduledRiskWindowController(
-        config=ScheduledRiskWindowControllerConfig(
-            run_id="test-run", scheduled_risk_window=ScheduledRiskWindowConfig(),
-        ),
-        exit_manager=None, state_machine=machine,
-        context_provider=None, apply_context=None,
-        invalidate_context_cache=lambda: None, process_exit_requests=None,
-        set_entry_blocked=gate.set_scheduled_entry_blocked,
-        pending_entry_plans=lambda: (), cancel_unfilled_entry_orders=None,
-        fetch_exchange_positions=None, clock=lambda: now,
-    )
-    controller._scheduled_window_day = now.date()
-    controller._scheduled_positions_verified = True
-    machine.fail_unblock = True
-    await controller.process(now=now)
-    assert not gate.entry_enabled
-    machine.fail_unblock = False
-    await controller.process(now=now)
-    assert gate.entry_enabled

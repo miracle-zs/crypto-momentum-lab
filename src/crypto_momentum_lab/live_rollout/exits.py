@@ -203,9 +203,9 @@ def managed_live_positions_from_views(
                     entry_price=batch.entry_price,
                     opened_at=batch.opened_at,
                     exit_order_submitted_at=(
-                        plan.created_at
-                        if plan is not None
-                        else batch.exit_order_submitted_at
+                        batch.exit_order_submitted_at
+                        if batch.exit_order_submitted_at is not None
+                        else (plan.created_at if plan is not None else None)
                     ),
                     recovery_order_client_id=(
                         None if recovery is None else plan.client_order_id

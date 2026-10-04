@@ -75,7 +75,6 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
             poll_interval_seconds=1.0,
             checkpoint_every_states=10,
             persist_exchange_operations=frozenset({"submit", "cancel"}),
-            acknowledge_missing_shadow_preflight=False,
         ),
         credentials=LiveRuntimeCredentials(
             base_url="https://fapi.binance.com",

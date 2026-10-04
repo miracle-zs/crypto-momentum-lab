@@ -15,7 +15,6 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 class RunMode(StrEnum):
     REPLAY = "replay"
     PAPER = "paper"
-    SHADOW = "shadow"
     LIVE = "live"
 
 

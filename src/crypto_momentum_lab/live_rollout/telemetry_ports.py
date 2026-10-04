@@ -56,12 +56,3 @@ class MarketAdmissionSink(Protocol):
         reloaded: bool,
         ingress: SourceIngress | None = None,
     ) -> None: ...
-
-    async def gate_evaluated(
-        self,
-        state: MarketState15s,
-        *,
-        occurred_at: datetime,
-        approved: bool,
-        reasons: tuple[str, ...],
-    ) -> None: ...

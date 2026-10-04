@@ -5,7 +5,7 @@ Validates:
 2. Transactional batch reservations preventing concurrent over-exit (anti-double-dipping);
 3. CAS projection version pinning and conflict detection;
 4. Fill reconciliation and unconsumed reservation releases;
-5. Execution readiness guard on degraded views.
+5. Known batch exits remain available on degraded views.
 """
 
 from datetime import UTC, datetime
@@ -22,7 +22,6 @@ from crypto_momentum_lab.domain.execution.account_journal import (
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
-    ExecutionReadinessError,
     ReservationConflictError,
     VersionConflictError,
 )
@@ -34,7 +33,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
-    PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocator,
@@ -285,31 +283,24 @@ def test_reservation_fill_reconciliation_and_release() -> None:
     )
 
 
-def test_execution_readiness_error_on_degraded_view() -> None:
-    book, key = _setup_two_batch_book()
-    degraded_view = PositionView(
-        key=key,
-        projection_version="pv_test",
-        input_revision=1,
-        event_cut=datetime.now(UTC),
-        policy_version="v1",
-        schema_version="v1",
-        coverage=None,
-        active_episode=None,
-        batches=(),
-        unallocated_quantity=Decimal("0"),
-        health_status=PositionHealthStatus.INCOMPLETE,
-    )
-    coordinator = ExecutionCoordinator()
-    cmd = TradeCommand(
-        command_id="cmd_fail",
-        position_key=key,
-        command_type=TradeCommandType.EXIT,
-        side=StrategySide.SHORT,
-        order_type=EntryType.MARKET,
-        requested_quantity=Decimal("1.0"),
-    )
+def test_known_batch_exit_can_reserve_with_degraded_view() -> None:
+    from dataclasses import replace
 
-    with pytest.raises(ExecutionReadinessError) as exc_info:
-        coordinator.reserve_exit(cmd, degraded_view)
-    assert "not ready for trade" in str(exc_info.value)
+    book, key = _setup_two_batch_book()
+    view = replace(book.get_view(), health_status=PositionHealthStatus.INCOMPLETE)
+    batch = view.batches[0]
+    allocation = ExitAllocator.plan_exit(
+        view, target_batch_ids=(batch.batch_id,), requested_quantity=Decimal("1"),
+        policy=ExitPolicyMode.TARGET_BATCHES_ONLY, reason="timeout",
+    )
+    command = TradeCommand(
+        command_id="exit-degraded", position_key=key,
+        command_type=TradeCommandType.EXIT, side=StrategySide.LONG,
+        order_type=EntryType.MARKET, requested_quantity=Decimal("1"),
+        reduce_only=True, allocation_plan=allocation,
+        expected_projection_version=view.projection_version,
+    )
+    reservations = ExecutionCoordinator().reserve_exit(command, view)
+    assert len(reservations) == 1
+    assert reservations[0].batch_id == batch.batch_id
+    assert reservations[0].reserved_quantity == Decimal("1")

@@ -41,6 +41,7 @@ def row(executed_quantity=Decimal("0.5")):
 def database():
     session = AsyncMock()
     session.__aenter__.return_value = session
+    session.execute.return_value = Mock(all=Mock(return_value=[]))
     factory = Mock(return_value=session)
     return PostgresOrderReadRepository(factory), session
 
@@ -63,7 +64,7 @@ async def test_load_preserves_durable_order_fields_and_quantity_baseline(quantit
     query = session.scalar.await_args.args[0]
     assert query.compile().params["client_order_id_1"] == "order"
     session.begin.assert_not_called()
-    session.execute.assert_not_awaited()
+    session.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -100,3 +101,30 @@ async def test_read_failure_is_not_reported_as_empty_order_set():
     session.scalars.side_effect = RuntimeError("database unavailable")
     with pytest.raises(RuntimeError, match="database unavailable"):
         await repository.load_unresolved_orders("run")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("prepared_price", [None, "105"])
+async def test_market_order_uses_prepared_price_before_legacy_exposure_claim(bulk, prepared_price):
+    repository, session = database()
+    order = row()
+    order.price = None
+    order.order_type = "MARKET"
+    order.time_in_force = None
+    metadata = [("order", {"execution_plan": {"reference_price": prepared_price}})]
+    session.scalar.return_value = order
+    if bulk:
+        session.scalars.return_value = Mock(all=Mock(return_value=[order]))
+        session.execute.side_effect = [
+            Mock(all=Mock(return_value=metadata)),
+            Mock(all=Mock(return_value=[("intent", Decimal("200"))])),
+        ]
+        restored = (await repository.load_unresolved_orders())[0]
+        assert session.execute.await_count == (1 if prepared_price else 2)
+    else:
+        session.execute.return_value = Mock(all=Mock(return_value=metadata))
+        session.scalars.return_value = Mock(all=Mock(return_value=[Decimal("200")]))
+        restored = await repository.load_order("order")
+        assert session.scalars.await_count == (0 if prepared_price else 1)
+    assert restored.plan.reference_price == Decimal(prepared_price or "100")

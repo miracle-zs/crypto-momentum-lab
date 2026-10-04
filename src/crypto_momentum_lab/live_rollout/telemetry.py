@@ -68,7 +68,6 @@ LIVE_TRIGGER_SOURCES: frozenset[LiveTriggerSource] = frozenset(
 
 MARKET_STATE_RECEIVED = "market_state_received"
 CONTEXT_READY = "context_ready"
-GATE_EVALUATED = "gate_evaluated"
 STRATEGY_DECISION = "strategy_decision"
 ENTRY_FILTER_READY = "entry_filter_ready"
 SIGNAL_RECORDED = "signal_recorded"
@@ -85,7 +84,6 @@ _PHASE_ORDER = (
     SOURCE_RECEIVED,
     MARKET_STATE_RECEIVED,
     CONTEXT_READY,
-    GATE_EVALUATED,
     STRATEGY_DECISION,
     ENTRY_FILTER_READY,
     SIGNAL_RECORDED,
@@ -104,7 +102,6 @@ _REPEATABLE_PHASES = frozenset(
         ACCOUNT_FILL,
         CANDIDATE_ACCEPTED,
         RISK_APPROVED,
-        GATE_EVALUATED,
         STRATEGY_DECISION,
     }
 )
@@ -808,24 +805,6 @@ class LiveRuntimeTelemetry:
             },
         )
 
-    async def gate_evaluated(
-        self,
-        state: MarketState15s,
-        *,
-        occurred_at: datetime,
-        approved: bool,
-        reasons: tuple[str, ...],
-    ) -> None:
-        await self._record_phase(
-            phase=GATE_EVALUATED,
-            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
-            lane=LIVE_LANE_ENTRY,
-            symbol=state.symbol,
-            bucket_start=state.bucket_start,
-            occurred_at=occurred_at,
-            details={"approved": approved, "reasons": list(reasons)},
-        )
-
     async def strategy_decision(
         self,
         state: MarketState15s,
@@ -1325,7 +1304,7 @@ class LiveRuntimeTelemetry:
         elif parent_trace_id:
             parent = self._traces.get(parent_trace_id)
             if parent is not None:
-                for p in (MARKET_STATE_RECEIVED, CONTEXT_READY, GATE_EVALUATED):
+                for p in (MARKET_STATE_RECEIVED, CONTEXT_READY):
                     if p in parent.phase_at:
                         trace.phase_at[p] = parent.phase_at[p]
         return trace
@@ -1561,7 +1540,6 @@ __all__ = [
     "CONTEXT_READY",
     "EXCHANGE_FILLED",
     "ENTRY_FILTER_READY",
-    "GATE_EVALUATED",
     "INTENT_SAVED",
     "LIVE_LANE_ENTRY",
     "LIVE_LANE_EXIT",

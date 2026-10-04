@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -309,4 +309,207 @@ async def test_book_sql_failure_never_publishes_candidate(async_database_url):
         ).projection_version == original.projection_version
         assert (await restored.read(first.scope)).total_quantity == Decimal("1")
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("fail_preparation", [False, True])
+@pytest.mark.parametrize("reduce_only", [False, True])
+async def test_order_preparation_and_dispatch_share_one_transaction(
+    async_database_url, fail_preparation, reduce_only,
+):
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        Accepted,
+        ExecutionRequest,
+    )
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderSubmissionPreparation,
+    )
+    from crypto_momentum_lab.persistence.postgres.models import (
+        ExchangeOrderRow,
+        ExecutionCommandRow,
+    )
+    from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+        PostgresOrderSubmissionRepository,
+    )
+    from tests.integration.persistence.test_order_repository import (
+        _evaluation,
+        _intent,
+        _plan,
+    )
+
+    transactions = []
+
+    class CountingUnitOfWork(AsyncPostgresExecutionUnitOfWork):
+        @asynccontextmanager
+        async def transaction(self, *args, **kwargs):
+            transactions.append(1)
+            async with super().transaction(*args, **kwargs) as tx:
+                yield tx
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"test-atomic-submit-{uuid4().hex}"
+    try:
+        book = _book(factory, CountingUnitOfWork)
+        await book.restore(account_label=account)
+        opening = _evidence(account, "1")
+        opening = replace(
+            opening, observed_at=opening.observed_at - timedelta(seconds=10),
+            fill=replace(opening.fill, trade_at=opening.fill.trade_at - timedelta(seconds=10)),
+        )
+        await book.observe(opening)
+        view = await book.read(opening.scope)
+        identity = f"cml_{uuid4().hex}"
+        intent = replace(_intent(), candidate_id=identity, reduce_only=reduce_only)
+        plan = replace(_plan(), intent_id=identity, client_order_id=identity,
+                       projection_version=view.projection_version, reduce_only=reduce_only,
+                       side="SELL" if reduce_only else "BUY",
+                       batch_id=view.batches[0].batch_id if reduce_only else None,
+                       created_at=opening.observed_at + timedelta(seconds=1))
+        preparation = OrderSubmissionPreparation(
+            intent=intent, evaluation=_evaluation(intent, identity),
+        )
+        repository = PostgresOrderSubmissionRepository(factory)
+        transactions.clear()
+
+        async def prepare(tx):
+            prepared = await repository.prepare_submission_in_session(
+                tx.session, intent=preparation.intent, evaluation=preparation.evaluation,
+                plan=plan, prepared_at=plan.created_at,
+            )
+            if fail_preparation:
+                raise RuntimeError("injected preparation rollback")
+            return prepared
+
+        result = await book.act(
+            ExecutionRequest(identity, opening.scope, "authority-test", "1", plan.run_id,
+                             identity, view.projection_version,
+                             TradeCommandType.EXIT if reduce_only else TradeCommandType.ENTRY,
+                             plan.quantity, reduce_only=reduce_only,
+                             target_batch_ids=(plan.batch_id,) if reduce_only else (),
+                             created_at=plan.created_at),
+            prepare_submission=prepare,
+        )
+        assert len(transactions) == 1
+        async with factory() as session:
+            order = await session.get(ExchangeOrderRow, identity)
+            command = await session.get(ExecutionCommandRow, identity)
+        if fail_preparation:
+            assert not isinstance(result, Accepted)
+            assert order is None and command is None
+            assert book.get_outbox(identity) is None
+        else:
+            assert isinstance(result, Accepted)
+            assert result.prepared_submission.plan == plan
+            assert order.state == ExchangeOrderState.SUBMITTING.value
+            assert command.status == DispatchState.DISPATCHING.value
+            assert book.get_outbox(identity).state is DispatchState.DISPATCHING
+            restarted = _book(factory)
+            await restarted.restore(account_label=account)
+            assert restarted.command_requires_recovery(identity)
+            if reduce_only:
+                assert (await book.read(opening.scope)).batches[0].exit_order_submitted_at == plan.created_at
+                assert (await restarted.read(opening.scope)).batches[0].exit_order_submitted_at == plan.created_at
+            # Submission recovery follows the main order even when a secondary
+            # command projection is stale. Terminal wire facts still need settlement.
+            async with factory() as session:
+                async with session.begin():
+                    saved_order = await session.get(ExchangeOrderRow, identity)
+                    saved_command = await session.get(ExecutionCommandRow, identity)
+                    saved_order.state = ExchangeOrderState.ACKNOWLEDGED.value
+                    saved_command.status = DispatchState.REJECTED.value
+            recovered = await PostgresCommandRepository(factory).load_active_execution_commands(account)
+            assert next(row for row in recovered if row["command_id"] == identity)["status"] == "acknowledged"
+            async with factory() as session:
+                async with session.begin():
+                    saved_order = await session.get(ExchangeOrderRow, identity)
+                    saved_command = await session.get(ExecutionCommandRow, identity)
+                    saved_order.state = ExchangeOrderState.CANCELED.value
+                    saved_command.status = DispatchState.ACKNOWLEDGED.value
+            recovered = await PostgresCommandRepository(factory).load_active_execution_commands(account)
+            assert next(row for row in recovered if row["command_id"] == identity)["status"] == "unknown"
+            # An obsolete rejection must not hide a real terminal fill either.
+            async with factory.begin() as session:
+                saved_order = await session.get(ExchangeOrderRow, identity)
+                saved_command = await session.get(ExecutionCommandRow, identity)
+                saved_order.state = ExchangeOrderState.FILLED.value
+                saved_order.executed_quantity = saved_order.quantity
+                saved_command.status = DispatchState.REJECTED.value
+            recovered = await PostgresCommandRepository(factory).load_active_execution_commands(account)
+            assert next(row for row in recovered if row["command_id"] == identity)["status"] == "unknown"
+
+    finally:
+        await engine.dispose()
+
+
+async def test_exit_ack_returns_with_durable_deadline_before_projection(async_database_url):
+    import asyncio
+
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderSubmissionPreparation,
+    )
+    from crypto_momentum_lab.execution_account.orders.coordinator import (
+        OrderExecutionCoordinator,
+    )
+    from crypto_momentum_lab.execution_account.orders.state_machine import (
+        OrderExecutionResult,
+    )
+    from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
+        PostgresOrderSubmissionRepository,
+    )
+    from tests.integration.persistence.test_order_repository import (
+        _evaluation,
+        _intent,
+        _plan,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = f"test-background-exit-{uuid4().hex}"
+    release = asyncio.Event()
+    coordinator = None
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        opening = _evidence(account, "1")
+        opening = replace(opening, observed_at=opening.observed_at - timedelta(seconds=10),
+                          fill=replace(opening.fill, trade_at=opening.fill.trade_at - timedelta(seconds=10)))
+        await book.observe(opening)
+        view = await book.read(opening.scope)
+        identity = f"cml_{uuid4().hex}"
+        intent = replace(_intent(), candidate_id=identity, reduce_only=True)
+        plan = replace(_plan(), intent_id=identity, client_order_id=identity,
+                       reduce_only=True, side="SELL", batch_id=view.batches[0].batch_id,
+                       created_at=opening.observed_at + timedelta(seconds=1),
+                       projection_version=view.projection_version)
+
+        class Backend:
+            async def submit(self, submitted, **kwargs):
+                return OrderExecutionResult(submitted.client_order_id, ExchangeOrderState.ACKNOWLEDGED, "123")
+
+        coordinator = OrderExecutionCoordinator(backend=Backend(), environment="live",
+                                                account_label=account, execution_book=book)
+        coordinator.configure_submission(PostgresOrderSubmissionRepository(factory))
+        original = coordinator._observe_order_result_in_execution_book
+
+        async def slow_projection(*args, **kwargs):
+            await release.wait()
+            await original(*args, **kwargs)
+
+        coordinator._observe_order_result_in_execution_book = slow_projection
+        result = await asyncio.wait_for(coordinator.prepare_and_execute(
+            plan, preparation=OrderSubmissionPreparation(intent=intent, evaluation=_evaluation(intent, identity)),
+        ), timeout=3)
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        assert not release.is_set()
+        assert (await book.read(opening.scope)).batches[0].exit_order_submitted_at == plan.created_at
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        assert (await restarted.read(opening.scope)).batches[0].exit_order_submitted_at == plan.created_at
+        assert restarted.command_requires_recovery(identity)
+    finally:
+        release.set()
+        if coordinator is not None:
+            await coordinator.aclose()
         await engine.dispose()

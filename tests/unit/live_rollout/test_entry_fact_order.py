@@ -171,10 +171,16 @@ async def test_recovery_scope_does_not_block_unrelated_exit(gate):
         target_batch_ids=tuple(batch.batch_id for batch in view.batches),
     )
     result = await book.act(request)
-    assert isinstance(result, Blocked if gate == "unknown_scope" else Accepted)
-    if gate != "unknown_scope":
-        same_scope = replace(request, request_id="btc-exit", scope=SCOPE)
-        assert isinstance(await book.act(same_scope), Blocked)
+    assert isinstance(result, Accepted)
+    same_view = await book.read(SCOPE)
+    same_scope = replace(
+        request, request_id="btc-exit", scope=SCOPE,
+        expected_view_token=same_view.projection_version,
+        action=TradeCommandType.ENTRY, reduce_only=False, target_batch_ids=(),
+    )
+    assert isinstance(await book.act(same_scope), Accepted)
+    same_order = replace(same_scope, request_id="waiting")
+    assert isinstance(await book.act(same_order), Blocked)
 
 
 async def test_book_commit_invalidates_operational_cache_without_next_candle():
@@ -201,5 +207,8 @@ async def test_rolled_back_facts_do_not_publish_context_revision():
     assert book.context_revision == revision
     stored_view = book._books[SCOPE.to_position_key().canonical_id].get_view()
     assert stored_view.total_quantity == 0
-    with pytest.raises(RuntimeError, match="durable restoration"):
-        await book.read(SCOPE)
+    assert (await book.read(SCOPE)).total_quantity == 0
+    uow.fail_commit = False
+    await book.observe(evidence("rollback", fill=fill("buy", "2", entry=True)))
+    assert (await book.read(SCOPE)).total_quantity == Decimal("2")
+    assert book.context_revision > revision

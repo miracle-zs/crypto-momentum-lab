@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+from crypto_momentum_lab.domain.account import (
+    AccountPositionSnapshot,
+    ExecutionAccountStatus,
+)
 from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -28,7 +31,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission,
 )
-from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
@@ -44,12 +46,8 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
-    SubmitPolicy,
 )
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
@@ -59,9 +57,6 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonRuntimeContext,
     LiveStrategyDaemon,
-)
-from crypto_momentum_lab.live_rollout.entry_lane import (
-    _live_entry_candidate_passes,
 )
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
@@ -82,12 +77,16 @@ from tests.fixtures.live_market import (
 from tests.fixtures.live_market import (
     _context as shadow_context,
 )
+from tests.unit.execution_account.orders.test_coordinator import (
+    OrderExecutionCoordinator,
+)
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,
     _snapshot,
 )
 from tests.unit.live_rollout.test_gates import _context as gate_context
+from tests.unit.live_rollout.test_gates import _risk_config as gate_risk_config
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
 
@@ -326,7 +325,7 @@ async def test_live_daemon_does_not_submit_expired_entry_candidate(reduce_only) 
 
 async def test_duplicate_prepared_intent_never_reaches_exchange() -> None:
     class AlreadySubmittedRepository(FakeLiveRepository):
-        async def prepare_submission(self, **kwargs):
+        async def prepare_submission_in_session(self, session, **kwargs):
             return None
 
     exchange = PlanAwareExchange()
@@ -510,7 +509,6 @@ async def test_live_daemon_allows_entry_with_confirmed_resting_order() -> None:
             _runtime_context(),
             gate_context=replace(
                 gate_context(),
-                unresolved_order_states=(resting_order,),
             ),
             unresolved_order_states=(resting_order,),
         )
@@ -563,7 +561,8 @@ async def test_live_daemon_filters_new_entries_by_pool_and_closed_ema() -> None:
     assert exchange.calls == []
 
 
-async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas() -> None:
+@pytest.mark.parametrize(("entry_price", "submitted"), [("30001", 1), ("30000", 0)])
+async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas(entry_price, submitted) -> None:
     exchange = PlanAwareExchange()
 
     async def load_symbols(_observed_at: datetime) -> frozenset[str]:
@@ -571,7 +570,7 @@ async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas() -> 
 
     async def load_context(_state: MarketState15s) -> LiveEntryFilterContext:
         return LiveEntryFilterContext(
-            entry_price=Decimal("30001"),
+            entry_price=Decimal(entry_price),
             ema5=Decimal("30000"),
             ema10=Decimal("29999"),
             ema_observed_at=NOW,
@@ -588,27 +587,12 @@ async def test_live_daemon_accepts_entry_inside_top100_and_above_both_emas() -> 
     result = await daemon.run(_states())
 
     assert result.halt_reason is None
-    assert result.approved_intent_count == 1
-    assert result.submitted_order_count == 1
-    assert exchange.calls == ["submit"]
+    assert result.approved_intent_count == submitted
+    assert result.submitted_order_count == submitted
+    assert exchange.calls == (["submit"] if submitted else [])
 
 
-def test_live_entry_ema_filter_is_strictly_above() -> None:
-    candidate = _intent()
-
-    assert not _live_entry_candidate_passes(
-        candidate,
-        context=LiveEntryFilterContext(
-            entry_price=Decimal("30000"),
-            ema5=Decimal("30000"),
-            ema10=Decimal("29999"),
-        ),
-        require_price_above_ema5=True,
-        require_price_above_ema10=True,
-    )
-
-
-async def test_live_daemon_blocks_before_submit_when_gate_changes() -> None:
+async def test_live_daemon_continues_running_when_candidate_risk_rejects() -> None:
     exchange = FakeExchange(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
 
     async def blocked_context(state: object) -> LiveDaemonRuntimeContext:
@@ -619,44 +603,11 @@ async def test_live_daemon_blocks_before_submit_when_gate_changes() -> None:
 
     result = await daemon.run(_states())
 
-    assert result.halt_reason is not None
-    assert result.halt_reason.startswith("live_gate:")
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 0
     assert exchange.calls == []
 
 
-async def test_live_daemon_survives_temporary_lease_gate_block() -> None:
-    exchange = PlanAwareExchange()
-    calls = 0
-
-    async def flaky_context(state: object) -> LiveDaemonRuntimeContext:
-        nonlocal calls
-        del state
-        calls += 1
-        if calls == 1:
-            return replace(
-                _runtime_context(),
-                active_lease=None,
-                gate_context=replace(gate_context(), active_lease=None),
-            )
-        return _runtime_context()
-
-    async def states() -> AsyncIterator:
-        yield _state()
-        next_state = _state()
-        yield replace(
-            next_state,
-            bucket_start=next_state.bucket_start + timedelta(seconds=15),
-            bucket_end=next_state.bucket_end + timedelta(seconds=15),
-        )
-
-    daemon = _daemon(exchange=exchange, context_provider=flaky_context)
-
-    result = await daemon.run(states())
-
-    assert result.halt_reason is None
-    assert result.processed_state_count == 2
-    assert result.submitted_order_count == 1
-    assert exchange.calls == ["submit"]
 
 
 async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> None:
@@ -673,7 +624,6 @@ async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> No
                 _runtime_context(),
                 gate_context=replace(
                     gate_context(),
-                    unresolved_order_states=(uncertain,),
                 ),
                 unresolved_order_states=(uncertain,),
             )
@@ -740,13 +690,6 @@ async def test_unknown_order_scope_through_market_loop_and_submission(
         risk_config=config,
         gate_context=replace(
             context.gate_context,
-            risk_config=config,
-            approval=replace(
-                context.gate_context.approval,
-                risk_config_hash=config.config_hash,
-                approved_max_open_positions=2,
-            ),
-            unresolved_order_states=(unknown.state,),
         ),
         unresolved_orders=(unknown,),
         unresolved_order_states=(unknown.state,),
@@ -786,7 +729,6 @@ async def test_live_daemon_checkpoints_while_reconciliation_is_pending() -> None
             _runtime_context(),
             gate_context=replace(
                 gate_context(),
-                unresolved_order_states=(uncertain,),
             ),
             unresolved_order_states=(uncertain,),
         )
@@ -934,7 +876,7 @@ async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
 
     failure = await daemon.process_account_event(_state())
 
-    assert failure == "pending_exit_order_recovery:BTCUSDT"
+    assert failure is None
     assert not recovery.plans
     await daemon.recover_requested_exits()
     assert len(exchange.plans) == 1
@@ -1500,26 +1442,29 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
     assert exchange.plans[1].reduce_only is False
 
 
-async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
+@pytest.mark.parametrize("capacity", [1, 2])
+async def test_live_daemon_continues_with_unmanaged_account_position(capacity) -> None:
     exchange = PlanAwareExchange()
 
     async def position_context(state: object) -> LiveDaemonRuntimeContext:
         del state
         return replace(
             _runtime_context(),
+            risk_config=replace(_runtime_context().risk_config, max_open_positions=capacity),
             open_position_symbols=frozenset({"ETHUSDT"}),
             unmanaged_position_symbols=frozenset({"ETHUSDT"}),
         )
 
-    daemon = _daemon(exchange=exchange, context_provider=position_context)
+    daemon = _daemon(exchange=exchange, context_provider=position_context, max_open_positions=capacity)
 
     result = await daemon.run(_states())
 
-    assert result.halt_reason == "unmanaged_live_positions:ETHUSDT"
-    assert exchange.calls == []
+    assert result.halt_reason is None
+    assert result.processed_state_count == 1
+    assert exchange.calls == (["submit"] if capacity == 2 else [])
 
 
-async def test_pending_account_position_blocks_entries_without_halting() -> None:
+async def test_pending_account_position_does_not_block_entry_lane() -> None:
     exchange = PlanAwareExchange()
 
     async def position_context(state: object) -> LiveDaemonRuntimeContext:
@@ -1546,14 +1491,11 @@ async def test_pending_account_position_blocks_entries_without_halting() -> None
 
     failure = await daemon.process_account_event(replace(_state(), symbol="ETHUSDT"))
 
-    assert failure == "pending_live_positions:ETHUSDT"
+    assert failure is None
     # Account-wide entry lane is not closed for other symbols
     assert daemon.entry_enabled is True
-    # ETHUSDT is locally blocked from entry
-    assert daemon.is_symbol_entry_allowed("ETHUSDT") == (
-        False,
-        "account_position_sync_pending:ETHUSDT",
-    )
+    # Reconciliation remains diagnostic
+    assert daemon.is_symbol_entry_allowed("ETHUSDT") == (True, "entry_allowed")
     # Other symbols (e.g. BTCUSDT) remain allowed
     assert daemon.is_symbol_entry_allowed("BTCUSDT") == (True, "entry_allowed")
     assert exchange.calls == []
@@ -1764,11 +1706,22 @@ async def test_scheduled_flatten_targets_exchange_position_before_market_state_a
 
 
 @pytest.mark.parametrize("unmanaged_symbols", [frozenset(), frozenset({"ETHUSDT"})])
+@pytest.mark.parametrize("cancel_failed", [False, True])
+@pytest.mark.parametrize("wait_for_exit", [False, True])
+@pytest.mark.parametrize("start_minute", [45, 55])
 async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
-    unmanaged_symbols,
+    unmanaged_symbols, cancel_failed, wait_for_exit, start_minute,
 ) -> None:
-    exchange = PlanAwareExchange()
-    scheduled_now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
+    exit_sent = asyncio.Event()
+
+    class SignallingExchange(PlanAwareExchange):
+        async def submit_order(self, plan):
+            result = await super().submit_order(plan)
+            exit_sent.set()
+            return result
+
+    exchange = SignallingExchange()
+    scheduled_now = datetime(2026, 7, 3, 23, start_minute, tzinfo=UTC)
     current_time = [scheduled_now]
     position = ManagedLivePosition(
         symbol="BTCUSDT",
@@ -1784,6 +1737,10 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
         plans: tuple[OrderExecutionPlan, ...],
     ) -> int:
         cancellation_calls.append(plans)
+        if wait_for_exit:
+            await asyncio.wait_for(exit_sent.wait(), timeout=1)
+        if cancel_failed:
+            raise OSError("cancel unavailable")
         return 0
 
     async def fetch_positions() -> tuple[AccountPositionSnapshot, ...]:
@@ -1833,15 +1790,16 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     )
     daemon._scheduled_controller.observe_state(_state())
 
-    failure = await daemon.process_scheduled_risk_window(now=scheduled_now)
+    failure = await asyncio.wait_for(daemon.process_scheduled_risk_window(now=scheduled_now), timeout=2)
 
-    assert failure is None
+    assert failure == ("scheduled_entry_order_cancel_failed:OSError" if cancel_failed else None)
     assert daemon.entry_enabled is False
     assert cancellation_calls == [()]
     assert len(exchange.plans) == 1
     assert exchange.plans[0].reduce_only is True
     assert exchange.plans[0].order_type == "MARKET"
 
+    cancel_failed = False
     verification_time = datetime(2026, 7, 3, 23, 58, tzinfo=UTC)
     current_time[0] = verification_time
     failure = await daemon.process_scheduled_risk_window(now=verification_time)
@@ -1869,8 +1827,8 @@ class FakeLiveRepository:
     ) -> None:
         pass
 
-    async def prepare_submission(
-        self, *, intent, evaluation, plan, prepared_at, **kwargs
+    async def prepare_submission_in_session(
+        self, session, *, intent, evaluation, plan, prepared_at, **kwargs
     ):
         await self.save_approved_intent(intent, evaluation)
         return PreparedOrderSubmission(
@@ -1918,6 +1876,7 @@ _created_coordinators: list[OrderExecutionCoordinator] = []
 def _daemon(
     *,
     exchange,
+    request_order_cleanup=lambda plans: None,
     strategy=None,
     context_provider=None,
     repository: FakeLiveRepository | None = None,
@@ -1940,16 +1899,12 @@ def _daemon(
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
     cancel_unfilled_entry_orders=None,
     fetch_exchange_positions=None,
-    readiness_provider=None,
-    cached_context_provider=None,
-    unmanaged_halt_debounce_seconds: float = 15.0,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
         exchange=exchange,
         repository=order_repository,
         event_repository=order_repository,
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
         reconciliation_retry_delays=(0.0, 0.0, 0.0, 0.0),
@@ -1964,10 +1919,6 @@ def _daemon(
             risk_config=config,
             gate_context=replace(
                 context.gate_context,
-                risk_config=config,
-                approval=replace(
-                    context.gate_context.approval, risk_config_hash=config.config_hash
-                ),
             ),
         )
 
@@ -1980,7 +1931,7 @@ def _daemon(
     submission_repository = repository or FakeLiveRepository()
     checkpoint_repository = checkpoint_repository or submission_repository
     return LiveStrategyDaemon(
-        cached_context_provider=cached_context_provider,
+        request_order_cleanup=request_order_cleanup,
         strategy=strategy or FakeStrategy(),
         risk_gateway=RiskGateway(
             limits=FixedLiveLimits(
@@ -2009,8 +1960,6 @@ def _daemon(
             entry_universe_snapshot_provider=entry_universe_snapshot_provider,
             entry_order_type=entry_order_type,
             scheduled_risk_window=scheduled_risk_window,
-            readiness_provider=readiness_provider,
-            unmanaged_halt_debounce_seconds=unmanaged_halt_debounce_seconds,
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,
@@ -2201,8 +2150,7 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
     return LiveDaemonRuntimeContext(
         now=NOW,
         gate_context=gate,
-        active_lease=gate.active_lease,
-        account_state=gate.account_state,
+        account_state=ExecutionAccountStatus.RUNNING,
         account_observed_at=NOW,
         open_position_symbols=frozenset(),
         realized_pnl=Decimal("0"),
@@ -2210,7 +2158,7 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
         gross_exposure=Decimal("0"),
         active_halts=(),
         unresolved_order_states=(),
-        risk_config=gate.risk_config,
+        risk_config=gate_risk_config(),
         strategy_state=shadow.strategy_state,
         trading_rules={
             "BTCUSDT": SymbolTradingRules(
@@ -2243,45 +2191,8 @@ async def _states() -> AsyncIterator:
     yield _state()
 
 
-async def test_live_daemon_readiness_provider_blocks_entries_when_lagging() -> None:
-    """Verifies that an injected lagging readiness provider prevents entry order submission."""
-    exchange = PlanAwareExchange()
-    daemon = _daemon(
-        exchange=exchange,
-        readiness_provider=lambda symbol: ExecutionReadiness.PROGRESS_LAGGING,
-    )
-    result = await daemon.run(_states())
-    assert result.approved_intent_count == 0
-    assert result.submitted_order_count == 0
-    assert exchange.calls == []
 
 
-def test_live_daemon_evaluate_readiness_detects_account_watermark_lag() -> None:
-    """Verifies that evaluate_readiness detects lag when the account watermark is older than the market watermark."""
-    now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
-    market_time = now  # fresh market
-    account_lagging_time = now - timedelta(seconds=120)  # account is 2 minutes behind!
-
-    class MockContextProvider:
-        def __init__(self) -> None:
-            self.cached_context = replace(
-                _runtime_context(),
-                account_observed_at=account_lagging_time,
-            )
-
-        def __call__(self) -> LiveDaemonRuntimeContext:
-            return self.cached_context
-
-    ctx_provider = MockContextProvider()
-    daemon = _daemon(
-        exchange=PlanAwareExchange(),
-        context_provider=ctx_provider,
-        clock=lambda: now,
-    )
-    daemon._market_loop._active_state_at = market_time
-
-    readiness = daemon.evaluate_readiness()
-    assert readiness == ExecutionReadiness.PROGRESS_LAGGING
 
 
 async def test_history_replay_reaches_live_decision_without_loading_live_context():
@@ -2339,33 +2250,6 @@ async def test_submission_and_checkpoint_persistence_are_independent():
     assert all(item[0] == "run-1" for item in saved)
 
 
-def test_readiness_reads_latest_explicit_context_without_provider_cache() -> None:
-    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
-
-    class Provider:
-        @property
-        def cached_context(self):
-            pytest.fail("explicit reader must bypass provider cache")
-
-        @property
-        def _cached_context(self):
-            pytest.fail("explicit reader must bypass private cache")
-
-    snapshot = replace(
-        _runtime_context(), account_observed_at=now - timedelta(seconds=120)
-    )
-    daemon = _daemon(
-        exchange=PlanAwareExchange(),
-        context_provider=Provider(),
-        cached_context_provider=lambda: snapshot,
-        clock=lambda: now,
-    )
-    daemon._market_loop._active_state_at = now
-    assert daemon.latest_watermark == now - timedelta(seconds=120)
-    assert daemon.evaluate_readiness() == ExecutionReadiness.PROGRESS_LAGGING
-    snapshot = replace(snapshot, account_observed_at=now)
-    assert daemon.latest_watermark == now
-    assert daemon.evaluate_readiness() != ExecutionReadiness.PROGRESS_LAGGING
 
 
 @pytest.mark.parametrize("waiting_on", ["cancellation", "verification"])
@@ -2459,9 +2343,9 @@ async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capa
         context=_runtime_context(),
         error=None,
     )
-    daemon._market_admission.invalidate_context_cache()
+    daemon._context_runtime.invalidate()
     assert daemon._context_runtime.generation == generation + 1
-    admitted = await daemon._market_admission.prepare(prefetched)
+    admitted = await daemon._context_runtime.prepare(prefetched)
     assert admitted.error is None
     assert admitted.context is fresh
     assert calls == ["invalidate", "load"]
@@ -2476,3 +2360,58 @@ def test_operator_can_pause_and_resume_exits():
     assert daemon.exit_enabled
     with pytest.raises(TypeError, match="enabled must be a bool"):
         daemon.set_exit_enabled("yes", reason="invalid")
+
+
+async def test_exit_exception_does_not_stop_later_market_states():
+    failed = asyncio.Event()
+
+    class ExitManager(LiveExitManager):
+        calls = 0
+
+        async def requests_for_state(self, state, positions):
+            self.calls += 1
+            if self.calls == 1:
+                failed.set()
+                raise RuntimeError("one exit observation failed")
+            return ()
+
+    manager = ExitManager(config=LiveExitConfig(
+        run_id="run-1", strategy_name="compression_breakout", strategy_version="v0",
+        strategy_config_hash="a" * 64, policy=PositionExitPolicy(max_holding_seconds=30),
+    ))
+    exchange = PlanAwareExchange()
+    daemon = _daemon(exchange=exchange, exit_manager=manager)
+
+    async def states():
+        first = _state()
+        yield first
+        await asyncio.wait_for(failed.wait(), timeout=1)
+        yield replace(first, bucket_start=first.bucket_start + timedelta(seconds=15),
+                      bucket_end=first.bucket_end + timedelta(seconds=15))
+
+    result = await daemon.run(states())
+    assert result.processed_state_count == 2
+    assert result.halt_reason is None
+    assert manager.calls == 2
+
+
+async def test_orphan_exit_cleanup_is_enqueued_without_foreground_cancel():
+    from crypto_momentum_lab.domain.execution.order_read_models import (
+        PersistedExchangeOrder,
+    )
+    from tests.unit.execution_account.orders.test_state_machine import _plan
+
+    plan = replace(_plan(), reduce_only=True, side="SELL", order_type="LIMIT", price=Decimal("30000"))
+    requested = []
+    exchange = PlanAwareExchange()
+
+    async def context(state):
+        return replace(_runtime_context(), unresolved_orders=(PersistedExchangeOrder(
+            plan, ExchangeOrderState.ACKNOWLEDGED, "123", NOW,
+        ),))
+
+    daemon = _daemon(exchange=exchange, context_provider=context, request_order_cleanup=requested.append)
+    result = await daemon.run(_states())
+    assert result.halt_reason is None
+    assert requested == [(plan,)]
+    assert "cancel" not in exchange.calls

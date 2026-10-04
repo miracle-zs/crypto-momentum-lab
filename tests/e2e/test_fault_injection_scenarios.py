@@ -2,7 +2,6 @@ import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
 
 import pytest
 
@@ -49,14 +48,7 @@ from tests.unit.execution_account.test_user_data_daemon import (
 from tests.unit.execution_account.test_user_data_daemon import (
     _snapshot as account_snapshot,
 )
-from tests.unit.live_rollout.test_daemon import _runtime_context
-from tests.unit.live_rollout.test_submission import (
-    RecordingCoordinator,
-    RecordingPreparedRepository,
-    _submission,
-)
 from tests.unit.market_data.test_hub import fixture_state
-from tests.fixtures.live_market import _intent, _state
 
 pytestmark = pytest.mark.e2e
 
@@ -279,47 +271,6 @@ async def test_fault_injection_submitting_sigterm_is_reconciled_after_restart() 
     assert restarted_result.state is ExchangeOrderState.FILLED
     assert exchange.calls == ["submit", "query"]
     assert repository.events[-1].state is ExchangeOrderState.FILLED
-
-
-class _HaltAwareCoordinator(RecordingCoordinator):
-    def __init__(self) -> None:
-        super().__init__()
-        self.prepare_calls = 0
-        self.exchange_calls = 0
-
-    async def prepare_and_execute(self, plan, *, preparation):
-        self.prepare_calls += 1
-        result = await super().prepare_and_execute(plan, preparation=preparation)
-        self.exchange_calls += int(result is not None)
-        return result
-
-
-async def test_fault_injection_operator_halt_wins_entry_post_race() -> None:
-    repository = RecordingPreparedRepository()
-    coordinator = _HaltAwareCoordinator()
-    entry_checks = 0
-
-    def entry_enabled() -> bool:
-        nonlocal entry_checks
-        entry_checks += 1
-        return entry_checks < 3
-
-    submission = _submission(
-        repository=repository, state_machine=coordinator, entry_enabled=entry_enabled,
-    )
-
-    result = await submission.execute(
-        replace(_intent(), desired_notional=Decimal("20")),
-        requested_quantity=None,
-        state=_state(),
-        context=_runtime_context(),
-    )
-
-    assert result is None
-    assert entry_checks == 3
-    assert coordinator.prepare_calls == 1
-    assert coordinator.exchange_calls == 0
-    assert repository.prepare_calls == []
 
 
 async def test_fault_injection_account_overflow_defers_and_recovers() -> None:

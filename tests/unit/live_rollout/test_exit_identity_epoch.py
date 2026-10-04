@@ -10,8 +10,8 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from tests.unit.live_rollout.test_exits import _config, _long_position
 from tests.fixtures.live_market import _state
+from tests.unit.live_rollout.test_exits import _config, _long_position
 
 
 def test_grace_timeout_identity_changes_after_conflict_epoch() -> None:

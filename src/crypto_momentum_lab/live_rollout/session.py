@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -7,14 +7,12 @@ from uuid import NAMESPACE_URL, uuid5
 from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.live_rollout import (
     LiveGateDecision,
-    LiveGateStatus,
     LiveSessionState,
     LiveSessionTransition,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 
 
 class LiveTransitionRepository(Protocol):
@@ -102,10 +100,7 @@ class LiveRolloutSession:
         config: LiveSessionConfig,
         clock: Callable[[], datetime],
     ) -> None:
-        self._repository = repository
         self._execute_plan = execute_plan
-        self._config = config
-        self._clock = clock
         self._lifecycle = LiveSessionLifecycle(
             repository=repository,
             config=config,
@@ -115,23 +110,9 @@ class LiveRolloutSession:
     async def run_one(
         self,
         *,
-        gate_context: LiveGateContext,
-        shadow_preflight: Callable[[], Awaitable[bool]],
+        gate: LiveGateDecision,
         plan: OrderExecutionPlan,
     ) -> LiveSessionResult:
-        await self._lifecycle.transition(LiveSessionState.PREFLIGHT)
-        await self._lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
-        if not await shadow_preflight():
-            gate = LiveGateDecision(
-                status=LiveGateStatus.BLOCKED,
-                reasons=("shadow_preflight_failed",),
-            )
-            await self._lifecycle.transition(
-                LiveSessionState.HALTED,
-                "shadow_preflight_failed",
-            )
-            return LiveSessionResult(gate, LiveSessionState.HALTED, None)
-        gate = evaluate_live_gate(gate_context)
         if not gate.approved:
             await self._lifecycle.transition(
                 LiveSessionState.HALTED,

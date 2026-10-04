@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -17,7 +16,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
 from crypto_momentum_lab.live_rollout.context import (
-    LiveContextChangedDuringLoad,
     LiveContextProvider,
     LiveDaemonRuntimeContext,
 )
@@ -33,6 +31,95 @@ from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
 from tests.fixtures.live_market import _intent, _state
 
 NOW = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC)
+
+
+async def test_exit_recovery_keeps_inspecting_after_previous_replacement_attempts():
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+
+    submission = RecordingSubmission(_acknowledged_result())
+    processor = _processor(submission)
+    plan = OrderExecutionPlan(
+        "exit",
+        "run-1",
+        "original-exit",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("0.001"),
+        None,
+        True,
+        NOW,
+    )
+    inspector = AsyncMock(side_effect=TimeoutError("exchange still unavailable"))
+    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspector)
+    processor._exit_recovery_attempts[plan.client_order_id] = 3
+    result = await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("0"),
+        state=_state(),
+        context=_context(),
+    )
+    assert result is None
+    inspector.assert_awaited_once_with(plan)
+    assert submission.calls == []
+
+
+@pytest.mark.parametrize(
+    "cancel_state",
+    [
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.REJECTED,
+    ],
+)
+async def test_one_batch_cancel_failure_does_not_stop_another_batch_exit(cancel_state):
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+    from crypto_momentum_lab.live_rollout.exits import LiveExitCancellationRequest
+
+    submission = RecordingSubmission(_acknowledged_result())
+    processor = _processor(submission)
+    plan = OrderExecutionPlan(
+        "exit-first",
+        "run-1",
+        "cancel-first",
+        "BTCUSDT",
+        "SELL",
+        "LIMIT",
+        Decimal("0.001"),
+        Decimal("100"),
+        True,
+        NOW,
+    )
+    processor._state_machine = SimpleNamespace(
+        cancel_order=AsyncMock(
+            return_value=OrderExecutionResult(
+                plan.client_order_id, cancel_state, None, plan=plan
+            ),
+        )
+    )
+    first = replace(_intent(), candidate_id="first-batch", reduce_only=True)
+    second = replace(_intent(), candidate_id="second-batch", reduce_only=True)
+    result = await processor.process_requests(
+        (
+            LiveExitCancellationRequest(
+                cancel_plan=plan,
+                fallback_candidate=first,
+                fallback_quantity=Decimal("0.001"),
+            ),
+            LiveExitOrderRequest(candidate=second, quantity=Decimal("0.001")),
+        ),
+        state=_state(),
+        context=_context(),
+    )
+    assert result[:2] == (1, 1)
+    assert result[2] is not None
+    assert [candidate.candidate_id for candidate, _, _ in submission.calls] == [
+        "second-batch"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -87,12 +174,11 @@ class BlockingSubmission(RecordingSubmission):
         return await super().execute(*args, **kwargs)
 
 
-def _acknowledged_result(*, suppressed: bool = False) -> OrderExecutionResult:
+def _acknowledged_result() -> OrderExecutionResult:
     return OrderExecutionResult(
         client_order_id="cml_exit_1",
         state=ExchangeOrderState.ACKNOWLEDGED,
         exchange_order_id="exchange-1",
-        suppressed=suppressed,
     )
 
 
@@ -108,8 +194,6 @@ def _context() -> LiveDaemonRuntimeContext:
 
 def _processor(
     submission: object,
-    *,
-    context_is_current: Callable[[LiveDaemonRuntimeContext], bool] = lambda _: True,
 ) -> LiveExitProcessor:
     async def provide_context(_state: MarketState15s) -> LiveDaemonRuntimeContext:
         return _context()
@@ -129,7 +213,6 @@ def _processor(
         context_provider=cast(LiveContextProvider, provide_context),
         apply_context=publish_positions,
         invalidate_context_cache=lambda: None,
-        context_is_current=context_is_current,
     )
 
 
@@ -159,23 +242,6 @@ async def test_process_requests_delegates_one_exit_and_reports_submission_counts
 
 
 @pytest.mark.asyncio
-async def test_process_requests_counts_suppressed_exit_without_exchange_submission() -> (
-    None
-):
-    submission = RecordingSubmission(_acknowledged_result(suppressed=True))
-    processor = _processor(submission)
-    candidate = replace(_intent(), candidate_id="exit-suppressed", reduce_only=True)
-
-    approved, submitted, failure = await processor.process_requests(
-        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
-        state=_state(),
-        context=_context(),
-    )
-
-    assert (approved, submitted, failure) == (1, 0, None)
-
-
-@pytest.mark.asyncio
 async def test_missing_durable_position_facts_degrades_exit_without_crashing() -> None:
     class MissingFactsSubmission:
         async def execute(self, *_args, **_kwargs):
@@ -194,61 +260,6 @@ async def test_missing_durable_position_facts_degrades_exit_without_crashing() -
     )
 
     assert result == (0, 0, "position_facts_not_restored")
-
-
-@pytest.mark.asyncio
-async def test_process_requests_retries_when_context_is_fenced_during_submission() -> (
-    None
-):
-    current = [True]
-
-    class StaleOnceSubmission(RecordingSubmission):
-        async def execute(self, *args, **kwargs):
-            if not self.calls:
-                current[0] = False
-                self.calls.append(
-                    (args[0], kwargs["requested_quantity"], kwargs["state"])
-                )
-                return None
-            return await super().execute(*args, **kwargs)
-
-    submission = StaleOnceSubmission(_acknowledged_result())
-    context_loads = 0
-
-    async def provide_context(_state: MarketState15s) -> LiveDaemonRuntimeContext:
-        nonlocal context_loads
-        context_loads += 1
-        current[0] = True
-        return _context()
-
-    def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
-        return None
-
-    processor = LiveExitProcessor(
-        config=ExitProcessorConfig(run_id="run-1"),
-        exit_manager=None,
-        exit_recovery_client=None,
-        state_machine=cast(OrderExecutionPort, object()),
-        submission=cast(LiveCandidateSubmission, submission),
-        telemetry=None,
-        clock=lambda: NOW,
-        is_exit_enabled=lambda: True,
-        context_provider=cast(LiveContextProvider, provide_context),
-        apply_context=publish_positions,
-        invalidate_context_cache=lambda: None,
-        context_is_current=lambda _context: current[0],
-    )
-    candidate = replace(_intent(), candidate_id="exit-stale", reduce_only=True)
-
-    approved, submitted, failure = await processor.process_requests(
-        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
-        state=_state(),
-        context=_context(),
-    )
-
-    assert (approved, submitted, failure) == (1, 1, None)
-    assert len(submission.calls) == 2
-    assert context_loads == 1
 
 
 @pytest.mark.asyncio
@@ -422,10 +433,8 @@ async def test_stale_exit_projection_defers_before_post_and_invalidates_context(
         FuturesPositionSide,
         OrderExecutionPlan,
     )
-    from crypto_momentum_lab.execution_account.orders.coordinator import (
-        OrderExecutionCoordinator,
-    )
     from tests.unit.execution_account.orders.test_coordinator import (
+        OrderExecutionCoordinator,
         _submission_preparation,
     )
 
@@ -480,7 +489,7 @@ async def test_stale_exit_projection_defers_before_post_and_invalidates_context(
             assert result == (0, 0, "pending_live_context:BTCUSDT")
         assert invalidations == [True, True]
         backend.submit.assert_not_awaited()
-        repository.prepare_submission.assert_not_awaited()
+        repository.prepare_submission_in_session.assert_not_awaited()
         assert book.get_outbox(plan.client_order_id) is None
     finally:
         await coordinator.aclose()
@@ -568,8 +577,8 @@ def test_recovery_rebuilds_current_target_batch_without_closing_addons():
     )
 
 
-async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinator():
-    from unittest.mock import MagicMock
+async def test_real_book_degraded_view_does_not_block_exit():
+    from unittest.mock import AsyncMock, MagicMock
 
     from crypto_momentum_lab.domain.account.models import (
         AccountFillEvent,
@@ -582,7 +591,7 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
         FuturesPositionSide,
         OrderExecutionPlan,
     )
-    from crypto_momentum_lab.execution_account.orders.coordinator import (
+    from tests.unit.execution_account.orders.test_coordinator import (
         OrderExecutionCoordinator,
     )
 
@@ -622,6 +631,7 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
     view = await book.read(scope)
     assert not view.is_ready_for_trade and view.batches
     backend = MagicMock()
+    backend.submit = AsyncMock(return_value=OrderExecutionResult("exit-guard", ExchangeOrderState.ACKNOWLEDGED, "123"))
     coordinator = OrderExecutionCoordinator(
         backend=backend,
         environment="live",
@@ -647,8 +657,7 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
 
     class GuardedSubmission:
         async def execute(self, *_args, **_kwargs):
-            await coordinator._ensure_reservation(plan)
-            raise AssertionError("unready exit was permitted")
+            return await coordinator.submit(plan)
 
     processor = _processor(GuardedSubmission())
     result = await processor.process_requests(
@@ -660,9 +669,10 @@ async def test_real_book_blocked_exit_preserves_readiness_type_through_coordinat
         state=_state(),
         context=_context(),
     )
-    assert result == (0, 0, "position_not_ready")
-    assert not book.get_active_reservations(scope.to_position_key())
-    backend.submit.assert_not_called()
+    assert result == (1, 1, None)
+    backend.submit.assert_awaited_once()
+    assert book.get_active_reservations(scope.to_position_key())
+    await coordinator.aclose()
 
 
 async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query():
@@ -670,14 +680,28 @@ async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query
     release = asyncio.Event()
     calls = []
     processor = _processor(RecordingSubmission(_acknowledged_result()))
-    processor._exit_manager = object()
+    processor._exit_manager = SimpleNamespace(
+        uses_market_state_exit=False, requests_for_quote=lambda *_: _provide(())
+    )
     state = _state()
-    plan = SimpleNamespace(symbol=state.symbol, reduce_only=True,
-                           client_order_id="unknown-exit", intent_id="exit",
-                           position_side=SimpleNamespace(value="LONG"))
-    context = SimpleNamespace(unresolved_orders=(SimpleNamespace(
-        plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-        executed_quantity=Decimal("0"), updated_at=NOW),))
+    plan = SimpleNamespace(
+        symbol=state.symbol,
+        reduce_only=True,
+        client_order_id="unknown-exit",
+        intent_id="exit",
+        position_side=SimpleNamespace(value="LONG"),
+    )
+    context = SimpleNamespace(
+        managed_positions=(),
+        unresolved_orders=(
+            SimpleNamespace(
+                plan=plan,
+                state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                executed_quantity=Decimal("0"),
+                updated_at=NOW,
+            ),
+        ),
+    )
 
     async def inspect(plan):
         calls.append(plan.client_order_id)
@@ -688,14 +712,18 @@ async def test_remote_recovery_does_not_hold_quote_decision_lock_or_repeat_query
     processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
     processor._context_provider = lambda state: _provide(context)
     first_outcome = await processor.process_state(state, context)
-    assert first_outcome.failure == f"pending_exit_order_recovery:{state.symbol}"
+    assert first_outcome.failure is None
     assert not calls
     worker = asyncio.create_task(processor.recover_requested_exits())
     try:
         await asyncio.wait_for(started.wait(), 1)
-        outcome = await asyncio.wait_for(processor.process_quote(
-            SimpleNamespace(symbol=state.symbol), state, context), 0.5)
-        assert outcome.failure == f"pending_exit_order_recovery:{state.symbol}"
+        outcome = await asyncio.wait_for(
+            processor.process_quote(
+                SimpleNamespace(symbol=state.symbol), state, context
+            ),
+            0.5,
+        )
+        assert outcome.failure is None
         assert calls == ["unknown-exit"]
         release.set()
         await asyncio.wait_for(worker, 1)
@@ -711,49 +739,44 @@ async def _provide(context):
     return context
 
 
-async def test_candle_recovery_does_not_confirm_unevaluated_closing_event():
+async def test_unknown_order_does_not_block_candle_evaluation_for_other_batches():
     from unittest.mock import AsyncMock
 
-
     processor = _processor(RecordingSubmission(_acknowledged_result()))
-    processor._exit_manager = SimpleNamespace(requests_for_closed_candle=AsyncMock())
-    state = _state()
-    plan = SimpleNamespace(symbol=state.symbol, reduce_only=True,
-                           client_order_id="unknown-exit", intent_id="exit",
-                           position_side=SimpleNamespace(value="LONG"))
-    context = SimpleNamespace(unresolved_orders=(SimpleNamespace(
-        plan=plan, state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-        executed_quantity=Decimal("0"), updated_at=NOW),))
-    processor._exit_recovery_client = SimpleNamespace(
-        inspect_exit_order=AsyncMock(side_effect=TimeoutError("unknown receipt")))
-    event = SimpleNamespace(candle=SimpleNamespace(symbol=state.symbol))
-    outcome = await processor.process_closed_candle(event, state, context, None)
-    assert outcome.failure == f"pending_exit_order_recovery:{event.candle.symbol}"
-    processor._exit_manager.requests_for_closed_candle.assert_not_awaited()
-
-
-@pytest.mark.parametrize("error,expected", [
-    (LiveContextChangedDuringLoad("facts advanced"), "pending_live_context:BTCUSDT"),
-    (RuntimeError("database failed"), "exit_context_refresh_failed:RuntimeError"),
-])
-async def test_context_refresh_distinguishes_fact_advance_from_failure(error, expected):
-    submission = RecordingSubmission(_acknowledged_result())
-    processor = _processor(submission, context_is_current=lambda _: False)
-
-    async def load(state):
-        raise error
-
-    processor._context_provider = load
-    candidate = replace(_intent(), reduce_only=True)
-    result = await processor.process_requests(
-        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
-        state=_state(), context=_context(),
+    processor._exit_manager = SimpleNamespace(
+        requests_for_closed_candle=AsyncMock(return_value=())
     )
-    assert result == (0, 0, expected)
-    assert submission.calls == []
+    state = _state()
+    plan = SimpleNamespace(
+        symbol=state.symbol,
+        reduce_only=True,
+        client_order_id="unknown-exit",
+        intent_id="exit",
+        position_side=SimpleNamespace(value="LONG"),
+    )
+    context = SimpleNamespace(
+        managed_positions=(),
+        unresolved_orders=(
+            SimpleNamespace(
+                plan=plan,
+                state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                executed_quantity=Decimal("0"),
+                updated_at=NOW,
+            ),
+        ),
+    )
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(side_effect=TimeoutError("unknown receipt"))
+    )
+    event = SimpleNamespace(
+        candle=SimpleNamespace(symbol=state.symbol), received_at=NOW
+    )
+    outcome = await processor.process_closed_candle(event, state, context, None)
+    assert outcome.failure is None
+    processor._exit_manager.requests_for_closed_candle.assert_awaited_once()
 
 
-async def test_cancel_fallback_waits_for_fresh_context_without_submitting():
+async def test_cancel_fallback_continues_when_context_read_temporarily_fails():
     from unittest.mock import AsyncMock
 
     from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
@@ -761,22 +784,53 @@ async def test_cancel_fallback_waits_for_fresh_context_without_submitting():
 
     submission = RecordingSubmission(_acknowledged_result())
     processor = _processor(submission)
-    processor._state_machine = SimpleNamespace(cancel_order=AsyncMock(
-        return_value=OrderExecutionResult("original", ExchangeOrderState.CANCELED, None)))
+    processor._state_machine = SimpleNamespace(
+        cancel_order=AsyncMock(
+            return_value=OrderExecutionResult(
+                "original", ExchangeOrderState.CANCELED, None
+            )
+        )
+    )
 
     async def load(state):
-        raise LiveContextChangedDuringLoad("facts advanced")
+        raise OSError("context storage temporarily unavailable")
 
     processor._context_provider = load
-    plan = OrderExecutionPlan("exit", "run-1", "original", "BTCUSDT", "SELL",
-        "LIMIT", Decimal("0.001"), Decimal("100"), True, NOW)
+    plan = OrderExecutionPlan(
+        "exit",
+        "run-1",
+        "original",
+        "BTCUSDT",
+        "SELL",
+        "LIMIT",
+        Decimal("0.001"),
+        Decimal("100"),
+        True,
+        NOW,
+    )
     request = LiveExitCancellationRequest(
-        cancel_plan=plan, fallback_candidate=replace(_intent(), reduce_only=True),
-        fallback_quantity=Decimal("0.001"), fallback_to_current_position=True)
-    result = await processor.process_requests((request,), state=_state(), context=_context())
-    assert result == (0, 0, "pending_live_context:BTCUSDT")
+        cancel_plan=plan,
+        fallback_candidate=replace(_intent(), reduce_only=True),
+        fallback_quantity=Decimal("0.001"),
+        fallback_to_current_position=True,
+    )
+    context = SimpleNamespace(
+        managed_positions=(
+            SimpleNamespace(
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+                quantity=plan.quantity,
+                side="long",
+                batches=(),
+            ),
+        )
+    )
+    result = await processor.process_requests(
+        (request,), state=_state(), context=context
+    )
+    assert result == (1, 1, None)
     processor._state_machine.cancel_order.assert_awaited_once()
-    assert submission.calls == []
+    assert len(submission.calls) == 1
 
 
 async def test_grace_cancel_rebuilds_fallback_from_latest_position():
@@ -794,9 +848,14 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
 
     is_current = [True]
     old_position = ManagedLivePosition(
-        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
-        Decimal("1.0"), Decimal("100"), NOW,
-        batch_id="batch-1", projection_version="old",
+        "BTCUSDT",
+        StrategySide.LONG,
+        FuturesPositionSide.LONG,
+        Decimal("1.0"),
+        Decimal("100"),
+        NOW,
+        batch_id="batch-1",
+        projection_version="old",
     )
     fresh_position = replace(
         old_position,
@@ -809,19 +868,22 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
         managed_positions=(fresh_position,),
     )
     submission = RecordingSubmission(_acknowledged_result())
-    processor = _processor(submission, context_is_current=lambda _: is_current[0])
+    processor = _processor(submission)
+
     async def refresh_context(_state):
         is_current[0] = True
         return fresh_context
 
     processor._context_provider = AsyncMock(side_effect=refresh_context)
     processor._apply_context = lambda _: None
-    processor._state_machine = SimpleNamespace(cancel_order=AsyncMock(
-        side_effect=lambda _plan: (
-            is_current.__setitem__(0, False)
-            or OrderExecutionResult("recovery", ExchangeOrderState.CANCELED, None)
+    processor._state_machine = SimpleNamespace(
+        cancel_order=AsyncMock(
+            side_effect=lambda _plan: (
+                is_current.__setitem__(0, False)
+                or OrderExecutionResult("recovery", ExchangeOrderState.CANCELED, None)
+            )
         )
-    ))
+    )
     candidate = replace(
         _intent(),
         candidate_id="old-fallback",
@@ -834,8 +896,16 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
         },
     )
     cancel_plan = OrderExecutionPlan(
-        "recovery", "run-1", "recovery", "BTCUSDT", "SELL", "LIMIT",
-        Decimal("1.0"), Decimal("99"), True, NOW,
+        "recovery",
+        "run-1",
+        "recovery",
+        "BTCUSDT",
+        "SELL",
+        "LIMIT",
+        Decimal("1.0"),
+        Decimal("99"),
+        True,
+        NOW,
         position_side=FuturesPositionSide.LONG,
     )
     request = LiveExitCancellationRequest(
@@ -845,7 +915,9 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
     )
 
     result = await processor.process_requests(
-        (request,), state=_state(), context=SimpleNamespace(
+        (request,),
+        state=_state(),
+        context=SimpleNamespace(
             pending_position_symbols=frozenset(),
             unmanaged_position_symbols=frozenset(),
             managed_positions=(old_position,),
@@ -861,41 +933,6 @@ async def test_grace_cancel_rebuilds_fallback_from_latest_position():
     assert submitted_candidate.features["exit_allocations"] == [
         {"batch_id": "batch-1", "quantity": "0.6"}
     ]
-
-
-async def test_stale_candle_context_is_not_acknowledged_as_evaluated():
-    from unittest.mock import AsyncMock
-
-    processor = _processor(RecordingSubmission(None), context_is_current=lambda _: False)
-    processor._exit_manager = SimpleNamespace(requests_for_closed_candle=AsyncMock())
-    event = SimpleNamespace(candle=SimpleNamespace(symbol="BTCUSDT"), received_at=NOW)
-    outcome = await processor.process_closed_candle(event, _state(), _context(), None)
-    assert outcome.failure == "pending_live_context:BTCUSDT"
-    assert not outcome.fatal_failure
-    processor._exit_manager.requests_for_closed_candle.assert_not_awaited()
-
-
-async def test_receipt_read_invalidated_by_account_update_does_not_commit_or_submit():
-    from unittest.mock import AsyncMock
-
-    current = [True]
-    processor = _processor(RecordingSubmission(_acknowledged_result()),
-                           context_is_current=lambda context: current[0])
-    processor._state_machine = SimpleNamespace(mark_absent_reconciled=AsyncMock(),
-                                               apply_observed_snapshot=AsyncMock())
-    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True, client_order_id="exit",
-                           intent_id="exit", position_side=SimpleNamespace(value="LONG"))
-    async def inspect(plan):
-        current[0] = False
-        return SimpleNamespace(order=None, position_quantity=Decimal("1"),
-                               active_exit_order_client_ids=(), observed_at=NOW)
-    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspect)
-    result = await processor._recover_unknown_exit(plan=plan,
-        known_executed_quantity=Decimal("0"), state=_state(), context=_context())
-    assert result is None
-    processor._state_machine.mark_absent_reconciled.assert_not_awaited()
-    processor._state_machine.apply_observed_snapshot.assert_not_awaited()
-    assert not processor._submission.calls
 
 
 @pytest.mark.parametrize("blocked_by", ["projection", "readiness", "admission"])
@@ -927,34 +964,59 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
     )
     processor = _processor(submission)
     plan = OrderExecutionPlan(
-        "exit", "run-1", "original", "BTCUSDT", "SELL", "MARKET",
-        Decimal("1"), None, True, NOW,
+        "exit",
+        "run-1",
+        "original",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("1"),
+        None,
+        True,
+        NOW,
         position_side=FuturesPositionSide.LONG,
-        batch_id="target", projection_version="pv_old",
+        batch_id="target",
+        projection_version="pv_old",
     )
     position = ManagedLivePosition(
-        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
-        Decimal("0.4"), Decimal("100"), NOW,
-        batch_id="target", projection_version="pv_current",
+        "BTCUSDT",
+        StrategySide.LONG,
+        FuturesPositionSide.LONG,
+        Decimal("0.4"),
+        Decimal("100"),
+        NOW,
+        batch_id="target",
+        projection_version="pv_current",
     )
     context = SimpleNamespace(
-        managed_positions=(position,), pending_position_symbols=frozenset(),
+        managed_positions=(position,),
+        pending_position_symbols=frozenset(),
         unmanaged_position_symbols=frozenset(),
     )
     processor._context_provider = lambda state: _provide(context)
     processor._state_machine = SimpleNamespace(
-        mark_absent_reconciled=AsyncMock(return_value=OrderExecutionResult(
-            "original", ExchangeOrderState.ABSENT_RECONCILED, None,
-        ))
+        mark_absent_reconciled=AsyncMock(
+            return_value=OrderExecutionResult(
+                "original",
+                ExchangeOrderState.ABSENT_RECONCILED,
+                None,
+            )
+        )
     )
     processor._exit_recovery_client = SimpleNamespace(
-        inspect_exit_order=AsyncMock(return_value=SimpleNamespace(
-            order=None, position_quantity=Decimal("0.4"),
-            active_exit_order_client_ids=(), observed_at=NOW,
-        ))
+        inspect_exit_order=AsyncMock(
+            return_value=SimpleNamespace(
+                order=None,
+                position_quantity=Decimal("0.4"),
+                active_exit_order_client_ids=(),
+                observed_at=NOW,
+            )
+        )
     )
     processor.request_exit_recovery(
-        plan=plan, known_executed_quantity=Decimal("0"), state=_state(),
+        plan=plan,
+        known_executed_quantity=Decimal("0"),
+        state=_state(),
         source_candidate=replace(_intent(), reduce_only=True),
     )
     assert await processor.recover_requested_exits() == ()
@@ -967,7 +1029,9 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
     processor._clock = lambda: processor._exit_recovery_next_attempt_at["original"]
     submission.execute.side_effect = None
     submission.execute.return_value = OrderExecutionResult(
-        "replacement", ExchangeOrderState.FILLED, "exchange-replacement",
+        "replacement",
+        ExchangeOrderState.FILLED,
+        "exchange-replacement",
     )
     outcomes = await processor.recover_requested_exits()
     assert len(outcomes) == 1
@@ -976,19 +1040,28 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
     assert submission.execute.await_count == 2
 
 
-async def test_recovery_batch_rotates_stale_reads_without_starving_later_orders():
+async def test_recovery_batch_rotates_failed_reads_without_starving_later_orders():
     processor = _processor(RecordingSubmission(None))
     processor._exit_recovery_client = object()
     reads = []
+
     async def load(state):
         reads.append(state.symbol)
-        raise LiveContextChangedDuringLoad("account advanced")
+        raise OSError("account storage temporarily unavailable")
+
     processor._context_provider = load
     for i in range(6):
         state = replace(_state(), symbol=f"SYMBOL{i}USDT")
-        processor.request_exit_recovery(plan=SimpleNamespace(symbol=state.symbol,
-            reduce_only=True, client_order_id=f"exit-{i}", intent_id=f"exit-{i}"),
-            known_executed_quantity=Decimal("0"), state=state)
+        processor.request_exit_recovery(
+            plan=SimpleNamespace(
+                symbol=state.symbol,
+                reduce_only=True,
+                client_order_id=f"exit-{i}",
+                intent_id=f"exit-{i}",
+            ),
+            known_executed_quantity=Decimal("0"),
+            state=state,
+        )
     await processor.recover_requested_exits()
     await processor.recover_requested_exits()
     assert reads[:5] == [f"SYMBOL{i}USDT" for i in range(5)]
@@ -1001,11 +1074,19 @@ async def test_latest_trigger_during_inspection_does_not_repeat_completed_recove
     processor = _processor(RecordingSubmission(None))
     processor._exit_recovery_client = object()
     state = _state()
-    plan = SimpleNamespace(symbol=state.symbol, client_order_id="exit", intent_id="exit")
-    processor.request_exit_recovery(plan=plan, known_executed_quantity=Decimal("0"), state=state)
+    plan = SimpleNamespace(
+        symbol=state.symbol, client_order_id="exit", intent_id="exit"
+    )
+    processor.request_exit_recovery(
+        plan=plan, known_executed_quantity=Decimal("0"), state=state
+    )
+
     async def recover(**kwargs):
-        processor.request_exit_recovery(plan=plan, known_executed_quantity=Decimal("0"), state=state)
+        processor.request_exit_recovery(
+            plan=plan, known_executed_quantity=Decimal("0"), state=state
+        )
         return OrderExecutionResult("exit", ExchangeOrderState.ABSENT_RECONCILED, None)
+
     processor._recover_unknown_exit = AsyncMock(side_effect=recover)
     assert len(await processor.recover_requested_exits()) == 1
     assert await processor.recover_requested_exits() == ()
@@ -1013,19 +1094,27 @@ async def test_latest_trigger_during_inspection_does_not_repeat_completed_recove
 
 
 @pytest.mark.parametrize("attempt", [3, 4])
-async def test_durable_recovery_attempt_identity_preserves_budget_after_restart(attempt):
+async def test_durable_recovery_attempt_does_not_stop_inspection_after_restart(attempt):
     from unittest.mock import AsyncMock
 
     processor = _processor(RecordingSubmission(None))  # No in-memory attempt history.
-    inspector = AsyncMock()
+    inspector = AsyncMock(side_effect=TimeoutError("exchange unavailable"))
     processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=inspector)
-    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True,
-        client_order_id="persisted-recovery", intent_id=f"live-exit-recovery-original-{attempt}",
-        position_side=SimpleNamespace(value="LONG"))
-    result = await processor._recover_unknown_exit(plan=plan,
-        known_executed_quantity=Decimal("0.2"), state=_state(), context=_context())
+    plan = SimpleNamespace(
+        symbol="BTCUSDT",
+        reduce_only=True,
+        client_order_id="persisted-recovery",
+        intent_id=f"live-exit-recovery-original-{attempt}",
+        position_side=SimpleNamespace(value="LONG"),
+    )
+    result = await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("0.2"),
+        state=_state(),
+        context=_context(),
+    )
     assert result is None
-    inspector.assert_not_awaited()
+    inspector.assert_awaited_once_with(plan)
     assert not processor._submission.calls
 
 
@@ -1036,14 +1125,33 @@ async def test_committed_flat_receipt_invalidates_context_without_replacement():
     invalidate = Mock()
     processor._invalidate_context_cache = invalidate
     result = OrderExecutionResult("exit", ExchangeOrderState.ABSENT_RECONCILED, None)
-    processor._state_machine = SimpleNamespace(mark_absent_reconciled=AsyncMock(return_value=result))
-    processor._exit_recovery_client = SimpleNamespace(inspect_exit_order=AsyncMock(return_value=SimpleNamespace(
-        order=None, position_quantity=Decimal("0"), active_exit_order_client_ids=(), observed_at=NOW)))
+    processor._state_machine = SimpleNamespace(
+        mark_absent_reconciled=AsyncMock(return_value=result)
+    )
+    processor._exit_recovery_client = SimpleNamespace(
+        inspect_exit_order=AsyncMock(
+            return_value=SimpleNamespace(
+                order=None,
+                position_quantity=Decimal("0"),
+                active_exit_order_client_ids=(),
+                observed_at=NOW,
+            )
+        )
+    )
     processor._context_provider = lambda state: _provide(_context())
-    plan = SimpleNamespace(symbol="BTCUSDT", reduce_only=True, client_order_id="exit",
-        intent_id="exit", position_side=SimpleNamespace(value="LONG"))
-    observed = await processor._recover_unknown_exit(plan=plan,
-        known_executed_quantity=Decimal("0"), state=_state(), context=_context())
+    plan = SimpleNamespace(
+        symbol="BTCUSDT",
+        reduce_only=True,
+        client_order_id="exit",
+        intent_id="exit",
+        position_side=SimpleNamespace(value="LONG"),
+    )
+    observed = await processor._recover_unknown_exit(
+        plan=plan,
+        known_executed_quantity=Decimal("0"),
+        state=_state(),
+        context=_context(),
+    )
     assert observed == result
     invalidate.assert_called_once()
     assert not processor._submission.calls
@@ -1063,49 +1171,79 @@ async def test_incomplete_terminal_fill_retains_recovery_without_replacement_pos
     submission = SimpleNamespace(execute=AsyncMock(return_value=None))
     processor = _processor(submission)
     plan = OrderExecutionPlan(
-        "exit", "run-1", "incomplete-original", "BTCUSDT", "SELL", "MARKET",
-        Decimal("1"), None, True, NOW,
-        position_side=FuturesPositionSide.LONG, batch_id="target",
+        "exit",
+        "run-1",
+        "incomplete-original",
+        "BTCUSDT",
+        "SELL",
+        "MARKET",
+        Decimal("1"),
+        None,
+        True,
+        NOW,
+        position_side=FuturesPositionSide.LONG,
+        batch_id="target",
     )
     position = ManagedLivePosition(
-        "BTCUSDT", StrategySide.LONG, FuturesPositionSide.LONG,
-        Decimal("1"), Decimal("100"), NOW,
-        batch_id="target", projection_version="pv_current",
+        "BTCUSDT",
+        StrategySide.LONG,
+        FuturesPositionSide.LONG,
+        Decimal("1"),
+        Decimal("100"),
+        NOW,
+        batch_id="target",
+        projection_version="pv_current",
     )
     context = SimpleNamespace(
-        managed_positions=(position,), pending_position_symbols=frozenset(),
+        managed_positions=(position,),
+        pending_position_symbols=frozenset(),
         unmanaged_position_symbols=frozenset(),
     )
     processor._context_provider = lambda state: _provide(context)
     pending = OrderExecutionResult(
-        plan.client_order_id, ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-        "exchange-original", executed_quantity=Decimal("1"), plan=plan,
+        plan.client_order_id,
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        "exchange-original",
+        executed_quantity=Decimal("1"),
+        plan=plan,
     )
     processor._state_machine = SimpleNamespace(
         apply_observed_snapshot=AsyncMock(return_value=pending),
     )
     observation = SimpleNamespace(
         order=ExchangeOrderSnapshot(
-            plan.client_order_id, "exchange-original", ExchangeOrderState.FILLED,
-            NOW, Decimal("1"), Decimal("0"),
+            plan.client_order_id,
+            "exchange-original",
+            ExchangeOrderState.FILLED,
+            NOW,
+            Decimal("1"),
+            Decimal("0"),
         ),
         # The account position can still lag behind the already reported fill.
-        position_quantity=Decimal("1"), active_exit_order_client_ids=(), observed_at=NOW,
+        position_quantity=Decimal("1"),
+        active_exit_order_client_ids=(),
+        observed_at=NOW,
     )
     processor._exit_recovery_client = SimpleNamespace(
         inspect_exit_order=AsyncMock(return_value=observation),
     )
     processor.request_exit_recovery(
-        plan=plan, known_executed_quantity=Decimal("1"), state=_state(),
+        plan=plan,
+        known_executed_quantity=Decimal("1"),
+        state=_state(),
         source_candidate=replace(_intent(), reduce_only=True),
     )
     await processor.recover_requested_exits()
     assert processor.has_pending_recovery
     submission.execute.assert_not_awaited()
-    processor._clock = lambda: processor._exit_recovery_next_attempt_at[plan.client_order_id]
+    processor._clock = lambda: processor._exit_recovery_next_attempt_at[
+        plan.client_order_id
+    ]
     observation.position_quantity = Decimal("0")
     processor._state_machine.apply_observed_snapshot.return_value = replace(
-        pending, state=ExchangeOrderState.FILLED, average_price=Decimal("100"),
+        pending,
+        state=ExchangeOrderState.FILLED,
+        average_price=Decimal("100"),
     )
     await processor.recover_requested_exits()
     assert not processor.has_pending_recovery

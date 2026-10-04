@@ -222,11 +222,11 @@ async def test_unfinished_position_repair_retries_without_more_account_events(
         interval_seconds=0.01,
     )
     positions = LiveUnmanagedPositionRepair(
+        context_is_current=lambda _context: True,
         account_label="primary",
         run_id="run",
         book=SimpleNamespace(get_active_stream=lambda *_args: ("hub", "epoch")),
         uow=SimpleNamespace(),
-        context_is_current=lambda _context: True,
         invalidate_context=repaired.set,
         request_recovery=recovery.request_recovery,
     )

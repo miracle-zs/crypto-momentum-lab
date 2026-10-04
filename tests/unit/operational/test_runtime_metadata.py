@@ -120,10 +120,10 @@ def test_runtime_metadata_snapshot_create_factory() -> None:
 def test_compute_trading_rules_hash() -> None:
     from decimal import Decimal
 
+    from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
     from crypto_momentum_lab.domain.operational.runtime_metadata import (
         compute_trading_rules_hash,
     )
-    from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 
     rules = {
         "BTCUSDT": SymbolTradingRules(

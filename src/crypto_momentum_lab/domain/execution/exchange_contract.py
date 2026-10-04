@@ -90,9 +90,3 @@ ExchangeBoundaryCallback = Callable[
     [OrderExecutionPlan, str, datetime],
     Awaitable[None],
 ]
-
-
-OrderExchangeSubmitGuard = Callable[
-    [OrderExecutionPlan, datetime],
-    Awaitable[None],
-]

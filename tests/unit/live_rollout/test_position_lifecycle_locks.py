@@ -5,7 +5,7 @@ import pytest
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.live_rollout.position_lifecycle import (
-    PositionLifecycleActors,
+    PositionLifecycleLocks,
 )
 
 
@@ -15,7 +15,7 @@ def _key(symbol: str, side: FuturesPositionSide) -> PositionKey:
 
 @pytest.mark.asyncio
 async def test_actor_serializes_one_position_and_runs_other_positions_concurrently():
-    actors = PositionLifecycleActors()
+    actors = PositionLifecycleLocks()
     started = asyncio.Event()
     release = asyncio.Event()
     order: list[str] = []
@@ -56,7 +56,7 @@ async def test_actor_serializes_one_position_and_runs_other_positions_concurrent
 
 @pytest.mark.asyncio
 async def test_actor_continues_after_one_lifecycle_operation_fails():
-    actors = PositionLifecycleActors()
+    actors = PositionLifecycleLocks()
     key = _key("BTCUSDT", FuturesPositionSide.SHORT)
 
     async def fail() -> None:
@@ -67,3 +67,36 @@ async def test_actor_continues_after_one_lifecycle_operation_fails():
 
     assert await actors.run(key, lambda: asyncio.sleep(0, result=7)) == 7
     await actors.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_never_runs_and_drain_waits_for_admitted_work():
+    locks = PositionLifecycleLocks()
+    key = _key("BTCUSDT", FuturesPositionSide.LONG)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    executed = []
+
+    async def first():
+        started.set()
+        await release.wait()
+
+    async def cancelled_operation():
+        executed.append("unexpected")
+
+    active = asyncio.create_task(locks.run(key, first))
+    await started.wait()
+    waiter = asyncio.create_task(locks.run(key, cancelled_operation))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    draining = asyncio.create_task(locks.drain())
+    await asyncio.sleep(0)
+    assert not draining.done()
+    release.set()
+    await active
+    await draining
+    assert executed == []
+    assert await locks.run(key, lambda: asyncio.sleep(0, result=7)) == 7
+    await locks.close()

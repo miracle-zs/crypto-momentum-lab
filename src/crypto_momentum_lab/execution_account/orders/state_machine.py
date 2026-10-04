@@ -3,7 +3,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
@@ -18,9 +17,7 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
     OrderExchangeClient,
-    OrderExchangeSubmitGuard,
 )
-from crypto_momentum_lab.domain.execution.models import ShadowSuppressionEvent
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderFill,
@@ -39,30 +36,17 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 log = structlog.get_logger()
 
 
-class SubmitPolicy(StrEnum):
-    SHADOW_SUPPRESS = "shadow_suppress"
-    LIVE_SUBMIT = "live_submit"
-
-
 class OrderPlanRepository(Protocol):
     async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
         pass
 
 
-class ShadowSuppressionRepository(Protocol):
-    async def save_shadow_suppression(
-        self,
-        event: ShadowSuppressionEvent,
-    ) -> None:
-        pass
-
-
 class OrderEventRepository(Protocol):
-    async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
-        pass
-
-    async def save_fill(self, fill: ExchangeOrderFill) -> bool:
-        pass
+    async def record_order_observation(
+        self,
+        event: ExchangeOrderEvent,
+        fills: tuple[ExchangeOrderFill, ...] = (),
+    ) -> bool: ...
 
 
 OrderEventCallback = Callable[
@@ -81,7 +65,6 @@ class OrderExecutionResult:
     client_order_id: str
     state: ExchangeOrderState
     exchange_order_id: str | None
-    suppressed: bool = False
     executed_quantity: Decimal = Decimal("0")
     average_price: Decimal = Decimal("0")
     plan: OrderExecutionPlan | None = None
@@ -103,13 +86,10 @@ class OrderExecutionStateMachine:
         exchange: OrderExchangeClient,
         repository: OrderPlanRepository,
         event_repository: OrderEventRepository,
-        shadow_repository: ShadowSuppressionRepository | None = None,
-        submit_policy: SubmitPolicy,
         live_submit_enabled: bool,
         clock: Callable[[], datetime] | None = None,
         on_event: OrderEventCallback | None = None,
         on_before_submit: OrderPreSubmissionCallback | None = None,
-        on_before_exchange_submit: OrderExchangeSubmitGuard | None = None,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
         serialize_commands: bool = True,
@@ -123,18 +103,13 @@ class OrderExecutionStateMachine:
     ) -> None:
         if any(delay < 0 for delay in reconciliation_retry_delays):
             raise ValueError("reconciliation retry delays must not be negative")
-        if submit_policy is SubmitPolicy.SHADOW_SUPPRESS and shadow_repository is None:
-            raise ValueError("shadow submit requires a suppression repository")
-        self._shadow_repository = shadow_repository
         self._exchange = exchange
         self._repository = repository
         self._event_repository = event_repository
-        self._submit_policy = submit_policy
         self._live_submit_enabled = live_submit_enabled
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._on_event = on_event
         self._on_before_submit = on_before_submit
-        self._on_before_exchange_submit = on_before_exchange_submit
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
@@ -147,12 +122,7 @@ class OrderExecutionStateMachine:
         if self._exchange_configured:
             return
         self._exchange_configured = True
-        set_guard = getattr(self._exchange, "set_before_order_submit_guard", None)
-        if callable(set_guard):
-            set_guard(self._on_before_exchange_submit)
-        set_boundary = getattr(
-            self._exchange, "set_exchange_boundary_callbacks", None
-        )
+        set_boundary = getattr(self._exchange, "set_exchange_boundary_callbacks", None)
         if callable(set_boundary):
             set_boundary(
                 on_request=self._on_exchange_request,
@@ -186,49 +156,15 @@ class OrderExecutionStateMachine:
         try:
             if not plan.quantized:
                 raise ValueError("order plan must be quantized before execution")
-            if (
-                self._submit_policy is SubmitPolicy.LIVE_SUBMIT
-                and not self._live_submit_enabled
-            ):
+            if not self._live_submit_enabled:
                 raise LiveSubmissionDisabledError(
-                    "live_submit policy requires explicit live_submit_enabled"
+                    "live submission requires explicit live_submit_enabled"
                 )
             if prepared_submission is not None:
                 if prepared_submission.plan != plan:
                     raise ValueError("prepared submission does not match order plan")
-                if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                    raise ValueError(
-                        "shadow submit cannot use a prepared live submission"
-                    )
             else:
                 await self._repository.save_planned_order(plan)
-            if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
-                assert self._shadow_repository is not None
-                await self._shadow_repository.save_shadow_suppression(
-                    ShadowSuppressionEvent(
-                        order_plan_id=plan.client_order_id,
-                        client_order_id=plan.client_order_id,
-                        suppressed_at=self._now(),
-                        reason="shadow_submit_policy",
-                        order_payload={
-                            "symbol": plan.symbol,
-                            "side": plan.side,
-                            "type": plan.order_type,
-                            "quantity": str(plan.quantity),
-                            "price": None if plan.price is None else str(plan.price),
-                            "reduce_only": plan.reduce_only,
-                        },
-                    )
-                )
-                await self._append_event(plan, ExchangeOrderState.SUPPRESSED)
-                return OrderExecutionResult(
-                    client_order_id=plan.client_order_id,
-                    state=ExchangeOrderState.SUPPRESSED,
-                    exchange_order_id=None,
-                    suppressed=True,
-                    plan=plan,
-                )
-
             if prepared_submission is None:
                 await self._append_event(plan, ExchangeOrderState.SUBMITTING)
             else:
@@ -369,28 +305,18 @@ class OrderExecutionStateMachine:
         """Close an unknown order after an independent absence proof."""
         if not plan.quantized:
             raise ValueError("order plan must be quantized before absence resolution")
-        if self._lock is None:
-            return await self._mark_absent_reconciled(plan, details=details)
-        async with self._lock:
-            return await self._mark_absent_reconciled(plan, details=details)
-
-    async def _mark_absent_reconciled(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        details: dict[str, JsonValue],
-    ) -> OrderExecutionResult:
-        await self._append_event(
-            plan,
-            ExchangeOrderState.ABSENT_RECONCILED,
-            details=details,
-        )
-        return OrderExecutionResult(
-            plan.client_order_id,
-            ExchangeOrderState.ABSENT_RECONCILED,
-            None,
-            plan=plan,
-        )
+        async with self._observation_lock:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.ABSENT_RECONCILED,
+                details=details,
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.ABSENT_RECONCILED,
+                None,
+                plan=plan,
+            )
 
     async def cancel_order(
         self,
@@ -588,8 +514,6 @@ class OrderExecutionStateMachine:
     ) -> OrderExecutionResult:
         if snapshot.client_order_id != plan.client_order_id:
             raise ValueError("exchange response client order id mismatch")
-        for fill in snapshot.fills:
-            await self._event_repository.save_fill(fill)
         if snapshot.executed_quantity > 0 and snapshot.average_price <= 0:
             # A reported fill quantity without its quote is incomplete evidence,
             # not a settled terminal receipt. Keep the identity and quantity for
@@ -605,6 +529,7 @@ class OrderExecutionStateMachine:
                     "average_price": str(snapshot.average_price),
                 },
                 occurred_at=snapshot.observed_at,
+                fills=snapshot.fills,
             )
             return OrderExecutionResult(
                 plan.client_order_id,
@@ -624,6 +549,7 @@ class OrderExecutionStateMachine:
                 "entry_leverage": snapshot.entry_leverage,
             },
             occurred_at=snapshot.observed_at,
+            fills=snapshot.fills,
         )
         return OrderExecutionResult(
             plan.client_order_id,
@@ -642,6 +568,7 @@ class OrderExecutionStateMachine:
         exchange_order_id: str | None = None,
         details: dict[str, JsonValue] | None = None,
         occurred_at: datetime | None = None,
+        fills: tuple[ExchangeOrderFill, ...] = (),
     ) -> None:
         event_at = occurred_at or self._now()
         # Multiple partial fills can share the exchange millisecond. Their
@@ -666,7 +593,7 @@ class OrderExecutionStateMachine:
             exchange_order_id=exchange_order_id,
             details=details or {},
         )
-        inserted = await self._event_repository.append_order_event(event)
+        inserted = await self._event_repository.record_order_observation(event, fills)
         if inserted:
             await self._notify_event(plan, event)
 
@@ -692,12 +619,6 @@ class OrderExecutionStateMachine:
                 and self._on_before_submit is not None
             ):
                 await self._on_before_submit(plan, self._now())
-            if (
-                operation == "submit"
-                and self._on_before_exchange_submit is not None
-                and not hasattr(self._exchange, "set_before_order_submit_guard")
-            ):
-                await self._on_before_exchange_submit(plan, self._now())
         except Exception as guard_exc:
             if isinstance(guard_exc, _OrderPreSubmissionError):
                 raise
@@ -705,9 +626,8 @@ class OrderExecutionStateMachine:
                 f"pre-submission guard failed: {guard_exc}"
             ) from guard_exc
 
-        exchange_handles_boundary = (
-            operation == "submit"
-            and hasattr(self._exchange, "set_exchange_boundary_callbacks")
+        exchange_handles_boundary = operation == "submit" and hasattr(
+            self._exchange, "set_exchange_boundary_callbacks"
         )
         if not exchange_handles_boundary:
             await self._notify_exchange_boundary(

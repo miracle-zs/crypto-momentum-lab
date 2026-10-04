@@ -36,7 +36,6 @@ from crypto_momentum_lab.domain.decision.policy_transition import (
     serialize_policy_state,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionHealthStatus,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
@@ -991,19 +990,6 @@ def create_authoritative_decision_filter(
         pos_view = frozen.position_view
         if pos_view.key.symbol != state.symbol:
             return _reject_all(decision, state, "frozen_inputs_symbol_mismatch")
-        if not pos_view.is_ready_for_trade:
-            if pos_view.health_status != PositionHealthStatus.READY:
-                return _reject_all(
-                    decision,
-                    state,
-                    f"position_health_{pos_view.health_status.value.lower()}",
-                )
-            return _reject_all(
-                decision,
-                state,
-                "position_not_ready_for_trade",
-            )
-
         scope_to_use = getattr(state, "environment", None)
         if not scope_to_use:
             raise ValueError("MarketState15s requires an explicit environment")

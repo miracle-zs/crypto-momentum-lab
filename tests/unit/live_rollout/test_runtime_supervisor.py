@@ -43,7 +43,6 @@ def _runtime_tasks(
     return LiveRuntimeTasks(
         market=asyncio.create_task(_wait_for_market_result()),
         account=account,
-        lease=asyncio.create_task(_wait_forever()),
         reconcile=asyncio.create_task(_wait_forever()),
         startup_market=startup_market,
         local_health=local_health,

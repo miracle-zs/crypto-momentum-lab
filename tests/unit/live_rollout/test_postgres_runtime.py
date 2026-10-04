@@ -9,6 +9,7 @@ import pytest
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
+    ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
@@ -24,12 +25,8 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.live_rollout import (
-    LIVE_APPROVAL_CONFIRMATION,
-    LiveOperatorApproval,
-)
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
-from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
+from crypto_momentum_lab.domain.risk import StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
@@ -38,13 +35,11 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveDaemonRuntimeContext,
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
-    _classify_live_positions,
     _classify_live_positions_detailed,
 )
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _resolve_strategy_live_state,
-    live_limits_from_approval,
     poll_live_market_states,
 )
 from crypto_momentum_lab.persistence.postgres.position_order_window import (
@@ -52,14 +47,15 @@ from crypto_momentum_lab.persistence.postgres.position_order_window import (
     _opening_anchors_from_events,
     _OrderAnchorEvent,
 )
-from tests.unit.live_rollout.test_gates import _context as gate_context
 from tests.fixtures.live_market import _context as shadow_context
+from tests.unit.live_rollout.test_gates import _context as gate_context
+from tests.unit.live_rollout.test_gates import _risk_config as gate_risk_config
 
 NOW = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
 
 
 def test_classifies_position_opened_by_current_run_as_managed() -> None:
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position()],
         [_order(reduce_only=False, side="BUY")],
     )
@@ -72,7 +68,7 @@ def test_classifies_position_opened_by_current_run_as_managed() -> None:
 
 
 def test_marks_external_position_as_unmanaged() -> None:
-    managed, unmanaged = _classify_live_positions([_position()], [])
+    managed, _pending, unmanaged = _classify_live_positions_detailed([_position()], [])
 
     assert managed == ()
     assert unmanaged == frozenset({"BTCUSDT"})
@@ -119,7 +115,7 @@ def test_stale_unfilled_current_run_entry_remains_unmanaged() -> None:
 
 
 def test_filled_close_suppresses_duplicate_exit_during_account_sync_lag() -> None:
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position()],
         [
             _order(
@@ -141,7 +137,7 @@ def test_prior_exit_does_not_suppress_a_reopened_position() -> None:
     old_exit_created_at = NOW + timedelta(seconds=10)
     old_exit_filled_at = NOW + timedelta(seconds=30)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position()],
         [
             _order(
@@ -176,7 +172,7 @@ def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
     old_exit_created_at = NOW + timedelta(seconds=10)
     old_exit_filled_at = NOW + timedelta(seconds=30)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("0.5"))],
         [
             _order(
@@ -220,7 +216,7 @@ def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
 def test_partial_close_does_not_suppress_remaining_position() -> None:
     entry_fill_at = NOW + timedelta(seconds=20)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("0.5"))],
         [
             _order(
@@ -253,7 +249,7 @@ def test_close_larger_than_remaining_position_does_not_suppress_it() -> None:
     add_on_fill_at = NOW + timedelta(seconds=20)
     close_fill_at = add_on_fill_at + timedelta(seconds=5)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         # The add-on lot was closed, while the original lot remains open.
         [_position(position_amt=Decimal("0.5"))],
         [
@@ -302,7 +298,7 @@ def test_position_batches_split_at_exit_order_and_use_latest_entry_time() -> Non
     latest_second_entry_at = NOW + timedelta(minutes=87)
     second_exit_at = NOW + timedelta(minutes=105)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("4470"))],
         [
             _order(
@@ -401,7 +397,7 @@ def test_classifies_remaining_recovery_quantity_after_partial_fill() -> None:
         executed_quantity=Decimal("0.400"),
     )
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("0.727"))],
         [
             _order(
@@ -422,7 +418,7 @@ def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> Non
     old_entry_at = NOW
     partial_entry_fill_at = NOW + timedelta(seconds=25)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position()],
         [
             _order(
@@ -455,7 +451,7 @@ def test_late_fill_after_an_exit_is_a_new_position_episode() -> None:
     pending_entry_created_at = NOW + timedelta(seconds=5)
     pending_entry_fill_at = NOW + timedelta(seconds=25)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position()],
         [
             _order(
@@ -487,7 +483,7 @@ def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
     old_exit_filled_at = NOW + timedelta(seconds=15)
     pending_entry_created_at = NOW + timedelta(seconds=20)
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("0.25"))],
         [
             _order(
@@ -596,7 +592,7 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
         ),
     ]
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("386"))],
         orders,
         exit_batch_ids={
@@ -666,7 +662,7 @@ def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
             client_order_id="current-entry",
         ),
     ]
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("266"))],
         orders,
         exit_batch_ids={"old-close-4542": "BTCUSDT:LONG:old-entry-a"},
@@ -728,7 +724,7 @@ def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
         ),
     ]
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(position_amt=Decimal("4595"))],
         orders,
         exit_batch_ids={
@@ -750,7 +746,7 @@ def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -
     current_entry_at = NOW + timedelta(days=30)
     legacy_client_id = "legacy-zero-fill-exit"
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [
             _position(
                 symbol="MINAUSDT",
@@ -808,7 +804,7 @@ def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -
 
 def test_active_zero_fill_legacy_identity_collision_remains_blocked() -> None:
     legacy_client_id = "legacy-active-zero-fill-exit"
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(symbol="MINAUSDT", position_amt=Decimal("926"))],
         [
             _order(
@@ -859,42 +855,6 @@ def test_draining_control_survives_a_later_operational_halt() -> None:
     )
 
 
-def test_live_limits_preserve_unbounded_capacity() -> None:
-    risk_config = RiskConfigSnapshot(
-        environment="live",
-        account_label="primary",
-        max_order_notional=None,
-        max_gross_notional=None,
-        max_daily_loss=None,
-        max_open_positions=None,
-        max_market_state_age_seconds=30,
-        max_account_state_age_seconds=30,
-        allow_reduce_only_while_draining=True,
-        created_at=NOW,
-    )
-    approval = LiveOperatorApproval(
-        approval_id="approval-1",
-        account_label="primary",
-        strategy_name="orderflow_impulse",
-        strategy_config_hash="a" * 64,
-        risk_config_hash=risk_config.config_hash,
-        git_commit_hash="abc123",
-        database_migration_revision="20260814_0016",
-        approved_notional_cap=None,
-        approved_max_open_positions=None,
-        approved_max_daily_loss=None,
-        approver_name="operator",
-        approval_text=LIVE_APPROVAL_CONFIRMATION,
-        expires_at=None,
-        created_at=NOW,
-    )
-
-    limits = live_limits_from_approval(
-        approval=approval,
-        risk_config=risk_config,
-    )
-
-    assert limits == (None, None, None, None)
 
 
 async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
@@ -1299,10 +1259,6 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     provider._account_label = "primary"
     provider._strategy_name = cached.gate_context.strategy_name
     provider._strategy_config_hash = cached.gate_context.strategy_config_hash
-    provider._git_commit_hash = cached.gate_context.git_commit_hash
-    provider._migration_revision = cached.gate_context.database_migration_revision
-    provider._lease_owner = cached.gate_context.required_lease_owner
-    provider._approval_id = cached.gate_context.approval.approval_id
     provider._cached_bucket_start = NOW + timedelta(minutes=1)
     provider._cached_context = cached
     provider._cached_rules = {"BTCUSDT": expected_rule}
@@ -1312,16 +1268,9 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     full_loads = 0
     rule_loads = 0
 
-    async def full_context_load(**_kwargs):
-        nonlocal full_loads
-        full_loads += 1
-        return cached.gate_context.approval
-
     class RiskRepository:
         async def load_active_lease(self, *_args):
-            nonlocal full_loads
-            full_loads += 1
-            return cached.active_lease
+            raise AssertionError("context must not load lease")
 
         async def load_active_halts(self, *_args):
             nonlocal full_loads
@@ -1369,9 +1318,6 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
         full_loads += 1
         return cached.strategy_state
 
-    provider._live_repository = SimpleNamespace(
-        load_active_approval=full_context_load,
-    )
     provider._risk_repository = RiskRepository()
     provider._load_symbol_rules = load_symbol_rules
     provider._load_unresolved_and_position_view = load_positions
@@ -1418,7 +1364,6 @@ async def test_next_market_bucket_reuses_fresh_context_cache() -> None:
     result = await provider(state)
 
     assert result.trading_rules == {"BTCUSDT": expected_rule}
-    assert result.gate_context.now == result.now
 
 
 async def test_live_market_poll_skips_a_backlog_to_the_latest_closed_bucket() -> None:
@@ -1473,30 +1418,19 @@ async def test_context_reload_survives_cache_invalidation_during_rule_load(
     provider._account_label = "primary"
     provider._strategy_name = cached.gate_context.strategy_name
     provider._strategy_config_hash = cached.gate_context.strategy_config_hash
-    provider._git_commit_hash = cached.gate_context.git_commit_hash
-    provider._migration_revision = cached.gate_context.database_migration_revision
-    provider._lease_owner = cached.gate_context.required_lease_owner
-    provider._approval_id = cached.gate_context.approval.approval_id
-    provider._lease_ttl_seconds = 300
-    provider._lease_renew_before_seconds = 120
     provider._cached_bucket_start = state.bucket_start
     provider._cached_context = cached
     provider._cached_rules = {}
     provider._cached_rules_at = {}
     provider._sessions = object()
 
-    class LiveRepository:
-        async def load_active_approval(self, **_kwargs):
-            return cached.gate_context.approval
-
     class RiskRepository:
         async def load_active_lease(self, *_args):
-            return cached.active_lease
+            raise AssertionError("context must not load lease")
 
         async def load_active_halts(self, *_args):
             return ()
 
-    provider._live_repository = LiveRepository()
     provider._risk_repository = RiskRepository()
 
     async def latest_risk_config(_sessions, _account_label):
@@ -1573,8 +1507,7 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
     return LiveDaemonRuntimeContext(
         now=NOW,
         gate_context=gate,
-        active_lease=gate.active_lease,
-        account_state=gate.account_state,
+        account_state=ExecutionAccountStatus.RUNNING,
         account_observed_at=NOW,
         open_position_symbols=frozenset(),
         realized_pnl=Decimal("0"),
@@ -1582,7 +1515,7 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
         gross_exposure=Decimal("0"),
         active_halts=(),
         unresolved_order_states=(),
-        risk_config=gate.risk_config,
+        risk_config=gate_risk_config(),
         strategy_state=shadow.strategy_state,
         trading_rules=rules,
     )
@@ -1748,7 +1681,7 @@ def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> Non
         ),
     ]
 
-    managed, unmanaged = _classify_live_positions(
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
         [_position(symbol="MARSCOINUSDT", position_amt=Decimal("1077"))],
         orders,
         exit_batch_ids={},
@@ -2239,4 +2172,3 @@ async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) 
     assert provider.is_symbol_rules_warmed("BTCUSDT")
     assert provider._cached_rules["BTCUSDT"] == rule
     assert provider._cached_rules_at["BTCUSDT"] == NOW
-

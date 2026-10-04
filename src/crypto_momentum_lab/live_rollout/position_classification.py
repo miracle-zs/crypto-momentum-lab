@@ -78,37 +78,6 @@ _PENDING_ENTRY_STATES = frozenset(
 _PENDING_POSITION_MAX_AGE_SECONDS = 60
 
 
-def _classify_live_positions(
-    positions: Sequence[AccountPositionSnapshot | PositionObservation],
-    orders: list[OrderObservation],
-    unresolved: tuple[PersistedExchangeOrder, ...] = (),
-    *,
-    entry_fill_times: Mapping[str, datetime] | None = None,
-    entry_fill_prices: Mapping[str, Decimal] | None = None,
-    exit_batch_ids: Mapping[str, str] | None = None,
-    order_identity_events: Mapping[
-        str,
-        Sequence[OrderIdentityEvent],
-    ]
-    | None = None,
-    account_fill_quantities: Mapping[str, Decimal] | None = None,
-    coverage_by_symbol: Mapping[str, CoverageEvidence] | None = None,
-) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
-    """Keep the historical two-value classification API for callers/tests."""
-    managed, _pending, unmanaged = _classify_live_positions_detailed(
-        positions,
-        orders,
-        unresolved,
-        entry_fill_times=entry_fill_times,
-        entry_fill_prices=entry_fill_prices,
-        exit_batch_ids=exit_batch_ids,
-        order_identity_events=order_identity_events,
-        account_fill_quantities=account_fill_quantities,
-        coverage_by_symbol=coverage_by_symbol,
-    )
-    return managed, unmanaged
-
-
 def _classify_live_positions_detailed(
     positions: Sequence[AccountPositionSnapshot | PositionObservation],
     orders: list[OrderObservation],

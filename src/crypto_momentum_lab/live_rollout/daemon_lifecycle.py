@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable
+from dataclasses import replace
 
 import structlog
 
@@ -17,7 +18,7 @@ from crypto_momentum_lab.live_rollout.exit_lane import (
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
 from crypto_momentum_lab.live_rollout.market_runtime_contracts import LiveDaemonResult
-from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleActors
+from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
 )
@@ -42,7 +43,7 @@ class LiveDaemonLifecycle:
             [AsyncIterable[MarketState15s]], Awaitable[LiveDaemonResult]
         ],
         set_run_active: Callable[[bool], None],
-        position_actors: PositionLifecycleActors | None = None,
+        position_locks: PositionLifecycleLocks | None = None,
         shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         if not run_id.strip():
@@ -57,7 +58,7 @@ class LiveDaemonLifecycle:
         self._scheduled_risk_window_enabled = scheduled_risk_window_enabled
         self._run_market_loop = run_market_loop
         self._set_run_active = set_run_active
-        self._position_actors = position_actors
+        self._position_locks = position_locks
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
 
     async def run(
@@ -67,6 +68,7 @@ class LiveDaemonLifecycle:
         self._set_run_active(True)
         result: LiveDaemonResult | None = None
         exit_outcome = ExitLaneOutcome()
+        shutdown_failure: str | None = None
         scheduled_task: asyncio.Task[None] | None = None
         try:
             await self._checkpoint_coordinator.start()
@@ -105,10 +107,7 @@ class LiveDaemonLifecycle:
                         run_id=self._run_id,
                         timeout_seconds=self._shutdown_timeout_seconds,
                     )
-                    exit_outcome = ExitLaneOutcome(
-                        failure="exit_lane_shutdown_timed_out",
-                        fatal_failure=True,
-                    )
+                    shutdown_failure = "exit_lane_shutdown_timed_out"
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -116,10 +115,7 @@ class LiveDaemonLifecycle:
                         "live_exit_lane_shutdown_failed",
                         run_id=self._run_id,
                     )
-                    exit_outcome = ExitLaneOutcome(
-                        failure="exit_lane_shutdown_failed",
-                        fatal_failure=True,
-                    )
+                    shutdown_failure = "exit_lane_shutdown_failed"
             try:
                 async with asyncio.timeout(self._shutdown_timeout_seconds):
                     await self._checkpoint_coordinator.stop()
@@ -136,10 +132,10 @@ class LiveDaemonLifecycle:
                     "live_checkpoint_shutdown_failed",
                     run_id=self._run_id,
                 )
-            if self._position_actors is not None:
+            if self._position_locks is not None:
                 try:
                     async with asyncio.timeout(self._shutdown_timeout_seconds):
-                        await self._position_actors.drain()
+                        await self._position_locks.drain()
                 except TimeoutError:
                     log.warning(
                         "live_position_actor_shutdown_timed_out",
@@ -157,7 +153,7 @@ class LiveDaemonLifecycle:
         if result is None:
             raise RuntimeError("live daemon stopped without a result")
         return _merge_lane_outcomes(
-            result,
+            replace(result, halt_reason=result.halt_reason or shutdown_failure),
             exit_outcome=exit_outcome,
             scheduled_controller=self._scheduled_controller,
         )
@@ -181,10 +177,7 @@ def _merge_lane_outcomes(
             + exit_outcome.submitted_order_count
             + scheduled_controller.submitted_order_count
         ),
-        halt_reason=(
-            result.halt_reason
-            or (exit_outcome.failure if exit_outcome.fatal_failure else None)
-        ),
+        halt_reason=result.halt_reason,
         final_state_at=result.final_state_at,
     )
 

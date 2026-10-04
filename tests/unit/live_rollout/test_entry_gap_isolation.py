@@ -1,4 +1,4 @@
-"""Tests for blast radius isolation in execution readiness and entry filtering."""
+"""Entry processing remains local when another symbol has a position gap."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import cast
 import pytest
 
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
-from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -64,14 +63,6 @@ async def test_symbol_level_isolation_allows_healthy_symbol_entry_when_other_sym
         unresolved_orders = ()
         pending_position_symbols = frozenset()
 
-    # Symbol-aware readiness evaluator:
-    # GRASSUSDT is PROGRESS_LAGGING due to gap
-    # ESPORTSUSDT is INDEPENDENT_EXECUTABLE (no gap, fresh)
-    def symbol_aware_readiness(symbol: str | None = None) -> ExecutionReadiness:
-        if symbol == "GRASSUSDT":
-            return ExecutionReadiness.PROGRESS_LAGGING
-        return ExecutionReadiness.INDEPENDENT_EXECUTABLE
-
     async def mock_execute(candidate, **kwargs):
         executed.append(candidate.symbol)
         return OrderExecutionResult(
@@ -83,7 +74,6 @@ async def test_symbol_level_isolation_allows_healthy_symbol_entry_when_other_sym
     lane = EntryExecutionLane(
         config=EntryLaneConfig(
             run_id="run-live-1",
-            readiness_provider=symbol_aware_readiness,
         ),
         clock=lambda: NOW,
         entry_enabled=lambda: True,

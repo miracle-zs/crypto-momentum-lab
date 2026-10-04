@@ -11,14 +11,10 @@ from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
-from crypto_momentum_lab.live_rollout.lease_recovery import (
-    should_auto_reacquire_live_lease,
-)
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     restore_live_strategy_from_checkpoint,
     validate_live_warmup_coverage,
@@ -283,7 +279,6 @@ def test_live_cli_exposes_required_commands() -> None:
         "refresh-approval-runtime",
         "prepare",
         "renew-lease",
-        "preflight",
         "resolve-missing-order",
         "run",
         "submit-plan",
@@ -715,52 +710,6 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
     assert profile.min_notional_5m_vs_30m == Decimal("1.50")
 
 
-def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_run_live_daemon(
-        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
-    ):
-        captured["config"] = config
-        captured.update(kwargs)
-        return main.LiveDaemonResult(
-            processed_state_count=0,
-            approved_intent_count=0,
-            submitted_order_count=0,
-            halt_reason=None,
-            final_state_at=None,
-        )
-
-    async def fake_startup_backoff(run_once, **_kwargs):
-        return await run_once()
-
-    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
-    monkeypatch.setattr(
-        main,
-        "_run_with_live_startup_backoff",
-        fake_startup_backoff,
-    )
-    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
-    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
-    _set_live_profile_env(monkeypatch)
-
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--acknowledge-missing-shadow-preflight",
-            "--i-understand-this-places-real-orders",
-        ],
-    )
-
-    assert result.exit_code == 0
-    config = captured["config"]
-    assert isinstance(config, runtime_config.LiveRuntimeConfig)
-    assert config.lifecycle.acknowledge_missing_shadow_preflight is True
-
-
 def test_resolve_missing_order_requires_exact_confirmation() -> None:
     result = runner.invoke(
         app,
@@ -899,259 +848,6 @@ def test_refresh_approval_runtime_preserves_existing_limits(monkeypatch) -> None
     assert refreshed.approved_max_daily_loss == current.approved_max_daily_loss
     assert refreshed.approver_name == current.approver_name
     assert refreshed.approval_text == current.approval_text
-
-
-def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
-    now = datetime.now(tz=UTC)
-    current = main.LiveOperatorApproval(
-        approval_id="approval-old",
-        account_label="account-2",
-        strategy_name="orderflow_impulse",
-        strategy_config_hash="a" * 64,
-        risk_config_hash="b" * 64,
-        git_commit_hash="c" * 40,
-        database_migration_revision="20260906_0030",
-        approved_notional_cap=Decimal("10000"),
-        approved_max_open_positions=500,
-        approved_max_daily_loss=Decimal("10000"),
-        approver_name="operator",
-        approval_text="ENABLE SMALL LIVE TRADING",
-        expires_at=None,
-        created_at=now - timedelta(minutes=1),
-    )
-
-    async def fake_load(*args):
-        del args
-        return current
-
-    async def fake_risk_hash(*args):
-        del args
-        return "d" * 64
-
-    async def fake_save(_database_url, approval):
-        del _database_url, approval
-
-    monkeypatch.setattr(main, "_load_active_approval", fake_load)
-    monkeypatch.setattr(main, "_latest_risk_config_hash", fake_risk_hash)
-    monkeypatch.setattr(main, "_runtime_strategy_config_hash", lambda _: "e" * 64)
-    monkeypatch.setattr(
-        main,
-        "_runtime_manifest_account_for_cli",
-        lambda path, *, account_label, strategy: (path, account_label, strategy),
-    )
-    monkeypatch.setattr(
-        main, "_runtime_manifest_strategy_config_hash", lambda _: "e" * 64
-    )
-    monkeypatch.setattr(main, "_save_approval", fake_save)
-
-    # Success case
-    preflight_kwargs: list[dict[str, object]] = []
-
-    async def fake_preflight_ok(*args, **kwargs):
-        del args
-        preflight_kwargs.append(kwargs)
-        return {"preflight_ok": True, "preflight_errors": []}
-
-    monkeypatch.setattr(main, "_preflight_summary", fake_preflight_ok)
-
-    result_ok = runner.invoke(
-        app,
-        [
-            "refresh-approval-runtime",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--account-label",
-            "account-2",
-            "--runtime-manifest",
-            "/runtime/live.yaml",
-            "--git-commit-hash",
-            "f" * 40,
-            "--migration-revision",
-            "20260906_0030",
-            "--verify-preflight",
-        ],
-    )
-    assert result_ok.exit_code == 0
-    assert '"preflight_ok": true' in result_ok.stdout
-    assert preflight_kwargs[0]["expected_strategy_config_hash"] == "e" * 64
-
-    # Failure case
-    async def fake_preflight_fail(*args, **kwargs):
-        del args, kwargs
-        return {"preflight_ok": False, "preflight_errors": ["mismatch"]}
-
-    monkeypatch.setattr(main, "_preflight_summary", fake_preflight_fail)
-
-    result_fail = runner.invoke(
-        app,
-        [
-            "refresh-approval-runtime",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--account-label",
-            "account-2",
-            "--runtime-manifest",
-            "/runtime/live.yaml",
-            "--git-commit-hash",
-            "f" * 40,
-            "--migration-revision",
-            "20260906_0030",
-            "--verify-preflight",
-        ],
-    )
-    assert result_fail.exit_code == 1
-    assert '"preflight_ok": false' in result_fail.stdout
-
-
-def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:
-    async def fake_summary(*args, **kwargs):
-        del args, kwargs
-        return {"preflight_ok": False, "preflight_errors": ["approval_present"]}
-
-    monkeypatch.setattr(main, "_preflight_summary", fake_summary)
-
-    result = runner.invoke(
-        app,
-        [
-            "preflight",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--strict",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "approval_present" in result.stdout
-
-
-def test_approval_binding_summary_checks_only_target_identity(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_load(*args, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(
-            git_commit_hash="a" * 40,
-            database_migration_revision="20260911_0040",
-        )
-
-    monkeypatch.setattr(main, "_load_active_approval", fake_load)
-
-    payload = asyncio.run(
-        main._approval_binding_summary(
-            "postgresql+asyncpg://unused",
-            "primary",
-            "orderflow_impulse",
-            expected_git_commit="a" * 40,
-            expected_migration_revision="20260911_0040",
-        )
-    )
-
-    assert captured["account_label"] == "primary"
-    assert captured["strategy_name"] == "orderflow_impulse"
-    assert payload["approval_precheck_ok"] is True
-    assert payload["approval_precheck_errors"] == []
-    assert payload["approval_precheck_checks"] == {
-        "approval_present": True,
-        "approval_git_commit_matches_expected": True,
-        "approval_migration_matches_expected": True,
-    }
-
-
-def test_strict_approval_precheck_returns_failure_exit_code(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_summary(*args, **kwargs):
-        captured.update(kwargs)
-        return {
-            "approval_precheck_ok": False,
-            "approval_precheck_errors": ["approval_present"],
-        }
-
-    monkeypatch.setattr(main, "_approval_binding_summary", fake_summary)
-
-    result = runner.invoke(
-        app,
-        [
-            "approval-precheck",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--account-label",
-            "account-2",
-            "--expected-git-commit",
-            "b" * 40,
-            "--expected-migration-revision",
-            "20260911_0040",
-            "--strict",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "approval_present" in result.stdout
-    assert captured["expected_git_commit"] == "b" * 40
-    assert captured["expected_migration_revision"] == "20260911_0040"
-
-
-def test_preflight_passes_runtime_manifest_expectations_to_summary(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    manifest_path = tmp_path / "runtime.yaml"
-    manifest_path.write_text(
-        """
-schema_version: 1
-runtime:
-  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  migration_revision: "20260911_0040"
-accounts:
-  - label: primary
-    strategy: orderflow_impulse
-    session_id: live-primary-v1
-    lease_owner: live-worker
-    profile_ref: profile.yaml
-    limits_ref: limits.yaml
-    services: [live-strategy]
-    strategy_config:
-      impulse_window_buckets: 4
-      confirmation_buckets: 1
-      min_return_pct: 0.005
-      min_imbalance: 0.30
-      min_intensity: 1.5
-      min_notional_5m_vs_30m: 1.50
-      cooldown_buckets: 0
-      entry_positive_gainer_top_count: 10
-      require_price_above_ema5: false
-      require_price_above_ema10: false
-      entry_policy_mode: enforce
-      entry_order_type: limit
-      entry_limit_ttl_seconds: 900
-""",
-        encoding="utf-8",
-    )
-    captured: dict[str, object] = {}
-
-    async def fake_summary(*args, **kwargs):
-        captured.update(kwargs)
-        return {"preflight_ok": True, "preflight_errors": []}
-
-    monkeypatch.setattr(main, "_preflight_summary", fake_summary)
-
-    result = runner.invoke(
-        app,
-        [
-            "preflight",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--runtime-manifest",
-            str(manifest_path),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert captured["expected_git_commit"] == "a" * 40
-    assert captured["expected_migration_revision"] == "20260911_0040"
-    assert captured["expected_lease_owner"] == "live-worker"
-    assert isinstance(captured["expected_strategy_config_hash"], str)
-    assert len(captured["expected_strategy_config_hash"]) == 64
 
 
 def test_prepare_uses_runtime_manifest_identity_before_writing_risk_gates(
@@ -1308,7 +1004,10 @@ def test_enforced_policy_hash_remains_stable_for_existing_live_approvals() -> No
         entry_limit_ttl_seconds=900,
     )
 
-    assert strategy_hash == "d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7"
+    assert (
+        strategy_hash
+        == "d0b133c89f80063a0e6c94418bdc463b0546daf136e160bfb2bcc6dd604f21e7"
+    )
 
 
 def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None:
@@ -1530,31 +1229,6 @@ async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> N
     assert set(seen["last_processed_at_by_symbol"]) == {"BTCUSDT", "4USDT"}
 
 
-def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:
-    assert should_auto_reacquire_live_lease(
-        lease_present=False,
-        session_was_live_enabled=True,
-        draining=False,
-        gate_reasons=("missing_active_lease",),
-    )
-    assert not should_auto_reacquire_live_lease(
-        lease_present=False,
-        session_was_live_enabled=False,
-        draining=False,
-        gate_reasons=("missing_active_lease",),
-    )
-    assert not should_auto_reacquire_live_lease(
-        lease_present=False,
-        session_was_live_enabled=True,
-        draining=True,
-        gate_reasons=("missing_active_lease",),
-    )
-    assert not should_auto_reacquire_live_lease(
-        lease_present=False,
-        session_was_live_enabled=True,
-        draining=False,
-        gate_reasons=("missing_active_lease", "active_risk_halt"),
-    )
 
 
 async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> None:
@@ -2075,57 +1749,3 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
         if notify
         else [("failure", "BTCUSDT")]
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "status,ready",
-    [
-        (ExecutionAccountStatus.RUNNING, True),
-        (ExecutionAccountStatus.READY_READONLY, True),
-        (ExecutionAccountStatus.STARTING, False),
-        (ExecutionAccountStatus.HALTED_READONLY, False),
-    ],
-)
-async def test_real_preflight_summary_checks_account_state(monkeypatch, status, ready):
-    from unittest.mock import AsyncMock
-
-    _set_live_profile_env(monkeypatch)
-    engine = SimpleNamespace(dispose=AsyncMock())
-    monkeypatch.setattr(main, "create_execution_database_engine", lambda _: engine)
-    monkeypatch.setattr(main, "async_sessionmaker", lambda *a, **k: object())
-    monkeypatch.setattr(
-        main,
-        "PostgresLiveRolloutRepository",
-        lambda _: SimpleNamespace(load_active_approval=AsyncMock(return_value=None)),
-    )
-    monkeypatch.setattr(
-        main,
-        "PostgresRiskRepository",
-        lambda _: SimpleNamespace(load_active_lease=AsyncMock(return_value=None)),
-    )
-    monkeypatch.setattr(
-        main,
-        "PostgresOrderReadRepository",
-        lambda _: SimpleNamespace(load_unresolved_orders=AsyncMock(return_value=[])),
-    )
-    monkeypatch.setattr(
-        main,
-        "_latest_risk_config",
-        AsyncMock(return_value=SimpleNamespace(config_hash="risk")),
-    )
-    monkeypatch.setattr(main, "_latest_account_state", AsyncMock(return_value=status))
-    manifest_hash = "c" * 64
-    monkeypatch.setenv("CML_LIVE_STRATEGY_CONFIG_HASH", manifest_hash)
-    result = await main._preflight_summary(
-        "test",
-        "primary",
-        "orderflow_impulse",
-        expected_strategy_config_hash=manifest_hash,
-    )
-    assert result["preflight_checks"]["account_ready"] is ready
-    assert result["runtime_strategy_config_hash"] == manifest_hash
-    assert result["preflight_checks"]["runtime_strategy_config_matches_manifest"]
-    assert result["preflight_checks"]["runtime_strategy_config_matches_configured"]
-    assert result["account_state"] == status.value
-    engine.dispose.assert_awaited_once()

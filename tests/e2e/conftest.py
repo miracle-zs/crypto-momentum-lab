@@ -4,6 +4,12 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+    ExecutionBookHeadRow,
+    ExecutionEvidenceReceiptRow,
+    ExecutionOrderWatermarkRow,
+    ExecutionTradeIdentityRow,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeFillRow,
     ExchangeOrderEventRow,
@@ -15,12 +21,17 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     OrderIntentClaimRow,
     OrderIntentExecutionRow,
+    PositionReservationRow,
     RiskHaltRow,
     ShadowSuppressionEventRow,
     TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_plan_repository import (
     PostgresOrderPlanRepository,
+)
+from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
+    PositionFactJournalEventRow,
+    PositionRecoveryCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -33,12 +44,21 @@ __all__ = ["fake_binance_server", "order_repository"]
 @pytest.fixture
 async def order_repository(
     async_database_url: str,
-) -> AsyncIterator[tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]]]:
+) -> AsyncIterator[
+    tuple[PostgresOrderPlanRepository, async_sessionmaker[AsyncSession]]
+]:
     engine = create_async_database_engine(async_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         async with session.begin():
             for model in (
+                PositionReservationRow,
+                ExecutionBookHeadRow,
+                ExecutionEvidenceReceiptRow,
+                ExecutionTradeIdentityRow,
+                ExecutionOrderWatermarkRow,
+                PositionFactJournalEventRow,
+                PositionRecoveryCheckpointRow,
                 ExchangeFillRow,
                 ExchangeOrderEventRow,
                 ExchangeOrderRow,

@@ -1,3 +1,5 @@
+from tests.unit.live_rollout.test_gates import _risk_config as gate_risk_config
+
 """Golden Path End-to-End Tests.
 
 Validates the complete production lifecycle across all core bounded contexts:
@@ -32,7 +34,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     StrategyLiveState,
-    TradingLease,
 )
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import (
@@ -50,7 +51,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
-    SubmitPolicy,
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
@@ -62,7 +62,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeFillRow,
     ExchangeOrderEventRow,
     LiveSessionTransitionRow,
-    TradingLeaseRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_event_repository import (
     PostgresOrderEventRepository,
@@ -222,7 +221,7 @@ async def close_submission_coordinators():
             await _created_coordinators.pop().aclose()
 
 
-def _build_submission_service(
+async def _build_submission_service(
     *,
     order_repo: PostgresOrderPlanRepository,
     sessions: async_sessionmaker[AsyncSession],
@@ -234,24 +233,53 @@ def _build_submission_service(
         exchange=exchange,
         repository=order_repo,
         event_repository=PostgresOrderEventRepository(sessions),
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
     )
+    from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+    from tests.integration.persistence.test_authority_book_transactions import _book
+
+    book = _book(sessions)
+    await book.restore(account_label="primary")
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    await book.observe(
+        ExecutionEvidence(
+            evidence_id="golden-flat-start",
+            scope=scope,
+            observed_at=NOW - timedelta(seconds=1),
+            stream_id="golden",
+            stream_epoch="one",
+            sequence=1,
+            snapshot=AccountPositionSnapshot(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side="BOTH",
+                position_amt=Decimal("0"),
+                entry_price=Decimal("0"),
+                mark_price=Decimal("30000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("0"),
+                leverage=None,
+                margin_type=None,
+                observed_at=NOW - timedelta(seconds=1),
+                raw_payload={},
+            ),
+        )
+    )
     coordinator = OrderExecutionCoordinator(
-        backend=machine, account_label="primary", environment="live",
+        backend=machine,
+        account_label="primary",
+        environment="live",
+        execution_book=book,
     )
     _created_coordinators.append(coordinator)
-    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
-    from crypto_momentum_lab.live_rollout.submission_admission import (
-        LiveSubmissionAdmission,
-    )
+
     coordinator.configure_submission(
         PostgresOrderSubmissionRepository(sessions),
-        admission=LiveSubmissionAdmission(
-            LiveEntryControlGate(run_id="golden-run-1", state_machine=coordinator),
-            lambda context: True,
-        ), clock=lambda: NOW,
+        clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
         risk_gateway=RiskGateway(
@@ -273,9 +301,6 @@ def _build_submission_service(
             entry_limit_ttl_seconds=900,
         ),
         clock=lambda: NOW,
-        entry_enabled=lambda: True,
-        entry_enabled_reason=lambda: "ready",
-        context_is_current=lambda ctx: True,
         pending_entry_reservation=lambda orders: (Decimal("0"), frozenset()),
         remember_pending_entry=lambda plan, result: None,
         record_signal_candidate=lambda **kwargs: None,
@@ -289,7 +314,6 @@ def _build_runtime_context(
     return LiveDaemonRuntimeContext(
         now=NOW,
         gate_context=gate,
-        active_lease=gate.active_lease,
         account_state=ExecutionAccountStatus.READY_READONLY,
         account_observed_at=NOW,
         open_position_symbols=frozenset(),
@@ -298,31 +322,10 @@ def _build_runtime_context(
         gross_exposure=Decimal("0"),
         active_halts=(),
         unresolved_order_states=(),
-        risk_config=gate.risk_config,
+        risk_config=gate_risk_config(),
         strategy_state=StrategyLiveState.ACTIVE,
         trading_rules={"BTCUSDT": trading_rules},
     )
-
-
-async def _seed_trading_lease(
-    session_factory: async_sessionmaker[AsyncSession],
-    lease: TradingLease,
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                TradingLeaseRow(
-                    lease_id=lease.lease_id,
-                    environment=lease.environment,
-                    account_label=lease.account_label,
-                    strategy_name=lease.strategy_name,
-                    owner=lease.owner,
-                    code_generation=lease.code_generation,
-                    state="active",
-                    acquired_at=lease.acquired_at,
-                    expires_at=lease.expires_at,
-                )
-            )
 
 
 async def _seed_live_session(
@@ -407,8 +410,6 @@ async def test_golden_path_full_trading_lifecycle(
         min_notional=Decimal("5"),
     )
     context = _build_runtime_context(trading_rules=trading_rules)
-    assert context.active_lease is not None
-    await _seed_trading_lease(session_factory, context.active_lease)
     await _seed_live_session(session_factory, "golden-run-1")
 
     entry_candidate = OrderIntentCandidate(
@@ -437,12 +438,24 @@ async def test_golden_path_full_trading_lifecycle(
     # Step 3 & 4: Risk Gate & Execution Submission to Exchange (Entry)
     # -------------------------------------------------------------------------
     exchange = DynamicFillingFakeExchange(state=ExchangeOrderState.FILLED)
-    submission_service = _build_submission_service(
+    submission_service = await _build_submission_service(
         order_repo=order_repo,
         sessions=session_factory,
         exchange=exchange,
     )
 
+    from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
+
+    scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    book = _created_coordinators[-1].execution_book
+    view = await book.read(scope)
+    entry_candidate = replace(
+        entry_candidate,
+        features={
+            **entry_candidate.features,
+            "projection_version": view.projection_version,
+        },
+    )
     market_state = _make_market_state(NOW)
     entry_result = await submission_service.execute(
         entry_candidate,
@@ -495,6 +508,43 @@ async def test_golden_path_full_trading_lifecycle(
         assert fills[0].quantity == persisted_entry.plan.quantity
         assert fills[0].price == Decimal("30000")
 
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+
+    entry_trade = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id=f"trade-{entry_result.client_order_id}",
+        order_id=entry_result.exchange_order_id,
+        side="BUY",
+        price=Decimal("30000"),
+        quantity=persisted_entry.plan.quantity,
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={
+            "positionSide": "BOTH",
+            "is_system": True,
+            "client_order_id": entry_result.client_order_id,
+        },
+    )
+    from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
+
+    trade_observation = await book.observe(
+        ExecutionEvidence(
+            evidence_id=entry_trade.trade_id,
+            scope=scope,
+            observed_at=NOW,
+            stream_id="golden",
+            stream_epoch="one",
+            sequence=2,
+            fill=entry_trade,
+        )
+    )
+    from crypto_momentum_lab.domain.execution.observation_models import Applied
+
+    assert isinstance(trade_observation, Applied), trade_observation
     # -------------------------------------------------------------------------
     # Step 6: Position Tracking & Lifecycle Management
     # -------------------------------------------------------------------------
@@ -536,6 +586,19 @@ async def test_golden_path_full_trading_lifecycle(
         exit_now,
         price=Decimal("31500"),
     )
+    view = await book.read(scope)
+    assert view.batches, view
+    exit_candidate = replace(
+        exit_candidate,
+        features={
+            **exit_candidate.features,
+            "projection_version": view.projection_version,
+            "exit_allocations": [
+                {"batch_id": batch.batch_id, "quantity": str(batch.quantity)}
+                for batch in view.batches
+            ],
+        },
+    )
     exit_result = await submission_service.execute(
         exit_candidate,
         requested_quantity=position.quantity,
@@ -563,6 +626,35 @@ async def test_golden_path_full_trading_lifecycle(
     assert persisted_exit.state is ExchangeOrderState.FILLED
     assert persisted_exit.plan.reduce_only is True
 
+    exit_trade = replace(
+        entry_trade,
+        trade_id=f"trade-{exit_result.client_order_id}",
+        order_id=exit_result.exchange_order_id,
+        side="SELL",
+        quantity=persisted_exit.plan.quantity,
+        trade_at=exit_now,
+        raw_payload={
+            "positionSide": "BOTH",
+            "is_system": True,
+            "client_order_id": exit_result.client_order_id,
+        },
+    )
+    exit_observation = await book.observe(
+        ExecutionEvidence(
+            evidence_id=exit_trade.trade_id,
+            scope=scope,
+            observed_at=exit_now,
+            stream_id="golden",
+            stream_epoch="one",
+            sequence=3,
+            fill=exit_trade,
+        )
+    )
+    assert isinstance(exit_observation, Applied), exit_observation
+    closed_view = await book.read(scope)
+    assert closed_view.total_quantity == Decimal("0")
+    assert book.get_active_reservations(scope.to_position_key()) == ()
+
     # Both entry and exit orders are safely recorded in PostgreSQL
     assert persisted_entry.plan.client_order_id != persisted_exit.plan.client_order_id
     assert persisted_entry.state is ExchangeOrderState.FILLED
@@ -578,7 +670,7 @@ async def test_golden_path_risk_gate_blocks_excessive_exposure(
     order_repo, session_factory = order_repository
     exchange = DynamicFillingFakeExchange()
     # Limit max open positions to 1
-    submission_service = _build_submission_service(
+    submission_service = await _build_submission_service(
         order_repo=order_repo,
         sessions=session_factory,
         exchange=exchange,
@@ -598,8 +690,6 @@ async def test_golden_path_risk_gate_blocks_excessive_exposure(
         min_notional=Decimal("5"),
     )
     context = _build_runtime_context(trading_rules=rules)
-    assert context.active_lease is not None
-    await _seed_trading_lease(session_factory, context.active_lease)
 
     # Position capacity is already saturated by ETHUSDT
     full_capacity_context = replace(

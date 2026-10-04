@@ -15,7 +15,6 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionEvidence,
 )
 from crypto_momentum_lab.domain.execution.execution_book import (
-    Blocked,
     ExecutionBook,
     ExecutionRequest,
 )
@@ -178,21 +177,6 @@ async def test_terminal_report_and_real_trades_settle_without_account_recovery(
         # A report settles capacity but must not manufacture position trades.
         assert (await book.read(SCOPE)).total_quantity == Decimal("5")
         assert book._recovery_required_commands == {"exit"}
-        blocked = await book.act(
-            ExecutionRequest(
-                request_id="next-exit",
-                scope=SCOPE,
-                strategy_name="test",
-                strategy_version="1",
-                run_id="run",
-                decision_ref="next",
-                expected_view_token="*",
-                action=TradeCommandType.EXIT,
-                requested_quantity=Decimal("1"),
-            )
-        )
-        assert isinstance(blocked, Blocked)
-        assert blocked.reason == "Execution reservation settlement requires recovery"
     later = await book.observe(second)
     assert isinstance(later, Applied)
     assert not later.recovery_required
@@ -219,7 +203,7 @@ async def test_exchange_trade_identity_settles_client_command_once(report_first)
 
 
 @pytest.mark.asyncio
-async def test_external_exit_quarantines_only_its_position_until_facts_reconcile():
+async def test_external_exit_diagnostics_do_not_block_new_entries():
     from crypto_momentum_lab.domain.execution.execution_book import Accepted
     book = ExecutionBook()
     await book.observe(evidence("opening", fill=fill("opening", "2", entry=True)))
@@ -230,7 +214,7 @@ async def test_external_exit_quarantines_only_its_position_until_facts_reconcile
             identity, scope, "test", "1", "run", "decision", view.projection_version,
             TradeCommandType.ENTRY, Decimal("1"),
         ))
-    assert isinstance(await act(SCOPE, "same-position"), Blocked)
+    assert isinstance(await act(SCOPE, "same-position"), Accepted)
     other = replace(SCOPE, symbol="ETHUSDT")
     await book.observe(replace(evidence("other-ready"), scope=other))
     assert isinstance(await act(other, "other-position"), Accepted)

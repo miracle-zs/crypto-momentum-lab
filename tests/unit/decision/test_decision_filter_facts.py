@@ -77,44 +77,6 @@ def test_filter_rejects_when_frozen_inputs_missing() -> None:
     assert out.candidates == ()
 
 
-def test_filter_rejects_non_ready_position_health() -> None:
-    key = PositionKey(
-        environment="live",
-        account_label="primary",
-        symbol="BTCUSDT",
-        position_side=FuturesPositionSide.BOTH,
-    )
-    view = PositionView(
-        key=key,
-        projection_version="pv1",
-        input_revision=1,
-        event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
-        policy_version="v1",
-        schema_version="v1",
-        coverage=FactCoverageInterval(
-            start_at=datetime(2026, 9, 25, 7, 0, tzinfo=UTC),
-            end_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
-            status=FactCoverageStatus.PENDING,
-        ),
-        active_episode=None,
-        batches=(),
-        unallocated_quantity=Decimal("0"),
-        reconciliation_gap=Decimal("0"),
-        health_status=PositionHealthStatus.CATCHING_UP,
-    )
-    frozen = FrozenDecisionInputs(
-        position_view=view,
-        cash_balance=Decimal("100"),
-        policy_state=PolicyState(),
-        universe_version="univ_v1",
-        risk_config_version="risk_v1",
-    )
-    filt = create_authoritative_decision_filter(
-        "strat",
-        fact_provider=lambda state: frozen,
-    )
-    out = filt(_decision_with_candidate(), _state())
-    assert out.candidates == ()
 
 
 def test_filter_rejects_symbol_mismatch() -> None:
@@ -517,7 +479,7 @@ def test_filter_admits_flat_stream_position_without_coverage() -> None:
     assert len(out.rejections) == 0
 
 
-def test_filter_rejects_catching_up_position_with_other_diagnostics() -> None:
+def test_filter_preserves_candidate_while_position_is_catching_up() -> None:
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
     )
@@ -604,6 +566,6 @@ def test_filter_rejects_catching_up_position_with_other_diagnostics() -> None:
     dec = StrategyDecision(signals=(sig_algo,), candidates=(cand_algo,), rejections=())
 
     out = filt(dec, state_algo)
-    assert len(out.candidates) == 0
-    assert len(out.rejections) == 1
-    assert out.rejections[0].details["raw_reason"] == "position_health_catching_up"
+    assert len(out.candidates) == 1
+    assert out.candidates[0].candidate_id == cand_algo.candidate_id
+    assert out.rejections == ()

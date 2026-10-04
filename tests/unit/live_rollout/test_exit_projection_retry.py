@@ -21,9 +21,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
@@ -32,15 +29,16 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitOrderRequest,
     managed_live_positions_from_views,
 )
+from tests.fixtures.live_market import _intent, _state
 from tests.unit.execution_account.orders.test_coordinator import (
+    OrderExecutionCoordinator,
     _prepared,
     _submission_preparation,
 )
 from tests.unit.live_rollout.test_exit_processor import NOW, _context, _processor
-from tests.fixtures.live_market import _intent, _state
 
 
-async def test_exit_settlement_gate_defers_without_post_or_strategy_crash():
+async def test_prior_exit_settlement_does_not_block_another_exit():
     book = ExecutionBook()
     book._recovery_required_commands.add("settling-earlier-exit")
     scope = ExecutionScope("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
@@ -70,6 +68,11 @@ async def test_exit_settlement_gate_defers_without_post_or_strategy_crash():
         projection_version=view.projection_version,
     )
 
+    backend.submit.return_value = OrderExecutionResult(
+        plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED, "123"
+    )
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(kwargs["plan"])
+
     class Submission:
         async def execute(self, *_args, **_kwargs):
             return await coordinator.prepare_and_execute(
@@ -83,9 +86,9 @@ async def test_exit_settlement_gate_defers_without_post_or_strategy_crash():
             state=_state(),
             context=_context(),
         )
-        assert outcome == (0, 0, "position_not_ready")
-        backend.submit.assert_not_awaited()
-        repository.prepare_submission.assert_not_awaited()
+        assert outcome == (1, 1, None)
+        backend.submit.assert_awaited_once()
+        repository.prepare_submission_in_session.assert_awaited_once()
         assert book.command_requires_recovery("settling-earlier-exit")
     finally:
         await coordinator.aclose()
@@ -148,7 +151,7 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
 
     backend, repository = AsyncMock(), AsyncMock()
     backend.submit.side_effect = post
-    repository.prepare_submission.side_effect = lambda **kwargs: _prepared(
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(
         kwargs["plan"]
     )
     coordinator = OrderExecutionCoordinator(
@@ -262,7 +265,7 @@ async def test_candle_exit_rebuilds_quantity_after_real_book_advance(race_at):
         assert [plan.quantity for plan in decided] == [Decimal("1"), Decimal("0.5")]
         assert decided[0].projection_version != decided[1].projection_version
         assert [plan.quantity for plan in posted] == [Decimal("0.5")]
-        assert repository.prepare_submission.await_count == 1
+        assert repository.prepare_submission_in_session.await_count == 1
         assert key not in runtime._pending_candles
     finally:
         await coordinator.aclose()

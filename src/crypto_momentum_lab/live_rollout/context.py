@@ -8,6 +8,7 @@ state.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -31,7 +32,6 @@ from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskHalt,
     StrategyLiveState,
-    TradingLease,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 
@@ -39,11 +39,9 @@ if TYPE_CHECKING:
     from crypto_momentum_lab.domain.account.snapshot_models import (
         AccountSnapshot,
     )
+    from crypto_momentum_lab.live_rollout.context_prefetch import PrefetchedContext
     from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
-
-
-class LiveContextChangedDuringLoad(RuntimeError):
-    """Facts advanced during reading; no stable decision context was produced."""
+    from crypto_momentum_lab.live_rollout.telemetry_ports import MarketAdmissionSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +75,6 @@ class LiveDaemonRuntimeContext:
 
     now: datetime
     gate_context: LiveGateContext
-    active_lease: TradingLease | None
     account_state: ExecutionAccountStatus
     account_observed_at: datetime | None
     open_position_symbols: frozenset[str] | None
@@ -159,6 +156,12 @@ class LiveContextReader(LiveContextProvider, Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ContextReadResult:
+    context: LiveDaemonRuntimeContext | None
+    error: Exception | None
+
+
 class LiveContextRuntime:
     """Fence context freshness and apply the related in-memory decision views."""
 
@@ -166,9 +169,10 @@ class LiveContextRuntime:
         self,
         *,
         run_id: str,
+        telemetry: MarketAdmissionSink | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         context_provider: LiveContextProvider,
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
-        set_pending_position_symbols: Callable[[Collection[str]], None],
         update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
         on_managed_position_symbols: (
             Callable[[frozenset[str]], None] | None
@@ -176,16 +180,56 @@ class LiveContextRuntime:
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
+        self._context_provider = context_provider
+        self._telemetry = telemetry
+        self._clock = clock
         resolved = context_provider
         self._run_id = run_id
         self._currentness_check = getattr(resolved, "is_current", None)
         self._context_invalidator = getattr(resolved, "invalidate", None)
         self._sync_pending_entry_plans = sync_pending_entry_plans
-        self._set_pending_position_symbols = set_pending_position_symbols
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
         self._generation = 0
         self._managed_position_symbols: frozenset[str] = frozenset()
+
+    async def prepare(
+        self,
+        prefetched: PrefetchedContext,
+    ) -> ContextReadResult:
+        """Prepare one state without authorizing entries on stale context."""
+
+        context_reloaded = prefetched.generation != self.generation
+        try:
+            if context_reloaded:
+                context = await self._context_provider(prefetched.state)
+            elif prefetched.error is not None:
+                raise prefetched.error
+            else:
+                if prefetched.context is None:
+                    raise RuntimeError("prefetched live context is missing")
+                context = prefetched.context
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return ContextReadResult(
+                context=None,
+                error=error,
+            )
+
+        self.apply_context(context)
+        if self._telemetry is not None:
+            await self._telemetry.context_ready(
+                prefetched.state,
+                occurred_at=self._clock(),
+                prefetched=not context_reloaded,
+                reloaded=context_reloaded,
+            )
+        return ContextReadResult(
+            context=context,
+            error=None,
+        )
+
 
     @property
     def generation(self) -> int:
@@ -243,7 +287,6 @@ class LiveContextRuntime:
         )
         self._sync_pending_entry_plans(context)
         self._managed_position_symbols = symbols
-        self._set_pending_position_symbols(context.pending_position_symbols)
         managed_order_symbols = frozenset(
             order.plan.symbol.strip().upper()
             for order in context.unresolved_orders

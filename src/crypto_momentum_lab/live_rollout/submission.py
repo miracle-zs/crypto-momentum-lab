@@ -157,6 +157,12 @@ class LiveSubmissionConfig:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
 
 
+from crypto_momentum_lab.live_rollout.position_lifecycle import (
+    PositionLifecycleLocks,
+    live_symbol_position_key,
+)
+
+
 class LiveCandidateSubmission:
     """Execute one accepted candidate through the live safety pipeline."""
 
@@ -167,9 +173,6 @@ class LiveCandidateSubmission:
         state_machine: CoordinatedOrderExecutionPort,
         config: LiveSubmissionConfig,
         clock: Callable[[], datetime],
-        entry_enabled: Callable[[], bool],
-        entry_enabled_reason: Callable[[], str],
-        context_is_current: Callable[[LiveDaemonRuntimeContext], bool],
         pending_entry_reservation: PendingEntryReservation,
         remember_pending_entry: Callable[
             [OrderExecutionPlan, OrderExecutionResult], None
@@ -177,7 +180,7 @@ class LiveCandidateSubmission:
         record_signal_candidate: ReduceOnlySignalRecorder,
         telemetry: LiveTelemetrySink | None = None,
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
-        is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
+        position_locks: PositionLifecycleLocks | None = None,
     ) -> None:
         self._risk_gateway = risk_gateway
         limits = risk_gateway.limits
@@ -187,15 +190,30 @@ class LiveCandidateSubmission:
         self._state_machine = state_machine
         self._config = config
         self._clock = clock
-        self._entry_enabled = entry_enabled
-        self._entry_enabled_reason = entry_enabled_reason
-        self._context_is_current = context_is_current
         self._pending_entry_reservation = pending_entry_reservation
         self._remember_pending_entry = remember_pending_entry
         self._record_signal_candidate = record_signal_candidate
         self._telemetry = telemetry
         self._entry_order_lifecycle = entry_order_lifecycle
-        self._is_symbol_entry_allowed = is_symbol_entry_allowed
+        self._position_locks = position_locks
+
+    async def execute_entry(
+        self,
+        candidate: OrderIntentCandidate,
+        *,
+        requested_quantity: Decimal | None,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> OrderExecutionResult | None:
+        if self._position_locks is None:
+            raise RuntimeError("entry lifecycle locks are not configured")
+        return await self._position_locks.run(
+            live_symbol_position_key(self._config.account_label, candidate.symbol),
+            lambda: self.execute(
+                candidate, requested_quantity=requested_quantity,
+                state=state, context=context,
+            ),
+        )
 
     async def execute(
         self,
@@ -207,21 +225,6 @@ class LiveCandidateSubmission:
         reference_price: Decimal | None = None,
     ) -> OrderExecutionResult | None:
         execution_now = self._clock()
-        if not candidate.reduce_only:
-            allowed, reason = (
-                self._is_symbol_entry_allowed(candidate.symbol)
-                if self._is_symbol_entry_allowed is not None
-                else (self._entry_enabled(), self._entry_enabled_reason())
-            )
-            if not allowed:
-                log.info(
-                    "live_entry_blocked_before_execution",
-                    run_id=self._config.run_id,
-                    candidate_id=candidate.candidate_id,
-                    symbol=candidate.symbol,
-                    reason=reason,
-                )
-                return None
         if candidate.expires_at <= execution_now:
             log.warning(
                 "live_candidate_expired_before_execution",
@@ -273,35 +276,16 @@ class LiveCandidateSubmission:
                 ),
                 symbol_concurrency=symbol_concurrency,
             )
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_before_risk",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
+        risk_context = RiskContext(
+            now=context.now,
+            open_position_symbols=risk_open_position_symbols,
+            active_halts=context.active_halts,
+            risk_config=context.risk_config,
+            strategy_state=context.strategy_state,
+        )
         assessment = self._risk_gateway.evaluate(
             executable_candidate,
-            RiskContext(
-                now=context.now,
-                active_lease=context.active_lease,
-                latest_market_state=state,
-                account_state=context.account_state,
-                open_position_symbols=risk_open_position_symbols,
-                active_halts=context.active_halts,
-                risk_config=context.risk_config,
-                strategy_state=context.strategy_state,
-                enforce_market_state_age=False,
-                required_lease_owner=context.gate_context.required_lease_owner,
-                required_lease_id=(
-                    None
-                    if context.active_lease is None
-                    else context.active_lease.lease_id
-                ),
-                required_account_label=context.gate_context.account_label,
-                required_strategy_name=context.gate_context.strategy_name,
-            ),
+            risk_context,
             limit_context=limit_context,
         )
         if assessment.candidate is None:
@@ -323,8 +307,6 @@ class LiveCandidateSubmission:
                 occurred_at=self._clock(),
                 lane=lane,
             )
-        if not self._context_is_current(context):
-            return None
         if evaluation.decision is not RiskDecision.APPROVED:
             return None
         if self._telemetry is not None:
@@ -335,14 +317,6 @@ class LiveCandidateSubmission:
                 lane=lane,
                 evaluation_id=evaluation.evaluation_id,
             )
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_after_risk",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
         rules = context.trading_rules.get(candidate.symbol)
         execution_reference_price, ref_time, ref_source = (
             resolve_authoritative_reference_price(
@@ -410,20 +384,7 @@ class LiveCandidateSubmission:
         if not executable_candidate.reduce_only and actual_notional is not None:
             allowed, ceiling_reason = self._risk_gateway.validate_quantized_notional(
                 actual_notional,
-                RiskContext(
-                    now=context.now,
-                    active_lease=context.active_lease,
-                    latest_market_state=state,
-                    account_state=context.account_state,
-                    open_position_symbols=risk_open_position_symbols,
-                    active_halts=context.active_halts,
-                    risk_config=context.risk_config,
-                    strategy_state=context.strategy_state,
-                    enforce_market_state_age=False,
-                    required_lease_owner=context.gate_context.required_lease_owner,
-                    required_account_label=context.gate_context.account_label,
-                    required_strategy_name=context.gate_context.strategy_name,
-                ),
+                risk_context,
                 gross_exposure=(
                     limit_context.gross_exposure if limit_context is not None else None
                 ),
@@ -448,53 +409,14 @@ class LiveCandidateSubmission:
                 time_in_force="GTD",
                 expires_at=executable_candidate.expires_at,
             )
-        if not executable_candidate.reduce_only:
-            allowed, reason = (
-                self._is_symbol_entry_allowed(executable_candidate.symbol)
-                if self._is_symbol_entry_allowed is not None
-                else (self._entry_enabled(), self._entry_enabled_reason())
-            )
-            if not allowed:
-                log.info(
-                    "live_entry_blocked_before_persistence",
-                    run_id=self._config.run_id,
-                    candidate_id=executable_candidate.candidate_id,
-                    symbol=executable_candidate.symbol,
-                    reason=reason,
-                )
-                return None
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_before_submission",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
         result = await self._state_machine.prepare_and_execute(
             plan,
             preparation=OrderSubmissionPreparation(
                 intent=executable_candidate,
                 evaluation=evaluation,
-                environment=(
-                    None
-                    if context.active_lease is None
-                    else context.active_lease.environment
-                ),
+                environment="live",
                 account_label=context.gate_context.account_label,
                 strategy_name=context.gate_context.strategy_name,
-                required_lease_owner=(context.gate_context.required_lease_owner),
-                required_lease_id=(
-                    None
-                    if context.active_lease is None
-                    else context.active_lease.lease_id
-                ),
-                required_code_generation=(
-                    None
-                    if context.active_lease is None
-                    else context.active_lease.code_generation
-                ),
-                required_session_id=self._config.run_id,
                 max_open_positions=(
                     None
                     if executable_candidate.reduce_only
@@ -533,7 +455,6 @@ class LiveCandidateSubmission:
                     else (actual_notional or executable_candidate.desired_notional)
                 ),
                 baseline_observed_at=context.account_observed_at,
-                context_token=context,
             ),
         )
         if result is None:

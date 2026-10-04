@@ -8,8 +8,8 @@ from crypto_momentum_lab.domain.live_rollout import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
-    SubmitPolicy,
 )
+from crypto_momentum_lab.live_rollout.gates import evaluate_live_gate
 from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
@@ -51,25 +51,15 @@ async def test_session_lifecycle_persists_shared_transition_contract() -> None:
     assert repository.items == [transition]
 
 
-async def test_session_preflight_runs_shadow_before_live() -> None:
-    calls: list[str] = []
-
-    async def shadow_preflight() -> bool:
-        calls.append("shadow")
-        return True
-
+async def test_session_executes_approved_plan_with_single_live_transition() -> None:
     session, transitions, exchange = _session()
 
     result = await session.run_one(
-        gate_context=_context(),
-        shadow_preflight=shadow_preflight,
+        gate=evaluate_live_gate(_context()),
         plan=_plan(),
     )
 
-    assert calls == ["shadow"]
-    assert [item.state for item in transitions.items[:3]] == [
-        LiveSessionState.PREFLIGHT,
-        LiveSessionState.SHADOW_PREFLIGHT,
+    assert [item.state for item in transitions.items] == [
         LiveSessionState.LIVE_ENABLED,
     ]
     assert result.state is LiveSessionState.LIVE_ENABLED
@@ -77,15 +67,11 @@ async def test_session_preflight_runs_shadow_before_live() -> None:
 
 
 async def test_session_submits_only_after_gate_approval() -> None:
-    async def shadow_preflight() -> bool:
-        return True
-
     session, _, exchange = _session()
-    blocked_context = replace(_context(), approval=None)
+    blocked_context = replace(_context(), live_submit_enabled=False)
 
     result = await session.run_one(
-        gate_context=blocked_context,
-        shadow_preflight=shadow_preflight,
+        gate=evaluate_live_gate(blocked_context),
         plan=_plan(),
     )
 
@@ -112,7 +98,6 @@ def _session() -> tuple[
         exchange=exchange,
         repository=FakeOrderRepository(),
         event_repository=FakeOrderRepository(),
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
     )

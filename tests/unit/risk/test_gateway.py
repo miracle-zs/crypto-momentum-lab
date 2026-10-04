@@ -4,14 +4,10 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits, LiveLimitContext
 from crypto_momentum_lab.domain.risk.models import (
     RiskDecision,
     StrategyLiveState,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -20,74 +16,6 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 from tests.unit.domain.risk.test_models import _risk_config
-
-
-def test_gateway_rejects_missing_active_lease() -> None:
-    evaluation = (
-        RiskGateway().evaluate(_intent(), _context(active_lease=None)).evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.REJECTED
-    assert evaluation.reason == "missing_active_lease"
-
-
-def test_gateway_rejects_lease_fencing_mismatch() -> None:
-    evaluation = (
-        RiskGateway()
-        .evaluate(
-            _intent(),
-            replace(
-                _context(),
-                required_lease_owner="another-worker",
-                required_lease_id="lease-2",
-                required_account_label="primary",
-                required_strategy_name="compression_breakout",
-            ),
-        )
-        .evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.REJECTED
-    assert evaluation.reason == "lease_owner_mismatch"
-
-
-def test_gateway_rejects_stale_market_state() -> None:
-    context = _context(
-        now=datetime(2026, 7, 4, 0, 2, tzinfo=UTC),
-        market_state=_market_state(0),
-    )
-
-    evaluation = RiskGateway().evaluate(_intent(), context).evaluation
-
-    assert evaluation.decision is RiskDecision.REJECTED
-    assert evaluation.reason == "stale_market_state"
-
-
-def test_gateway_rejects_account_not_started() -> None:
-    evaluation = (
-        RiskGateway()
-        .evaluate(
-            _intent(),
-            _context(account_state=ExecutionAccountStatus.STARTING),
-        )
-        .evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.REJECTED
-    assert evaluation.reason == "account_not_ready"
-
-
-def test_gateway_approves_when_account_state_is_running() -> None:
-    evaluation = (
-        RiskGateway()
-        .evaluate(
-            _intent(),
-            _context(account_state=ExecutionAccountStatus.RUNNING),
-        )
-        .evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.APPROVED
 
 
 def test_gateway_approves_small_entry_when_all_limits_pass() -> None:
@@ -132,7 +60,7 @@ def test_gateway_allows_reduce_only_while_draining() -> None:
     )
 
     assert evaluation.decision is RiskDecision.APPROVED
-    assert evaluation.reason == "reduce_only_draining"
+    assert evaluation.reason == "reduce_only"
 
 
 def test_gateway_allows_reduce_only_while_draining_when_config_flag_is_false() -> None:
@@ -142,9 +70,6 @@ def test_gateway_allows_reduce_only_while_draining_when_config_flag_is_false() -
             _intent(reduce_only=True),
             RiskContext(
                 now=datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC),
-                active_lease=_lease(),
-                latest_market_state=_market_state(0),
-                account_state=ExecutionAccountStatus.READY_READONLY,
                 open_position_symbols=frozenset(),
                 active_halts=(),
                 risk_config=_risk_config(
@@ -158,7 +83,7 @@ def test_gateway_allows_reduce_only_while_draining_when_config_flag_is_false() -
     )
 
     assert evaluation.decision is RiskDecision.APPROVED
-    assert evaluation.reason == "reduce_only_draining"
+    assert evaluation.reason == "reduce_only"
 
 
 def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
@@ -175,32 +100,8 @@ def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
     assert evaluation.reason == "reduce_only"
 
 
-def test_gateway_allows_reduce_only_when_account_syncing() -> None:
-    evaluation = (
-        RiskGateway()
-        .evaluate(
-            _intent(reduce_only=True),
-            _context(account_state=ExecutionAccountStatus.SYNCING),
-        )
-        .evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.APPROVED
-    assert evaluation.reason == "reduce_only"
 
 
-def test_gateway_rejects_reduce_only_when_account_stopped() -> None:
-    evaluation = (
-        RiskGateway()
-        .evaluate(
-            _intent(reduce_only=True),
-            _context(account_state=ExecutionAccountStatus.STOPPED),
-        )
-        .evaluation
-    )
-
-    assert evaluation.decision is RiskDecision.REJECTED
-    assert evaluation.reason == "account_stopped"
 
 
 def test_gateway_blocks_entries_when_strategy_is_halted() -> None:
@@ -277,14 +178,6 @@ def test_gateway_rejects_fixed_limit_failures(change, reason) -> None:
     assert result.evaluation.reason == reason
 
 
-def test_gateway_preserves_authority_rejection_after_limit_approval() -> None:
-    result = RiskGateway(limits=_fixed_limits()).evaluate(
-        _intent(),
-        _context(active_lease=None),
-        limit_context=_entry_limit_context(),
-    )
-    assert result.candidate is not None
-    assert result.evaluation.reason == "missing_active_lease"
 
 
 def test_gateway_reduce_only_bypasses_entry_limits() -> None:
@@ -329,18 +222,11 @@ def test_quantized_notional_cannot_exceed_approved_budget():
 
 def _context(
     *,
-    active_lease: TradingLease | None | object = "default",
-    market_state=None,
-    account_state: ExecutionAccountStatus = ExecutionAccountStatus.READY_READONLY,
     strategy_state: StrategyLiveState = StrategyLiveState.ACTIVE,
     now: datetime = datetime(2026, 7, 4, 0, 0, 20, tzinfo=UTC),
 ) -> RiskContext:
-    lease = _lease() if active_lease == "default" else active_lease
     return RiskContext(
         now=now,
-        active_lease=lease,
-        latest_market_state=market_state or _market_state(0),
-        account_state=account_state,
         open_position_symbols=frozenset(),
         active_halts=(),
         risk_config=_risk_config(max_order_notional=Decimal("100")),
@@ -348,18 +234,6 @@ def _context(
     )
 
 
-def _lease() -> TradingLease:
-    return TradingLease(
-        lease_id="lease-1",
-        environment="live",
-        account_label="primary",
-        strategy_name="compression_breakout",
-        owner="worker-1",
-        code_generation="test-generation",
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        expires_at=datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
-    )
 
 
 def _intent(
@@ -384,37 +258,4 @@ def _intent(
         created_at=now,
         reason="test",
         features={},
-    )
-
-
-def _market_state(bucket_index: int) -> MarketState15s:
-    bucket_start = datetime(2026, 7, 4, 0, 0, tzinfo=UTC) + timedelta(
-        seconds=15 * bucket_index
-    )
-    return MarketState15s(
-        schema_version=1,
-        exchange="binance-usdm",
-        environment="live",
-        symbol="BTCUSDT",
-        bucket_start=bucket_start,
-        bucket_end=bucket_start + timedelta(seconds=15),
-        open_price=Decimal("100"),
-        high_price=Decimal("100"),
-        low_price=Decimal("100"),
-        close_price=Decimal("100"),
-        trade_count=1,
-        trade_notional=Decimal("100"),
-        aggressive_buy_notional=Decimal("60"),
-        aggressive_sell_notional=Decimal("40"),
-        last_bid_price=Decimal("99.99"),
-        last_ask_price=Decimal("100.01"),
-        spread=Decimal("0.02"),
-        midpoint=Decimal("100"),
-        liquidation_count=0,
-        liquidation_notional=Decimal("0"),
-        mark_price=Decimal("100"),
-        closed_kline_count=0,
-        source_event_count=1,
-        first_received_at=bucket_start,
-        last_received_at=bucket_start + timedelta(seconds=15),
     )

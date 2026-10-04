@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from crypto_momentum_lab.domain.risk import RiskConfigSnapshot
 from crypto_momentum_lab.domain.strategy import EntryType
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
@@ -92,7 +93,6 @@ def _make_test_config() -> LiveRuntimeConfig:
             poll_interval_seconds=1.0,
             checkpoint_every_states=10,
             persist_exchange_operations=frozenset({"submit", "cancel"}),
-            acknowledge_missing_shadow_preflight=False,
         ),
         credentials=LiveRuntimeCredentials(
             base_url="https://fapi.binance.com",
@@ -190,15 +190,16 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.LiveStrategySignalRecorder.start",
         AsyncMock(),
     )
-    risk_config_mock = MagicMock()
-    risk_config_mock.config_hash = "mock_risk_hash"
-    risk_config_mock.max_open_positions = 5
-    risk_config_mock.max_account_drawdown = Decimal("0.10")
-    risk_config_mock.max_gross_notional = Decimal("1000.00")
-    risk_config_mock.max_order_notional = Decimal("200.00")
+    risk_config = RiskConfigSnapshot(
+        environment="live", account_label="account-1",
+        max_open_positions=5, max_gross_notional=Decimal("1000"),
+        max_order_notional=Decimal("200"), max_daily_loss=Decimal("100"),
+        max_market_state_age_seconds=30, max_account_state_age_seconds=30,
+        allow_reduce_only_while_draining=True, created_at=datetime.now(UTC),
+    )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator._latest_risk_config",
-        AsyncMock(return_value=risk_config_mock),
+        AsyncMock(return_value=risk_config),
     )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator._load_trading_rules",
@@ -231,10 +232,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     )
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.LiveAccountEventRuntime.run",
-        AsyncMock(),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator.LiveLeaseHeartbeat.run",
         AsyncMock(),
     )
     monkeypatch.setattr(
@@ -273,13 +270,11 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator._wait_for_durable_market_state_cutover",
         AsyncMock(return_value=datetime.now(tz=UTC)),
     )
-    mock_lease = MagicMock()
-    mock_approval = MagicMock()
     mock_persistence.repositories.live_repository.load_active_approval = AsyncMock(
-        return_value=mock_approval
+        side_effect=AssertionError("startup must not require approval")
     )
     mock_persistence.repositories.risk_repository.load_active_lease = AsyncMock(
-        return_value=mock_lease
+        side_effect=AssertionError("startup must not require lease")
     )
     mock_persistence.repositories.risk_repository.load_active_halts = AsyncMock(
         return_value=()
@@ -291,33 +286,8 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         return_value=None
     )
     monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator._latest_account_state",
-        AsyncMock(return_value=MagicMock()),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator._maybe_auto_reacquire_live_lease",
-        AsyncMock(return_value=mock_lease),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator.evaluate_live_gate",
-        lambda context: MagicMock(approved=True, reasons=()),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator.shadow_preflight.warn_if_shadow_preflight_missing",
-        AsyncMock(),
-    )
-    monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator._warm_live_strategy",
         AsyncMock(),
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator.live_limits_from_approval",
-        lambda approval, risk_config: (
-            Decimal("1000"),
-            5,
-            Decimal("100"),
-            Decimal("2000"),
-        ),
     )
     startup_market_mock = MagicMock()
     startup_market_mock.buffer = MagicMock()

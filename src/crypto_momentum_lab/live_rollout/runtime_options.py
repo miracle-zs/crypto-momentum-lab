@@ -100,7 +100,6 @@ class LiveRunOptions:
     candle_grace_decision_profit_pct: str | None
     candle_grace_profit_pct: str | None
     base_url: str
-    acknowledge_missing_shadow_preflight: bool
     persist_exchange_operations: str | None
     target_notional: str | None = None
     max_concurrency_per_symbol: int | None = None
@@ -478,52 +477,11 @@ def resolve_live_runtime_config(
             "--target-notional",
         )
 
-        configured_git_commit = (
-            options.git_commit_hash.strip()
-            or values.get(
-                "CML_CODE_COMMIT",
-                "",
-            ).strip()
-        )
-        manifest_git_commit = _validate_hex_hash(
-            manifest_account.image_commit,
-            "runtime manifest image_commit",
-            _GIT_COMMIT_HASH_LENGTH,
-        )
-        if (
-            configured_git_commit
-            and configured_git_commit.lower() != manifest_git_commit
-        ):
-            raise LiveRuntimeOptionsError(
-                "git commit does not match the runtime manifest"
-            )
-        git_commit_hash = manifest_git_commit
+        git_commit_hash = manifest_account.image_commit
 
-        configured_migration_revision = (
-            options.migration_revision.strip()
-            or values.get("CML_LIVE_MIGRATION_REVISION", "").strip()
-        )
-        if (
-            configured_migration_revision
-            and configured_migration_revision != manifest_account.migration_revision
-        ):
-            raise LiveRuntimeOptionsError(
-                "migration revision does not match the runtime manifest"
-            )
         migration_revision = manifest_account.migration_revision
 
         manifest_strategy_hash = runtime_manifest_strategy_config_hash(manifest_account)
-        configured_strategy_hash = options.strategy_config_hash.strip().lower()
-        if configured_strategy_hash not in {"", "unset"}:
-            configured_strategy_hash = _validate_hex_hash(
-                configured_strategy_hash,
-                "--strategy-config-hash",
-                _CONFIG_HASH_LENGTH,
-            )
-            if configured_strategy_hash != manifest_strategy_hash:
-                raise LiveRuntimeOptionsError(
-                    "strategy config hash does not match the runtime manifest"
-                )
         strategy_config_hash = manifest_strategy_hash
 
     if (
@@ -629,9 +587,6 @@ def resolve_live_runtime_config(
             checkpoint_phase_seconds=options.checkpoint_phase_seconds,
             persist_exchange_operations=parse_exchange_operations(
                 persist_exchange_operations
-            ),
-            acknowledge_missing_shadow_preflight=(
-                options.acknowledge_missing_shadow_preflight
             ),
         ),
         credentials=LiveRuntimeCredentials(

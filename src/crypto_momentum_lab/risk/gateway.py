@@ -3,17 +3,12 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskDecision,
     RiskEvaluation,
     RiskHalt,
     StrategyLiveState,
-    TradingLease,
-    TradingLeaseState,
 )
 from crypto_momentum_lab.domain.risk.limits import (
     FixedLiveLimits,
@@ -26,18 +21,10 @@ from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
 @dataclass(frozen=True, slots=True)
 class RiskContext:
     now: datetime
-    active_lease: TradingLease | None
-    latest_market_state: MarketState15s
-    account_state: ExecutionAccountStatus
     open_position_symbols: frozenset[str]
     active_halts: tuple[RiskHalt, ...]
     risk_config: RiskConfigSnapshot
     strategy_state: StrategyLiveState
-    enforce_market_state_age: bool = True
-    required_lease_owner: str | None = None
-    required_lease_id: str | None = None
-    required_account_label: str | None = None
-    required_strategy_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,25 +32,6 @@ class CandidateRiskAssessment:
     candidate: OrderIntentCandidate | None
     evaluation: RiskEvaluation
     approved_notional: Decimal | None = None
-    scope: ExecutionScope | None = None
-    version: str | None = None
-
-
-def _derive_scope(
-    intent: OrderIntentCandidate, context: RiskContext
-) -> ExecutionScope | None:
-    lease = context.active_lease
-    env = lease.environment if lease else "live"
-    acc = (
-        lease.account_label if lease else (context.required_account_label or "primary")
-    )
-    pos_side = getattr(intent, "position_side", None)
-    return ExecutionScope(
-        environment=env,
-        account_label=acc,
-        symbol=intent.symbol,
-        position_side=pos_side,
-    )
 
 
 class RiskGateway:
@@ -116,10 +84,6 @@ class RiskGateway:
                         decision.reason,
                     ),
                     approved_notional=None,
-                    scope=_derive_scope(intent, context),
-                    version=context.active_lease.lease_id
-                    if context.active_lease
-                    else None,
                 )
             intent = replace(intent, desired_notional=decision.capped_notional)
             capped_notional = decision.capped_notional
@@ -134,8 +98,6 @@ class RiskGateway:
             candidate=intent,
             evaluation=auth_eval,
             approved_notional=capped_notional if is_approved else None,
-            scope=_derive_scope(intent, context),
-            version=context.active_lease.lease_id if context.active_lease else None,
         )
 
     def validate_quantized_notional(
@@ -172,118 +134,14 @@ class RiskGateway:
     ) -> RiskEvaluation:
         if context.now.tzinfo is None or context.now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
+        if intent.reduce_only:
+            return _evaluation(intent, context, RiskDecision.APPROVED, "reduce_only")
         if context.active_halts:
             return _evaluation(intent, context, RiskDecision.HALTED, "active_halt")
-        if context.active_lease is None:
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "missing_active_lease",
-            )
-        if context.active_lease.state is not TradingLeaseState.ACTIVE:
-            return _evaluation(intent, context, RiskDecision.REJECTED, "lease_inactive")
-        if context.active_lease.expires_at <= context.now:
-            return _evaluation(intent, context, RiskDecision.REJECTED, "lease_expired")
-        if (
-            context.required_lease_owner is not None
-            and context.active_lease.owner != context.required_lease_owner
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "lease_owner_mismatch",
-            )
-        if (
-            context.required_lease_id is not None
-            and context.active_lease.lease_id != context.required_lease_id
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "lease_id_mismatch",
-            )
-        if (
-            context.required_account_label is not None
-            and context.active_lease.account_label != context.required_account_label
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "lease_account_mismatch",
-            )
-        if (
-            context.required_strategy_name is not None
-            and context.active_lease.strategy_name != context.required_strategy_name
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "lease_strategy_mismatch",
-            )
-        if context.enforce_market_state_age and _market_age_seconds(context) > (
-            context.risk_config.max_market_state_age_seconds
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "stale_market_state",
-            )
         if context.strategy_state is StrategyLiveState.HALTED:
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.HALTED,
-                "strategy_halted",
-            )
-        if intent.reduce_only:
-            if context.strategy_state is StrategyLiveState.DRAINING:
-                return _evaluation(
-                    intent,
-                    context,
-                    RiskDecision.APPROVED,
-                    "reduce_only_draining",
-                )
-            if context.account_state in (
-                ExecutionAccountStatus.HALTED_READONLY,
-                ExecutionAccountStatus.STOPPED,
-            ):
-                return _evaluation(
-                    intent,
-                    context,
-                    RiskDecision.REJECTED,
-                    "account_stopped",
-                )
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.APPROVED,
-                "reduce_only",
-            )
-        if context.account_state not in (
-            ExecutionAccountStatus.RUNNING,
-            ExecutionAccountStatus.READY_READONLY,
-            ExecutionAccountStatus.SYNCING,
-            ExecutionAccountStatus.DEGRADED,
-        ):
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "account_not_ready",
-            )
+            return _evaluation(intent, context, RiskDecision.HALTED, "strategy_halted")
         if context.strategy_state is StrategyLiveState.DRAINING:
-            return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "strategy_draining",
-            )
+            return _evaluation(intent, context, RiskDecision.REJECTED, "entries_disabled")
         desired_notional = intent.desired_notional
         if desired_notional is None:
             return _evaluation(
@@ -326,10 +184,6 @@ class RiskGateway:
                 else "max_open_positions_exceeded",
             )
         return _evaluation(intent, context, RiskDecision.APPROVED, "approved")
-
-
-def _market_age_seconds(context: RiskContext) -> float:
-    return (context.now - context.latest_market_state.bucket_end).total_seconds()
 
 
 def _evaluation(

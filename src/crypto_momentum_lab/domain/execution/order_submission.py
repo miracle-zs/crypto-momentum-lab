@@ -18,6 +18,10 @@ class OrderPreSubmissionError(RuntimeError):
     """A local precondition failed before an exchange write was attempted."""
 
 
+class OrderAlreadyPreparedError(OrderPreSubmissionError):
+    """The existing client order must be reconciled instead of submitted again."""
+
+
 class OrderRecoveryPendingError(OrderPreSubmissionError):
     """Known recovery admission rejection, with no exchange write attempted."""
 
@@ -41,8 +45,9 @@ class PreparedOrderSubmission:
 
 
 class OrderSubmissionRepository(Protocol):
-    async def prepare_submission(
+    async def prepare_submission_in_session(
         self,
+        session: object,
         *,
         intent: OrderIntentCandidate,
         evaluation: RiskEvaluation,
@@ -51,10 +56,6 @@ class OrderSubmissionRepository(Protocol):
         environment: str | None = None,
         account_label: str | None = None,
         strategy_name: str | None = None,
-        required_lease_owner: str | None = None,
-        required_lease_id: str | None = None,
-        required_code_generation: str | None = None,
-        required_session_id: str | None = None,
         max_open_positions: int | None = None,
         max_daily_loss: Decimal | None = None,
         max_gross_exposure: Decimal | None = None,
@@ -73,10 +74,6 @@ class OrderSubmissionPreparation:
     environment: str | None = None
     account_label: str | None = None
     strategy_name: str | None = None
-    required_lease_owner: str | None = None
-    required_lease_id: str | None = None
-    required_code_generation: str | None = None
-    required_session_id: str | None = None
     max_open_positions: int | None = None
     max_daily_loss: Decimal | None = None
     max_gross_exposure: Decimal | None = None
@@ -85,12 +82,3 @@ class OrderSubmissionPreparation:
     open_position_symbols: frozenset[str] | None = None
     exposure_notional: Decimal | None = None
     baseline_observed_at: datetime | None = None
-    context_token: object | None = None
-
-
-class FinalSubmissionAdmission(Protocol):
-    def rejection_reason(
-        self,
-        plan: OrderExecutionPlan,
-        preparation: OrderSubmissionPreparation,
-    ) -> str | None: ...

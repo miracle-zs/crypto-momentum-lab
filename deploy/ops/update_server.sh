@@ -4,13 +4,12 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard] [--execution-accounts-only] [--dashboard-only]
+Usage: update_server.sh <server-host> [git-ref] [--live] [--sync-dashboard] [--execution-accounts-only] [--dashboard-only]
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
-  CML_LIVE_CONTROL_CONCURRENCY  maximum parallel Live approval/preflight/lease operations (default: 4)
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS  general health wait timeout (default: 300)
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS  market-data health timeout (default: 900)
   CML_CONSUMER_WAIT_TIMEOUT_SECONDS  Paper/research health timeout (default: 300)
@@ -24,27 +23,23 @@ Environment:
   CML_SYNC_DASHBOARD  force sync dashboard image to runtime commit (default: 0)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
-The live profile is never touched unless --live is supplied. Live updates run
-a lightweight approval-binding check for every currently running account before
-restarting any non-Live service, then run the full preflight immediately before
-restarting each Live container and verify its structured readiness snapshot.
+The live profile is never touched unless --live is supplied. Live updates restart
+only currently running accounts. Health checks run immediately after each restart
+and report its structured readiness snapshot.
 The additional-account overlay is loaded only when an account-2/3/4
 service is already running; stopped accounts are not started implicitly.
 No Paper runner is deployed. Retired Paper containers from older checkouts
 are archived, stopped, and removed during the update.
---refresh-approvals is an explicit opt-in that refreshes active approvals from
-the target runtime while preserving their existing limits and operator fields;
-it requires --live and an explicit git-ref.
 --execution-accounts-only is a recovery rollout for already-running read-only
 Live execution-account services. It requires --live and an explicit git-ref,
-does not refresh approvals, and leaves strategy and Paper services untouched.
+leaves strategy and Paper services untouched.
 --sync-dashboard forces updating CML_DASHBOARD_IMAGE to the target commit image;
 by default, dashboard images referencing an ancestor repository commit are also
 automatically advanced, while custom non-repo images remain preserved.
 --dashboard-only builds the target commit image and recreates only the
 dashboard service, updating CML_DASHBOARD_IMAGE while leaving market-data,
 research-collector, live strategies, and execution accounts completely untouched.
-It cannot be combined with --live, --refresh-approvals, or --execution-accounts-only.
+It cannot be combined with --live or --execution-accounts-only.
 The SSH connection uses an agent/key by default. When
 CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
 is never a command-line argument, remote argument, or repository value.
@@ -66,7 +61,6 @@ shift
 target_ref="origin/main"
 target_ref_set=0
 live_update=0
-refresh_approvals=0
 execution_accounts_only=0
 dashboard_only=0
 sync_dashboard="${CML_SYNC_DASHBOARD:-0}"
@@ -74,9 +68,6 @@ while (( $# > 0 )); do
   case "$1" in
     --live)
       live_update=1
-      ;;
-    --refresh-approvals)
-      refresh_approvals=1
       ;;
     --execution-accounts-only)
       execution_accounts_only=1
@@ -112,16 +103,7 @@ if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
   exit 64
 fi
 
-if [[ "$refresh_approvals" == 1 && "$live_update" != 1 ]]; then
-  echo "--refresh-approvals requires --live" >&2
-  exit 64
-fi
 
-if [[ "$refresh_approvals" == 1 && "$target_ref_set" == 0 ]]; then
-  echo "--refresh-approvals requires an explicit git-ref" >&2
-  usage >&2
-  exit 64
-fi
 
 if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
   echo "--execution-accounts-only requires --live" >&2
@@ -134,20 +116,12 @@ if [[ "$execution_accounts_only" == 1 && "$target_ref_set" == 0 ]]; then
   exit 64
 fi
 
-if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
-  echo "--execution-accounts-only cannot be combined with --refresh-approvals" >&2
-  exit 64
-fi
 
 if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
   echo "--dashboard-only cannot be combined with --live" >&2
   exit 64
 fi
 
-if [[ "$dashboard_only" == 1 && "$refresh_approvals" == 1 ]]; then
-  echo "--dashboard-only cannot be combined with --refresh-approvals" >&2
-  exit 64
-fi
 
 if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
   echo "--dashboard-only cannot be combined with --execution-accounts-only" >&2
@@ -157,7 +131,6 @@ fi
 server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
-live_control_concurrency="${CML_LIVE_CONTROL_CONCURRENCY:-4}"
 deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
 market_data_wait_timeout="${CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS:-900}"
 consumer_wait_timeout="${CML_CONSUMER_WAIT_TIMEOUT_SECONDS:-300}"
@@ -219,36 +192,33 @@ fi
 client_started_at="$(date +%s)"
 if "${runner[@]}" \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
-  "$live_control_concurrency" \
   "$deploy_wait_timeout" "$market_data_wait_timeout" \
   "$consumer_wait_timeout" "$live_wait_timeout" \
   "$live_stop_timeout" \
   "$deploy_operation_timeout" "$deploy_build_timeout" \
-  "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
+  "$dashboard_required" "$dashboard_proxy_url" \
   "$crash_log_directory" "$sync_dashboard" "$execution_accounts_only" \
   "$dashboard_only" \
   <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
-remote_dir="$1"
-target_ref="$2"
-live_update="$3"
-live_concurrency="$4"
-live_control_concurrency="$5"
-deploy_wait_timeout="$6"
-market_data_wait_timeout="$7"
-consumer_wait_timeout="$8"
-live_wait_timeout="$9"
-live_stop_timeout="${10}"
-deploy_operation_timeout="${11}"
-deploy_build_timeout="${12}"
-refresh_approvals="${13}"
-dashboard_required="${14}"
-dashboard_proxy_url="${15}"
-crash_log_directory="${16}"
-sync_dashboard="${17:-0}"
-execution_accounts_only="${18:-0}"
-dashboard_only="${19:-0}"
+remote_dir="${1}"
+target_ref="${2}"
+live_update="${3}"
+live_concurrency="${4}"
+deploy_wait_timeout="${5}"
+market_data_wait_timeout="${6}"
+consumer_wait_timeout="${7}"
+live_wait_timeout="${8}"
+live_stop_timeout="${9}"
+deploy_operation_timeout="${10}"
+deploy_build_timeout="${11}"
+dashboard_required="${12}"
+dashboard_proxy_url="${13}"
+crash_log_directory="${14}"
+sync_dashboard="${15}"
+execution_accounts_only="${16}"
+dashboard_only="${17}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -271,10 +241,6 @@ for timeout_name in \
     exit 64
   fi
 done
-if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
-  echo "Invalid refresh approvals flag: $refresh_approvals" >&2
-  exit 64
-fi
 if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
   echo "Invalid sync dashboard flag: $sync_dashboard" >&2
   exit 64
@@ -287,10 +253,6 @@ if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
   echo "Execution-account-only rollout requires --live" >&2
   exit 64
 fi
-if [[ "$execution_accounts_only" == 1 && "$refresh_approvals" == 1 ]]; then
-  echo "Execution-account-only rollout cannot refresh approvals" >&2
-  exit 64
-fi
 if [[ "$dashboard_only" != 0 && "$dashboard_only" != 1 ]]; then
   echo "Invalid dashboard-only flag: $dashboard_only" >&2
   exit 64
@@ -301,10 +263,6 @@ if [[ "$dashboard_only" == 1 && "$live_update" == 1 ]]; then
 fi
 if [[ "$dashboard_only" == 1 && "$execution_accounts_only" == 1 ]]; then
   echo "Dashboard-only rollout cannot be combined with --execution-accounts-only" >&2
-  exit 64
-fi
-if [[ "$dashboard_only" == 1 && "$refresh_approvals" == 1 ]]; then
-  echo "Dashboard-only rollout cannot refresh approvals" >&2
   exit 64
 fi
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
@@ -350,68 +308,6 @@ run_with_timeout() {
   fi
   echo "operation=end name=$label status=$status elapsed_seconds=$(( $(date +%s) - started_at ))"
   return "$status"
-}
-
-run_with_account_ready_retry() {
-  local label="$1" timeout_seconds="$2"
-  shift 2
-  local attempt status output_file remaining_seconds
-  local max_attempts=20
-  local deadline=$(( $(date +%s) + timeout_seconds ))
-  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-    remaining_seconds=$(( deadline - $(date +%s) ))
-    if (( remaining_seconds <= 0 )); then
-      echo "operation=timeout name=$label reason=account_syncing timeout_seconds=$timeout_seconds" >&2
-      return 124
-    fi
-    output_file="$(mktemp)"
-    if run_with_timeout "$label" "$remaining_seconds" "$@" 2>&1 | tee "$output_file"; then
-      rm -f "$output_file"
-      return 0
-    else
-      status=$?
-    fi
-    # Only the explicit transient account state is retryable. Approval,
-    # configuration, database, timeout and unstructured failures still stop.
-    if [[ "$status" != 1 || "$attempt" == "$max_attempts" ]] || ! python3 - "$output_file" <<'PREFLIGHT_RETRY'
-import json
-from pathlib import Path
-import sys
-
-summaries = []
-for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-    try:
-        value = json.loads(line)
-    except (ValueError, TypeError):
-        continue
-    if isinstance(value, dict) and "preflight_errors" in value:
-        summaries.append(value)
-if not summaries:
-    raise SystemExit(1)
-summary = summaries[-1]
-checks = summary.get("preflight_checks")
-retryable = (
-    summary.get("account_state") in ("syncing", "starting")
-    and summary.get("preflight_ok") is False
-    and summary.get("preflight_errors") == ["account_ready"]
-    and isinstance(checks, dict)
-    and len(checks) > 1
-    and checks.get("account_ready") is False
-    and all(value is True for key, value in checks.items() if key != "account_ready")
-)
-raise SystemExit(0 if retryable else 1)
-PREFLIGHT_RETRY
-    then
-      rm -f "$output_file"
-      return "$status"
-    fi
-    rm -f "$output_file"
-    echo "operation=retry name=$label reason=account_syncing attempt=$attempt max_attempts=$max_attempts"
-    remaining_seconds=$(( deadline - $(date +%s) ))
-    if (( remaining_seconds > 0 )); then
-      sleep "$(( remaining_seconds < 3 ? remaining_seconds : 3 ))"
-    fi
-  done
 }
 
 log_service_timing() {
@@ -634,7 +530,7 @@ if [[ "$target_commit" == "$previous_commit" \
     # A recorded runtime that still points at an older image means the target
     # was never rolled out, so the persisted phase is not a safe resume point:
     # replay the full rollout from the checkout phase instead of reusing the
-    # stale runtime identity for the preflight below.
+    # stale runtime identity for service selection.
     if [[ "$runtime_commit" != "$target_commit" ]]; then
       resume_from_phase="checkout"
       runtime_changed=1
@@ -733,7 +629,7 @@ else
 fi
 # Compose reads these process-level overrides for this attempt. Persisting them
 # to .env.server is intentionally deferred until every health and target check
-# succeeds, so a failed preflight cannot change the runtime seen by old Live
+# succeeds, so a failed deployment cannot change the runtime seen by old Live
 # containers on the next restart.
 export CML_CODE_COMMIT="$runtime_commit"
 export CML_DASHBOARD_IMAGE="$dashboard_image"
@@ -801,13 +697,11 @@ phase_rank() {
     build) echo 2 ;;
     migrate) echo 3 ;;
     volume-init) echo 4 ;;
-    live-approval-precheck) echo 5 ;;
     # dashboard is a legacy phase name from before the dashboard/market-data
     # start wave. It must still retry the research stop before the wave.
     dashboard|research-stop) echo 6 ;;
     dashboard-market-data|market-data) echo 7 ;;
     paper-retired-cleanup|consumers) echo 8 ;;
-    live-preflight) echo 9 ;;
     live-restart) echo 10 ;;
     verify) echo 11 ;;
     complete) echo 12 ;;
@@ -1325,7 +1219,6 @@ verify_service_target_timed() {
   fi
 }
 
-live_preflight_complete=0
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_pairs=(
     "primary:execution-account-live:live-strategy"
@@ -1338,10 +1231,6 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     echo "Invalid CML_LIVE_CONCURRENCY: $live_concurrency" >&2
     exit 64
   fi
-  if ! [[ "$live_control_concurrency" =~ ^[1-4]$ ]]; then
-    echo "Invalid CML_LIVE_CONTROL_CONCURRENCY: $live_control_concurrency" >&2
-    exit 64
-  fi
 
   env_value() {
     local key="$1"
@@ -1351,101 +1240,12 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     printf '%s' "${value:-$fallback}"
   }
 
-  lease_owner_for_account() {
-    local account="$1"
-    case "$account" in
-      primary) env_value CML_LIVE_LEASE_OWNER live-worker ;;
-      account-2) env_value CML_LIVE_LEASE_OWNER_ACCOUNT_2 live-worker-account-2 ;;
-      account-3) env_value CML_LIVE_LEASE_OWNER_ACCOUNT_3 live-worker-account-3 ;;
-      account-4) env_value CML_LIVE_LEASE_OWNER_ACCOUNT_4 live-worker-account-4 ;;
-      *) echo "unknown account: $account" >&2; return 64 ;;
-    esac
-  }
 
-  migration_revision_for_account() {
-    local account="$1"
-    case "$account" in
-      primary) env_value CML_LIVE_MIGRATION_REVISION 20260925_0043 ;;
-      account-2) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_2 20260925_0043 ;;
-      account-3) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_3 20260925_0043 ;;
-      account-4) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_4 20260925_0043 ;;
-      *) echo "unknown account: $account" >&2; return 64 ;;
-    esac
-  }
 
-  wait_for_batch() {
-    local failure=0
-    local pid
-    for pid in "$@"; do
-      if ! wait "$pid"; then
-        failure=1
-      fi
-    done
-    return "$failure"
-  }
 
-  refresh_approval_for_pair() {
-    local pair="$1"
-    local account execution_service strategy_service
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    echo "refresh approval $account"
-    run_with_account_ready_retry "refresh-approval:$account" "$deploy_operation_timeout" \
-      "${compose[@]}" run --rm --no-deps -T "$strategy_service" \
-        refresh-approval-runtime \
-        --account-label "$account" \
-        --strategy orderflow_impulse \
-        --runtime-manifest /app/deploy/live-runtime.yaml \
-        --git-commit-hash "$runtime_commit" \
-        --migration-revision "$(migration_revision_for_account "$account")" \
-        --verify-preflight \
-        </dev/null
-  }
 
-  renew_lease_for_pair() {
-    local pair="$1"
-    local account execution_service strategy_service lease_owner
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    lease_owner="$(lease_owner_for_account "$account")"
-    echo "renew lease $account"
-    run_with_timeout --quiet "renew-lease:$account" "$deploy_operation_timeout" \
-      "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
-        --account-label "$account" \
-        --strategy orderflow_impulse \
-        --lease-owner "$lease_owner" \
-        --git-commit-hash "$runtime_commit" \
-        --lease-ttl-seconds 3600 \
-        --confirmation "RENEW LIVE RISK LEASE" </dev/null
-  }
 
-  preflight_pair() {
-    local pair="$1"
-    local account execution_service strategy_service
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    echo "preflight $account"
-    run_with_account_ready_retry "preflight:$account" "$deploy_operation_timeout" \
-      "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
-        --account-label "$account" \
-        --strategy orderflow_impulse \
-        --strict \
-        --expected-git-commit "$runtime_commit" \
-        --expected-migration-revision "$(migration_revision_for_account "$account")" \
-        </dev/null
-  }
 
-  approval_precheck_for_pair() {
-    local pair="$1"
-    local account execution_service strategy_service
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    echo "approval precheck $account"
-    run_with_timeout "approval-precheck:$account" "$deploy_operation_timeout" \
-      "${compose[@]}" run --rm --no-deps -T "$strategy_service" approval-precheck \
-        --account-label "$account" \
-        --strategy orderflow_impulse \
-        --strict \
-        --expected-git-commit "$runtime_commit" \
-        --expected-migration-revision "$(migration_revision_for_account "$account")" \
-        </dev/null
-  }
 
   verify_live_readiness() {
     local service="$1"
@@ -1463,90 +1263,26 @@ import json
 from pathlib import Path
 import sys
 
-expected_commit, expected_account, expected_migration = sys.argv[1:4]
+expected_account = sys.argv[1]
 path = Path("/run/cml/health/readiness")
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
 except Exception as error:
     raise SystemExit(f"cannot read readiness: {type(error).__name__}") from error
 
-required = (
-    "schema_version",
-    "account_label",
-    "session_id",
-    "strategy",
-    "code_commit",
-    "migration_revision",
-    "entry_universe_target_count",
-    "entry_universe_count",
-    "warmup_required_buckets",
-    "warmup_expected_symbols",
-    "warmup_complete_symbols",
-    "warmup_deferred_symbols",
-    "latest_market_state_age_seconds",
-    "entry_enabled",
-    "entry_enabled_reason",
-)
-missing = [key for key in required if key not in payload]
-if missing:
-    raise SystemExit("readiness schema missing: " + ",".join(missing))
-schema_version = payload["schema_version"]
-account_label = payload["account_label"]
-code_commit = payload["code_commit"]
-migration_revision = payload["migration_revision"]
-if schema_version != 1:
-    raise SystemExit(f"unsupported readiness schema: {schema_version}")
+account_label = payload.get("account_label")
 if account_label != expected_account:
     raise SystemExit(f"readiness account mismatch: {account_label}")
-if code_commit.lower() != expected_commit.lower():
-    raise SystemExit(f"readiness commit mismatch: {code_commit}")
-if migration_revision != expected_migration:
-    raise SystemExit(f"readiness migration mismatch: {migration_revision}")
-
-def nonnegative_int(key):
-    value = payload[key]
-    if type(value) is not int or value < 0:
-        raise SystemExit(f"readiness field must be a nonnegative integer: {key}")
-    return value
-
-target = payload["entry_universe_target_count"]
-if target is not None and (type(target) is not int or target <= 0):
-    raise SystemExit("readiness entry_universe_target_count is invalid")
-entry_count = nonnegative_int("entry_universe_count")
-expected = nonnegative_int("warmup_expected_symbols")
-complete = nonnegative_int("warmup_complete_symbols")
-deferred = nonnegative_int("warmup_deferred_symbols")
-required_buckets = nonnegative_int("warmup_required_buckets")
-if required_buckets == 0:
-    raise SystemExit("readiness warmup_required_buckets is zero")
-if complete + deferred != expected:
-    raise SystemExit("readiness warmup symbol counts do not reconcile")
-if target is not None and entry_count > target:
-    raise SystemExit("readiness entry universe exceeds configured top count")
-entry_enabled = payload["entry_enabled"]
-entry_reason = payload["entry_enabled_reason"]
-if type(entry_enabled) is not bool:
-    raise SystemExit("readiness entry_enabled is invalid")
-if not isinstance(entry_reason, str):
-    raise SystemExit("readiness entry_enabled_reason is invalid")
-age = payload["latest_market_state_age_seconds"]
-if age is not None and (type(age) not in (int, float) or age < 0):
-    raise SystemExit("readiness latest_market_state_age_seconds is invalid")
-if entry_enabled and (age is None or age > 120.0):
-    raise SystemExit(f"readiness entry_enabled is true but market state age is stale: {age}s")
-target_label = "unbounded" if target is None else str(target)
-
+# Readiness is diagnostic. Compose health already verifies the running process;
+# internal warmup counters and entry switches are not deployment approval gates.
 print(
     "live_readiness"
-    f" account={account_label}"
-    f" entry_universe={entry_count}/{target_label}"
-    f" warmup={complete}/{expected}"
-    f" deferred={deferred}"
-    f" entry_enabled={str(entry_enabled).lower()}"
-    f" reason={entry_reason}"
-    f" latest_market_state_age_seconds={age}"
+    + f" account={account_label}"
+    + " entry_enabled=" + str(payload.get("entry_enabled"))
+    + " reason=" + str(payload.get("entry_enabled_reason"))
+    + " latest_market_state_age_seconds=" + str(payload.get("latest_market_state_age_seconds"))
 )
-' "$runtime_commit" "$account" "$(migration_revision_for_account "$account")"
+' "$account"
   }
 
   live_old_services=()
@@ -1630,31 +1366,6 @@ print(
     echo "phase=live-stop elapsed_seconds=$(( $(date +%s) - stop_started_at )) services=$*"
   }
 
-  run_parallel_pairs() {
-    local action="$1"
-    shift
-    local pair
-    local -a pids=()
-    for pair in "$@"; do
-      case "$action" in
-        refresh) refresh_approval_for_pair "$pair" & ;;
-        renew) renew_lease_for_pair "$pair" & ;;
-        preflight) preflight_pair "$pair" & ;;
-        approval-precheck) approval_precheck_for_pair "$pair" & ;;
-        *) echo "unknown parallel action: $action" >&2; return 64 ;;
-      esac
-      pids+=("$!")
-      if (( ${#pids[@]} >= live_control_concurrency )); then
-        if ! wait_for_batch "${pids[@]}"; then
-          return 1
-        fi
-        pids=()
-      fi
-    done
-    if (( ${#pids[@]} > 0 )); then
-      wait_for_batch "${pids[@]}"
-    fi
-  }
 
   live_up_and_wait_parallel() {
     local health_timeout="$1"
@@ -1705,7 +1416,7 @@ print(
     for pair in "${live_pairs[@]}"; do
       IFS=: read -r account execution_service strategy_service <<<"$pair"
       if is_live_service_active "$strategy_service"; then
-        if [[ "$recovery_run" != 1 && "$refresh_approvals" != 1 ]] \
+        if [[ "$recovery_run" != 1 ]] \
           && service_is_converged "$execution_service" \
           && service_is_converged "$strategy_service"; then
           echo "phase=live account=$account skipped converged=1"
@@ -1839,7 +1550,7 @@ if [[ "$execution_accounts_only" == 1 ]]; then
 
   # Keep a resumable deployment record at the last common prerequisite phase.
   # A subsequent normal --live run will continue with approvals and the full
-  # strategy preflight after account readiness has recovered.
+  # strategy restart after account workers have recovered.
   deploy_phase=volume-init
   write_deploy_state running "$deploy_phase"
   exit 0
@@ -1884,33 +1595,6 @@ if [[ "$dashboard_only" == 1 ]]; then
   echo "deployed_dashboard_image=$dashboard_image"
   echo "market_data_services=untouched strategy_services=untouched"
   exit 0
-fi
-
-# Check the Live approval binding before restarting any non-Live service. This
-# read-only check only validates that an active approval exists for the target
-# commit and migration; the full preflight remains the final race-sensitive
-# gate immediately before each Live restart.
-# An explicit approval refresh intentionally stays in the final Live gate so
-# the old running worker is never left under a newly refreshed approval while
-# Dashboard, market-data, or consumers are still converging.
-if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
-  deploy_phase=live-approval-precheck
-  if should_run_phase live-approval-precheck; then
-    write_deploy_state running "$deploy_phase"
-    if [[ "$refresh_approvals" == 1 ]]; then
-      echo "phase=live-approval-precheck skipped refresh_approvals=1"
-    else
-      collect_active_live_pairs
-      approval_precheck_started_at="$(date +%s)"
-      if ! run_parallel_pairs approval-precheck "${active_pairs[@]}"; then
-        echo "approval precheck failed; non-Live services were not restarted" >&2
-        exit 1
-      fi
-      echo "phase=live-approval-precheck elapsed_seconds=$(( $(date +%s) - approval_precheck_started_at ))"
-    fi
-  else
-    echo "phase=live-approval-precheck skipped resume_from_phase=$resume_from_phase"
-  fi
 fi
 
 # Preserve the durable research cursor before the Hub's stream epoch changes.
@@ -2055,53 +1739,10 @@ if [[ "$market_changed" == 1 ]]; then
 fi
 verification_services+=("${consumer_candidates[@]}")
 
-# Run the Live preflight after the non-Live services have converged and before
-# touching any Live container. Approval and lease state are external, so a
-# persisted deployment phase never proves that this invocation is still
-# authorized to restart Live services. Keeping this gate here also lets a
-# rejected Live rollout leave the non-Live update complete instead of forcing
-# a second recovery deployment.
-if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
-  # Recompute the active set after non-Live convergence. A strategy that
-  # drained during the earlier phases must not be restarted accidentally.
-  collect_active_live_pairs
-  deploy_phase=live-preflight
-  write_deploy_state running "$deploy_phase"
-  preflight_started_at="$(date +%s)"
-  if [[ "$refresh_approvals" == 1 ]]; then
-    approval_refresh_started_at="$(date +%s)"
-    if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
-      echo "approval refresh failed; Live services were not restarted" >&2
-      exit 1
-    fi
-    echo "phase=approval-refresh elapsed_seconds=$(( $(date +%s) - approval_refresh_started_at ))"
-    echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
-  else
-    # Preflight is read-only. Run it before lease renewal so an approval or
-    # migration mismatch cannot leave a new lease attached to old containers.
-    if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
-      echo "preflight failed; Live services were not restarted" >&2
-      exit 1
-    fi
-    echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
-  fi
-
-  lease_started_at="$(date +%s)"
-  if ! run_parallel_pairs renew "${active_pairs[@]}"; then
-    echo "lease renewal failed; Live services were not restarted" >&2
-    exit 1
-  fi
-  echo "phase=lease-renew elapsed_seconds=$(( $(date +%s) - lease_started_at ))"
-  live_preflight_complete=1
-fi
-
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   deploy_phase=live-restart
   write_deploy_state running "$deploy_phase"
-  if [[ "$live_preflight_complete" != 1 ]]; then
-    echo "live preflight did not complete" >&2
-    exit 1
-  fi
+  collect_active_live_pairs
 
   # Compose performs each wave concurrently while respecting the configured
   # bound. Re-check strategy processes before the second wave so a service that
@@ -2113,12 +1754,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_live_service_active "$strategy_service"; then
       execution_candidates+=("$execution_service")
-      if [[ "$refresh_approvals" == 1 ]]; then
-        # Refreshing approvals can accompany a configuration-only change while
-        # the image commit stays the same. Recreate the execution worker so its
-        # environment and approval identity are applied together.
-        execution_services+=("$execution_service")
-      elif service_is_converged "$execution_service"; then
+      if service_is_converged "$execution_service"; then
         echo "phase=execution service=$execution_service skipped converged=1"
       else
         execution_services+=("$execution_service")
@@ -2140,11 +1776,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_live_service_active "$strategy_service"; then
       strategy_candidates+=("$strategy_service")
-      if [[ "$refresh_approvals" == 1 ]]; then
-        # A same-commit approval refresh is also the explicit signal that the
-        # runtime environment changed; do not leave the old process running.
-        strategy_services+=("$strategy_service")
-      elif service_is_converged "$strategy_service"; then
+      if service_is_converged "$strategy_service"; then
         echo "phase=strategy service=$strategy_service skipped converged=1"
       else
         strategy_services+=("$strategy_service")

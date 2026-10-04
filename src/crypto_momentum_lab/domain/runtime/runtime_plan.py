@@ -4,8 +4,7 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 - Compiled immutable RuntimePlan with explicit source tracking;
 - plan_hash captures the entire effective configuration content
   (compilation time excluded);
-- Distinguishes runtime_generation, fencing_epoch, declared_schema_compatibility,
-  and observed_database_revision;
+- Retains runtime generation and schema metadata for identification;
 - Secrets stored by reference only; never enumerable in hash or payload;
 - Deep immutability enforced on mappings;
 - Prohibits runtime execution paths from reading dynamic environment variables;
@@ -17,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import MappingProxyType
@@ -50,9 +49,6 @@ class RuntimePlan:
     effective_policy: EffectivePolicy
     plan_hash: str = ""
     runtime_generation: str = ""
-    fencing_epoch: int = 1
-    declared_schema_compatibility: str = ""
-    observed_database_revision: str | None = None
     options_source_chain: Mapping[str, str] = field(default_factory=dict)
     secret_references: Mapping[str, str] = field(default_factory=dict)
     compiled_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -68,14 +64,6 @@ class RuntimePlan:
             raise ValueError("strategy_hash must not be empty")
         if not self.deployment_hash.strip():
             raise ValueError("deployment_hash must not be empty")
-        if self.fencing_epoch < 1:
-            raise ValueError("fencing_epoch must be positive (>= 1)")
-
-        if not self.declared_schema_compatibility:
-            object.__setattr__(
-                self, "declared_schema_compatibility", self.schema_compatibility_version
-            )
-
         if not self.runtime_generation:
             default_gen = f"gen_{self.account_label}_{self.deployment_hash[:8]}"
             object.__setattr__(self, "runtime_generation", default_gen)
@@ -88,7 +76,7 @@ class RuntimePlan:
                 "execution_policy_hash": self.execution_policy_hash,
                 "risk_policy_hash": self.risk_policy_hash,
                 "deployment_hash": self.deployment_hash,
-                "schema_compatibility_version": self.declared_schema_compatibility,
+                "schema_compatibility_version": self.schema_compatibility_version,
             }
             computed_plan_hash = hashlib.sha256(
                 json.dumps(content_payload, sort_keys=True).encode()
@@ -109,17 +97,6 @@ class RuntimePlan:
                 MappingProxyType(dict(self.secret_references)),
             )
 
-    def with_observed_db_revision(self, revision: str | None) -> RuntimePlan:
-        """Returns an immutable copy with the observed database revision set."""
-        return replace(self, observed_database_revision=revision)
-
-    def with_fencing_epoch(self, epoch: int) -> RuntimePlan:
-        """Returns an immutable copy with an updated writer fencing epoch."""
-        if epoch < self.fencing_epoch:
-            raise ValueError(
-                f"fencing_epoch must not decrease: {epoch} < {self.fencing_epoch}"
-            )
-        return replace(self, fencing_epoch=epoch)
 
 
 class RuntimePlanCompiler:
@@ -137,8 +114,6 @@ class RuntimePlanCompiler:
         overrides: dict[str, Any] | None = None,
         secret_keys: tuple[str, ...] = ("BINANCE_API_KEY", "BINANCE_API_SECRET"),
         runtime_generation: str | None = None,
-        fencing_epoch: int = 1,
-        observed_database_revision: str | None = None,
         strict: bool = False,
     ) -> RuntimePlan:
         """Statically compiles configuration options into an immutable RuntimePlan."""
@@ -330,9 +305,6 @@ class RuntimePlanCompiler:
             schema_compatibility_version=schema_version,
             effective_policy=policy,
             runtime_generation=gen,
-            fencing_epoch=fencing_epoch,
-            declared_schema_compatibility=schema_version,
-            observed_database_revision=observed_database_revision,
             options_source_chain=sources,
             secret_references=secret_refs,
             compiled_at=datetime.now(UTC),

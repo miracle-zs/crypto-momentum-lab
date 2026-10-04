@@ -40,9 +40,6 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_market_database_engine,
     create_observability_database_engine,
 )
-from crypto_momentum_lab.persistence.postgres.shadow_repository import (
-    PostgresShadowRepository,
-)
 
 if TYPE_CHECKING:
     from crypto_momentum_lab.live_rollout.runtime_session import (
@@ -70,7 +67,6 @@ class LiveSessionFactories:
 
 @dataclass(frozen=True, slots=True)
 class LiveRepositories:
-    shadow_repository: PostgresShadowRepository
     live_repository: PostgresLiveRolloutRepository
     risk_repository: PostgresRiskRepository
     heartbeat_live_repository: PostgresLiveRolloutRepository
@@ -156,7 +152,6 @@ def assemble_live_persistence(
         expire_on_commit=False,
     )
 
-    shadow_repository = PostgresShadowRepository(execution_factory)
     live_repository = PostgresLiveRolloutRepository(
         execution_factory,
         strategy_scope=("live", account_label, strategy_name),
@@ -189,7 +184,6 @@ def assemble_live_persistence(
         heartbeat_factory=heartbeat_factory,
     )
     repositories = LiveRepositories(
-        shadow_repository=shadow_repository,
         live_repository=live_repository,
         risk_repository=risk_repository,
         heartbeat_live_repository=heartbeat_live_repository,

@@ -24,7 +24,6 @@ class LiveRuntimeTasks:
 
     market: asyncio.Task[LiveDaemonResult]
     account: asyncio.Task[None]
-    lease: asyncio.Task[None]
     reconcile: asyncio.Task[None]
     startup_market: asyncio.Task[None] | None = None
     quote: asyncio.Task[None] | None = None
@@ -42,7 +41,6 @@ class LiveRuntimeTasks:
         return {
             self.market,
             self.account,
-            self.lease,
             self.reconcile,
             *(() if self.startup_market is None else (self.startup_market,)),
             *(() if self.quote is None else (self.quote,)),
@@ -68,8 +66,7 @@ class LiveRuntimeTasks:
                 self.quote,
                 self.closed_candle,
                 self.grace_timeout,
-                self.lease,
-                self.reconcile,
+                    self.reconcile,
                 self.local_health,
                 self.entry_filter_cache,
                 self.entry_symbol_cache,
@@ -162,7 +159,6 @@ class LiveRuntimeSupervisor:
         self._cancel(self._tasks.quote)
         self._cancel(self._tasks.closed_candle)
         self._cancel(self._tasks.grace_timeout)
-        self._cancel(self._tasks.lease)
         self._cancel(self._tasks.reconcile)
         self._cancel(self._tasks.local_health)
         self._cancel(self._tasks.entry_filter_cache)
@@ -262,7 +258,6 @@ class LiveRuntimeSupervisor:
             (self._tasks.quote, "market quote channel"),
             (self._tasks.closed_candle, "closed candle exit channel"),
             (self._tasks.grace_timeout, "grace timeout exit channel"),
-            (self._tasks.lease, "live lease heartbeat"),
             (self._tasks.reconcile, "live order reconcile task"),
             (self._tasks.entry_filter_cache, "live entry filter cache task"),
             (self._tasks.entry_symbol_cache, "live entry symbol cache task"),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -89,6 +89,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     OrderProjectionConflictError,
+    PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict,
@@ -103,6 +104,7 @@ from crypto_momentum_lab.domain.execution.position_book import (
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    ExitOrderSubmissionFact,
     FreshnessRequirement,
     PositionKey,
     PositionStreamMismatchError,
@@ -273,7 +275,7 @@ class ExecutionReceipt:
 @dataclass(frozen=True, slots=True)
 class Accepted:
     receipt: ExecutionReceipt
-    extra: object | None = None
+    prepared_submission: PreparedOrderSubmission | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1143,7 +1145,11 @@ class ExecutionBook:
             event_cut.tzinfo is None or event_cut.utcoffset() is None
         ):
             raise ValueError("event_cut must be timezone-aware")
-        if self._execution_unit_of_work is not None and self._persistence_failed:
+        if (
+            self._execution_unit_of_work is not None
+            and self._persistence_failed
+            and not self._stream_scopes
+        ):
             raise RuntimeError("execution facts require successful durable restoration")
         key = PositionKey(
             environment=scope.environment,
@@ -1334,7 +1340,11 @@ class ExecutionBook:
             event_cut.tzinfo is None or event_cut.utcoffset() is None
         ):
             raise ValueError("event_cut must be timezone-aware")
-        if self._execution_unit_of_work is not None and self._persistence_failed:
+        if (
+            self._execution_unit_of_work is not None
+            and self._persistence_failed
+            and not self._stream_scopes
+        ):
             raise RuntimeError("execution facts require successful durable restoration")
         scopes = []
         for book in tuple(self._books.values()):
@@ -1375,22 +1385,19 @@ class ExecutionBook:
         self,
         request: ExecutionRequest,
         *,
-        in_transaction: Callable[[ExecutionTransactionPort], Awaitable[object]] | None = None,
+        prepare_submission: Callable[[ExecutionTransactionPort | None], Awaitable[PreparedOrderSubmission]] | None = None,
     ) -> ExecutionActResult:
         """Accept a command atomically when backed by the durable UoW."""
         if self._execution_unit_of_work is None:
             res = await self._act_mutating(request)
-            if isinstance(res, Accepted) and in_transaction is not None:
-                extra_res = await in_transaction(None)
-                res = replace(res, extra=extra_res)
+            if isinstance(res, Accepted) and prepare_submission is not None:
+                prepared = await prepare_submission(None)
+                await self.mark_dispatching(request.request_id)
+                res = replace(res, prepared_submission=prepared)
             return res
         key = request.scope.to_position_key()
         canon = key.canonical_id
         async with self._mutation_lock(key):
-            if self._persistence_failed:
-                return Blocked(
-                    reason="Execution persistence failed; restore is required before trading"
-                )
             stream_scope = self._stream_scopes.get(canon)
             if stream_scope is None:
                 return Blocked(
@@ -1468,9 +1475,35 @@ class ExecutionBook:
                             batch_quantities=batch_capacities,
                             proven_position_quantity=current_view.total_quantity,
                         )
-                    if in_transaction is not None:
-                        extra_res = await in_transaction(tx)
-                        result = replace(result, extra=extra_res)
+                    if prepare_submission is not None:
+                        prepared = await prepare_submission(tx)
+                        if prepared.plan.reduce_only and request.target_batch_ids:
+                            journal = candidate._ensure_journal(key)
+                            for batch_id in dict.fromkeys(request.target_batch_ids):
+                                journal.record_boundary(ExitOrderSubmissionFact(
+                                    order_id=f"{request.request_id}:{batch_id}",
+                                    submitted_at=prepared.plan.created_at,
+                                    symbol=key.symbol,
+                                    position_side=key.position_side,
+                                    client_order_id=request.request_id,
+                                    target_batch_id=batch_id,
+                                ))
+                            boundary_facts = journal.read_cut()
+                            persisted = await tx.persist_facts(
+                                scope=stream_scope,
+                                facts=boundary_facts,
+                                revision=journal.revision,
+                                checkpoint=boundary_facts.recovery_checkpoint,
+                                delta=journal.pending_fact_delta(),
+                            )
+                            if persisted.has_conflicts:
+                                raise RuntimeError("exit boundary persistence conflict")
+                            candidate._journal_revisions[canon] = persisted.revision
+                        await candidate._apply_command_transition(
+                            request.request_id, DispatchState.DISPATCHING,
+                            at=prepared.submitting_event.occurred_at,
+                        )
+                        result = replace(result, prepared_submission=prepared)
                     facts = candidate._ensure_journal(key).read_cut()
                     head_payload = _execution_head_payload(
                         candidate, key, facts.compute_facts_hash()
@@ -1514,42 +1547,17 @@ class ExecutionBook:
         request: ExecutionRequest,
     ) -> ExecutionActResult:
         """Accepts a trade request, enforcing CAS view token, capacity, and outbox."""
-        if self._persistence_failed:
-            return Blocked(
-                reason=(
-                    "Execution persistence failed; restore is required before trading"
-                )
-            )
+        if self._persistence_failed and not self._stream_scopes:
+            return Blocked(reason="Initial durable restore is required before trading")
         key = request.scope.to_position_key()
-        blocking_recoveries = {
-            identity
-            for identity in self._recovery_required_commands
-            if (
-                request.action == TradeCommandType.ENTRY
-                and identity not in self._external_recovery_positions
-            )
-            or self._recovery_blocks_position(identity, key)
-        }
-        if blocking_recoveries:
+        if request.request_id in (
+            self._recovery_required_commands
+            | self._dispatch_reconciliation_required_commands
+        ):
             return ExecutionRecoveryPending(
-                reason="Execution reservation settlement requires recovery",
-                diagnostics=tuple(sorted(blocking_recoveries)),
+                reason="This execution command requires reconciliation",
+                diagnostics=(request.request_id,),
             )
-        dispatch_recoveries = {
-            identity
-            for identity in self._dispatch_reconciliation_required_commands
-            if (
-                request.action == TradeCommandType.ENTRY
-                and identity not in self._external_recovery_positions
-            )
-            or self._recovery_blocks_position(identity, key)
-        }
-        if dispatch_recoveries:
-            return ExecutionRecoveryPending(
-                reason="Execution command reconciliation is required",
-                diagnostics=tuple(sorted(dispatch_recoveries)),
-            )
-        key = request.scope.to_position_key()
         book = self._ensure_book(key)
         view = book.get_view()
         effective_view_token = view.projection_version
@@ -1582,15 +1590,6 @@ class ExecutionBook:
                     f"Expected view token {request.expected_view_token} does not match "
                     f"current projection {view.projection_version}"
                 ),
-            )
-
-        # 3. Trade readiness check
-        if not view.is_ready_for_trade and not request.target_batch_ids:
-            return PositionNotReady(
-                reason=(
-                    f"PositionView is not ready for trade (status={view.health_status})"
-                ),
-                diagnostics=view.diagnostics,
             )
 
         # 4. Command building and reservation calculation
@@ -1893,14 +1892,6 @@ class ExecutionBook:
             or command_id in self._dispatch_reconciliation_required_commands
         )
 
-    def _recovery_blocks_position(self, identity: str, key: PositionKey) -> bool:
-        external_key = self._external_recovery_positions.get(identity)
-        if external_key is not None:
-            return external_key == key
-        entry = self._outbox_by_command_id.get(identity)
-        # Unknown scope must remain globally protected until restored.
-        return entry is None or entry.scope.to_position_key() == key
-
     def list_outbox(
         self,
         scope: ExecutionScope | None = None,
@@ -1935,8 +1926,6 @@ class ExecutionBook:
         key = entry.scope.to_position_key()
         canon = key.canonical_id
         async with self._mutation_lock(key):
-            if self._persistence_failed:
-                raise RuntimeError("Execution persistence failed; restore is required")
             stream_scope = self._stream_scopes.get(canon)
             if stream_scope is None:
                 raise RuntimeError("Execution command has no durable stream scope")
@@ -2224,10 +2213,8 @@ class ExecutionBook:
             )
 
         async with self._mutation_lock(key):
-            if self._persistence_failed:
-                raise RuntimeError(
-                    "Execution persistence failed; restore is required before ingest"
-                )
+            if self._persistence_failed and not self._stream_scopes:
+                raise RuntimeError("execution facts require initial durable restoration")
             # A truly flat position on exchange with no active local exposure,
             # reservations, or pending commands can adopt or confirm the stream
             # epoch in memory without cloning the book or opening a database

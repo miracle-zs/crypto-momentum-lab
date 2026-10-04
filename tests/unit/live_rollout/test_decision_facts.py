@@ -168,14 +168,16 @@ def test_missing_position_view_yields_none() -> None:
     assert out is None
 
 
-def test_unready_position_view_yields_none() -> None:
+@pytest.mark.parametrize("diagnostic", ["none", "pending_position_symbols", "unmanaged_position_symbols"])
+def test_unready_position_view_remains_available_for_decisions(diagnostic) -> None:
     out = frozen_decision_inputs_from_context(
-        _Ctx(account_snapshot=_snapshot()),
+        _Ctx(account_snapshot=_snapshot(), **({diagnostic: frozenset({"BTCUSDT"})} if diagnostic != "none" else {})),
         _state(),
         account_label="primary",
         position_view=_position_view(health_status=PositionHealthStatus.CATCHING_UP),
     )
-    assert out is None
+    assert out is not None
+    assert out.position_view.health_status is PositionHealthStatus.CATCHING_UP
 
 
 def test_non_active_strategy_yields_none() -> None:
@@ -430,7 +432,7 @@ async def test_pending_exit_recovers_after_book_becomes_ready() -> None:
 
 @pytest.mark.parametrize(
     "mismatch",
-    ["projection", "not_ready", "epoch", "dispatch_recovery", "dispatch_unknown"],
+    ["projection", "epoch", "dispatch_recovery", "dispatch_unknown"],
 )
 async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     mismatch: str,
@@ -443,8 +445,6 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     )
     if mismatch == "projection":
         view.projection_version = "pv_newer"
-    elif mismatch == "not_ready":
-        view.is_ready_for_trade = False
     elif mismatch == "epoch":
         book.read.side_effect = PositionStreamMismatchError(
             "requested account stream does not match the restored position"
@@ -507,7 +507,7 @@ async def test_newly_committed_exit_defers_without_stopping_market_consumer(
     )
 
 
-@pytest.mark.parametrize("mismatch", ["epoch", "projection", "allocation", "not_ready"])
+@pytest.mark.parametrize("mismatch", ["epoch", "projection", "allocation"])
 async def test_stale_pending_exit_is_never_dispatched_or_silently_acknowledged(
     mismatch: str,
 ) -> None:
@@ -526,8 +526,6 @@ async def test_stale_pending_exit_is_never_dispatched_or_silently_acknowledged(
             ),
         )
         uow.load_pending_exits.return_value = (("incident-decision", command),)
-    else:
-        view.is_ready_for_trade = False
     for _ in range(3):
         await source.recover_pending_exits()
     handler.assert_not_awaited()
@@ -679,4 +677,14 @@ async def test_obsolete_pending_timeout_uses_receipt_recovery_without_resubmissi
     recovery.assert_awaited_once_with(command)
     uow.mark_exit_superseded.assert_awaited_once_with(
         "incident-decision", command.command_id, "verified_unsubmitted",
+    )
+
+
+async def test_pending_exit_dispatches_while_position_health_is_unready():
+    source, uow, _, view, handler, command = _pending_exit_case()
+    view.is_ready_for_trade = False
+    await source.recover_pending_exits()
+    handler.assert_awaited_once_with(command)
+    uow.mark_exit_dispatched.assert_awaited_once_with(
+        "incident-decision", command.command_id
     )

@@ -1,32 +1,16 @@
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
-
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
-    LIVE_APPROVAL_CONFIRMATION,
     LiveGateStatus,
-    LiveOperatorApproval,
 )
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
-    TradingLease,
-    TradingLeaseState,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
-
-
-def test_live_gate_rejects_without_operator_approval() -> None:
-    decision = evaluate_live_gate(replace(_context(), approval=None))
-
-    assert decision.status is LiveGateStatus.BLOCKED
-    assert "missing_operator_approval" in decision.reasons
 
 
 def test_live_gate_rejects_when_live_submit_disabled() -> None:
@@ -35,192 +19,29 @@ def test_live_gate_rejects_when_live_submit_disabled() -> None:
     assert "live_submit_disabled" in decision.reasons
 
 
-def test_live_gate_rejects_before_account_startup() -> None:
-    decision = evaluate_live_gate(
-        replace(_context(), account_state=ExecutionAccountStatus.STARTING)
-    )
-
-    assert "account_not_ready" in decision.reasons
-
-
-def test_live_gate_rejects_when_strategy_lease_missing() -> None:
-    decision = evaluate_live_gate(replace(_context(), active_lease=None))
-
-    assert "missing_active_lease" in decision.reasons
-
-
-def test_live_gate_rejects_when_lease_generation_differs_from_worker() -> None:
-    decision = evaluate_live_gate(replace(_context(), git_commit_hash="def456"))
-
-    assert decision.status is LiveGateStatus.BLOCKED
-    assert "lease_code_generation_mismatch" in decision.reasons
-
-
-def test_live_gate_accepts_complete_preflight_context() -> None:
+def test_enabled_trading_is_admitted() -> None:
     decision = evaluate_live_gate(_context())
 
     assert decision.status is LiveGateStatus.APPROVED
     assert decision.reasons == ()
 
 
-def test_live_gate_accepts_running_account_state() -> None:
-    decision = evaluate_live_gate(
-        replace(_context(), account_state=ExecutionAccountStatus.RUNNING)
-    )
-
-    assert decision.status is LiveGateStatus.APPROVED
-    assert decision.reasons == ()
 
 
-@pytest.mark.parametrize(
-    "blocked_state",
-    [
-        ExecutionAccountStatus.STOPPED,
-        ExecutionAccountStatus.HALTED_READONLY,
-        ExecutionAccountStatus.STARTING,
-    ],
-)
-def test_live_gate_rejects_non_running_states(
-    blocked_state: ExecutionAccountStatus,
-) -> None:
-    decision = evaluate_live_gate(replace(_context(), account_state=blocked_state))
-
-    assert decision.status is LiveGateStatus.BLOCKED
-    assert "account_not_ready" in decision.reasons
 
 
-@pytest.mark.parametrize(
-    "state", [ExecutionAccountStatus.SYNCING, ExecutionAccountStatus.DEGRADED]
-)
-def test_historical_soft_status_does_not_replace_candidate_fact_checks(state) -> None:
-    assert evaluate_live_gate(replace(_context(), account_state=state)).approved
 
 
-def test_live_gate_accepts_unlimited_approval_for_bounded_risk_config() -> None:
-    approval = replace(
-        _context().approval,
-        approved_notional_cap=None,
-        approved_max_open_positions=None,
-        approved_max_daily_loss=None,
-    )
-
-    decision = evaluate_live_gate(replace(_context(), approval=approval))
-
-    assert decision.status is LiveGateStatus.APPROVED
-    assert decision.reasons == ()
 
 
-def test_live_gate_rejects_permanent_unbounded_approval() -> None:
-    config = replace(
-        _risk_config(),
-        max_order_notional=None,
-        max_gross_notional=None,
-        max_open_positions=None,
-        max_daily_loss=None,
-    )
-    approval = replace(
-        _context().approval,
-        risk_config_hash=config.config_hash,
-        approved_notional_cap=None,
-        approved_max_open_positions=None,
-        approved_max_daily_loss=None,
-        expires_at=None,
-    )
-
-    decision = evaluate_live_gate(
-        replace(_context(), risk_config=config, approval=approval)
-    )
-
-    assert decision.status is LiveGateStatus.BLOCKED
-    assert "risk_notional_exceeds_approval" in decision.reasons
-    assert "risk_positions_exceed_approval" in decision.reasons
-    assert "risk_daily_loss_exceeds_approval" in decision.reasons
-
-
-def test_live_gate_rejects_finite_approval_for_unbounded_risk_config() -> None:
-    config = replace(
-        _risk_config(),
-        max_order_notional=None,
-        max_open_positions=None,
-    )
-    approval = replace(
-        _context().approval,
-        risk_config_hash=config.config_hash,
-    )
-
-    decision = evaluate_live_gate(
-        replace(_context(), risk_config=config, approval=approval)
-    )
-
-    assert "risk_notional_exceeds_approval" in decision.reasons
-    assert "risk_positions_exceed_approval" in decision.reasons
-
-
-def test_live_gate_allows_confirmed_resting_exit_order() -> None:
-    decision = evaluate_live_gate(
-        replace(
-            _context(),
-            unresolved_order_states=(ExchangeOrderState.ACKNOWLEDGED,),
-        )
-    )
-
-    assert decision.status is LiveGateStatus.APPROVED
-
-
-def test_live_gate_leaves_order_uncertainty_to_candidate_admission() -> None:
-    decision = evaluate_live_gate(
-        replace(
-            _context(),
-            unresolved_order_states=(ExchangeOrderState.CANCELING,),
-        )
-    )
-
-    assert decision.status is LiveGateStatus.APPROVED
 
 
 def _context() -> LiveGateContext:
-    config = _risk_config()
     return LiveGateContext(
-        now=NOW,
         live_submit_enabled=True,
         account_label="primary",
         strategy_name="compression_breakout",
         strategy_config_hash="a" * 64,
-        git_commit_hash="abc123",
-        database_migration_revision="20260704_0010",
-        required_lease_owner="live-worker",
-        requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
-        active_lease=TradingLease(
-            lease_id="lease-1",
-            environment="live",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            owner="live-worker",
-            code_generation="abc123",
-            state=TradingLeaseState.ACTIVE,
-            acquired_at=NOW - timedelta(minutes=1),
-            expires_at=NOW + timedelta(minutes=5),
-        ),
-        risk_config=config,
-        approval=LiveOperatorApproval(
-            approval_id="approval-1",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            strategy_config_hash="a" * 64,
-            risk_config_hash=config.config_hash,
-            git_commit_hash="abc123",
-            database_migration_revision="20260704_0010",
-            approved_notional_cap=Decimal("25"),
-            approved_max_open_positions=1,
-            approved_max_daily_loss=Decimal("10"),
-            approver_name="operator",
-            approval_text=LIVE_APPROVAL_CONFIRMATION,
-            expires_at=NOW + timedelta(hours=1),
-            created_at=NOW - timedelta(minutes=1),
-        ),
-        account_state=ExecutionAccountStatus.READY_READONLY,
-        active_halts=(),
-        unresolved_order_states=(),
     )
 
 
@@ -237,26 +58,3 @@ def _risk_config() -> RiskConfigSnapshot:
         allow_reduce_only_while_draining=True,
         created_at=NOW,
     )
-
-
-@pytest.mark.parametrize(
-    "reasons, expected",
-    [
-        ((), False),
-        (("missing_active_lease",), True),
-        (("inactive_or_expired_lease",), True),
-        (("account_not_ready",), True),
-        (("unresolved_order_uncertainty",), True),
-        (("missing_active_lease", "account_not_ready"), True),
-        (("unresolved_order_uncertainty", "unresolved_order_uncertainty"), True),
-        (("active_risk_halt",), False),
-        (("unresolved_order_uncertainty", "active_risk_halt"), False),
-        (("unknown_gate_reason",), False),
-    ],
-)
-def test_transient_gate_requires_only_known_recoverable_reasons(
-    reasons: tuple[str, ...], expected: bool
-) -> None:
-    from crypto_momentum_lab.live_rollout.gates import is_transient_live_gate
-
-    assert is_transient_live_gate(reasons) is expected

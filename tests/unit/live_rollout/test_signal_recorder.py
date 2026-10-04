@@ -47,10 +47,6 @@ async def test_records_24h_quote_volume_and_signal_context() -> None:
     recorder = LiveStrategySignalRecorder(
         run_id="run-1",
         account_label="primary",
-        strategy_name="compression_breakout",
-        strategy_version="v1",
-        config_hash="a" * 64,
-        code_commit="b" * 40,
         quote_volume_provider=FakeQuoteVolumeProvider(volume),
         persist=persist,
     )
@@ -85,6 +81,10 @@ async def test_records_24h_quote_volume_and_signal_context() -> None:
 
     assert len(persisted) == 1
     row = persisted[0]
+    assert row["code_commit"] == ""
+    assert row["strategy_name"] == _signal().strategy_name
+    assert row["strategy_version"] == _signal().strategy_version
+    assert row["config_hash"] == _signal().config_hash
     assert row["quote_volume_24h"] == Decimal("123456.78")
     assert row["quote_volume_24h_quote_asset"] == "USDT"
     assert row["quote_volume_24h_source"] == "binance_fapi_ticker_24hr"
@@ -117,9 +117,6 @@ async def test_recorder_is_best_effort_when_queue_is_full_or_persist_fails() -> 
     recorder = LiveStrategySignalRecorder(
         run_id="run-1",
         account_label="primary",
-        strategy_name="compression_breakout",
-        strategy_version="v1",
-        config_hash="a" * 64,
         code_commit="b" * 40,
         persist=persist,
         queue_size=1,

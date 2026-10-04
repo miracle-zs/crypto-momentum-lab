@@ -87,6 +87,7 @@ async def test_historical_account_trades_settle_without_replaying_position_prefi
         await book.observe(evidence("same-trade-in-current-cut", fill=historical_fill))
     session = AsyncMock()
     session.__aenter__.return_value = session
+    session.execute.return_value = Mock(all=Mock(return_value=[]))
     session.scalar.side_effect = [
         order,
         {

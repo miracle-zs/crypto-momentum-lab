@@ -36,19 +36,14 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
     PositionHealthStatus,
 )
-from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.risk import (
-    RiskConfigSnapshot,
     StrategyLiveState,
-    TradingLease,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
-    LiveContextChangedDuringLoad,
     LiveContextReader,
     LiveDaemonRuntimeContext,
 )
@@ -71,9 +66,6 @@ from crypto_momentum_lab.live_rollout.position_batches import (
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
     _classify_live_positions_detailed,
-)
-from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
-    PostgresLiveRolloutRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
@@ -151,7 +143,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     _TRADING_RULE_CACHE_SECONDS = 300
     # Account events invalidate this snapshot immediately. A short positive
     # TTL lets consecutive market buckets reuse the same account/risk view
-    # instead of issuing the full nine-query context load every 15 seconds.
+    # instead of reloading unchanged account/risk facts every 15 seconds.
     _CONTEXT_CACHE_SECONDS = 30
     _ABNORMAL_CONTEXT_CACHE_SECONDS = 0.5
 
@@ -165,11 +157,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         run_id: str,
         strategy_name: str,
         strategy_config_hash: str,
-        git_commit_hash: str,
-        migration_revision: str,
-        lease_owner: str,
-        approval_id: str,
-        request_position_repair: Callable[[LiveDaemonRuntimeContext], None] | None = None,
+        request_position_repair: Callable[[LiveDaemonRuntimeContext], None]
+        | None = None,
     ) -> None:
         execution_sessions = execution_session_factory or session_factory
         if execution_sessions is None:
@@ -180,12 +169,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         self._run_id = run_id
         self._strategy_name = strategy_name
         self._strategy_config_hash = strategy_config_hash
-        self._git_commit_hash = git_commit_hash
-        self._migration_revision = migration_revision
-        self._lease_owner = lease_owner
-        self._approval_id = approval_id
         self._risk_repository = PostgresRiskRepository(execution_sessions)
-        self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
         self._order_repository = PostgresOrderReadRepository(execution_sessions)
         self._request_position_repair = request_position_repair
         self._cached_bucket_start: datetime | None = None
@@ -247,7 +231,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                     replace(
                         current_context,
                         now=now,
-                        gate_context=replace(current_context.gate_context, now=now),
                         trading_rules={state.symbol: symbol_rules},
                     ),
                     state,
@@ -291,10 +274,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                         replace(
                             current_context,
                             now=now,
-                            gate_context=replace(
-                                current_context.gate_context,
-                                now=now,
-                            ),
                             trading_rules={state.symbol: symbol_rules},
                         ),
                         state,
@@ -440,15 +419,8 @@ class PostgresLiveContextProvider(LiveContextReader):
             }
         pending = frozenset(key[0] for key in pending_keys)
         unmanaged = frozenset(key[0] for key in unmanaged_keys)
-        managed = tuple(
-            position
-            for position in managed
-            if (position.symbol, position.position_side.value)
-            not in pending_keys | unmanaged_keys
-        )
         await self._observe_book_drift(book=book, context=context)
-        if book_revision != getattr(book, "context_revision", None):
-            raise LiveContextChangedDuringLoad("execution facts changed during load")
+        # Cache revisions control reuse; they do not veto a reduce-only exit.
         self._cached_book_bucket_end = state.bucket_end
         self._cached_book_unresolved = context.unresolved_orders
         self._cached_book_revision = book_revision
@@ -535,59 +507,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         self,
         state: MarketState15s,
     ) -> LiveDaemonRuntimeContext:
-        """Load a context and refuse to return one invalidated in-flight.
-
-        Account events and lease heartbeats can invalidate the provider while
-        the parallel database reads below are waiting.  A stale context is
-        unsafe for both entry and exit decisions, so retry a bounded number of
-        times and fail closed if the inputs never become stable.
-        """
-        for _attempt in range(3):
-            context = await self._load_context_once(state)
-            if self.is_current(context):
-                return context
-        raise LiveContextChangedDuringLoad("live context changed during load")
-
-    async def load_lease_gate(
-        self, sessions: async_sessionmaker[AsyncSession]
-    ) -> LiveGateContext:
-        """Read only lease-recovery prerequisites on the isolated heartbeat pool."""
-        now = datetime.now(UTC)
-        epoch = self._cache_epoch
-        live = PostgresLiveRolloutRepository(sessions)
-        risk = PostgresRiskRepository(sessions)
-        orders = PostgresOrderReadRepository(sessions)
-        approval = await live.load_active_approval(
-            account_label=self._account_label, strategy_name=self._strategy_name, now=now
-        )
-        config = await _latest_risk_config(sessions, self._account_label)
-        lease = await risk.load_active_lease("live", self._account_label, now)
-        halts = await risk.load_active_halts("live", self._account_label)
-        unresolved = await orders.load_unresolved_orders(self._run_id)
-        account_state = self._realtime_account_state
-        if account_state is None:
-            account_state = await _latest_account_state(sessions, self._account_label)
-        if epoch != self._cache_epoch:
-            raise RuntimeError("account control facts changed during lease recovery")
-        if approval is not None and approval.approval_id != self._approval_id:
-            approval = None
-        return LiveGateContext(
-            now=now, live_submit_enabled=True,
-            account_label=self._account_label, strategy_name=self._strategy_name,
-            strategy_config_hash=self._strategy_config_hash,
-            git_commit_hash=self._git_commit_hash,
-            database_migration_revision=self._migration_revision,
-            required_lease_owner=self._lease_owner,
-            requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            active_lease=lease, risk_config=config, approval=approval,
-            account_state=account_state, active_halts=halts,
-            unresolved_order_states=tuple(order.state for order in unresolved),
-        )
-
-    async def _load_context_once(
-        self,
-        state: MarketState15s,
-    ) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
         cached_context = self._cached_context
         if (
@@ -603,7 +522,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                 return replace(
                     current_context,
                     now=now,
-                    gate_context=replace(current_context.gate_context, now=now),
                     trading_rules={state.symbol: symbol_rules},
                 )
             # An account event may invalidate the cache while symbol rules are
@@ -621,24 +539,10 @@ class PostgresLiveContextProvider(LiveContextReader):
             "_realtime_account_state",
             None,
         )
-        approval_task = asyncio.create_task(
-            self._live_repository.load_active_approval(
-                account_label=self._account_label,
-                strategy_name=self._strategy_name,
-                now=now,
-            )
-        )
         risk_config_task = asyncio.create_task(
             _latest_risk_config(
                 self._sessions,
                 self._account_label,
-            )
-        )
-        lease_task = asyncio.create_task(
-            self._risk_repository.load_active_lease(
-                "live",
-                self._account_label,
-                now,
             )
         )
         halts_task = asyncio.create_task(
@@ -671,9 +575,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         )
         strategy_state_task = asyncio.create_task(self._strategy_live_state())
         context_tasks: list[asyncio.Task[object]] = [
-            approval_task,
             risk_config_task,
-            lease_task,
             halts_task,
             unresolved_and_positions_task,
             realized_task,
@@ -696,9 +598,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                     task.cancel()
             await asyncio.shield(asyncio.gather(*context_tasks, return_exceptions=True))
             raise
-        approval = approval_task.result()
         risk_config = risk_config_task.result()
-        lease = lease_task.result()
         halts = halts_task.result()
         unresolved_and_positions = unresolved_and_positions_task.result()
         if realtime_account_state is not None:
@@ -710,8 +610,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         realized = realized_task.result()
         symbol_rules = symbol_rules_task.result()
         strategy_state = strategy_state_task.result()
-        if approval is not None and approval.approval_id != self._approval_id:
-            approval = None
         (
             account_observed_at,
             position_symbols,
@@ -727,26 +625,14 @@ class PostgresLiveContextProvider(LiveContextReader):
         rules = {state.symbol: symbol_rules}
         unresolved_states = tuple(item.state for item in unresolved)
         gate_context = LiveGateContext(
-            now=now,
             live_submit_enabled=True,
             account_label=self._account_label,
             strategy_name=self._strategy_name,
             strategy_config_hash=self._strategy_config_hash,
-            git_commit_hash=self._git_commit_hash,
-            database_migration_revision=self._migration_revision,
-            required_lease_owner=self._lease_owner,
-            requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            active_lease=lease,
-            risk_config=risk_config,
-            approval=approval,
-            account_state=account_state,
-            active_halts=halts,
-            unresolved_order_states=unresolved_states,
         )
         context = LiveDaemonRuntimeContext(
             now=now,
             gate_context=gate_context,
-            active_lease=lease,
             account_state=account_state,
             account_observed_at=account_observed_at,
             open_position_symbols=position_symbols,
@@ -839,27 +725,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             ContextInvalidation(
                 reason=ContextInvalidationReason.RECOVERY,
                 occurred_at=datetime.now(tz=UTC),
-            )
-        )
-
-    def update_lease(self, lease: TradingLease) -> None:
-        """Publish a heartbeat renewal into the cached runtime context.
-
-        Lease renewal is owned by the independent heartbeat task.  Updating
-        the cache here keeps the gate on the hot market-state path consistent
-        with the lease that was just committed to PostgreSQL.
-        """
-
-        if lease.owner != self._lease_owner:
-            return
-        # Invalidate in-flight loads as well as the cached object.  Updating
-        # only ``_cached_context`` allows a load that captured an older lease
-        # to repopulate the cache after this callback returns.
-        self.invalidate(
-            ContextInvalidation(
-                reason=ContextInvalidationReason.LEASE_CHANGE,
-                occurred_at=datetime.now(tz=UTC),
-                details={"owner": lease.owner},
             )
         )
 
@@ -1478,8 +1343,13 @@ def _book_owned_account_exposure(
     active: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
     observed_at: datetime | None,
 ) -> tuple[
-    datetime | None, frozenset[str], Decimal, Decimal,
-    tuple[ManagedLivePosition, ...], frozenset[str], frozenset[str],
+    datetime | None,
+    frozenset[str],
+    Decimal,
+    Decimal,
+    tuple[ManagedLivePosition, ...],
+    frozenset[str],
+    frozenset[str],
     Mapping[str, CoverageEvidence],
 ]:
     """Account exposure is factual; the Book supplies ownership and readiness."""
@@ -1488,7 +1358,10 @@ def _book_owned_account_exposure(
         frozenset(position.symbol for position in active),
         sum((position.unrealized_pnl for position in active), Decimal("0")),
         sum((abs(position.notional) for position in active), Decimal("0")),
-        (), frozenset(), frozenset(), {},
+        (),
+        frozenset(),
+        frozenset(),
+        {},
     )
 
 
@@ -1590,47 +1463,3 @@ async def poll_live_market_states(
                 bucket_start=state.bucket_start,
                 symbol=state.symbol,
             )
-
-
-def live_limits_from_approval(
-    *,
-    approval: LiveOperatorApproval,
-    risk_config: RiskConfigSnapshot,
-) -> tuple[Decimal | None, int | None, Decimal | None, Decimal | None]:
-    return (
-        _minimum_optional_decimal_limit(
-            approval.approved_notional_cap,
-            risk_config.max_order_notional,
-        ),
-        _minimum_optional_integer_limit(
-            approval.approved_max_open_positions,
-            risk_config.max_open_positions,
-        ),
-        _minimum_optional_decimal_limit(
-            approval.approved_max_daily_loss,
-            risk_config.max_daily_loss,
-        ),
-        risk_config.max_gross_notional,
-    )
-
-
-def _minimum_optional_decimal_limit(
-    left: Decimal | None,
-    right: Decimal | None,
-) -> Decimal | None:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return min(left, right)
-
-
-def _minimum_optional_integer_limit(
-    left: int | None,
-    right: int | None,
-) -> int | None:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return min(left, right)

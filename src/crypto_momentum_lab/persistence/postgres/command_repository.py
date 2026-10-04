@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import (
+    and_,
     exists,
     func,
     or_,
@@ -14,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
     ExecutionBookHeadRow,
@@ -292,6 +294,13 @@ class PostgresCommandRepository:
                 )
                 .where(
                     or_(
+                        ExchangeOrderRow.state.not_in(tuple(
+                            state.value for state in ExchangeOrderState if state.terminal
+                        )),
+                        and_(
+                            ExchangeOrderRow.executed_quantity > 0,
+                            ExecutionCommandRow.status == "rejected",
+                        ),
                         ExecutionCommandRow.status.in_(
                             ["prepared", "dispatching", "acknowledged", "unknown"]
                         ),
@@ -315,10 +324,11 @@ class PostgresCommandRepository:
                 await session.scalars(query.order_by(ExecutionCommandRow.requested_at))
             ).all()
             result = []
-            exchange_ids = dict((await session.execute(
-                select(ExchangeOrderRow.client_order_id, ExchangeOrderRow.exchange_order_id)
-                .where(ExchangeOrderRow.client_order_id.in_([r.client_order_id for r in rows]))
-            )).all()) if rows else {}
+            orders = {order.client_order_id: order for order in (
+                await session.scalars(select(ExchangeOrderRow).where(
+                    ExchangeOrderRow.client_order_id.in_([r.client_order_id for r in rows])
+                ))
+            ).all()} if rows else {}
             for r in rows:
                 if getattr(r, "command", None) in (
                     "resolve_unknown_order",
@@ -328,7 +338,7 @@ class PostgresCommandRepository:
                     continue
                 dtls = dict(r.details) if isinstance(r.details, dict) else {}
                 if dtls.get("external_order_id") is None:
-                    dtls["external_order_id"] = exchange_ids.get(r.client_order_id)
+                    dtls["external_order_id"] = orders[r.client_order_id].exchange_order_id if r.client_order_id in orders else None
                 scope = dtls.get("scope")
                 acc = (
                     scope.get("account_label")
@@ -343,7 +353,7 @@ class PostgresCommandRepository:
                         "command_id": r.command_id,
                         "client_order_id": r.client_order_id,
                         "command": r.command,
-                        "status": r.status,
+                        "status": _restored_dispatch_status(orders.get(r.client_order_id), r.status),
                         "requested_at": r.requested_at,
                         "details": dtls,
                     }
@@ -632,3 +642,18 @@ class PostgresCommandRepository:
                 await session.execute(
                     insert(model).values(values).on_conflict_do_nothing()
                 )
+
+
+def _restored_dispatch_status(order: ExchangeOrderRow | None, settlement_status: str) -> str:
+    """Use the order for submission state; terminal projection still needs settlement."""
+    if order is None:
+        return settlement_status
+    state = ExchangeOrderState(order.state)
+    if state.terminal:
+        if settlement_status == "rejected" and order.executed_quantity > 0:
+            return "unknown"
+        return settlement_status if settlement_status in {"terminal", "rejected"} else "unknown"
+    if state in {ExchangeOrderState.ACKNOWLEDGED, ExchangeOrderState.SUBMITTED,
+                 ExchangeOrderState.PARTIALLY_FILLED}:
+        return "acknowledged"
+    return "unknown"

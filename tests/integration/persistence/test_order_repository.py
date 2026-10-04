@@ -63,8 +63,35 @@ from crypto_momentum_lab.persistence.postgres.session import (
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("price_source", ["event", "fills", "missing", "wrong_quantity", "zero_cancel", "account_fills", "nested_account_fills", "wrong_account"])
-async def test_terminal_receipt_requires_exact_priced_execution_facts(order_repository, price_source):
+
+async def _prepare_submission(repository, **values):
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderAlreadyPreparedError,
+    )
+    try:
+        async with repository._session_factory() as session:
+            async with session.begin():
+                return await repository.prepare_submission_in_session(session, **values)
+    except OrderAlreadyPreparedError:
+        return None
+
+
+@pytest.mark.parametrize(
+    "price_source",
+    [
+        "event",
+        "fills",
+        "missing",
+        "wrong_quantity",
+        "zero_cancel",
+        "account_fills",
+        "nested_account_fills",
+        "wrong_account",
+    ],
+)
+async def test_terminal_receipt_requires_exact_priced_execution_facts(
+    order_repository, price_source
+):
     plans, _, reads, events, submissions, factory = order_repository
     await _save_intent(submissions)
     plan = _plan()
@@ -74,32 +101,103 @@ async def test_terminal_receipt_requires_exact_priced_execution_facts(order_repo
     if price_source == "event":
         details["average_price"] = "100"
     elif price_source == "wrong_quantity":
-        await events.append_order_event(ExchangeOrderEvent("priced-partial", plan.client_order_id,
-            ExchangeOrderState.PARTIALLY_FILLED, NOW, "12345", {"executed_quantity": str(quantity / 2), "average_price": "100"}))
+        await events.append_order_event(
+            ExchangeOrderEvent(
+                "priced-partial",
+                plan.client_order_id,
+                ExchangeOrderState.PARTIALLY_FILLED,
+                NOW,
+                "12345",
+                {"executed_quantity": str(quantity / 2), "average_price": "100"},
+            )
+        )
     if price_source == "fills":
-        await events.save_fill(ExchangeOrderFill("fill-receipt", plan.client_order_id,
-            "real-trade", Decimal(100), quantity, Decimal(0), "USDT", NOW, {}))
+        await events.save_fill(
+            ExchangeOrderFill(
+                "fill-receipt",
+                plan.client_order_id,
+                "real-trade",
+                Decimal(100),
+                quantity,
+                Decimal(0),
+                "USDT",
+                NOW,
+                {},
+            )
+        )
     if price_source in {"account_fills", "nested_account_fills", "wrong_account"}:
         account = f"test-receipt-{uuid4().hex}"
         async with factory.begin() as session:
-            session.add(ExecutionCommandRow(command_id=plan.client_order_id, client_order_id=plan.client_order_id,
-                command="entry", status="unknown", requested_at=NOW, details={"scope": {
-                    "environment": "live", "account_label": account, "symbol": plan.symbol,
-                    "position_side": plan.position_side.value,
-                }}))
+            session.add(
+                ExecutionCommandRow(
+                    command_id=plan.client_order_id,
+                    client_order_id=plan.client_order_id,
+                    command="entry",
+                    status="unknown",
+                    requested_at=NOW,
+                    details={
+                        "scope": {
+                            "environment": "live",
+                            "account_label": account,
+                            "symbol": plan.symbol,
+                            "position_side": plan.position_side.value,
+                        }
+                    },
+                )
+            )
             # Same exchange ID in another account must not influence the receipt.
-            session.add(AccountFillEventRow(environment="live", account_label=account + "-other",
-                symbol=plan.symbol, trade_id="other-account", order_id="12345", side=plan.side,
-                price=Decimal(200), quantity=quantity, realized_pnl=Decimal(0), fee=Decimal(0),
-                fee_asset="USDT", trade_at=NOW, raw_payload={"positionSide": plan.position_side.value}))
+            session.add(
+                AccountFillEventRow(
+                    environment="live",
+                    account_label=account + "-other",
+                    symbol=plan.symbol,
+                    trade_id="other-account",
+                    order_id="12345",
+                    side=plan.side,
+                    price=Decimal(200),
+                    quantity=quantity,
+                    realized_pnl=Decimal(0),
+                    fee=Decimal(0),
+                    fee_asset="USDT",
+                    trade_at=NOW,
+                    raw_payload={"positionSide": plan.position_side.value},
+                )
+            )
             if price_source in {"account_fills", "nested_account_fills"}:
-                session.add(AccountFillEventRow(environment="live", account_label=account,
-                    symbol=plan.symbol, trade_id="actual-trade", order_id="12345", side=plan.side,
-                    price=Decimal(100), quantity=quantity, realized_pnl=Decimal(0), fee=Decimal(0),
-                    fee_asset="USDT", trade_at=NOW, raw_payload={"event": {"o": {"ps": plan.position_side.value}}} if price_source == "nested_account_fills" else {"positionSide": plan.position_side.value}))
-    state = ExchangeOrderState.CANCELED if price_source == "zero_cancel" else ExchangeOrderState.FILLED
-    await events.append_order_event(ExchangeOrderEvent("terminal", plan.client_order_id, state,
-        NOW + timedelta(seconds=1), None if price_source == "zero_cancel" else "12345", details))
+                session.add(
+                    AccountFillEventRow(
+                        environment="live",
+                        account_label=account,
+                        symbol=plan.symbol,
+                        trade_id="actual-trade",
+                        order_id="12345",
+                        side=plan.side,
+                        price=Decimal(100),
+                        quantity=quantity,
+                        realized_pnl=Decimal(0),
+                        fee=Decimal(0),
+                        fee_asset="USDT",
+                        trade_at=NOW,
+                        raw_payload={"event": {"o": {"ps": plan.position_side.value}}}
+                        if price_source == "nested_account_fills"
+                        else {"positionSide": plan.position_side.value},
+                    )
+                )
+    state = (
+        ExchangeOrderState.CANCELED
+        if price_source == "zero_cancel"
+        else ExchangeOrderState.FILLED
+    )
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            "terminal",
+            plan.client_order_id,
+            state,
+            NOW + timedelta(seconds=1),
+            None if price_source == "zero_cancel" else "12345",
+            details,
+        )
+    )
     order = await reads.load_order(plan.client_order_id)
     assert not await reads.load_unresolved_orders(plan.run_id)
     if price_source in {"missing", "wrong_quantity", "wrong_account"}:
@@ -111,7 +209,9 @@ async def test_terminal_receipt_requires_exact_priced_execution_facts(order_repo
         assert receipt.average_price == (Decimal(0) if quantity == 0 else Decimal(100))
 
 
-async def test_restored_unknown_with_terminal_order_replays_through_real_postgres_book(order_repository):
+async def test_restored_unknown_with_terminal_order_replays_through_real_postgres_book(
+    order_repository,
+):
     from crypto_momentum_lab.domain.account import AccountFillEvent
     from crypto_momentum_lab.domain.execution.command_models import (
         DispatchState,
@@ -137,27 +237,74 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
     await _save_intent(submissions)
     plan = _plan()
     await plans.save_planned_order(plan)
-    await events.append_order_event(ExchangeOrderEvent("terminal", plan.client_order_id, ExchangeOrderState.FILLED,
-        NOW, "12345", {"executed_quantity": str(plan.quantity), "average_price": "100"}))
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            "terminal",
+            plan.client_order_id,
+            ExchangeOrderState.FILLED,
+            NOW,
+            "12345",
+            {"executed_quantity": str(plan.quantity), "average_price": "100"},
+        )
+    )
     account = f"test-replay-{uuid4().hex}"
     scope = ExecutionScope("live", account, plan.symbol, plan.position_side)
     book = _book(factory)
     await book.restore(account_label=account)
-    fill = AccountFillEvent("live", account, plan.symbol, "real-trade", "12345", "BUY", Decimal(100),
-        plan.quantity, Decimal(0), Decimal(0), "USDT", NOW, {"positionSide": plan.position_side.value})
-    await book.observe(ExecutionEvidence("true-fill", scope, NOW, fill=fill, stream_id="legacy", stream_epoch="one"))
-    book.register_prepared_command(TradeCommand(plan.client_order_id, scope.to_position_key(), TradeCommandType.ENTRY,
-        StrategySide.LONG, EntryType.LIMIT, plan.quantity, limit_price=plan.price, created_at=NOW), scope)
+    fill = AccountFillEvent(
+        "live",
+        account,
+        plan.symbol,
+        "real-trade",
+        "12345",
+        "BUY",
+        Decimal(100),
+        plan.quantity,
+        Decimal(0),
+        Decimal(0),
+        "USDT",
+        NOW,
+        {"positionSide": plan.position_side.value},
+    )
+    await book.observe(
+        ExecutionEvidence(
+            "true-fill", scope, NOW, fill=fill, stream_id="legacy", stream_epoch="one"
+        )
+    )
+    book.register_prepared_command(
+        TradeCommand(
+            plan.client_order_id,
+            scope.to_position_key(),
+            TradeCommandType.ENTRY,
+            StrategySide.LONG,
+            EntryType.LIMIT,
+            plan.quantity,
+            limit_price=plan.price,
+            created_at=NOW,
+        ),
+        scope,
+    )
     await book.mark_dispatching(plan.client_order_id)
     async with factory.begin() as session:
-        await session.execute(delete(ExecutionBookHeadRow).where(ExecutionBookHeadRow.account_label == account))
+        await session.execute(
+            delete(ExecutionBookHeadRow).where(
+                ExecutionBookHeadRow.account_label == account
+            )
+        )
     restored = _book(factory)
     await restored.restore(account_label=account)
     assert restored.command_requires_recovery(plan.client_order_id)
-    coordinator = OrderExecutionCoordinator(backend=object(), account_label=account, environment="live", execution_book=restored)
+    coordinator = OrderExecutionCoordinator(
+        backend=object(),
+        account_label=account,
+        environment="live",
+        execution_book=restored,
+    )
     try:
         assert not await recover_restored_commands(
-            book=restored, coordinator=coordinator, orders=reads,
+            book=restored,
+            coordinator=coordinator,
+            orders=reads,
             reconcile_order=coordinator.reconcile_order,
         )
         assert restored.get_outbox(plan.client_order_id).state == DispatchState.TERMINAL
@@ -170,7 +317,9 @@ async def test_restored_unknown_with_terminal_order_replays_through_real_postgre
 
 
 @pytest.mark.parametrize("history", ["complete", "partial", "foreign_account"])
-async def test_old_trade_settlement_is_independent_of_current_epoch_position_facts(order_repository, history):
+async def test_old_trade_settlement_is_independent_of_current_epoch_position_facts(
+    order_repository, history
+):
     from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
     from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
     from crypto_momentum_lab.domain.execution.trade_command import (
@@ -189,43 +338,85 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
     await _save_intent(submissions)
     plan = _plan()
     await plans.save_planned_order(plan)
-    await events.append_order_event(ExchangeOrderEvent(
-        "terminal", plan.client_order_id, ExchangeOrderState.FILLED, NOW, "12345",
-        {"executed_quantity": str(plan.quantity), "average_price": "100"},
-    ))
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            "terminal",
+            plan.client_order_id,
+            ExchangeOrderState.FILLED,
+            NOW,
+            "12345",
+            {"executed_quantity": str(plan.quantity), "average_price": "100"},
+        )
+    )
     account = f"test-history-{uuid4().hex}"
     scope = ExecutionScope("live", account, plan.symbol, plan.position_side)
     book = _book(factory)
     await book.restore(account_label=account)
     # New stream baseline intentionally has no previous epoch's trade prefix.
-    await book.observe(ExecutionEvidence("current-stream", scope, NOW,
-                                         stream_id="hub", stream_epoch="new"))
+    await book.observe(
+        ExecutionEvidence(
+            "current-stream", scope, NOW, stream_id="hub", stream_epoch="new"
+        )
+    )
     async with factory.begin() as session:
-        session.add(AccountFillEventRow(
-            environment="live", account_label=account if history != "foreign_account" else account + "-other",
-            symbol=plan.symbol, trade_id="old-real-trade", order_id="12345", side=plan.side,
-            quantity=plan.quantity if history != "partial" else plan.quantity / 2,
-            price=Decimal(100), realized_pnl=Decimal(0), fee=Decimal(0), fee_asset="USDT",
-            trade_at=NOW - timedelta(seconds=1), raw_payload={"positionSide": plan.position_side.value},
-        ))
-    book.register_prepared_command(TradeCommand(
-        plan.client_order_id, scope.to_position_key(), TradeCommandType.ENTRY,
-        StrategySide.LONG, EntryType.LIMIT, plan.quantity, limit_price=plan.price, created_at=NOW,
-    ), scope)
+        session.add(
+            AccountFillEventRow(
+                environment="live",
+                account_label=account
+                if history != "foreign_account"
+                else account + "-other",
+                symbol=plan.symbol,
+                trade_id="old-real-trade",
+                order_id="12345",
+                side=plan.side,
+                quantity=plan.quantity if history != "partial" else plan.quantity / 2,
+                price=Decimal(100),
+                realized_pnl=Decimal(0),
+                fee=Decimal(0),
+                fee_asset="USDT",
+                trade_at=NOW - timedelta(seconds=1),
+                raw_payload={"positionSide": plan.position_side.value},
+            )
+        )
+    book.register_prepared_command(
+        TradeCommand(
+            plan.client_order_id,
+            scope.to_position_key(),
+            TradeCommandType.ENTRY,
+            StrategySide.LONG,
+            EntryType.LIMIT,
+            plan.quantity,
+            limit_price=plan.price,
+            created_at=NOW,
+        ),
+        scope,
+    )
     await book.mark_dispatching(plan.client_order_id)
     restored = _book(factory)
     await restored.restore(account_label=account)
-    coordinator = OrderExecutionCoordinator(backend=object(), account_label=account,
-                                             environment="live", execution_book=restored)
+    coordinator = OrderExecutionCoordinator(
+        backend=object(),
+        account_label=account,
+        environment="live",
+        execution_book=restored,
+    )
     try:
         pending = history != "complete"
-        assert await recover_restored_commands(
-            book=restored, coordinator=coordinator, orders=reads,
-            reconcile_order=coordinator.reconcile_order,
-        ) is pending
+        assert (
+            await recover_restored_commands(
+                book=restored,
+                coordinator=coordinator,
+                orders=reads,
+                reconcile_order=coordinator.reconcile_order,
+            )
+            is pending
+        )
         assert restored.command_requires_recovery(plan.client_order_id) is pending
         assert (await restored.read(scope)).total_quantity == 0
-        assert restored._journals[scope.to_position_key().canonical_id].read_cut().fills == ()
+        assert (
+            restored._journals[scope.to_position_key().canonical_id].read_cut().fills
+            == ()
+        )
         # The head and command transition commit together and survive process loss.
         restarted = _book(factory)
         await restarted.restore(account_label=account)
@@ -235,20 +426,36 @@ async def test_old_trade_settlement_is_independent_of_current_epoch_position_fac
         await coordinator.aclose()
 
 
-@pytest.mark.parametrize("terminal", [ExchangeOrderState.FILLED, ExchangeOrderState.CANCELED])
-async def test_exchange_terminal_fact_precedes_later_local_ack_clock(order_repository, terminal):
+@pytest.mark.parametrize(
+    "terminal", [ExchangeOrderState.FILLED, ExchangeOrderState.CANCELED]
+)
+async def test_exchange_terminal_fact_precedes_later_local_ack_clock(
+    order_repository, terminal
+):
     plans, _, _, events, submissions, factory = order_repository
     await _save_intent(submissions)
     plan = _plan()
     await plans.save_planned_order(plan)
-    await events.append_order_event(ExchangeOrderEvent(
-        "local-ack", plan.client_order_id, ExchangeOrderState.ACKNOWLEDGED,
-        NOW + timedelta(seconds=3, microseconds=348681), "12345", {},
-    ))
-    await events.append_order_event(ExchangeOrderEvent(
-        "exchange-terminal", plan.client_order_id, terminal,
-        NOW + timedelta(seconds=3, microseconds=345000), "12345", {},
-    ))
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            "local-ack",
+            plan.client_order_id,
+            ExchangeOrderState.ACKNOWLEDGED,
+            NOW + timedelta(seconds=3, microseconds=348681),
+            "12345",
+            {},
+        )
+    )
+    await events.append_order_event(
+        ExchangeOrderEvent(
+            "exchange-terminal",
+            plan.client_order_id,
+            terminal,
+            NOW + timedelta(seconds=3, microseconds=345000),
+            "12345",
+            {},
+        )
+    )
     async with factory() as session:
         row = await session.get(ExchangeOrderRow, plan.client_order_id)
         assert row.state == terminal.value
@@ -393,6 +600,7 @@ async def test_save_fill_deduplicates_exchange_trade_identity(
     assert count == 1
 
 
+@pytest.mark.parametrize("previously_approved", [False, True])
 async def test_prepare_submission_journals_intent_order_and_event_together(
     order_repository: tuple[
         PostgresOrderPlanRepository,
@@ -402,9 +610,12 @@ async def test_prepare_submission_journals_intent_order_and_event_together(
         PostgresOrderSubmissionRepository,
         async_sessionmaker[AsyncSession],
     ],
+    previously_approved: bool,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    prepared = await submissions.prepare_submission(
+    if previously_approved:
+        await _save_intent(submissions)
+    prepared = await _prepare_submission(submissions,
         intent=_intent(),
         evaluation=RiskEvaluation(
             evaluation_id="evaluation-1",
@@ -473,7 +684,7 @@ async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
     )
 
     assert (
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=intent,
             evaluation=evaluation,
             plan=first_plan,
@@ -501,7 +712,7 @@ async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
         created_at=NOW + timedelta(seconds=3),
     )
     assert (
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=intent,
             evaluation=evaluation,
             plan=repriced_plan,
@@ -533,7 +744,7 @@ async def test_concurrent_prepare_grants_only_one_submission(order_repository) -
     )
     results = await asyncio.gather(
         *(
-            submissions.prepare_submission(
+            _prepare_submission(submissions,
                 intent=_intent(),
                 evaluation=evaluation,
                 plan=_plan(),
@@ -555,7 +766,7 @@ async def test_concurrent_prepare_grants_only_one_submission(order_repository) -
     )
     restarted = PostgresOrderSubmissionRepository(factory)
     assert (
-        await restarted.prepare_submission(
+        await _prepare_submission(restarted,
             intent=_intent(),
             evaluation=evaluation,
             plan=_plan(),
@@ -579,7 +790,6 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     first_intent = _intent()
     first_evaluation = _evaluation(first_intent, "evaluation-entry-1")
     first_plan = _plan()
@@ -595,9 +805,6 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -607,7 +814,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
         "exposure_notional": Decimal("100"),
     }
 
-    first = await submissions.prepare_submission(
+    first = await _prepare_submission(submissions,
         intent=first_intent,
         evaluation=first_evaluation,
         plan=first_plan,
@@ -616,7 +823,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
     )
     assert first is not None
     with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=second_intent,
             evaluation=second_evaluation,
             plan=second_plan,
@@ -634,7 +841,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
             details={},
         )
     )
-    second = await submissions.prepare_submission(
+    second = await _prepare_submission(submissions,
         intent=second_intent,
         evaluation=second_evaluation,
         plan=second_plan,
@@ -652,7 +859,6 @@ async def test_filled_entry_claim_retained_and_blocks_stale_baseline_order(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     first_intent = _intent()
     first_evaluation = _evaluation(first_intent, "eval-fill-block-1")
     first_plan = _plan()
@@ -669,9 +875,6 @@ async def test_filled_entry_claim_retained_and_blocks_stale_baseline_order(
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -681,7 +884,7 @@ async def test_filled_entry_claim_retained_and_blocks_stale_baseline_order(
         "exposure_notional": Decimal("100"),
     }
 
-    first = await submissions.prepare_submission(
+    first = await _prepare_submission(submissions,
         intent=first_intent,
         evaluation=first_evaluation,
         plan=first_plan,
@@ -711,7 +914,7 @@ async def test_filled_entry_claim_retained_and_blocks_stale_baseline_order(
         assert claim_row.active is True
 
     with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=second_intent,
             evaluation=second_evaluation,
             plan=second_plan,
@@ -725,7 +928,6 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     first_intent = _intent()
     first_evaluation = _evaluation(first_intent, "eval-cover-1")
     first_plan = _plan()
@@ -742,9 +944,6 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -754,7 +953,7 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
         "exposure_notional": Decimal("100"),
     }
 
-    first = await submissions.prepare_submission(
+    first = await _prepare_submission(submissions,
         intent=first_intent,
         evaluation=first_evaluation,
         plan=first_plan,
@@ -783,7 +982,7 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
     updated_kwargs["open_position_symbols"] = frozenset({first_plan.symbol})
 
     with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=second_intent,
             evaluation=second_evaluation,
             plan=second_plan,
@@ -794,7 +993,7 @@ async def test_filled_entry_claim_retired_when_account_baseline_covers_exposure(
 
     smaller_kwargs = dict(updated_kwargs)
     smaller_kwargs["exposure_notional"] = Decimal("40")
-    second = await submissions.prepare_submission(
+    second = await _prepare_submission(submissions,
         intent=second_intent,
         evaluation=second_evaluation,
         plan=second_plan,
@@ -814,7 +1013,6 @@ async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     first_intent = _intent()
     first_evaluation = _evaluation(first_intent, "eval-partial-1")
     first_plan = replace(_plan(), quantity=Decimal("1.0"))
@@ -831,9 +1029,6 @@ async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -843,7 +1038,7 @@ async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
         "exposure_notional": Decimal("100"),
     }
 
-    first = await submissions.prepare_submission(
+    first = await _prepare_submission(submissions,
         intent=first_intent,
         evaluation=first_evaluation,
         plan=first_plan,
@@ -883,7 +1078,7 @@ async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
         assert claim.notional == Decimal("60")
 
     with pytest.raises(OrderPreSubmissionError, match="gross exposure"):
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=second_intent,
             evaluation=second_evaluation,
             plan=second_plan,
@@ -894,7 +1089,7 @@ async def test_partial_fill_canceled_downsizes_claim_and_retains_filled_portion(
 
     second_kwargs = dict(claim_kwargs)
     second_kwargs["exposure_notional"] = Decimal("80")
-    second = await submissions.prepare_submission(
+    second = await _prepare_submission(submissions,
         intent=second_intent,
         evaluation=second_evaluation,
         plan=second_plan,
@@ -909,7 +1104,6 @@ async def test_concurrent_workers_with_stale_baseline_serialized_by_advisory_loc
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     worker1_intent = _intent()
     worker1_evaluation = _evaluation(worker1_intent, "eval-concurrent-1")
     worker1_plan = _plan()
@@ -926,9 +1120,6 @@ async def test_concurrent_workers_with_stale_baseline_serialized_by_advisory_loc
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -940,7 +1131,7 @@ async def test_concurrent_workers_with_stale_baseline_serialized_by_advisory_loc
 
     async def try_submit(sub_repo, intent, eval_obj, plan):
         try:
-            return await sub_repo.prepare_submission(
+            return await _prepare_submission(sub_repo,
                 intent=intent,
                 evaluation=eval_obj,
                 plan=plan,
@@ -969,10 +1160,9 @@ async def test_duplicate_and_out_of_order_terminal_events_are_idempotent(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     plan = _plan()
     intent = _intent()
-    await submissions.prepare_submission(
+    await _prepare_submission(submissions,
         intent=intent,
         evaluation=_evaluation(intent, "eval-idempotent"),
         plan=plan,
@@ -980,9 +1170,6 @@ async def test_duplicate_and_out_of_order_terminal_events_are_idempotent(
         environment="live",
         account_label="primary",
         strategy_name="compression_breakout",
-        required_lease_owner="worker-1",
-        required_lease_id="lease-test",
-        required_code_generation="test-generation",
         max_gross_exposure=Decimal("150"),
         current_daily_pnl=Decimal("0"),
         current_gross_exposure=Decimal("0"),
@@ -991,110 +1178,63 @@ async def test_duplicate_and_out_of_order_terminal_events_are_idempotent(
     )
 
     t_filled = NOW + timedelta(seconds=2)
-    assert await events.append_order_event(
-        ExchangeOrderEvent(
-            event_id="idemp-fill-1",
-            client_order_id=plan.client_order_id,
-            state=ExchangeOrderState.FILLED,
-            occurred_at=t_filled,
-            exchange_order_id="ex-1",
-            details={"executed_quantity": str(plan.quantity), "average_price": "100"},
+    assert (
+        await events.append_order_event(
+            ExchangeOrderEvent(
+                event_id="idemp-fill-1",
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                occurred_at=t_filled,
+                exchange_order_id="ex-1",
+                details={
+                    "executed_quantity": str(plan.quantity),
+                    "average_price": "100",
+                },
+            )
         )
-    ) is True
+        is True
+    )
 
-    assert await events.append_order_event(
-        ExchangeOrderEvent(
-            event_id="idemp-fill-2",
-            client_order_id=plan.client_order_id,
-            state=ExchangeOrderState.FILLED,
-            occurred_at=t_filled + timedelta(milliseconds=10),
-            exchange_order_id="ex-1",
-            details={"executed_quantity": str(plan.quantity), "average_price": "100"},
+    assert (
+        await events.append_order_event(
+            ExchangeOrderEvent(
+                event_id="idemp-fill-2",
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                occurred_at=t_filled + timedelta(milliseconds=10),
+                exchange_order_id="ex-1",
+                details={
+                    "executed_quantity": str(plan.quantity),
+                    "average_price": "100",
+                },
+            )
         )
-    ) is True
+        is True
+    )
 
-    assert await events.append_order_event(
-        ExchangeOrderEvent(
-            event_id="idemp-late-ack",
-            client_order_id=plan.client_order_id,
-            state=ExchangeOrderState.ACKNOWLEDGED,
-            occurred_at=t_filled - timedelta(seconds=1),
-            exchange_order_id="ex-1",
-            details={"status": "NEW"},
+    assert (
+        await events.append_order_event(
+            ExchangeOrderEvent(
+                event_id="idemp-late-ack",
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.ACKNOWLEDGED,
+                occurred_at=t_filled - timedelta(seconds=1),
+                exchange_order_id="ex-1",
+                details={"status": "NEW"},
+            )
         )
-    ) is True
+        is True
+    )
 
     persisted = await reads.load_order(plan.client_order_id)
     assert persisted is not None
     assert persisted.state is ExchangeOrderState.FILLED
 
 
-async def test_live_submission_rejects_stale_code_generation(
-    order_repository,
-) -> None:
-    repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
-
-    with pytest.raises(
-        OrderPreSubmissionError,
-        match="version fencing",
-    ):
-        await submissions.prepare_submission(
-            intent=_intent(),
-            evaluation=_evaluation(_intent(), "evaluation-stale-generation"),
-            plan=_plan(),
-            prepared_at=NOW + timedelta(seconds=1),
-            environment="live",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            required_lease_owner="worker-1",
-            required_lease_id="lease-test",
-            required_code_generation="stale-generation",
-        )
-
-
-async def test_live_submission_rejects_draining_session(
-    order_repository,
-) -> None:
-    repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
-    async with factory() as session:
-        async with session.begin():
-            session.add(
-                LiveSessionTransitionRow(
-                    transition_id="transition-draining-session",
-                    session_id="live-session-fence",
-                    state="draining",
-                    occurred_at=NOW,
-                    operator="operator",
-                    strategy_config_hash="strategy-hash",
-                    risk_config_hash="risk-hash",
-                    reason="operator_disabled_new_entries",
-                    details={},
-                )
-            )
-
-    with pytest.raises(OrderPreSubmissionError, match="session entries"):
-        await submissions.prepare_submission(
-            intent=_intent(),
-            evaluation=_evaluation(_intent(), "evaluation-draining-session"),
-            plan=_plan(),
-            prepared_at=NOW + timedelta(seconds=1),
-            environment="live",
-            account_label="primary",
-            strategy_name="compression_breakout",
-            required_lease_owner="worker-1",
-            required_lease_id="lease-test",
-            required_code_generation="test-generation",
-            required_session_id="live-session-fence",
-        )
-
-
 async def test_live_exit_episode_reservation_survives_rolling_workers(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    await _save_live_lease(factory)
     first_intent = replace(
         _intent(),
         reduce_only=True,
@@ -1123,19 +1263,16 @@ async def test_live_exit_episode_reservation_survives_rolling_workers(
         "environment": "live",
         "account_label": "primary",
         "strategy_name": "compression_breakout",
-        "required_lease_owner": "worker-1",
-        "required_lease_id": "lease-test",
-        "required_code_generation": "test-generation",
     }
     results = await asyncio.gather(
-        submissions.prepare_submission(
+        _prepare_submission(submissions,
             intent=first_intent,
             evaluation=first_evaluation,
             plan=first_plan,
             prepared_at=NOW + timedelta(seconds=1),
             **fencing_kwargs,
         ),
-        submissions.prepare_submission(
+        _prepare_submission(submissions,
             intent=second_intent,
             evaluation=second_evaluation,
             plan=second_plan,
@@ -1159,7 +1296,7 @@ async def test_live_exit_episode_reservation_survives_rolling_workers(
             details={},
         )
     )
-    retry = await submissions.prepare_submission(
+    retry = await _prepare_submission(submissions,
         intent=loser_intent,
         evaluation=loser_evaluation,
         plan=loser_plan,
@@ -1181,7 +1318,7 @@ async def test_prepare_rejects_client_order_id_reused_by_another_intent(
     order_repository,
 ) -> None:
     repository, adoption, reads, events, submissions, factory = order_repository
-    prepared = await submissions.prepare_submission(
+    prepared = await _prepare_submission(submissions,
         intent=_intent(),
         evaluation=RiskEvaluation(
             evaluation_id="evaluation-1",
@@ -1199,7 +1336,7 @@ async def test_prepare_rejects_client_order_id_reused_by_another_intent(
     conflicting_intent = replace(_intent(), candidate_id="candidate-2")
     conflicting_plan = replace(_plan(), intent_id="candidate-2")
     with pytest.raises(ValueError, match="client order ID"):
-        await submissions.prepare_submission(
+        await _prepare_submission(submissions,
             intent=conflicting_intent,
             evaluation=RiskEvaluation(
                 evaluation_id="evaluation-2",
@@ -1384,24 +1521,6 @@ async def _save_intent(repository: PostgresOrderSubmissionRepository) -> None:
     )
 
 
-async def _save_live_lease(factory: async_sessionmaker[AsyncSession]) -> None:
-    async with factory() as session:
-        async with session.begin():
-            session.add(
-                TradingLeaseRow(
-                    lease_id="lease-test",
-                    environment="live",
-                    account_label="primary",
-                    strategy_name="compression_breakout",
-                    owner="worker-1",
-                    code_generation="test-generation",
-                    state="active",
-                    acquired_at=NOW,
-                    expires_at=NOW + timedelta(hours=1),
-                )
-            )
-
-
 def _evaluation(
     intent: OrderIntentCandidate,
     evaluation_id: str,
@@ -1470,14 +1589,14 @@ from crypto_momentum_lab.persistence.postgres.order_submission_repository import
     PostgresOrderSubmissionRepository,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
-from tests.integration.persistence.test_order_repository import _intent, _plan, NOW
+from tests.integration.persistence.test_order_repository import _intent, _plan, _prepare_submission, NOW
 
 async def main():
     engine = create_async_database_engine(os.environ["CML_CRASH_TEST_DATABASE_URL"])
     repository = PostgresOrderSubmissionRepository(
         async_sessionmaker(engine, expire_on_commit=False)
     )
-    prepared = await repository.prepare_submission(
+    prepared = await _prepare_submission(repository,
         intent=_intent(), plan=_plan(), prepared_at=NOW,
         evaluation=RiskEvaluation(
             evaluation_id="evaluation-crash", candidate_id="candidate-1",
@@ -1520,7 +1639,7 @@ asyncio.run(main())
         )
     assert state == ExchangeOrderState.SUBMITTING.value
     assert event_count == 1
-    duplicate = await submissions.prepare_submission(
+    duplicate = await _prepare_submission(submissions,
         intent=_intent(),
         plan=_plan(),
         prepared_at=NOW,
@@ -1536,24 +1655,31 @@ asyncio.run(main())
     assert duplicate is None
 
 
-async def test_missing_fill_quote_remains_durable_unresolved_until_priced(order_repository):
+async def test_missing_fill_quote_remains_durable_unresolved_until_priced(
+    order_repository,
+):
     from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
     from crypto_momentum_lab.execution_account.orders.state_machine import (
         OrderExecutionStateMachine,
-        SubmitPolicy,
-    )
+        )
 
     plans, _, reads, events, submissions, _ = order_repository
     await _save_intent(submissions)
     plan = _plan()
     await plans.save_planned_order(plan)
     machine = OrderExecutionStateMachine(
-        exchange=object(), repository=plans, event_repository=events,
-        submit_policy=SubmitPolicy.LIVE_SUBMIT, live_submit_enabled=True,
+        exchange=object(),
+        repository=plans,
+        event_repository=events,
+        live_submit_enabled=True,
     )
     snapshot = ExchangeOrderSnapshot(
-        plan.client_order_id, "actual-exchange-id", ExchangeOrderState.FILLED,
-        NOW, plan.quantity, Decimal("0"),
+        plan.client_order_id,
+        "actual-exchange-id",
+        ExchangeOrderState.FILLED,
+        NOW,
+        plan.quantity,
+        Decimal("0"),
     )
     pending = await machine.apply_observed_snapshot(plan, snapshot)
     assert pending.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
@@ -1562,9 +1688,116 @@ async def test_missing_fill_quote_remains_durable_unresolved_until_priced(order_
     assert order.terminal_receipt is None
     assert await reads.load_unresolved_orders(plan.run_id)
     priced = await machine.apply_observed_snapshot(
-        plan, replace(snapshot, average_price=Decimal("100"), observed_at=NOW + timedelta(seconds=1)),
+        plan,
+        replace(
+            snapshot,
+            average_price=Decimal("100"),
+            observed_at=NOW + timedelta(seconds=1),
+        ),
     )
     assert priced.state is ExchangeOrderState.FILLED
     order = await reads.load_order(plan.client_order_id)
     assert order.terminal_receipt.average_price == Decimal("100")
     assert not await reads.load_unresolved_orders(plan.run_id)
+
+
+async def test_prepared_exit_restores_final_batch_allocations(order_repository) -> None:
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+
+    _, _, reads, _, submissions, _ = order_repository
+    plan = replace(
+        _plan(),
+        reduce_only=True,
+        side="SELL",
+        quantity=Decimal("1"),
+        batch_id="batch-a",
+        allocations=(
+            ExitAllocation("batch-a", Decimal("0.4"), Decimal("100")),
+            ExitAllocation("batch-b", Decimal("0.6"), Decimal("101")),
+        ),
+        batch_quantities={"batch-a": Decimal("0.4"), "batch-b": Decimal("0.6")},
+        strategy_name="momentum",
+        strategy_version="v1",
+        reference_price=Decimal("102"),
+    )
+    await _prepare_submission(submissions,
+        intent=replace(_intent(), reduce_only=True),
+        evaluation=_evaluation(_intent(), "evaluation-1"),
+        plan=plan,
+        prepared_at=NOW,
+    )
+    single = await reads.load_order(plan.client_order_id)
+    unresolved = await reads.load_unresolved_orders(plan.run_id)
+    assert single is not None
+    assert len(unresolved) == 1
+    for restored in (single.plan, unresolved[0].plan):
+        assert restored.batch_id == plan.batch_id
+        assert restored.allocations == plan.allocations
+        assert restored.batch_quantities == plan.batch_quantities
+        assert restored.strategy_name == plan.strategy_name
+        assert restored.strategy_version == plan.strategy_version
+        assert restored.reference_price == plan.reference_price
+
+
+async def test_order_observation_commits_fills_and_state_atomically(
+    order_repository, monkeypatch
+):
+    plans, _, reads, events, submissions, factory = order_repository
+    await _save_intent(submissions)
+    plan = _plan()
+    await plans.save_planned_order(plan)
+    fill = ExchangeOrderFill(
+        "atomic-fill",
+        plan.client_order_id,
+        "atomic-trade",
+        Decimal("100"),
+        plan.quantity,
+        Decimal("0"),
+        "USDT",
+        NOW,
+        {},
+    )
+    observation = ExchangeOrderEvent(
+        "atomic-observation",
+        plan.client_order_id,
+        ExchangeOrderState.FILLED,
+        NOW,
+        "12345",
+        {"executed_quantity": str(plan.quantity), "average_price": "100"},
+    )
+
+    async def fail_after_fill(session, event):
+        assert (
+            await session.scalar(select(func.count()).select_from(ExchangeFillRow)) == 1
+        )
+        raise RuntimeError("injected event persistence failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "_append_order_event_in_session", fail_after_fill)
+        with pytest.raises(RuntimeError, match="injected event persistence failure"):
+            await events.record_order_observation(observation, (fill,))
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(ExchangeFillRow)) == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(ExchangeOrderEventRow)
+            )
+            == 0
+        )
+    assert await events.record_order_observation(observation, (fill,)) is True
+    assert await events.record_order_observation(observation, (fill,)) is False
+    persisted = await reads.load_order(plan.client_order_id)
+    assert persisted.state is ExchangeOrderState.FILLED
+    assert persisted.executed_quantity == plan.quantity
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(ExchangeFillRow)) == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(ExchangeOrderEventRow)
+            )
+            == 1
+        )

@@ -12,6 +12,7 @@ import crypto_momentum_lab.domain.execution.order_read_models as order_read_mode
 from crypto_momentum_lab.domain.account.models import extract_fill_position_side
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
+    ExitAllocation,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -72,7 +73,16 @@ class PostgresOrderReadRepository:
                     )
                 )
             ).all()
-            market_intent_ids = [r.intent_id for r in rows if r.price is None]
+            plan_details = await _load_plan_details(
+                session, [r.client_order_id for r in rows]
+            )
+            market_intent_ids = [
+                r.intent_id
+                for r in rows
+                if r.price is None
+                and plan_details.get(r.client_order_id, {}).get("reference_price")
+                is None
+            ]
             claim_notionals: dict[str, Decimal] = {}
             if market_intent_ids:
                 try:
@@ -94,6 +104,7 @@ class PostgresOrderReadRepository:
         return tuple(
             _persisted_order(
                 row,
+                details=plan_details.get(row.client_order_id),
                 reference_price=(claim_notionals[row.intent_id] / row.quantity)
                 if (row.intent_id in claim_notionals and row.quantity > 0)
                 else None,
@@ -113,8 +124,14 @@ class PostgresOrderReadRepository:
             )
             if row is None:
                 return None
+            plan_details = await _load_plan_details(session, [client_order_id])
+            details = plan_details.get(client_order_id)
             ref_price: Decimal | None = None
-            if row.price is None and row.intent_id is not None:
+            if (
+                row.price is None
+                and row.intent_id is not None
+                and (details or {}).get("reference_price") is None
+            ):
                 try:
                     claims = (
                         await session.scalars(
@@ -127,7 +144,11 @@ class PostgresOrderReadRepository:
                         ref_price = claims[0] / row.quantity
                 except Exception:
                     pass
-            order = _persisted_order(row, reference_price=ref_price)
+            order = _persisted_order(
+                row,
+                reference_price=ref_price,
+                details=details,
+            )
             receipt = None
             if order.state.terminal:
                 quantity = order.executed_quantity
@@ -241,10 +262,35 @@ class PostgresOrderReadRepository:
             return replace(order, terminal_receipt=receipt)
 
 
+async def _load_plan_details(
+    session: AsyncSession, order_ids: list[str]
+) -> dict[str, dict]:
+    if not order_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(ExchangeOrderEventRow.client_order_id, ExchangeOrderEventRow.details)
+            .where(
+                ExchangeOrderEventRow.client_order_id.in_(order_ids),
+                ExchangeOrderEventRow.state == ExchangeOrderState.SUBMITTING.value,
+            )
+            .order_by(ExchangeOrderEventRow.occurred_at)
+        )
+    ).all()
+    result = {}
+    for order_id, details in rows:
+        plan = details.get("execution_plan")
+        if isinstance(plan, dict):
+            result.setdefault(order_id, plan)
+    return result
+
+
 def _persisted_order(
     row: ExchangeOrderRow,
     reference_price: Decimal | None = None,
+    details: dict | None = None,
 ) -> order_read_models.PersistedExchangeOrder:
+    details = details or {}
     return order_read_models.PersistedExchangeOrder(
         plan=OrderExecutionPlan(
             intent_id=row.intent_id,
@@ -261,7 +307,26 @@ def _persisted_order(
             quantized=True,
             time_in_force=row.time_in_force,
             expires_at=row.expires_at,
-            reference_price=reference_price,
+            reference_price=Decimal(details["reference_price"])
+            if details.get("reference_price") is not None
+            else reference_price,
+            batch_id=details.get("batch_id"),
+            allocations=tuple(
+                ExitAllocation(
+                    batch_id=item["batch_id"],
+                    allocated_quantity=Decimal(item["allocated_quantity"]),
+                    entry_price=Decimal(item["entry_price"]),
+                )
+                for item in details.get("allocations", ())
+            ),
+            batch_quantities={
+                key: Decimal(value)
+                for key, value in details["batch_quantities"].items()
+            }
+            if details.get("batch_quantities") is not None
+            else None,
+            strategy_name=details.get("strategy_name"),
+            strategy_version=details.get("strategy_version"),
         ),
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,

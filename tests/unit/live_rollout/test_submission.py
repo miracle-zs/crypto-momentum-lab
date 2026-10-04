@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -49,7 +48,7 @@ class RecordingPreparedRepository:
         del intent, evaluation
         self.saved_intents += 1
 
-    async def prepare_submission(self, **kwargs):
+    async def prepare_submission_in_session(self, session, **kwargs):
         self.prepare_calls.append(kwargs)
         plan = cast(OrderExecutionPlan, kwargs["plan"])
         return PreparedOrderSubmission(
@@ -69,23 +68,18 @@ class RecordingCoordinator:
     def __init__(self) -> None:
         self.events: list[str] = []
 
-    def configure_submission(self, repository, *, admission=None, clock=lambda: NOW):
+    def configure_submission(self, repository, *, clock=lambda: NOW):
         self.repository = repository
-        self.admission = admission
         self.clock = clock
 
     async def prepare_and_execute(self, plan, *, preparation):
         self.events.append("prepare")
-        if self.admission is not None and self.admission.rejection_reason(
-            plan, preparation
-        ):
-            return None
         values = {
             f.name: getattr(preparation, f.name)
             for f in fields(preparation)
-            if f.name != "context_token"
         }
-        prepared = await self.repository.prepare_submission(
+        prepared = await self.repository.prepare_submission_in_session(
+            None,
             plan=plan,
             prepared_at=self.clock(),
             **values,
@@ -107,30 +101,10 @@ def _submission(
     repository,
     state_machine,
     limits: FixedLiveLimits | None = None,
-    entry_enabled=lambda: True,
-    context_is_current=lambda context: True,
-    is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
 ) -> LiveCandidateSubmission:
-    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
-    from crypto_momentum_lab.live_rollout.submission_admission import (
-        LiveSubmissionAdmission,
-    )
-
-    class TestGate(LiveEntryControlGate):
-        @property
-        def entry_enabled(self):
-            return entry_enabled()
-
-        def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
-            if is_symbol_entry_allowed is not None:
-                return is_symbol_entry_allowed(symbol)
-            enabled = self.entry_enabled
-            return (enabled, "ready" if enabled else "disabled")
-
-    gate = TestGate(run_id="run-1", state_machine=state_machine)
     state_machine.configure_submission(
         repository,
-        admission=LiveSubmissionAdmission(gate, context_is_current),
+
         clock=lambda: NOW,
     )
     return LiveCandidateSubmission(
@@ -153,22 +127,23 @@ def _submission(
             entry_limit_ttl_seconds=900,
         ),
         clock=lambda: NOW,
-        entry_enabled=entry_enabled,
-        entry_enabled_reason=lambda: "ready",
-        context_is_current=context_is_current,
         pending_entry_reservation=lambda orders: (
             Decimal("0"),
             frozenset(),
         ),
         remember_pending_entry=lambda plan, result: None,
         record_signal_candidate=lambda **kwargs: None,
-        is_symbol_entry_allowed=is_symbol_entry_allowed,
     )
 
 
-async def test_submission_prepares_with_fencing_before_coordinator_exchange() -> None:
+async def test_submission_prepares_without_static_fencing_before_exchange() -> None:
     repository = RecordingPreparedRepository()
-    coordinator = RecordingCoordinator()
+    from tests.unit.execution_account.orders.test_coordinator import (
+        BlockingBackend,
+        OrderExecutionCoordinator,
+    )
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
     submission = _submission(
         repository=repository,
         state_machine=coordinator,
@@ -185,17 +160,14 @@ async def test_submission_prepares_with_fencing_before_coordinator_exchange() ->
 
     assert result is not None
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
-    assert coordinator.events == ["prepare", "exchange"]
+    assert backend.calls == ["submit:BTCUSDT:entry"]
+    await coordinator.aclose()
     assert repository.saved_intents == 0
     assert len(repository.prepare_calls) == 1
     call = repository.prepare_calls[0]
     assert call["environment"] == "live"
     assert call["account_label"] == "primary"
     assert call["strategy_name"] == "compression_breakout"
-    assert call["required_lease_owner"] == "live-worker"
-    assert call["required_lease_id"] == "lease-1"
-    assert call["required_code_generation"] == "abc123"
-    assert call["required_session_id"] == "run-1"
 
 
 @pytest.mark.parametrize(("budget", "accepted"), [("20", False), ("25", True)])
@@ -599,89 +571,10 @@ async def test_submission_entry_trade_command_carries_projection_version() -> No
     assert command.expected_projection_version == "pv_entry_token_123"
 
 
-async def test_queued_entry_crossing_schedule_boundary_never_prepares_or_posts():
-    from crypto_momentum_lab.live_rollout.entry_control import LiveEntryControlGate
-    from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
-        ScheduledRiskWindowConfig,
-    )
-
-    current = [datetime(2026, 7, 3, 23, 44, 59, tzinfo=UTC)]
-    repository = RecordingPreparedRepository()
-    gate = LiveEntryControlGate(
-        run_id="run-1",
-        state_machine=object(),
-        scheduled_risk_window=ScheduledRiskWindowConfig(),
-        clock=lambda: current[0],
-    )
-
-    class BoundaryCoordinator(RecordingCoordinator):
-        async def prepare_and_execute(self, plan, *, preparation):
-            assert gate.entry_enabled
-            current[0] += timedelta(seconds=1)
-            return await super().prepare_and_execute(plan, preparation=preparation)
-
-    submission = _submission(
-        repository=repository,
-        state_machine=BoundaryCoordinator(),
-        entry_enabled=lambda: gate.entry_enabled,
-    )
-    result = await submission.execute(
-        replace(_intent(), desired_notional=Decimal("20")),
-        requested_quantity=None,
-        state=_state(),
-        context=_runtime_context(),
-    )
-    assert result is None
-    assert not repository.prepare_calls
-    assert repository.saved_intents == 0
-
-
-async def test_queued_entry_with_invalidated_context_never_prepares_or_posts():
-    repository = RecordingPreparedRepository()
-    current = [True]
-    posts = []
-
-    class DelayedCoordinator(RecordingCoordinator):
-        async def prepare_and_execute(self, plan, *, preparation):
-            current[0] = False
-            result = await super().prepare_and_execute(plan, preparation=preparation)
-            if result is not None:
-                posts.append(plan)
-            return result
-
-    submission = _submission(
-        repository=repository,
-        state_machine=DelayedCoordinator(),
-        context_is_current=lambda context: current[0],
-    )
-    result = await submission.execute(
-        replace(_intent(), desired_notional=Decimal("20")),
-        requested_quantity=None,
-        state=_state(),
-        context=_runtime_context(),
-    )
-    assert result is None
-    assert repository.prepare_calls == []
-    assert posts == []
 
 
 @pytest.mark.asyncio
 async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
-    # 1. Symbol A (BTCUSDT) exit failure disallows BTC, but Symbol B (ETHUSDT) succeeds
-    symbol_allowed = {
-        "BTCUSDT": (False, "exit_failure:BTCUSDT:timeout"),
-        "ETHUSDT": (True, "entry_allowed"),
-    }
-    repo = RecordingPreparedRepository()
-    coord = RecordingCoordinator()
-    submission = _submission(
-        repository=repo,
-        state_machine=coord,
-        is_symbol_entry_allowed=lambda sym: symbol_allowed.get(
-            sym, (True, "entry_allowed")
-        ),
-    )
-
     rules_eth = SymbolTradingRules(
         symbol="ETHUSDT",
         tick_size=Decimal("0.01"),
@@ -709,25 +602,6 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
         symbol="ETHUSDT",
         desired_notional=Decimal("15"),
     )
-
-    res_btc = await submission.execute(
-        cand_btc,
-        requested_quantity=None,
-        state=_state(),
-        context=base_ctx,
-    )
-    assert res_btc is None
-    assert repo.prepare_calls == []
-
-    res_eth = await submission.execute(
-        cand_eth,
-        requested_quantity=None,
-        state=_state(),
-        context=base_ctx,
-        reference_price=Decimal("3000"),
-    )
-    assert res_eth is not None
-    assert res_eth.plan.symbol == "ETHUSDT"
 
     # 2. Uncertain order on BTCUSDT with bounded risk:
     # Blocks BTCUSDT candidate, but does NOT block ETHUSDT candidate
@@ -857,3 +731,39 @@ async def test_submission_blocks_when_quantized_notional_exceeds_max_order_notio
     assert res is None
     assert coord.events == []
     assert repo.prepare_calls == []
+
+
+async def test_exit_submission_bypasses_entry_pause_through_real_coordinator():
+    from tests.unit.execution_account.orders.test_coordinator import (
+        BlockingBackend,
+        OrderExecutionCoordinator,
+    )
+    repository = RecordingPreparedRepository()
+    class Backend(BlockingBackend):
+        async def submit(self, plan, **kwargs):
+            result = await super().submit(plan, **kwargs)
+            return replace(result, plan=plan)
+
+    backend = Backend()
+    coordinator = OrderExecutionCoordinator(backend=backend, account_label="primary")
+    submission = _submission(repository=repository, state_machine=coordinator)
+    coordinator.block_entry_submissions()
+    context = replace(_runtime_context(), managed_positions=(ManagedLivePosition(
+        symbol="BTCUSDT", side=StrategySide.LONG, position_side=FuturesPositionSide.BOTH,
+        quantity=Decimal("0.0007"), entry_price=Decimal("10000"), opened_at=NOW,
+    ),))
+    try:
+        result = await submission.execute(
+            replace(_intent(), reduce_only=True, entry_type=EntryType.MARKET,
+                    features={"position_side": "BOTH"}),
+            requested_quantity=Decimal("0.0004"), state=_state(), context=context,
+            reference_price=Decimal("10000"),
+        )
+        assert result is not None
+        assert result.state is ExchangeOrderState.ACKNOWLEDGED
+        assert result.plan.reduce_only
+        assert result.plan.quantity == Decimal("0.0004")
+        assert backend.calls == ["submit:BTCUSDT:exit"]
+        assert len(repository.prepare_calls) == 1
+    finally:
+        await coordinator.aclose()

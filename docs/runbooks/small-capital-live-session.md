@@ -126,12 +126,9 @@ both `runtime_strategy_config_matches_configured` and
 `runtime_strategy_config_matches_approval`; do not treat the library defaults
 as the production runtime configuration.
 
-When a completed matching Shadow session is intentionally unavailable during
-an already-approved temporary rollout, pass
-`--acknowledge-missing-shadow-preflight` to the Live `run` command. This does
-not create a Shadow record or bypass the Live gate; it changes the advisory
-log to an explicit, auditable `info` event. Keep the acknowledgment temporary
-and still run a real Shadow preflight before the next rollout change.
+Shadow execution and its startup acknowledgment flag have been removed. Live
+startup does not query historical Shadow sessions. Existing Shadow database
+records are retained without participating in runtime decisions.
 
 ```bash
 $COMPOSE --profile live run --rm --no-deps live-strategy approve \

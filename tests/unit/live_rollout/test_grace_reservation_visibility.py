@@ -25,9 +25,6 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitMode,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionCoordinator,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
@@ -40,13 +37,14 @@ from crypto_momentum_lab.live_rollout.exits import (
 from crypto_momentum_lab.persistence.postgres.order_read_repository import (
     _persisted_order,
 )
+from tests.fixtures.live_market import _intent, _state
 from tests.unit.execution_account.orders.test_coordinator import (
+    OrderExecutionCoordinator,
     _prepared,
     _submission_preparation,
 )
 from tests.unit.live_rollout.test_exit_processor import NOW, _context, _processor
 from tests.unit.live_rollout.test_exits import _config
-from tests.fixtures.live_market import _intent, _state
 
 
 @pytest.mark.parametrize("path", ("candle", "queued_conflict"))
@@ -121,7 +119,7 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
     backend.submit.return_value = OrderExecutionResult(
         "grace", ExchangeOrderState.ACKNOWLEDGED, "123"
     )
-    repository.prepare_submission.side_effect = lambda **kwargs: _prepared(
+    repository.prepare_submission_in_session.side_effect = lambda session, **kwargs: _prepared(
         kwargs["plan"]
     )
     coordinator = OrderExecutionCoordinator(
@@ -156,7 +154,7 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
             )
             assert outcome == (0, 0, "pending_live_context:BTCUSDT")
             backend.submit.assert_awaited_once()
-            repository.prepare_submission.assert_awaited_once()
+            repository.prepare_submission_in_session.assert_awaited_once()
             return
         # ExchangeOrderRow has no batch/allocations columns; use its real decoder.
         row = SimpleNamespace(

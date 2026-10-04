@@ -22,7 +22,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
-    PositionLedgerBatch,
     PositionView,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s

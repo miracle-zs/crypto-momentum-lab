@@ -9,12 +9,58 @@ DEPLOY_SCRIPT = ROOT / "deploy/ops/update_server.sh"
 DOCKERFILE = ROOT / "Dockerfile"
 
 
-@pytest.mark.parametrize(("parallel", "fail_health"), [(1, False), (2, False), (1, True)])
-def test_live_startup_concurrency_waits_for_health_before_next_batch(parallel, fail_health):
+def test_remote_argument_decoder_preserves_timeouts_and_rollout_scope() -> None:
+    script = DEPLOY_SCRIPT.read_text()
+    marker = script.index("<<'REMOTE_SCRIPT'")
+    start = script.index("set -Eeuo pipefail\n", marker)
+    end = script.index("for timeout_name in", start)
+    values = [
+        "/srv/cml",
+        "origin/main",
+        "1",
+        "2",
+        "301",
+        "902",
+        "303",
+        "304",
+        "95",
+        "306",
+        "907",
+        "1",
+        "http://localhost/health",
+        "/srv/logs",
+        "1",
+        "1",
+        "0",
+    ]
+    variables = (
+        "remote_dir target_ref live_update live_concurrency deploy_wait_timeout "
+        "market_data_wait_timeout consumer_wait_timeout live_wait_timeout "
+        "live_stop_timeout deploy_operation_timeout deploy_build_timeout "
+        "dashboard_required dashboard_proxy_url crash_log_directory "
+        "sync_dashboard execution_accounts_only dashboard_only"
+    ).split()
+    report = "printf '%s\\n' " + " ".join(f'"${name}"' for name in variables)
+    result = subprocess.run(
+        ["bash", "-c", script[start:end] + report, "test", *values],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == values
+
+
+@pytest.mark.parametrize(
+    ("parallel", "fail_health"), [(1, False), (2, False), (1, True)]
+)
+def test_live_startup_concurrency_waits_for_health_before_next_batch(
+    parallel, fail_health
+):
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     start = script.index("  live_up_and_wait_parallel() {")
     end = script.index("\n  collect_active_live_pairs()", start)
-    invocation = f'''set -Eeuo pipefail
+    invocation = f"""set -Eeuo pipefail
 {script[start:end]}
 compose=(compose)
 deploy_operation_timeout=300
@@ -24,98 +70,19 @@ stop_live_services() {{ echo "stop $*"; }}
 run_with_timeout() {{ echo "$1"; }}
 wait_for_services_healthy() {{ shift; echo "healthy $*"; return {17 if fail_health else 0}; }}
 live_up_and_wait_parallel 300 {parallel} one two three four
-'''
-    result = subprocess.run(["bash", "-c", invocation], capture_output=True, text=True, timeout=5)
+"""
+    result = subprocess.run(
+        ["bash", "-c", invocation], capture_output=True, text=True, timeout=5
+    )
     assert result.returncode == (17 if fail_health else 0), result.stderr
     expected = []
     services = ["one", "two", "three", "four"]
     for index in range(0, len(services), parallel):
-        batch = " ".join(services[index:index + parallel])
+        batch = " ".join(services[index : index + parallel])
         expected += [f"stop {batch}", f"compose-up:{batch}", f"healthy {batch}"]
         if fail_health:
             break
     assert result.stdout.splitlines() == expected
-
-
-@pytest.mark.parametrize(
-    ("mode", "expected_status", "expected_attempts"),
-    [
-        ("transient", 0, 2),
-        ("persistent", 1, 20),
-        ("mismatch", 1, 1),
-        ("unknown", 1, 1),
-        ("timeout", 124, 1),
-    ],
-)
-def test_preflight_retries_only_transient_account_syncing(
-    tmp_path: Path, mode: str, expected_status: int, expected_attempts: int
-) -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    start = script.index("run_with_timeout() {")
-    end = script.index("\nlog_service_timing()", start)
-    functions = script[start:end]
-    runner = (
-        "run_with_account_ready_retry"
-        if "run_with_account_ready_retry()" in functions
-        else "run_with_timeout"
-    )
-    command = tmp_path / "preflight.py"
-    counter = tmp_path / "attempts"
-    command.write_text(
-        "import json,sys\nfrom pathlib import Path\n"
-        "counter=Path(sys.argv[1]); mode=sys.argv[2]\n"
-        "attempt=int(counter.read_text())+1 if counter.exists() else 1\n"
-        "counter.write_text(str(attempt))\n"
-        "ready=mode=='transient' and attempt>1\n"
-        "errors=[] if ready else ['account_ready']\n"
-        "checks={'account_ready':ready,'approval_present':True}\n"
-        "if mode=='mismatch':\n"
-        " errors.append('approval_git_commit_matches_expected')\n"
-        " checks['approval_git_commit_matches_expected']=False\n"
-        "payload={'account_state':'ready_readonly' if ready else 'syncing',"
-        "'preflight_errors':errors,'preflight_checks':checks,'preflight_ok':ready}\n"
-        "print(json.dumps({} if mode=='unknown' else payload))\n"
-        "sys.exit(124 if mode=='timeout' else 0 if ready else 1)\n",
-        encoding="utf-8",
-    )
-    # Exercise the deployment's real Bash helpers; only skip retry delays.
-    invocation = (
-        f"set -Eeuo pipefail\n{functions}\nsleep() {{ :; }}\n"
-        'timeout() { shift 3; "$@"; }\n'
-        f'{runner} preflight 30 python3 "$1" "$2" "$3"\n'
-    )
-    result = subprocess.run(
-        ["bash", "-c", invocation, "test", str(command), str(counter), mode],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == expected_status, result.stdout + result.stderr
-    assert int(counter.read_text()) == expected_attempts
-
-
-def test_preflight_syncing_retries_share_one_timeout_budget(tmp_path):
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    start = script.index("run_with_account_ready_retry() {")
-    end = script.index("\nlog_service_timing()", start)
-    clock = tmp_path / "clock"
-    clock.write_text("100")
-    invocation = f'''set -Eeuo pipefail
-{script[start:end]}
-clock_file="$1"
-date() {{ local current; current=$(cat "$clock_file"); echo "$((current+1))" > "$clock_file"; echo "$current"; }}
-sleep() {{ :; }}
-run_with_timeout() {{
-  echo '{{"account_state":"syncing","preflight_ok":false,"preflight_errors":["account_ready"],"preflight_checks":{{"account_ready":false,"approval_present":true}}}}'
-  return 1
-}}
-run_with_account_ready_retry preflight 3 unused
-'''
-    result = subprocess.run(["bash", "-c", invocation, "test", str(clock)],
-                            capture_output=True, text=True, timeout=5)
-    assert result.returncode == 124
-    assert result.stdout.count('"account_state"') == 1
-    assert "operation=timeout" in result.stderr
 
 
 def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
@@ -207,28 +174,6 @@ def test_paper_rollout_removes_retired_services() -> None:
     assert 'consumer_candidates+=("$paper_svc")' in script
 
 
-def test_live_control_plane_concurrency_is_separate_from_restart_concurrency() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    assert "CML_LIVE_CONTROL_CONCURRENCY" in script
-    assert 'live_control_concurrency="${CML_LIVE_CONTROL_CONCURRENCY:-4}"' in script
-    assert "run_parallel_pairs()" in script
-    assert "live_control_concurrency" in script[script.index("run_parallel_pairs()") :]
-    assert (
-        'live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency"' in script
-    )
-
-
-def test_live_lease_timing_is_not_hidden_by_command_output_redirection() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    renew_start = script.index("renew_lease_for_pair()")
-    renew_end = script.index("preflight_pair()", renew_start)
-    renew_block = script[renew_start:renew_end]
-
-    assert 'run_with_timeout --quiet "renew-lease:$account"' in renew_block
-    assert "</dev/null >/dev/null" not in renew_block
-
-
 def test_health_wait_does_not_add_a_five_second_polling_gap() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     health_start = script.index("wait_for_services_healthy()")
@@ -243,13 +188,12 @@ def test_live_readiness_validator_embedded_python_is_valid() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     marker = 'docker exec "$container_id" python -S -c \''
     start = script.index(marker) + len(marker)
-    end = script.index('\' "$runtime_commit"', start)
+    end = script.index('\' "$account"', start)
 
     compile(script[start:end], "<live-readiness-validator>", "exec")
     assert "verify_live_readiness" in script
     assert "live-readiness" in script
     assert "/run/cml/health/readiness" in script
-    assert "warmup symbol counts do not reconcile" in script
     assert "phase=live-readiness" in script
 
 
@@ -594,66 +538,11 @@ def test_volume_initialization_precedes_dashboard_restart() -> None:
     )
 
 
-def test_live_recovery_always_revalidates_preflight() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    active_pairs_start = script.index("active_pairs=()")
-    active_pairs_end = script.index("# market-data discovers", active_pairs_start)
-    active_pairs = script[active_pairs_start:active_pairs_end]
-
-    assert "should_run_phase live-preflight" not in script
-    assert (
-        '$(phase_rank "$resume_from_phase") > $(phase_rank live-preflight)'
-        not in script
-    )
-    assert '"$recovery_run" != 1 && "$refresh_approvals" != 1' in active_pairs
-    assert script.index("consumer_candidates=()") < script.index(
-        "deploy_phase=live-preflight"
-    )
-
-
-def test_live_generation_fence_order_is_migration_preflight_restart() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    migration_phase = script.index("deploy_phase=migrate")
-    preflight_phase = script.index("deploy_phase=live-preflight")
-    dashboard_phase = script.index("deploy_phase=dashboard-market-data")
-    live_restart = script.index("deploy_phase=live-restart")
-
-    consumers_phase = script.index("consumer_candidates=()")
-
-    assert migration_phase < dashboard_phase < consumers_phase < preflight_phase
-    assert preflight_phase < live_restart
-    preflight_block = script[preflight_phase:live_restart]
-    assert "run --rm --no-deps migrate" in script[migration_phase:dashboard_phase]
-    assert "run_parallel_pairs preflight" in preflight_block
-    assert "run_parallel_pairs renew" in preflight_block
-    assert preflight_block.index(
-        "run_parallel_pairs preflight"
-    ) < preflight_block.index("run_parallel_pairs renew")
-
-
-def test_live_approval_precheck_precedes_non_live_restart() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    precheck = script.index("deploy_phase=live-approval-precheck")
-    research_stop = script.index("deploy_phase=research-stop")
-    dashboard_wave = script.index("deploy_phase=dashboard-market-data")
-    consumers = script.index("consumer_candidates=()")
-    final_preflight = script.index("deploy_phase=live-preflight")
-    precheck_block = script[precheck:research_stop]
-
-    assert "should_run_phase live-approval-precheck" in precheck_block
-    assert "run_parallel_pairs approval-precheck" in precheck_block
-    assert "run_parallel_pairs preflight" not in precheck_block
-    assert "refresh_approvals=1" in precheck_block
-    assert precheck < research_stop < dashboard_wave < consumers < final_preflight
-
-
 def test_live_restart_waits_for_old_containers_before_recreate() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
     helper_start = script.index("stop_live_services()")
-    helper_end = script.index("run_parallel_pairs()", helper_start)
+    helper_end = script.index("live_up_and_wait_parallel()", helper_start)
     helper_block = script[helper_start:helper_end]
     restart_start = script.index("live_up_and_wait_parallel()")
     restart_end = script.index("collect_active_live_pairs()", restart_start)
@@ -670,21 +559,6 @@ def test_live_restart_waits_for_old_containers_before_recreate() -> None:
         "up -d --force-recreate --no-deps"
     )
     assert script.count("live_up_and_wait_parallel") >= 3
-
-
-def test_live_preflight_has_no_side_effects_before_validation() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    preflight_phase = script.index("deploy_phase=live-preflight")
-    consumers_phase = script.index("consumer_candidates=()")
-    preflight_start = script.index("preflight_started_at=")
-    lease_start = script.index("lease_started_at=")
-    env_commit_write = script.index('set_env_value CML_CODE_COMMIT "$runtime_commit"')
-    verify_elapsed = script.index("phase=verify elapsed_seconds=")
-
-    assert consumers_phase < preflight_phase
-    assert preflight_start < lease_start
-    assert verify_elapsed < env_commit_write
 
 
 def test_health_wait_detects_restart_loops() -> None:
@@ -834,28 +708,6 @@ def test_sync_dashboard_option_and_ancestor_resolution(tmp_path: Path) -> None:
     assert res3.strip().splitlines()[-1] == f"crypto-momentum-lab-app:{target_commit}"
 
 
-def test_refresh_approval_includes_verify_preflight_and_streamlines_preflight() -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    refresh_start = script.index("refresh_approval_for_pair()")
-    refresh_end = script.index("renew_lease_for_pair()", refresh_start)
-    refresh_block = script[refresh_start:refresh_end]
-
-    assert "--verify-preflight" in refresh_block
-
-    preflight_phase = script.index("deploy_phase=live-preflight")
-    live_restart = script.index("deploy_phase=live-restart")
-    preflight_block = script[preflight_phase:live_restart]
-
-    assert 'if [[ "$refresh_approvals" == 1 ]]' in preflight_block
-    assert "run_parallel_pairs refresh" in preflight_block
-    assert "run_parallel_pairs preflight" in preflight_block
-
-    restart_block = script[live_restart:]
-    assert restart_block.count('if [[ "$refresh_approvals" == 1 ]]') >= 2
-    assert 'execution_services+=("$execution_service")' in restart_block
-    assert 'strategy_services+=("$strategy_service")' in restart_block
-
-
 def test_post_deploy_image_prune_is_configured() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     prune_idx = script.index("docker image prune -f")
@@ -870,7 +722,6 @@ def test_dashboard_only_deployment_mode_is_configured() -> None:
 
     assert "--dashboard-only" in script
     assert "--dashboard-only cannot be combined with --live" in script
-    assert "--dashboard-only cannot be combined with --refresh-approvals" in script
     assert (
         "--dashboard-only cannot be combined with --execution-accounts-only" in script
     )

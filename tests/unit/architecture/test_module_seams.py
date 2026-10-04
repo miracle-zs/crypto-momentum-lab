@@ -10,9 +10,7 @@ import pytest
     "module",
     [
         "crypto_momentum_lab.live_rollout.order_identity_errors",
-        "crypto_momentum_lab.live_rollout.shadow_preflight",
         "crypto_momentum_lab.live_rollout.session_state",
-        "crypto_momentum_lab.live_rollout.lease_recovery",
         "crypto_momentum_lab.live_rollout.exit_channel_ports",
         "crypto_momentum_lab.live_rollout.exit_failure_policy",
         "crypto_momentum_lab.live_rollout.order_event_runtime",
@@ -23,7 +21,6 @@ import pytest
         "crypto_momentum_lab.live_rollout.telemetry_ports",
         "crypto_momentum_lab.live_rollout.control_plane",
         "crypto_momentum_lab.live_rollout.context",
-        "crypto_momentum_lab.live_rollout.market_admission",
         "crypto_momentum_lab.live_rollout.risk_control",
         "crypto_momentum_lab.live_rollout.scheduled_controller",
         "crypto_momentum_lab.live_rollout.decision_facts",

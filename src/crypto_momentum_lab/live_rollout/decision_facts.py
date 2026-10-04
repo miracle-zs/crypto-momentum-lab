@@ -119,8 +119,6 @@ def frozen_decision_inputs_from_context(
         or position_view.key.symbol != state.symbol
     ):
         return None
-    if not position_view.is_ready_for_trade:
-        return None
     cash = _cash_balance(context)
     if cash is None:
         return None
@@ -132,10 +130,6 @@ def frozen_decision_inputs_from_context(
     if context.strategy_state != StrategyLiveState.ACTIVE:
         return None
     if context.active_halts:
-        return None
-    if state.symbol in (
-        context.pending_position_symbols | context.unmanaged_position_symbols
-    ):
         return None
     risk_config = context.risk_config
     risk_version = getattr(risk_config, "config_hash", None) or (
@@ -591,7 +585,6 @@ class LiveDecisionFactSource:
         total_qty = getattr(view, "total_quantity", None)
         return (
             view.stream_scope == expected_scope
-            and view.is_ready_for_trade
             and (total_qty is None or total_qty > Decimal("0"))
             and view.projection_version == command.expected_projection_version
             and command.allocation_plan is not None

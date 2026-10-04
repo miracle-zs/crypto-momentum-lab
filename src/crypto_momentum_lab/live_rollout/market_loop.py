@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 from collections.abc import (
     AsyncIterable,
     AsyncIterator,
@@ -22,21 +21,20 @@ from datetime import datetime, timedelta
 
 import structlog
 
-import crypto_momentum_lab.live_rollout.gates as gates
 import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
 import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.context import (
+    LiveContextRuntime,
+    LiveDaemonRuntimeContext,
+)
 from crypto_momentum_lab.live_rollout.context_prefetch import (
     LiveContextPrefetcher,
     PrefetchedContext,
@@ -44,9 +42,6 @@ from crypto_momentum_lab.live_rollout.context_prefetch import (
 from crypto_momentum_lab.live_rollout.entry_lane import EntryExecutionLane
 from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
-from crypto_momentum_lab.live_rollout.market_admission import (
-    LiveMarketStateAdmission,
-)
 from crypto_momentum_lab.live_rollout.runtime_cache import (
     LiveRuntimeCacheMaintenance,
 )
@@ -77,17 +72,18 @@ class LiveMarketLoop:
         exit_lane: ExitExecutionLane,
         exit_manager: LiveExitManager | None,
         exit_enabled: Callable[[], bool],
-        market_admission: LiveMarketStateAdmission,
+        context_runtime: LiveContextRuntime,
         checkpoint_coordinator: LiveCheckpointCoordinator,
         entry_lane: EntryExecutionLane,
-        state_machine: OrderExecutionPort,
         clock: Callable[[], datetime],
         recover_market_state_gap: market_runtime_contracts.MarketStateGapRecovery
         | None = None,
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
-        unmanaged_halt_debounce_seconds: float = 15.0,
+        request_order_cleanup: Callable[
+            [tuple[OrderExecutionPlan, ...]], None
+        ] = lambda plans: None,
         decision_filter: (
             Callable[
                 [StrategyDecision, MarketState15s],
@@ -109,10 +105,10 @@ class LiveMarketLoop:
         self._exit_lane = exit_lane
         self._exit_manager = exit_manager
         self._exit_enabled = exit_enabled
-        self._market_admission = market_admission
+        self._context_runtime = context_runtime
         self._checkpoint_coordinator = checkpoint_coordinator
         self._entry_lane = entry_lane
-        self._state_machine = state_machine
+        self._request_order_cleanup = request_order_cleanup
         self._clock = clock
         self._recover_market_state_gap = recover_market_state_gap
         self._hub_cursor_provider = hub_cursor_provider
@@ -120,16 +116,8 @@ class LiveMarketLoop:
         self._entered_symbol_lookup = entered_symbol_lookup
         self._decision_filter = decision_filter
         self._decision_fact_binder = decision_fact_binder
-        self._unmanaged_halt_debounce_seconds = float(
-            os.environ.get(
-                "CML_UNMANAGED_HALT_DEBOUNCE_SECONDS",
-                str(unmanaged_halt_debounce_seconds),
-            )
-        )
-        self._unmanaged_first_seen_at: dict[str, float] = {}
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
-        self._last_transient_gate_reasons: tuple[str, ...] | None = None
         self._active_state_at: datetime | None = None
 
     @property
@@ -276,16 +264,6 @@ class LiveMarketLoop:
                         occurred_at=prefetched.received_at,
                         received_at=prefetched.received_at,
                     )
-            exit_lane_failure = self._exit_lane.failure
-            if exit_lane_failure is not None:
-                await self._checkpoint_coordinator.save_final()
-                return market_runtime_contracts.LiveDaemonResult(
-                    processed,
-                    approved,
-                    submitted,
-                    exit_lane_failure,
-                    final_state_at,
-                )
             gap_generation = self._market_gap_generation
             if gap_generation > self._strategy_gap_reset_generation_by_symbol.get(
                 state.symbol,
@@ -311,7 +289,7 @@ class LiveMarketLoop:
                 ),
                 max_gap_seconds=max_gap_seconds,
             )
-            admission = await self._market_admission.prepare(prefetched)
+            admission = await self._context_runtime.prepare(prefetched)
             if admission.error is not None:
                 admission_error = admission.error
                 if not runtime_errors.is_transient_runtime_error(admission_error):
@@ -351,133 +329,31 @@ class LiveMarketLoop:
                     error_type=type(admission_error).__name__,
                 )
                 continue
-            if admission.context is None or admission.gate is None:
+            if admission.context is None:
                 raise RuntimeError("market state admission is incomplete")
             context = admission.context
-            gate = admission.gate
-            if not gate.approved:
-                if gates.is_transient_live_gate(gate.reasons):
-                    if self._last_transient_gate_reasons != gate.reasons:
-                        log.warning(
-                            "live_gate_temporarily_blocked",
-                            run_id=self._run_id,
-                            reasons=gate.reasons,
-                        )
-                        self._last_transient_gate_reasons = gate.reasons
-                    decision = self._strategy.on_market_state(state)
-                    self._entry_lane.record_decision(
-                        decision=decision,
-                        state=state,
-                        recorded_at=self._clock(),
-                        context=context,
-                        gate_reasons=gate.reasons,
-                        filter_context={
-                            "context_available": True,
-                            "gate_approved": False,
-                        },
-                    )
-                    if self._telemetry is not None:
-                        await self._telemetry.strategy_decision(
-                            state,
-                            occurred_at=self._clock(),
-                            signal_count=len(decision.signals),
-                            candidate_count=len(decision.candidates),
-                            details=decision_details,
-                            empty_heartbeat_eligible=_empty_heartbeat_eligible(
-                                state.symbol,
-                                entry_symbols=self._entry_lane.entry_symbols,
-                                open_position_symbols=context.open_position_symbols,
-                            ),
-                        )
-                    processed += 1
-                    final_state_at = state.bucket_start
-                    self._record_processed_state(state, saved_at=context.now)
-                    continue
-                self._last_transient_gate_reasons = None
-                await self._checkpoint_coordinator.save_final()
-                return market_runtime_contracts.LiveDaemonResult(
-                    processed,
-                    approved,
-                    submitted,
-                    f"live_gate:{','.join(gate.reasons)}",
-                    final_state_at,
-                )
-            self._last_transient_gate_reasons = None
             if context.unmanaged_position_symbols:
-                loop_now = asyncio.get_running_loop().time()
-                current_unmanaged = set(context.unmanaged_position_symbols)
-                for s in list(self._unmanaged_first_seen_at.keys()):
-                    if s not in current_unmanaged:
-                        self._unmanaged_first_seen_at.pop(s, None)
-                for s in current_unmanaged:
-                    if s not in self._unmanaged_first_seen_at:
-                        self._unmanaged_first_seen_at[s] = loop_now
-                        log.warning(
-                            "live_unmanaged_position_detected_debouncing",
-                            run_id=self._run_id,
-                            symbol=s,
-                            debounce_seconds=self._unmanaged_halt_debounce_seconds,
-                        )
-                self._market_admission.invalidate_context_cache()
-
-                expired_symbols = [
-                    s
-                    for s in current_unmanaged
-                    if (loop_now - self._unmanaged_first_seen_at[s])
-                    >= self._unmanaged_halt_debounce_seconds
-                ]
-                if expired_symbols:
-                    await self._checkpoint_coordinator.save_final()
-                    symbols = ",".join(sorted(expired_symbols))
-                    return market_runtime_contracts.LiveDaemonResult(
-                        processed,
-                        approved,
-                        submitted,
-                        f"unmanaged_live_positions:{symbols}",
-                        final_state_at,
-                    )
-                log.info(
-                    "live_unmanaged_position_debouncing_active",
+                log.warning(
+                    "live_unmanaged_positions_observed",
                     run_id=self._run_id,
-                    symbols=sorted(current_unmanaged),
-                    elapsed={
-                        s: round(loop_now - self._unmanaged_first_seen_at[s], 2)
-                        for s in current_unmanaged
-                    },
+                    symbols=sorted(context.unmanaged_position_symbols),
                 )
-                decision = self._strategy.on_market_state(state)
-                self._entry_lane.record_decision(
-                    decision=decision,
-                    state=state,
-                    recorded_at=self._clock(),
-                    context=context,
-                    gate_reasons=("unmanaged_live_positions_debouncing",),
-                    filter_context={
-                        "context_available": True,
-                        "gate_approved": False,
-                    },
-                )
-                processed += 1
-                final_state_at = state.bucket_start
-                self._record_processed_state(state, saved_at=context.now)
-                continue
-            elif self._unmanaged_first_seen_at:
-                log.info(
-                    "live_unmanaged_positions_cleared",
-                    run_id=self._run_id,
-                    symbols=sorted(self._unmanaged_first_seen_at.keys()),
-                )
-                self._unmanaged_first_seen_at.clear()
-            orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
-            if orphan_cancel_reason is not None:
-                await self._checkpoint_coordinator.save_final()
-                return market_runtime_contracts.LiveDaemonResult(
-                    processed,
-                    approved,
-                    submitted,
-                    orphan_cancel_reason,
-                    final_state_at,
-                )
+            # Use the already loaded account facts to request background cleanup.
+            # No REST cancellation or reconciliation owns this market event.
+            position_symbols = (
+                (context.open_position_symbols or frozenset())
+                | context.pending_position_symbols
+                | context.unmanaged_position_symbols
+            )
+            orphan_plans = tuple(
+                order.plan
+                for order in context.unresolved_orders
+                if order.plan.reduce_only
+                and order.plan.order_type == "LIMIT"
+                and order.plan.symbol not in position_symbols
+            )
+            if orphan_plans:
+                self._request_order_cleanup(orphan_plans)
             if (
                 self._exit_manager is not None
                 and self._exit_enabled()
@@ -485,16 +361,6 @@ class LiveMarketLoop:
             ):
                 await self._exit_lane.submit_market(state)
                 await asyncio.sleep(0)
-                exit_lane_failure = self._exit_lane.failure
-                if exit_lane_failure is not None:
-                    await self._checkpoint_coordinator.save_final()
-                    return market_runtime_contracts.LiveDaemonResult(
-                        processed,
-                        approved,
-                        submitted,
-                        exit_lane_failure,
-                        final_state_at,
-                    )
             decision = self._strategy.on_market_state(state)
             if self._decision_fact_binder is not None:
                 self._decision_fact_binder(context)
@@ -522,7 +388,6 @@ class LiveMarketLoop:
                 decision=decision,
                 state=state,
                 context=context,
-                gate_reasons=gate.reasons,
                 recorded_at=decision_recorded_at,
             )
             approved += entry_outcome.approved_intent_count
@@ -531,43 +396,13 @@ class LiveMarketLoop:
             final_state_at = state.bucket_start
             self._record_processed_state(state, saved_at=context.now)
         await self._checkpoint_coordinator.save_final()
-        final_halt_reason: str | None = None
-        if self._unmanaged_first_seen_at:
-            symbols = ",".join(sorted(self._unmanaged_first_seen_at.keys()))
-            final_halt_reason = f"unmanaged_live_positions:{symbols}"
         return market_runtime_contracts.LiveDaemonResult(
             processed,
             approved,
             submitted,
-            final_halt_reason,
+            None,
             final_state_at,
         )
-
-    async def _cancel_orphan_exit_orders(
-        self,
-        context: LiveDaemonRuntimeContext,
-    ) -> str | None:
-        open_symbols = context.open_position_symbols or frozenset()
-        for item in context.unresolved_orders:
-            plan = getattr(item, "plan", None)
-            if plan is None or not plan.reduce_only:
-                continue
-            if plan.order_type != "LIMIT":
-                continue
-            if plan.symbol in open_symbols:
-                continue
-            result = await self._state_machine.cancel_order(plan)
-            if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                log.warning(
-                    "live_orphan_cancel_pending_reconciliation",
-                    run_id=self._run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                )
-                continue
-            if not result.state.terminal:
-                return "orphan_cancel_not_confirmed"
-        return None
 
     def _record_processed_state(
         self,
@@ -687,6 +522,7 @@ def _strategy_max_gap_seconds(
 ) -> int | None:
     requirement = strategy.required_data()
     return None if requirement is None else int(requirement.max_gap_seconds)
+
 
 def _strategy_state_interval_seconds(
     strategy: market_runtime_contracts.LiveRuntimeStrategy,

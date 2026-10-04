@@ -12,9 +12,6 @@ from crypto_momentum_lab.domain.execution.evidence_grouping import (
     observe_evidence_group,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionReadinessError,
-)
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
     EvidenceConflict,
@@ -301,7 +298,7 @@ async def test_missing_parent_waits_but_mismatched_parent_remains_conflict(
         await coordinator.aclose()
 
 
-async def test_waiting_cumulative_order_result_is_not_reported_as_success():
+async def test_waiting_projection_does_not_overwrite_exchange_result():
     book = ExecutionBook()
     book.observe = AsyncMock(
         return_value=WaitingForEvidence(
@@ -318,8 +315,11 @@ async def test_waiting_cumulative_order_result_is_not_reported_as_success():
         execution_book=book,
     )
     try:
-        with pytest.raises(ExecutionReadinessError, match="waiting for recovery"):
-            await coordinator.reconcile_order(plan)
+        result = await coordinator.reconcile_order(plan)
+        assert result == _result(plan)
+        # A zero-fill ACK projects in the background; closing drains accepted facts.
+        await coordinator.aclose()
+        assert book.command_requires_recovery(plan.client_order_id)
     finally:
         await coordinator.aclose()
 

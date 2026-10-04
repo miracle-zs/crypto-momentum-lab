@@ -76,10 +76,7 @@ def test_runtime_plan_compilation_deterministic_hashes() -> None:
     assert plan1.effective_policy.max_open_positions is None
     assert plan1.options_source_chain["max_open_positions"] == "not_configured"
     assert plan1.options_source_chain["max_gross_notional"] == "not_configured"
-    assert plan1.fencing_epoch == 1
     assert plan1.runtime_generation.startswith("gen_binance_primary_")
-    assert plan1.declared_schema_compatibility == "20260925_0042"
-    assert plan1.observed_database_revision is None
 
 
 def test_runtime_plan_deep_immutability() -> None:
@@ -97,28 +94,6 @@ def test_runtime_plan_deep_immutability() -> None:
 
     with pytest.raises(TypeError):
         plan.secret_references["KEY"] = "val"  # type: ignore[index]
-
-
-def test_runtime_plan_observed_revision_and_epoch_transitions() -> None:
-    plan = RuntimePlanCompiler.compile(
-        environment="live",
-        account_label="binance_primary",
-        schema_version="20260925_0043",
-        fencing_epoch=2,
-    )
-
-    # Immutable update of observed revision
-    plan_with_obs = plan.with_observed_db_revision("20260925_0043")
-    assert plan_with_obs.observed_database_revision == "20260925_0043"
-    assert plan.observed_database_revision is None  # Original intact
-
-    # Updating fencing epoch monotonically
-    plan_epoch_3 = plan_with_obs.with_fencing_epoch(3)
-    assert plan_epoch_3.fencing_epoch == 3
-
-    # Decreasing epoch must fail closed
-    with pytest.raises(ValueError, match="fencing_epoch must not decrease"):
-        plan_epoch_3.with_fencing_epoch(1)
 
 
 def test_runtime_plan_secret_references_safety() -> None:
@@ -184,20 +159,4 @@ def test_runtime_plan_invalid_post_init() -> None:
             effective_policy=RuntimePlanCompiler.compile(
                 environment="live", account_label="acc"
             ).effective_policy,
-        )
-
-    with pytest.raises(ValueError, match="fencing_epoch must be positive"):
-        RuntimePlan(
-            plan_id="plan-1",
-            environment="live",
-            account_label="acc",
-            strategy_hash="hash",
-            execution_policy_hash="hash",
-            risk_policy_hash="hash",
-            deployment_hash="hash",
-            schema_compatibility_version="v1",
-            effective_policy=RuntimePlanCompiler.compile(
-                environment="live", account_label="acc"
-            ).effective_policy,
-            fencing_epoch=0,
         )

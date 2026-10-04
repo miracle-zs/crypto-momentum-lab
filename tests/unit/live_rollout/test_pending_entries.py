@@ -1,15 +1,17 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
-
-from crypto_momentum_lab.domain.execution.order_read_models import PersistedExchangeOrder
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import OrderExecutionResult
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionResult,
+)
 from crypto_momentum_lab.live_rollout.pending_entries import LivePendingEntryRegistry
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)

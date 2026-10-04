@@ -30,7 +30,6 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     OrderExecutionStateMachine,
-    SubmitPolicy,
 )
 
 NOW = datetime(2026, 9, 30, 0, 0, 0, tzinfo=UTC)
@@ -40,7 +39,7 @@ class RecordingOrderRepository:
     def __init__(self) -> None:
         self.prepare_calls: list[dict[str, Any]] = []
 
-    async def prepare_submission(self, **kwargs: Any) -> PreparedOrderSubmission:
+    async def prepare_submission_in_session(self, session, **kwargs: Any) -> PreparedOrderSubmission:
         self.prepare_calls.append(kwargs)
         plan = cast(OrderExecutionPlan, kwargs["plan"])
         return PreparedOrderSubmission(
@@ -66,8 +65,8 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
     async def fake_prepare_and_execute(plan, *, preparation):
         from dataclasses import fields
         values = {f.name: getattr(preparation, f.name) for f in fields(preparation)
-                  if f.name != "context_token"}
-        prepared = await repository.prepare_submission(plan=plan, prepared_at=NOW, **values)
+                  }
+        prepared = await repository.prepare_submission_in_session(None, plan=plan, prepared_at=NOW, **values)
         assert prepared is not None
         prepared_submissions.append(prepared)
         return OrderExecutionResult(
@@ -85,8 +84,6 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
     strategy_name = "orderflow_impulse"
     strategy_config_hash = "cfg_hash_test"
     account_label = "primary"
-    lease_owner = "owner-1"
-    git_commit_hash = "abc1234"
     active_lease = None
 
     # Simulate _handle_decision_exit logic from runtime_orchestrator
@@ -170,10 +167,6 @@ async def test_decision_exit_properly_prepares_intent_and_submits() -> None:
                 intent=intent, evaluation=evaluation,
                 environment="live" if active_lease is not None else None,
                 account_label=account_label, strategy_name=strategy_name,
-                required_lease_owner=lease_owner if active_lease is not None else None,
-                required_lease_id=active_lease.lease_id if active_lease is not None else None,
-                required_code_generation=git_commit_hash if active_lease is not None else None,
-                required_session_id=session_id,
             ),
         )
         if res is None:
@@ -242,7 +235,6 @@ async def test_pre_exchange_database_failure_marks_rejected_not_unknown() -> Non
         exchange=mock_exchange,
         repository=FailingRepo(),
         event_repository=FailingRepo(),
-        submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
     )

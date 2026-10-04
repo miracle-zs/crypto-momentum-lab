@@ -1,45 +1,22 @@
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
 
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
-    LIVE_APPROVAL_CONFIRMATION,
     LiveGateDecision,
     LiveGateStatus,
-    LiveOperatorApproval,
 )
-from crypto_momentum_lab.domain.risk import (
-    RiskConfigSnapshot,
-    RiskHalt,
-    TradingLease,
-    TradingLeaseState,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 
 
 @dataclass(frozen=True, slots=True)
 class LiveGateContext:
-    now: datetime
     live_submit_enabled: bool
     account_label: str
     strategy_name: str
     strategy_config_hash: str
-    git_commit_hash: str
-    database_migration_revision: str
-    required_lease_owner: str
-    requested_submit_policy: SubmitPolicy
-    active_lease: TradingLease | None
-    risk_config: RiskConfigSnapshot
-    approval: LiveOperatorApproval | None
-    account_state: ExecutionAccountStatus
-    active_halts: tuple[RiskHalt, ...]
-    unresolved_order_states: tuple[ExchangeOrderState, ...]
 
 
 def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
@@ -48,34 +25,10 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
         reasons.append("live_submit_disabled")
     if not context.account_label.strip():
         reasons.append("missing_account_label")
-    if context.requested_submit_policy is not SubmitPolicy.LIVE_SUBMIT:
-        reasons.append("submit_policy_not_live")
-    _check_lease(context, reasons)
-    _check_approval(context, reasons)
-    if context.account_state not in (
-        ExecutionAccountStatus.RUNNING,
-        ExecutionAccountStatus.READY_READONLY,
-        ExecutionAccountStatus.SYNCING,
-        ExecutionAccountStatus.DEGRADED,
-    ):
-        reasons.append("account_not_ready")
-    if context.active_halts:
-        reasons.append("active_risk_halt")
-    # This gate authorizes the process. Order conflicts and occupied risk are
-    # evaluated against the actual candidate, not aggregated across symbols.
     return LiveGateDecision(
         status=LiveGateStatus.BLOCKED if reasons else LiveGateStatus.APPROVED,
         reasons=tuple(reasons),
     )
-
-
-def is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
-    return bool(reasons) and set(reasons) <= {
-        "missing_active_lease",
-        "inactive_or_expired_lease",
-        "account_not_ready",
-        "unresolved_order_uncertainty",
-    }
 
 
 def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
@@ -118,98 +71,3 @@ def has_entry_order_conflict(
         ):
             return True
     return False
-
-
-def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:
-    lease = context.active_lease
-    if lease is None:
-        reasons.append("missing_active_lease")
-        return
-    if lease.state is not TradingLeaseState.ACTIVE or lease.expires_at <= context.now:
-        reasons.append("inactive_or_expired_lease")
-    if lease.owner != context.required_lease_owner:
-        reasons.append("lease_owner_mismatch")
-    if lease.account_label != context.account_label:
-        reasons.append("lease_account_mismatch")
-    if lease.strategy_name != context.strategy_name:
-        reasons.append("lease_strategy_mismatch")
-    if lease.code_generation != context.git_commit_hash:
-        reasons.append("lease_code_generation_mismatch")
-
-
-def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
-    approval = context.approval
-    if approval is None:
-        reasons.append("missing_operator_approval")
-        return
-    checks = (
-        (
-            approval.approval_text == LIVE_APPROVAL_CONFIRMATION,
-            "approval_text_mismatch",
-        ),
-        (
-            approval.expires_at is None or approval.expires_at > context.now,
-            "approval_expired",
-        ),
-        (approval.account_label == context.account_label, "approval_account_mismatch"),
-        (approval.strategy_name == context.strategy_name, "approval_strategy_mismatch"),
-        (
-            approval.strategy_config_hash == context.strategy_config_hash,
-            "approval_strategy_config_mismatch",
-        ),
-        (
-            approval.risk_config_hash == context.risk_config.config_hash,
-            "approval_risk_config_mismatch",
-        ),
-        (
-            approval.git_commit_hash == context.git_commit_hash,
-            "approval_commit_mismatch",
-        ),
-        (
-            approval.database_migration_revision == context.database_migration_revision,
-            "approval_migration_mismatch",
-        ),
-        (
-            _decimal_limit_is_covered(
-                context.risk_config.max_order_notional,
-                approval.approved_notional_cap,
-            ),
-            "risk_notional_exceeds_approval",
-        ),
-        (
-            _integer_limit_is_covered(
-                context.risk_config.max_open_positions,
-                approval.approved_max_open_positions,
-            ),
-            "risk_positions_exceed_approval",
-        ),
-        (
-            _decimal_limit_is_covered(
-                context.risk_config.max_daily_loss,
-                approval.approved_max_daily_loss,
-            ),
-            "risk_daily_loss_exceeds_approval",
-        ),
-    )
-    reasons.extend(reason for passed, reason in checks if not passed)
-
-
-def _decimal_limit_is_covered(
-    required: Decimal | None,
-    approved: Decimal | None,
-) -> bool:
-    # ``None`` on an approval represents an explicit unlimited cap. A missing
-    # runtime limit is different: it leaves risk unbounded and must fail closed.
-    if required is None:
-        return False
-    return approved is None or required <= approved
-
-
-def _integer_limit_is_covered(
-    required: int | None,
-    approved: int | None,
-) -> bool:
-    # Keep unlimited approvals distinct from an unbounded runtime configuration.
-    if required is None:
-        return False
-    return approved is None or required <= approved

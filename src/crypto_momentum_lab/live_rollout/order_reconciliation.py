@@ -76,6 +76,9 @@ class LiveOrderReconciliation:
         default_factory=set, init=False, repr=False
     )
     _last_lookup_id: str | None = field(default=None, init=False, repr=False)
+    _orphan_cancels: dict[str, OrderExecutionPlan] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -88,8 +91,13 @@ class LiveOrderReconciliation:
         self._requested_tasks.update(_RECOVERY_TASKS)
         self._requested.set()
 
-    def request_order_recovery(self) -> None:
+    def request_order_recovery(
+        self, orphan_plans: tuple[OrderExecutionPlan, ...] = ()
+    ) -> None:
         """Repair order/command uncertainty without scanning exits or positions."""
+        self._orphan_cancels.update(
+            (plan.client_order_id, plan) for plan in orphan_plans
+        )
         self._requested_tasks.add("orders")
         self._requested.set()
 
@@ -170,7 +178,10 @@ class LiveOrderReconciliation:
                     )
                     return
                 else:
-                    await self.state_machine.reconcile_order(persisted.plan)
+                    # Incomplete WS facts schedule the existing repair worker;
+                    # account publication must never await a REST round trip.
+                    self._requested_runs.add(persisted.plan.run_id)
+                    self.request_order_recovery()
                     return
             if snapshot is None:
                 await self.state_machine.mark_reconciliation_pending(
@@ -212,8 +223,28 @@ class LiveOrderReconciliation:
             plans.setdefault(plan.client_order_id, plan)
 
         try:
+            cancel_batch = tuple(self._orphan_cancels.values())[
+                : self.max_order_lookups_per_pass
+            ]
+            for plan in cancel_batch:
+                # Rotate before I/O so one failing order cannot starve cleanup.
+                self._orphan_cancels.pop(plan.client_order_id, None)
+                self._orphan_cancels[plan.client_order_id] = plan
+                try:
+                    result = await self.state_machine.cancel_order(plan)
+                except Exception as error:
+                    log.warning(
+                        "live_orphan_cancel_deferred",
+                        run_id=self.run_id,
+                        client_order_id=plan.client_order_id,
+                        error_type=type(error).__name__,
+                    )
+                    continue
+                if result.state.terminal:
+                    self._orphan_cancels.pop(plan.client_order_id, None)
+            pending = bool(self._orphan_cancels)
             if self.recover_commands is not None:
-                pending = await self.recover_commands(reconcile_once)
+                pending = await self.recover_commands(reconcile_once) or pending
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
                     if not include_confirmed and order.state in {
@@ -238,12 +269,13 @@ class LiveOrderReconciliation:
             if self._last_lookup_id in ids:
                 start = ids.index(self._last_lookup_id) + 1
                 ordered = ordered[start:] + ordered[:start]
-            for plan in ordered[: self.max_order_lookups_per_pass]:
+            lookup_budget = self.max_order_lookups_per_pass - len(cancel_batch)
+            for plan in ordered[:lookup_budget]:
                 # Move the cursor before I/O so a failing order cannot starve
                 # the remaining commands on the next requested pass.
                 self._last_lookup_id = plan.client_order_id
                 await self.state_machine.reconcile_order(plan)
-            if len(ordered) > self.max_order_lookups_per_pass:
+            if len(ordered) > lookup_budget:
                 self._requested_runs.update(runs)
                 pending = True
         except BaseException:

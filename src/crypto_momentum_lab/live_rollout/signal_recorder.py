@@ -147,10 +147,7 @@ class LiveStrategySignalRecorder:
         *,
         run_id: str,
         account_label: str,
-        strategy_name: str,
-        strategy_version: str,
-        config_hash: str,
-        code_commit: str,
+        code_commit: str = "",
         quote_volume_provider: QuoteVolume24hProvider | None = None,
         persist: LiveSignalBatchSink | None = None,
         queue_size: int = 4096,
@@ -159,10 +156,6 @@ class LiveStrategySignalRecorder:
         for value, field_name in (
             (run_id, "run_id"),
             (account_label, "account_label"),
-            (strategy_name, "strategy_name"),
-            (strategy_version, "strategy_version"),
-            (config_hash, "config_hash"),
-            (code_commit, "code_commit"),
         ):
             if not value.strip():
                 raise ValueError(f"{field_name} must not be empty")
@@ -172,9 +165,6 @@ class LiveStrategySignalRecorder:
             raise ValueError("max_recent_records must be positive")
         self._run_id = run_id
         self._account_label = account_label
-        self._strategy_name = strategy_name
-        self._strategy_version = strategy_version
-        self._config_hash = config_hash
         self._code_commit = code_commit
         self._quote_volume_provider = quote_volume_provider
         self._persist = persist

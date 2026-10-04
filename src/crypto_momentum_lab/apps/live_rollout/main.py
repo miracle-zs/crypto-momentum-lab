@@ -51,7 +51,6 @@ from crypto_momentum_lab.config import (
     ResolvedBinanceCredentials,
     resolve_role_credentials,
 )
-from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -132,14 +131,8 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
-from crypto_momentum_lab.persistence.postgres.order_read_repository import (
-    PostgresOrderReadRepository,
-)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
-)
-from crypto_momentum_lab.persistence.postgres.runtime_context import (
-    load_latest_account_state as _latest_account_state,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_risk_config as _latest_risk_config,
@@ -429,37 +422,9 @@ def prepare_command(
         ).strip()
     )
     if manifest_account is not None:
-        manifest_git_commit = _validate_hex_hash(
-            manifest_account.image_commit,
-            "runtime manifest image_commit",
-            _GIT_COMMIT_HASH_LENGTH,
-        )
-        if (
-            configured_git_commit
-            and configured_git_commit.lower() != manifest_git_commit
-        ):
-            raise typer.BadParameter("git commit does not match the runtime manifest")
+        manifest_git_commit = manifest_account.image_commit
         configured_git_commit = manifest_git_commit
-    git_commit_hash = _validate_hex_hash(
-        configured_git_commit,
-        "--git-commit-hash or CML_CODE_COMMIT",
-        _GIT_COMMIT_HASH_LENGTH,
-    )
-    if manifest_account is not None:
-        configured_migration_revision = (
-            migration_revision.strip()
-            or os.environ.get(
-                "CML_LIVE_MIGRATION_REVISION",
-                "",
-            ).strip()
-        )
-        if (
-            configured_migration_revision
-            and configured_migration_revision != manifest_account.migration_revision
-        ):
-            raise typer.BadParameter(
-                "migration revision does not match the runtime manifest"
-            )
+    git_commit_hash = configured_git_commit
     if manifest_account is not None and lease_owner != manifest_account.lease_owner:
         raise typer.BadParameter("lease owner does not match the runtime manifest")
     if manifest_account is None:
@@ -769,13 +734,6 @@ def refresh_approval_runtime_command(
     ] = None,
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
-    verify_preflight: Annotated[
-        bool,
-        typer.Option(
-            "--verify-preflight",
-            help="Immediately verify preflight status in the same execution.",
-        ),
-    ] = False,
 ) -> None:
     """Refresh an active approval while preserving its operator limits."""
 
@@ -875,24 +833,6 @@ def refresh_approval_runtime_command(
             sort_keys=True,
         )
     )
-    if verify_preflight:
-        payload = asyncio.run(
-            _preflight_summary(
-                resolved_database_url,
-                account_label,
-                strategy,
-                expected_git_commit=git_commit_hash,
-                expected_migration_revision=migration_revision,
-                expected_strategy_config_hash=(
-                    None
-                    if manifest_account is None
-                    else strategy_config_hash
-                ),
-            )
-        )
-        typer.echo(json.dumps(payload, sort_keys=True))
-        if payload.get("preflight_ok") is not True:
-            raise typer.Exit(code=1)
 
 
 def _runtime_manifest_account_for_cli(
@@ -955,117 +895,6 @@ def _resolve_manifest_operations(
         raise typer.BadParameter(str(error)) from error
 
 
-@app.command("preflight")
-def preflight_command(
-    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
-    runtime_manifest: Annotated[
-        Path | None,
-        typer.Option(
-            "--runtime-manifest",
-            help="Validate this account against the desired runtime manifest.",
-        ),
-    ] = None,
-    strict: Annotated[bool, typer.Option("--strict")] = False,
-    expected_git_commit: Annotated[
-        str | None, typer.Option("--expected-git-commit")
-    ] = None,
-    expected_migration_revision: Annotated[
-        str | None, typer.Option("--expected-migration-revision")
-    ] = None,
-) -> None:
-    manifest_account = None
-    if runtime_manifest is not None:
-        manifest_account = _runtime_manifest_account_for_cli(
-            runtime_manifest,
-            account_label=account_label,
-            strategy=strategy,
-        )
-        manifest_git_commit = _validate_hex_hash(
-            manifest_account.image_commit,
-            "runtime manifest image_commit",
-            _GIT_COMMIT_HASH_LENGTH,
-        )
-        if expected_git_commit is None:
-            expected_git_commit = manifest_git_commit
-        elif expected_git_commit.lower() != manifest_git_commit:
-            raise typer.BadParameter(
-                "--expected-git-commit does not match the runtime manifest"
-            )
-        if expected_migration_revision is None:
-            expected_migration_revision = manifest_account.migration_revision
-        elif expected_migration_revision != manifest_account.migration_revision:
-            raise typer.BadParameter(
-                "--expected-migration-revision does not match the runtime manifest"
-            )
-    if expected_git_commit is not None:
-        expected_git_commit = _validate_hex_hash(
-            expected_git_commit,
-            "--expected-git-commit",
-            _GIT_COMMIT_HASH_LENGTH,
-        )
-    if expected_migration_revision is not None:
-        expected_migration_revision = expected_migration_revision.strip()
-        if not expected_migration_revision:
-            raise typer.BadParameter("--expected-migration-revision must not be empty")
-    payload = asyncio.run(
-        _preflight_summary(
-            _execution_database_url(database_url),
-            account_label,
-            strategy,
-            expected_git_commit=expected_git_commit,
-            expected_migration_revision=expected_migration_revision,
-            expected_lease_owner=(
-                None if manifest_account is None else manifest_account.lease_owner
-            ),
-            expected_strategy_config_hash=(
-                None
-                if manifest_account is None
-                else _runtime_manifest_strategy_config_hash(manifest_account)
-            ),
-        )
-    )
-    typer.echo(json.dumps(payload, sort_keys=True))
-    if strict and payload["preflight_ok"] is not True:
-        raise typer.Exit(code=1)
-
-
-@app.command("approval-precheck")
-def approval_precheck_command(
-    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
-    expected_git_commit: Annotated[str, typer.Option("--expected-git-commit")] = "",
-    expected_migration_revision: Annotated[
-        str, typer.Option("--expected-migration-revision")
-    ] = "",
-    strict: Annotated[bool, typer.Option("--strict")] = False,
-) -> None:
-    """Validate the active approval's target commit and migration binding."""
-
-    expected_git_commit = _validate_hex_hash(
-        expected_git_commit,
-        "--expected-git-commit",
-        _GIT_COMMIT_HASH_LENGTH,
-    )
-    expected_migration_revision = expected_migration_revision.strip()
-    if not expected_migration_revision:
-        raise typer.BadParameter("--expected-migration-revision must not be empty")
-    payload = asyncio.run(
-        _approval_binding_summary(
-            _execution_database_url(database_url),
-            account_label,
-            strategy,
-            expected_git_commit=expected_git_commit,
-            expected_migration_revision=expected_migration_revision,
-        )
-    )
-    typer.echo(json.dumps(payload, sort_keys=True))
-    if strict and payload["approval_precheck_ok"] is not True:
-        raise typer.Exit(code=1)
-
-
 @app.command("resolve-missing-order")
 def resolve_missing_order_command(
     client_order_id: Annotated[str, typer.Option("--client-order-id")],
@@ -1118,10 +947,7 @@ def submit_plan_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
     session_id: Annotated[str, typer.Option("--session-id")] = "live-manual",
     operator: Annotated[str, typer.Option("--operator")] = "",
-    lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
-    git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
-    migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
     order_plan_json: Annotated[
         Path | None, typer.Option("--order-plan-json", exists=True, dir_okay=False)
     ] = None,
@@ -1164,10 +990,7 @@ def submit_plan_command(
             strategy_name=strategy,
             session_id=session_id,
             operator=operator,
-            lease_owner=lease_owner,
             strategy_config_hash=strategy_config_hash,
-            git_commit_hash=git_commit_hash,
-            migration_revision=migration_revision,
             plan=plan,
             account_event_hub_url=account_event_hub_url,
             base_url=base_url,
@@ -1362,16 +1185,6 @@ def run_command(
             help="Entry margin mode: CROSSED or ISOLATED.",
         ),
     ] = None,
-    acknowledge_missing_shadow_preflight: Annotated[
-        bool,
-        typer.Option(
-            "--acknowledge-missing-shadow-preflight",
-            help=(
-                "Acknowledge the advisory when no matching completed Shadow "
-                "session exists."
-            ),
-        ),
-    ] = False,
     persist_exchange_operations: Annotated[
         str | None,
         typer.Option(
@@ -1456,9 +1269,6 @@ def run_command(
                 candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
                 candle_grace_profit_pct=candle_grace_profit_pct,
                 base_url=base_url,
-                acknowledge_missing_shadow_preflight=(
-                    acknowledge_missing_shadow_preflight
-                ),
                 persist_exchange_operations=persist_exchange_operations,
                 target_notional=target_notional,
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
@@ -1483,7 +1293,9 @@ def status_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(_load_transition(_execution_database_url(database_url), session_id))
+    transition = asyncio.run(
+        _load_transition(_execution_database_url(database_url), session_id)
+    )
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -1651,7 +1463,9 @@ def report_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(_load_transition(_execution_database_url(database_url), session_id))
+    transition = asyncio.run(
+        _load_transition(_execution_database_url(database_url), session_id)
+    )
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -1759,53 +1573,6 @@ async def _load_active_approval(
         )
     finally:
         await engine.dispose()
-
-
-async def _approval_binding_summary(
-    database_url: str,
-    account_label: str,
-    strategy_name: str,
-    *,
-    expected_git_commit: str,
-    expected_migration_revision: str,
-) -> dict[str, object]:
-    """Check only the approval identity needed before non-Live convergence."""
-
-    approval = await _load_active_approval(
-        database_url=database_url,
-        account_label=account_label,
-        strategy_name=strategy_name,
-        now=datetime.now(tz=UTC),
-    )
-    normalized_git_commit = expected_git_commit.strip().lower()
-    normalized_migration_revision = expected_migration_revision.strip()
-    approved_git_commit_hash = None if approval is None else approval.git_commit_hash
-    approved_migration_revision = (
-        None if approval is None else approval.database_migration_revision
-    )
-    checks = {
-        "approval_present": approval is not None,
-        "approval_git_commit_matches_expected": (
-            approval is not None
-            and approval.git_commit_hash.strip().lower() == normalized_git_commit
-        ),
-        "approval_migration_matches_expected": (
-            approval is not None
-            and approval.database_migration_revision == normalized_migration_revision
-        ),
-    }
-    errors = [name for name, passed in checks.items() if not passed]
-    return {
-        "account_label": account_label,
-        "strategy": strategy_name,
-        "approved_git_commit_hash": approved_git_commit_hash,
-        "approved_migration_revision": approved_migration_revision,
-        "expected_git_commit": normalized_git_commit,
-        "expected_migration_revision": normalized_migration_revision,
-        "approval_precheck_checks": checks,
-        "approval_precheck_errors": errors,
-        "approval_precheck_ok": not errors,
-    }
 
 
 async def _prepare_live_risk_gates(
@@ -2044,149 +1811,6 @@ def _parse_approval_expiration(
             "--expires-in-minutes must be a positive integer or 'never'"
         )
     return now + timedelta(minutes=minutes)
-
-
-async def _preflight_summary(
-    database_url: str,
-    account_label: str,
-    strategy_name: str,
-    *,
-    expected_git_commit: str | None = None,
-    expected_migration_revision: str | None = None,
-    expected_lease_owner: str | None = None,
-    expected_strategy_config_hash: str | None = None,
-) -> dict[str, object]:
-    now = datetime.now(tz=UTC)
-    engine = create_execution_database_engine(database_url)
-    try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        approval = await PostgresLiveRolloutRepository(factory).load_active_approval(
-            account_label=account_label,
-            strategy_name=strategy_name,
-            now=now,
-        )
-        lease = await PostgresRiskRepository(factory).load_active_lease(
-            "live", account_label, now
-        )
-        unresolved = await PostgresOrderReadRepository(factory).load_unresolved_orders()
-        risk_config = await _latest_risk_config(factory, account_label)
-        if expected_strategy_config_hash is None:
-            runtime_config = _preflight_runtime_strategy_config()
-            runtime_strategy_config_hash = _live_strategy_config_hash(
-                strategy_name,
-                profile=runtime_config.profile,
-                entry_positive_gainer_top_count=(
-                    runtime_config.entry_positive_gainer_top_count
-                ),
-                require_price_above_ema5=runtime_config.require_price_above_ema5,
-                require_price_above_ema10=runtime_config.require_price_above_ema10,
-                entry_order_type=runtime_config.entry_order_type,
-                entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
-            )
-            runtime_strategy_config_inputs: dict[str, object] = {
-                **runtime_config.profile.as_dict(),
-                "entry_positive_gainer_top_count": (
-                    runtime_config.entry_positive_gainer_top_count
-                ),
-                "require_price_above_ema5": runtime_config.require_price_above_ema5,
-                "require_price_above_ema10": runtime_config.require_price_above_ema10,
-                "entry_policy_mode": runtime_config.entry_policy_mode,
-                "entry_order_type": runtime_config.entry_order_type.value,
-                "entry_limit_ttl_seconds": runtime_config.entry_limit_ttl_seconds,
-            }
-        else:
-            runtime_strategy_config_hash = expected_strategy_config_hash.strip().lower()
-            runtime_strategy_config_inputs = {
-                "source": "runtime_manifest",
-                "strategy_config_hash": runtime_strategy_config_hash,
-            }
-        configured_strategy_config_hash = (
-            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower() or None
-        )
-        if configured_strategy_config_hash == "unset":
-            configured_strategy_config_hash = None
-        approved_strategy_config_hash = (
-            None if approval is None else approval.strategy_config_hash
-        )
-        account_state = await _latest_account_state(factory, account_label)
-        approval_risk_config_hash = (
-            None if approval is None else approval.risk_config_hash
-        )
-        approval_git_commit_hash = (
-            None if approval is None else approval.git_commit_hash
-        )
-        approval_migration_revision = (
-            None if approval is None else approval.database_migration_revision
-        )
-        checks: dict[str, bool] = {
-            "approval_present": approval is not None,
-            "lease_present": lease is not None,
-            "account_ready": account_state
-            in (
-                ExecutionAccountStatus.RUNNING,
-                ExecutionAccountStatus.READY_READONLY,
-            ),
-            "runtime_strategy_config_matches_approval": (
-                approval is not None
-                and runtime_strategy_config_hash == approved_strategy_config_hash
-            ),
-            "risk_config_matches_approval": (
-                approval is not None
-                and risk_config.config_hash == approval_risk_config_hash
-            ),
-        }
-        if configured_strategy_config_hash is not None:
-            checks["runtime_strategy_config_matches_configured"] = (
-                runtime_strategy_config_hash == configured_strategy_config_hash
-            )
-        if expected_git_commit is not None:
-            checks["approval_git_commit_matches_expected"] = (
-                approval_git_commit_hash == expected_git_commit.strip().lower()
-            )
-        if expected_migration_revision is not None:
-            checks["approval_migration_matches_expected"] = (
-                approval_migration_revision == expected_migration_revision.strip()
-            )
-        if expected_lease_owner is not None:
-            checks["lease_owner_matches_expected"] = (
-                lease is not None and lease.owner == expected_lease_owner
-            )
-        if expected_strategy_config_hash is not None:
-            checks["runtime_strategy_config_matches_manifest"] = (
-                runtime_strategy_config_hash == expected_strategy_config_hash
-            )
-        preflight_errors = [name for name, passed in checks.items() if not passed]
-        return {
-            "approval_present": approval is not None,
-            "lease_present": lease is not None,
-            "account_state": account_state.value,
-            "unresolved_order_count": len(unresolved),
-            "risk_config_hash": risk_config.config_hash,
-            "approved_risk_config_hash": approval_risk_config_hash,
-            "runtime_strategy_config_hash": runtime_strategy_config_hash,
-            "configured_strategy_config_hash": configured_strategy_config_hash,
-            "approved_strategy_config_hash": approved_strategy_config_hash,
-            "approved_git_commit_hash": approval_git_commit_hash,
-            "approved_migration_revision": approval_migration_revision,
-            "expected_lease_owner": expected_lease_owner,
-            "expected_strategy_config_hash": expected_strategy_config_hash,
-            "preflight_checks": checks,
-            "preflight_errors": preflight_errors,
-            "preflight_ok": not preflight_errors,
-            "runtime_strategy_config_matches_configured": (
-                None
-                if configured_strategy_config_hash is None
-                else runtime_strategy_config_hash == configured_strategy_config_hash
-            ),
-            "runtime_strategy_config_matches_approval": (
-                None
-                if approved_strategy_config_hash is None
-                else runtime_strategy_config_hash == approved_strategy_config_hash
-            ),
-            "runtime_strategy_config_inputs": runtime_strategy_config_inputs,
-        }
-    finally:
-        await engine.dispose()
 
 
 def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
