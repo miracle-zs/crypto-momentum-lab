@@ -19,6 +19,37 @@ import {
   renderLiveAccounts,
   updateLiveAccountsDynamic,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
+import {
+  renderedPayloadMatches,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account/loaders.js";
+
+
+test("account payload cache only matches the same rendered target and data", () => {
+  const slot = {
+    __cmlRenderedPayload: JSON.stringify({ value: 1 }),
+    dataset: {
+      renderedAccount: "primary",
+      renderedRange: "24h",
+    },
+  };
+
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
+    accountLabel: "primary",
+    equityRange: "24h",
+  }), true);
+  assert.equal(renderedPayloadMatches(slot, { value: 2 }, {
+    accountLabel: "primary",
+    equityRange: "24h",
+  }), false);
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
+    accountLabel: "account-2",
+    equityRange: "24h",
+  }), false);
+  assert.equal(renderedPayloadMatches(slot, { value: 1 }, {
+    accountLabel: "primary",
+    equityRange: "7d",
+  }), false);
+});
 
 
 test("live account renderer exposes equity range controls and yearly dates", () => {

@@ -10,6 +10,7 @@
 .ruff_cache/
 .venv
 .venv/
+src/crypto_momentum_lab/operator_dashboard/static/node_modules/
 __pycache__/
 *.egg-info/
 data/

@@ -29,6 +29,25 @@ export async function defaultAccountRequestJson(url, { timeoutMs = 15000 } = {})
 const liveAccountDetailInFlight = new Map();
 const liveAccountMetricsInFlight = new Map();
 
+/**
+ * A cached API response can be polled again before its source has changed.
+ * Keep the already-rendered, scroll-heavy region intact in that case instead
+ * of reconciling the same DOM tree and asking ECharts to scan its surfaces.
+ */
+export function renderedPayloadMatches(
+  slot,
+  payload,
+  { accountLabel = null, equityRange = null } = {},
+) {
+  if (!slot || slot.__cmlRenderedPayload === undefined) return false;
+  if (accountLabel != null && slot.dataset.renderedAccount !== accountLabel) return false;
+  if (equityRange != null && slot.dataset.renderedRange !== equityRange) return false;
+  return slot.__cmlRenderedPayload === JSON.stringify(payload);
+}
+
+function rememberRenderedPayload(slot, payload) {
+  slot.__cmlRenderedPayload = JSON.stringify(payload);
+}
 
 export function markRefreshStale(root, message) {
   const state = root.querySelector(sel.refreshState());
@@ -201,6 +220,7 @@ export async function loadLiveAccountDetail(
     }
     const detail = await detailPromise;
     if (requestId !== state.liveAccountDetailRequest || !slot.isConnected) return;
+    if (renderedPayloadMatches(slot, detail, { accountLabel, equityRange })) return;
     const [status, html] = renderAccount(detail);
     if (slot.dataset.renderedAccount === accountLabel) patchChildrenFromHtml(contentSlot, html);
     else replaceChildrenFromHtml(contentSlot, html);
@@ -208,6 +228,7 @@ export async function loadLiveAccountDetail(
     slot.dataset.renderedAccount = accountLabel;
     slot.dataset.renderedRange = equityRange;
     slot.dataset.requestedRange = equityRange;
+    rememberRenderedPayload(slot, detail);
     setLiveAccountDetailHeader(slot, accountLabel, detail);
     wireAccountEquityRanges(contentSlot, (nextRange) => loadLiveAccountDetail(state, root, accountLabel, requestJson, nextRange));
     refreshEcharts(contentSlot);
@@ -258,11 +279,13 @@ export async function loadLiveAccountMetrics(state, root, requestJson, equityRan
     }
     const data = await metricsPromise;
     if (requestId !== state.liveAccountMetricsRequest || !slot.isConnected) return;
+    if (renderedPayloadMatches(slot, data, { equityRange })) return;
     const html = renderLiveAccountMetrics(data);
     if (hasLastGood) patchChildrenFromHtml(slot, html);
     else replaceChildrenFromHtml(slot, html);
     slot.dataset.renderedRange = equityRange;
     slot.dataset.requestedRange = equityRange;
+    rememberRenderedPayload(slot, data);
     wireLiveAccountMetricsRanges(slot, (nextRange) => loadLiveAccountMetrics(state, root, requestJson, nextRange), state);
     refreshEcharts(slot);
   } catch (error) {

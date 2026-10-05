@@ -322,16 +322,20 @@ def create_dashboard_app(
             status_code: int = 200,
         ) -> Response:
             response = super().file_response(full_path, stat_result, scope, status_code)
-            path_str = str(full_path)
-            if "vendor" in path_str:
+            path = Path(full_path)
+            if path.is_relative_to(STATIC_DIR / "assets"):
                 response.headers["Cache-Control"] = (
                     "public, max-age=31536000, immutable"
                 )
-            elif path_str.endswith((".css", ".js")):
+            elif "vendor" in str(path):
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            elif str(path).endswith((".css", ".js")):
                 response.headers["Cache-Control"] = (
                     "no-cache, no-store, must-revalidate"
                 )
-            elif path_str.endswith((".svg", ".png", ".woff2")):
+            elif str(path).endswith((".svg", ".png", ".woff2")):
                 response.headers["Cache-Control"] = "public, max-age=86400"
             return response
 

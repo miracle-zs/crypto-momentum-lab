@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from fastapi.testclient import TestClient
 
@@ -177,8 +178,14 @@ def test_paper_history_full_flag_uses_separate_cache_entry() -> None:
 
 def test_dashboard_enables_gzip_for_large_static_responses() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        index_res = client.get("/")
+        asset_match = re.search(
+            r'static/assets/dashboard-[a-f0-9]{16}\.js',
+            index_res.text,
+        )
+        assert asset_match is not None
         response = client.get(
-            "/static/dashboard.js",
+            f"/{asset_match.group(0)}",
             headers={"Accept-Encoding": "gzip"},
         )
 
@@ -274,9 +281,16 @@ def test_static_assets_cache_headers() -> None:
         assert vendor_res.status_code == 200
         assert "max-age=31536000" in vendor_res.headers.get("Cache-Control", "")
 
-        css_res = client.get("/static/dashboard.css")
+        index_res = client.get("/")
+        asset_match = re.search(
+            r'static/assets/dashboard-[a-f0-9]{16}\.css',
+            index_res.text,
+        )
+        assert asset_match is not None
+        css_res = client.get(f"/{asset_match.group(0)}")
         assert css_res.status_code == 200
-        assert "no-cache" in css_res.headers.get("Cache-Control", "")
+        assert "max-age=31536000" in css_res.headers.get("Cache-Control", "")
+        assert "immutable" in css_res.headers.get("Cache-Control", "")
 
         html_res = client.get("/static/index.html")
         assert html_res.status_code == 200

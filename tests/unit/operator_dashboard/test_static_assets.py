@@ -61,13 +61,26 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     active_assets = markup.stylesheets + markup.scripts
     active_paths = {urlsplit(asset).path for asset in active_assets}
-    assert {
-        "static/dashboard.css",
-        "static/vendor/echarts.min.js",
-        "static/dashboard.js",
-    } <= active_paths
+    assert len(active_paths) == 3
+    assert all(path.startswith("static/assets/") for path in active_paths)
+    assert any(
+        re.fullmatch(r"static/assets/dashboard-[a-f0-9]{16}\.css", path)
+        for path in active_paths
+    )
+    assert any(
+        re.fullmatch(r"static/assets/echarts-[a-f0-9]{16}\.js", path)
+        for path in active_paths
+    )
+    assert any(
+        re.fullmatch(r"static/assets/dashboard-[a-f0-9]{16}\.js", path)
+        for path in active_paths
+    )
+    for path in active_paths:
+        assert (STATIC / path.removeprefix("static/")).is_file(), (
+            f"missing built asset: {path}"
+        )
     assert all(not urlsplit(asset).path.startswith("/") for asset in active_assets)
-    assert all(urlsplit(asset).query.startswith("v=") for asset in active_assets)
+    assert all(not urlsplit(asset).query for asset in active_assets)
 
 
 def test_dashboard_loads_stable_frontend_modules() -> None:
@@ -77,22 +90,13 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     markup.feed(index)
 
     assert any(
-        urlsplit(source).path == "static/dashboard.js"
+        re.fullmatch(
+            r"static/assets/dashboard-[a-f0-9]{16}\.js",
+            urlsplit(source).path,
+        )
         for source in markup.module_scripts
     )
-
-    uncommented_javascript = "\n".join(
-        line for line in javascript.splitlines() if not line.lstrip().startswith("//")
-    )
-    imported_modules = re.findall(
-        r"""(?ms)^[ \t]*import\b[\s\S]*?\bfrom\s*["']([^"']+)["']\s*;""",
-        uncommented_javascript,
-    )
-    imported_paths = {urlsplit(module).path for module in imported_modules}
-    assert imported_paths, "dashboard entrypoint must load executable modules"
-    for module in imported_modules:
-        path = STATIC / urlsplit(module).path.removeprefix("./")
-        assert path.is_file(), f"missing imported dashboard module: {path}"
+    assert "import" in javascript, "source entrypoint must remain modular before bundling"
 
 
 def test_degraded_status_labels_are_visible() -> None:

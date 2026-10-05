@@ -2,9 +2,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "vendor:echarts": "node scripts/vendor-echarts.mjs"
+    "build": "python3 ../../../../scripts/bundle_dashboard_css.py && node scripts/build-dashboard-assets.mjs"
   },
   "devDependencies": {
-    "echarts": "6.1.0"
+    "echarts": "6.1.0",
+    "esbuild": "^0.25.12"
   }
 }
