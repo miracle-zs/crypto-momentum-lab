@@ -46,7 +46,12 @@ def upgrade() -> None:
         sa.Column("symbol", sa.String(32), nullable=True),
         sa.Column("bucket_start", sa.DateTime(timezone=True), nullable=True),
         sa.Column("details", postgresql.JSONB(), nullable=False),
-        sa.PrimaryKeyConstraint("event_id", name="pk_strategy_runtime_events"),
+        sa.PrimaryKeyConstraint(
+            "event_id",
+            "occurred_at",
+            name="pk_strategy_runtime_events",
+        ),
+        postgresql_partition_by="RANGE (occurred_at)",
     )
     op.create_index(
         "ix_strategy_runtime_events_run_time",

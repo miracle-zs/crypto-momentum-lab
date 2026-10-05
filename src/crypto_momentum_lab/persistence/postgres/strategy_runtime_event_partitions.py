@@ -43,31 +43,13 @@ def event_partition_name(start: datetime) -> str:
     return f"{EVENT_PARTITION_PREFIX}{floor_event_partition_start(start):%Y%m%d}"
 
 
-async def event_table_is_partitioned(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> bool:
-    async with session_factory() as session:
-        value = await session.scalar(
-            text(
-                "SELECT c.relkind = 'p' "
-                "FROM pg_class AS c "
-                "WHERE c.oid = to_regclass(:table_name)"
-            ),
-            {"table_name": EVENT_TABLE},
-        )
-    return bool(value)
-
-
 async def ensure_event_partitions(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     through: datetime,
     from_at: datetime | None = None,
 ) -> int:
-    """Create missing daily partitions up to ``through``.
-
-    No-op while the relation is still the legacy unpartitioned table.
-    """
+    """Create missing daily partitions up to ``through``."""
 
     end = _ceil_event_partition_end(through)
     start = floor_event_partition_start(
@@ -78,8 +60,6 @@ async def ensure_event_partitions(
 
     async with session_factory() as session:
         async with session.begin():
-            if not await _table_is_partitioned(session, EVENT_TABLE):
-                return 0
             return await _ensure_partitions_in_session(
                 session,
                 parent_table=EVENT_TABLE,
@@ -112,8 +92,6 @@ async def drop_expired_event_partitions(
             cutoff = plan.effective_cutoff
 
     async with session_factory() as session:
-        if not await _table_is_partitioned(session, EVENT_TABLE):
-            return 0
         rows = (
             await session.execute(
                 text(
@@ -214,21 +192,6 @@ async def _ensure_partitions_in_session(
             created += 1
         cursor = next_boundary
     return created
-
-
-async def _table_is_partitioned(
-    session: AsyncSession,
-    table_name: str,
-) -> bool:
-    value = await session.scalar(
-        text(
-            "SELECT c.relkind = 'p' "
-            "FROM pg_class AS c "
-            "WHERE c.oid = to_regclass(:table_name)"
-        ),
-        {"table_name": table_name},
-    )
-    return bool(value)
 
 
 def _ceil_event_partition_end(value: datetime) -> datetime:

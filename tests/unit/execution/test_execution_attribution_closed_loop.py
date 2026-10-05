@@ -22,8 +22,8 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution.account_journal import (
     AccountJournal,
 )
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
     ReservationConflictError,
     VersionConflictError,
 )
@@ -186,7 +186,7 @@ def test_targeted_exit_allocates_exact_batch_not_fifo_first() -> None:
 def test_transactional_reservation_prevents_concurrent_double_dipping() -> None:
     book, key = _setup_two_batch_book()
     view = book.get_view()
-    coordinator = ExecutionCoordinator()
+    coordinator = ReservationRegistry()
 
     batch_1, batch_2 = view.batches
     assert batch_1.quantity == Decimal("1.0")
@@ -225,7 +225,7 @@ def test_transactional_reservation_prevents_concurrent_double_dipping() -> None:
 def test_cas_version_fencing_rejects_stale_command() -> None:
     book, key = _setup_two_batch_book()
     view = book.get_view()
-    coordinator = ExecutionCoordinator()
+    coordinator = ReservationRegistry()
 
     cmd = _exit_command(
         view,
@@ -288,7 +288,7 @@ def test_cas_version_fencing_rejects_stale_command() -> None:
 def test_reservation_fill_reconciliation_and_release() -> None:
     book, key = _setup_two_batch_book()
     view = book.get_view()
-    coordinator = ExecutionCoordinator()
+    coordinator = ReservationRegistry()
 
     batch_1 = view.batches[0]
     cmd = _exit_command(
@@ -340,14 +340,14 @@ def test_known_batch_exit_can_reserve_with_degraded_view() -> None:
         allocation_plan=allocation,
         expected_projection_version=view.projection_version,
     )
-    reservations = ExecutionCoordinator().reserve_exit(command, view)
+    reservations = ReservationRegistry().reserve_exit(command, view)
     assert len(reservations) == 1
     assert reservations[0].batch_id == batch.batch_id
     assert reservations[0].reserved_quantity == Decimal("1")
 
 
 def test_multi_batch_reservation_failure_publishes_no_partial_state():
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         InMemoryPositionReservationRepository,
     )
 
@@ -358,7 +358,7 @@ def test_multi_batch_reservation_failure_publishes_no_partial_state():
     position_book, key = _setup_two_batch_book()
     view = position_book.get_view()
     repository = FailingRepository()
-    coordinator = ExecutionCoordinator(repository=repository)
+    coordinator = ReservationRegistry(repository=repository)
     command = _exit_command(
         view,
         command_id="two-batch-exit",

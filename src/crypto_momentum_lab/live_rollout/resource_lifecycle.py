@@ -5,21 +5,34 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from time import perf_counter
+from typing import Protocol
 
 import structlog
-
-from crypto_momentum_lab.live_rollout.resource_ports import (
-    AsyncClosable,
-    AsyncDisposable,
-    AsyncStoppable,
-    HealthStopMarker,
-    SyncClosable,
-)
 
 log = structlog.get_logger()
 
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 _RESOURCE_CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+class AsyncStoppable(Protocol):
+    async def stop(self) -> None: ...
+
+
+class AsyncClosable(Protocol):
+    async def aclose(self) -> None: ...
+
+
+class SyncClosable(Protocol):
+    def close(self) -> None: ...
+
+
+class AsyncDisposable(Protocol):
+    async def dispose(self) -> None: ...
+
+
+class HealthStopMarker(Protocol):
+    def stopped(self) -> None: ...
 
 
 class LiveResourceLifecycle:

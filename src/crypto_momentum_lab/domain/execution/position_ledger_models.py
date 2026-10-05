@@ -25,7 +25,7 @@ from crypto_momentum_lab.domain.account.models import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
 class PositionStreamMismatchError(ValueError):

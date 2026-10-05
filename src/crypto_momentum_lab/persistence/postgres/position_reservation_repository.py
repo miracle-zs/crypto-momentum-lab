@@ -18,7 +18,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
+from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationConflictError,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide

@@ -21,6 +21,9 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionRequest,
     StaleView,
 )
+from crypto_momentum_lab.domain.execution.execution_book_recovery import (
+    restore_durable_positions,
+)
 from crypto_momentum_lab.domain.execution.observation_models import Applied, Duplicate
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -2372,7 +2375,8 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
     # Must succeed without raising RuntimeError:
     # "durable position facts do not match the execution head"
-    await book._restore_durable_positions(
+    await restore_durable_positions(
+        book.recovery_state, watermark_key=book._order_watermark_key,
         unit_of_work=unit_of_work,
         account_label="primary",
         environment="live",
@@ -2465,7 +2469,8 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
     # The current durable snapshot repairs the in-memory head while
     # reservations remain active.
-    await book._restore_durable_positions(
+    await restore_durable_positions(
+        book.recovery_state, watermark_key=book._order_watermark_key,
         unit_of_work=unit_of_work,
         account_label="primary",
         environment="live",

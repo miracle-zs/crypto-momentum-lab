@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.trading import OrderType, TradeSide
 
 
 class RunMode(StrEnum):
@@ -18,14 +19,8 @@ class RunMode(StrEnum):
     LIVE = "live"
 
 
-class StrategySide(StrEnum):
-    LONG = "long"
-    SHORT = "short"
-
-
-class EntryType(StrEnum):
-    MARKET = "market"
-    LIMIT = "limit"
+StrategySide = TradeSide
+EntryType = OrderType
 
 
 class RejectionReason(StrEnum):

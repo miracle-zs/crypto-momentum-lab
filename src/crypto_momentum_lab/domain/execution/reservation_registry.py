@@ -1,4 +1,4 @@
-"""ExecutionCoordinator domain service for transactional lot reservation.
+"""Reservation registry for transactional lot reservation.
 
 Obeys RFC 2026-09-25:
 1. Version-pinned lot reservation (CAS check on projection version);
@@ -143,7 +143,7 @@ class InMemoryPositionReservationRepository:
         return self._reservations.get(reservation_id)
 
 
-class ExecutionCoordinator:
+class ReservationRegistry:
     """Coordinates transactional lot reservations and prevents double-dipping."""
 
     def __init__(self, repository: PositionReservationRepository | None = None) -> None:
@@ -151,15 +151,15 @@ class ExecutionCoordinator:
         self._reservations_by_id: dict[str, PositionReservation] = {}
         self.recover()
 
-    def copy_for_transaction(self) -> ExecutionCoordinator:
+    def copy_for_transaction(self) -> ReservationRegistry:
         """Stage reservation changes without writing the live repository."""
-        candidate = ExecutionCoordinator(
+        candidate = ReservationRegistry(
             repository=InMemoryPositionReservationRepository()
         )
         candidate._reservations_by_id = dict(self._reservations_by_id)
         return candidate
 
-    def publish_from(self, candidate: ExecutionCoordinator) -> None:
+    def publish_from(self, candidate: ReservationRegistry) -> None:
         """Take over staged tracking after commit; the candidate is then retired."""
         self._reservations_by_id = candidate._reservations_by_id
 

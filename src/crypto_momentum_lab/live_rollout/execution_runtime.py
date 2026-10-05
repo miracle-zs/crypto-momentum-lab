@@ -16,8 +16,8 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     OrderExchangeClient,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionRepository,
@@ -88,7 +88,7 @@ async def build_live_execution_runtime(
         sessions,
         strategy_name=strategy_name,
     )
-    domain_coordinator = ExecutionCoordinator()
+    reservation_registry = ReservationRegistry()
     commands = PostgresCommandRepository(sessions)
     unit_of_work = AsyncPostgresExecutionUnitOfWork(
         sessions,
@@ -97,7 +97,7 @@ async def build_live_execution_runtime(
         reservation_repository=reservations,
     )
     book = ExecutionBook(
-        coordinator=domain_coordinator,
+        coordinator=reservation_registry,
         reservation_repository=reservations,
         command_repository=commands,
         execution_unit_of_work=unit_of_work,

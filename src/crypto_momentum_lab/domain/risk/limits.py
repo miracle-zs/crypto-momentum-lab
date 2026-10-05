@@ -40,6 +40,27 @@ class LiveLimitDecision:
     capped_notional: Decimal | None
 
 
+def validate_quantized_notional(
+    actual_notional: Decimal,
+    *,
+    approved_notional: Decimal | None,
+    max_order_notional: Decimal | None,
+    gross_exposure: Decimal | None,
+    max_gross_notional: Decimal | None,
+) -> tuple[bool, str | None]:
+    """Check the actual exchange quantity after step-size quantization."""
+    if approved_notional is not None and actual_notional > approved_notional:
+        return False, "quantized_order_notional_exceeds_approved_notional"
+    if max_order_notional is not None and actual_notional > max_order_notional:
+        return False, "quantized_order_notional_exceeds_max_order_notional"
+    if max_gross_notional is not None:
+        if gross_exposure is None:
+            return False, "missing_gross_exposure"
+        if gross_exposure + actual_notional > max_gross_notional:
+            return False, "quantized_order_notional_exceeds_max_gross_notional"
+    return True, None
+
+
 def evaluate_fixed_live_limits(
     limits: FixedLiveLimits,
     context: LiveLimitContext,

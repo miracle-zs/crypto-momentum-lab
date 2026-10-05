@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
+from crypto_momentum_lab.domain.execution.reservation_registry import (
     ExecutionReadinessError,
 )
 from crypto_momentum_lab.domain.execution.order_read_models import (

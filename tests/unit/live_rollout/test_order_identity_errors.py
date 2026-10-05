@@ -1,6 +1,6 @@
 import pytest
 
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
+from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationConflictError,
 )
 from crypto_momentum_lab.live_rollout.order_identity_errors import (

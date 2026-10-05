@@ -105,11 +105,8 @@ _ALERT_LABELS = {
     "container_memory_growth": "服务内存趋势异常",
     "container_memory_pressure": "服务匿名内存被换出",
     "live_position_intent_divergence": "账户下单意图发生分叉",
-    # Keep the legacy label so an alert written by an older monitor can still
-    # be rendered correctly while its recovery record is being drained.
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
-    "live_legacy_order_identity_conflict": "订单身份发生冲突",
     "live_exit_processing_degraded": "平仓处理降级",
     "market_task_not_alive": "行情连接任务无响应",
     "live_session_not_ready": "实时会话未就绪",
@@ -159,7 +156,6 @@ _ALERT_IMPACTS = {
     ),
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
-    "live_legacy_order_identity_conflict": "订单与交易所订单的归属可能无法安全关联。",
     "live_exit_processing_degraded": (
         "退出流程反复失败，持仓无法按策略平掉，浮亏可能持续扩大。"
     ),
@@ -235,9 +231,6 @@ _ALERT_ACTIONS = {
     "rss_growth": "分析进程 RSS 内存增长趋势，排查连接泄漏与队列积压。",
     "telemetry_persist_failure": (
         "检查 PostgreSQL 慢查询、数据库连接池耗尽或遥测批量写入缓冲队列。"
-    ),
-    "live_legacy_order_identity_conflict": (
-        "核对本地 client_order_id 与交易所 order_id 绑定关系，排查跨会话重复委托。"
     ),
     "live_exit_processing_degraded": (
         "退出委托受阻；紧急核对交易所实际持仓，必要时在交易所后台手动干预平仓。"
@@ -357,7 +350,6 @@ class ContainerMemoryStats:
 @dataclass(frozen=True, slots=True)
 class LogSignals:
     telemetry_persist_failures: int = 0
-    legacy_order_identity_conflicts: int = 0
     exit_processing_degraded_symbols: tuple[str, ...] = ()
     dead_connection_tasks: tuple[str, ...] = ()
     latest_rss_bytes: int | None = None
@@ -945,9 +937,6 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
         telemetry_persist_failures=(
             left.telemetry_persist_failures + right.telemetry_persist_failures
         ),
-        legacy_order_identity_conflicts=(
-            left.legacy_order_identity_conflicts + right.legacy_order_identity_conflicts
-        ),
         exit_processing_degraded_symbols=(
             *left.exit_processing_degraded_symbols,
             *right.exit_processing_degraded_symbols,
@@ -993,15 +982,6 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 severity,
                 "Runtime telemetry batches failed to persist",
                 {"failure_count": signals.telemetry_persist_failures},
-            )
-        )
-    if signals.legacy_order_identity_conflicts:
-        alerts.append(
-            Alert(
-                "live_legacy_order_identity_conflict",
-                "critical",
-                "Live order identity was reused across multiple exchange orders",
-                {"conflict_count": (signals.legacy_order_identity_conflicts)},
             )
         )
     if signals.exit_processing_degraded_symbols:
@@ -2485,7 +2465,6 @@ class OpsMonitor:
         since_seconds: float,
     ) -> LogSignals:
         telemetry_failures = 0
-        legacy_order_identity_conflicts = 0
         degraded_exit_symbols: set[str] = set()
         dead_tasks: list[str] = []
         latest_rss: int | None = None
@@ -2515,8 +2494,6 @@ class OpsMonitor:
                 event = str(record.get("event", ""))
                 if event == "live_runtime_telemetry_persist_failed":
                     telemetry_failures += 1
-                elif event == "live_legacy_order_identity_conflict":
-                    legacy_order_identity_conflicts += 1
                 elif event == "live_grace_timeout_processing_degraded":
                     symbol = record.get("symbol")
                     if symbol:
@@ -2562,7 +2539,6 @@ class OpsMonitor:
                         expired_candidates.append((acc, sym))
         return LogSignals(
             telemetry_persist_failures=telemetry_failures,
-            legacy_order_identity_conflicts=legacy_order_identity_conflicts,
             exit_processing_degraded_symbols=tuple(sorted(degraded_exit_symbols)),
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
             latest_rss_bytes=latest_rss,
@@ -4476,16 +4452,11 @@ def _format_alert_human_details(
         if c_present is not None:
             lines.append(f"- **策略检查点**：{'存在' if c_present else '缺失（异常）'}")
 
-    # 13. Telemetry & legacy order conflict & market tasks
+    # 13. Telemetry and market tasks
     elif base_name == "telemetry_persist_failure":
         failures = details.get("failure_count")
         if failures:
             lines.append(f"- **落库失败批次**：**{failures}** 次")
-
-    elif base_name == "live_legacy_order_identity_conflict":
-        conflicts = details.get("conflict_count")
-        if conflicts:
-            lines.append(f"- **冲突记录数**：**{conflicts}** 笔")
 
     elif base_name == "market_task_not_alive":
         group_ids = details.get("group_ids")
@@ -4682,8 +4653,6 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         return "行情 WebSocket 连接任务挂死，**部分币种实时行情已中断**。"
     if base_name == "telemetry_persist_failure":
         return "数据库遥测批次批量落库失败，**监控与运行诊断数据存在丢失风险**。"
-    if base_name == "live_legacy_order_identity_conflict":
-        return "检测到本地订单 ID 重复关联交易所订单，**订单生命周期冲突**。"
     if base_name == "live_heartbeat_stale":
         age = details.get("heartbeat_age_seconds")
         age_str = f"（已失联 {age:.0f} 秒）" if isinstance(age, (int, float)) else ""

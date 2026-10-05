@@ -58,6 +58,7 @@ def upgrade() -> None:
             "bucket_start",
             name="pk_runtime_market_states_15s",
         ),
+        postgresql_partition_by="RANGE (bucket_start)",
     )
     op.create_index(
         "ix_runtime_market_states_15s_polling",

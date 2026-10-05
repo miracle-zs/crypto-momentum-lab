@@ -427,8 +427,8 @@ class PostgresLiveContextProvider(LiveContextReader):
         )
         cached_context = self._cached_context
         if cached_context is not None and self.is_current(context):
-            # Debounce actual Book uncertainty, not the discarded legacy
-            # classification. Account updates still invalidate this cache.
+            # Debounce actual Book uncertainty. Account updates still
+            # invalidate this cache.
             self._cached_context = replace(
                 cached_context,
                 pending_position_symbols=pending,

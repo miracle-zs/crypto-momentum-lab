@@ -11,7 +11,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     FuturesPositionSide,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
 @dataclass(frozen=True, slots=True)

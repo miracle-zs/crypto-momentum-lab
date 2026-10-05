@@ -194,8 +194,8 @@ def _build_position_batches(
             symbol=position.symbol,
             error=str(exc),
         )
-        # Fail-closed in authoritative primary mode: never silently fall back
-        # to legacy rebuild batches.
+        # Fail closed: do not synthesize batches after the authoritative
+        # projection failed.
         err_msg = (
             f"Authoritative PositionLedger projection failed for "
             f"{position.symbol}: {exc}"

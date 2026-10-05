@@ -51,6 +51,7 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision
 from crypto_momentum_lab.domain.risk.limits import (
     LiveLimitContext,
+    validate_quantized_notional,
 )
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -360,15 +361,18 @@ class LiveCandidateSubmission:
             # Re-verify hard risk limits on actual quantized notional for non-reduce_only entries via RiskGateway
             if not executable_candidate.reduce_only and actual_notional is not None:
                 allowed, ceiling_reason = (
-                    self._risk_gateway.validate_quantized_notional(
+                    validate_quantized_notional(
                         actual_notional,
-                        risk_context,
                         gross_exposure=(
                             limit_context.gross_exposure
                             if limit_context is not None
                             else None
                         ),
                         approved_notional=executable_candidate.desired_notional,
+                        max_order_notional=risk_context.risk_config.max_order_notional,
+                        max_gross_notional=(
+                            risk_context.risk_config.max_gross_notional
+                        ),
                     )
                 )
                 if not allowed:

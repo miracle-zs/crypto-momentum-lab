@@ -205,7 +205,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
 
     left = LogSignals(
         telemetry_persist_failures=1,
-        legacy_order_identity_conflicts=2,
         exit_processing_degraded_symbols=("龙虾USDT",),
         dead_connection_tasks=("grp-a",),
         latest_rss_bytes=100,
@@ -213,7 +212,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
     )
     right = LogSignals(
         telemetry_persist_failures=3,
-        legacy_order_identity_conflicts=4,
         exit_processing_degraded_symbols=("BTWUSDT",),
         dead_connection_tasks=("grp-b",),
         fact_inconsistencies=(("primary", "BTCUSDT", "repair_blocked"),),
@@ -224,7 +222,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
     merged = _merge_log_signals(left, right)
 
     assert merged.telemetry_persist_failures == 4
-    assert merged.legacy_order_identity_conflicts == 6
     assert merged.exit_processing_degraded_symbols == ("龙虾USDT", "BTWUSDT")
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
     assert merged.latest_rss_bytes == 100
@@ -236,7 +233,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
     # Any field added to LogSignals must be merged above; keep this list honest.
     assert {f.name for f in dataclasses.fields(LogSignals)} == {
         "telemetry_persist_failures",
-        "legacy_order_identity_conflicts",
         "exit_processing_degraded_symbols",
         "dead_connection_tasks",
         "latest_rss_bytes",

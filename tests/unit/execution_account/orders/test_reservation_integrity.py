@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
+from crypto_momentum_lab.domain.execution.reservation_registry import (
     InMemoryPositionReservationRepository,
     ReservationConflictError,
 )

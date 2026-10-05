@@ -58,7 +58,7 @@ def test_grace_timeout_identity_changes_after_conflict_epoch() -> None:
 
 
 def test_order_identity_conflict_detector() -> None:
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ReservationConflictError,
     )
     from crypto_momentum_lab.execution_account.orders.coordinator import (

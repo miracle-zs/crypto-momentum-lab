@@ -15,8 +15,8 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
     InMemoryPositionReservationRepository,
     ReservationConflictError,
 )
@@ -84,7 +84,7 @@ def test_durable_reservation_and_crash_recovery() -> None:
     shared_repo = InMemoryPositionReservationRepository()
 
     # Instance 1: Create coordinator and make a reservation
-    coord1 = ExecutionCoordinator(repository=shared_repo)
+    coord1 = ReservationRegistry(repository=shared_repo)
     view = _create_ready_view(batch_qty=Decimal("2189.0"), version="pv_sand_v1")
 
     command1 = TradeCommand(
@@ -123,7 +123,7 @@ def test_durable_reservation_and_crash_recovery() -> None:
 
     # --- SIMULATE PROCESS CRASH & RESTART ---
     # Instance 2: New coordinator spins up with same shared repository
-    coord2 = ExecutionCoordinator(repository=shared_repo)
+    coord2 = ReservationRegistry(repository=shared_repo)
 
     # In-flight reservation must be recovered on startup!
     recovered = coord2.get_active_reservations(view.key)
@@ -167,7 +167,7 @@ def test_durable_reservation_and_crash_recovery() -> None:
 
 def test_fill_reconciliation_updates_persistent_reservation() -> None:
     shared_repo = InMemoryPositionReservationRepository()
-    coord = ExecutionCoordinator(repository=shared_repo)
+    coord = ReservationRegistry(repository=shared_repo)
     view = _create_ready_view()
 
     command = TradeCommand(
@@ -212,7 +212,7 @@ def test_fill_reconciliation_updates_persistent_reservation() -> None:
 
 def test_reservation_release_on_cancellation_updates_repository() -> None:
     shared_repo = InMemoryPositionReservationRepository()
-    coord = ExecutionCoordinator(repository=shared_repo)
+    coord = ReservationRegistry(repository=shared_repo)
     view = _create_ready_view()
 
     command = TradeCommand(

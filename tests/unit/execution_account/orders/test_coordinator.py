@@ -65,7 +65,11 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
             plan, strategy_name=preparation.intent.strategy_name
         )
         result = await self.execution_book.act(request, prepare_submission=prepare)
-        self._handle_act_result(plan, result)
+        from crypto_momentum_lab.execution_account.orders.execution_result_mapping import (
+            require_accepted_execution_result,
+        )
+
+        require_accepted_execution_result(plan, result)
         return result.prepared_submission
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
@@ -264,14 +268,10 @@ async def test_scheduler_close_releases_queued_submitters() -> None:
 async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel() -> (
     None
 ):
-    from unittest.mock import AsyncMock
-
     backend = BlockingSubmitBackend()
     coordinator = OrderExecutionCoordinator(
         backend=backend, account_label="primary", execution_book=ExecutionBook()
     )
-    drain = AsyncMock()
-    coordinator.execution_book.drain = drain
     submit_task = asyncio.create_task(
         submit_prepared(coordinator, _plan("BTCUSDT", reduce_only=False))
     )
@@ -284,13 +284,10 @@ async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel()
     close_task = asyncio.create_task(coordinator.aclose())
     await asyncio.sleep(0)
     assert close_task.done() is False
-    drain.assert_not_awaited()
     backend.release_submit.set()
     await close_task
     assert backend.calls == ["submit:BTCUSDT:entry"]
-    drain.assert_awaited_once_with()
     await coordinator.aclose()
-    drain.assert_awaited_once_with()
 
 
 async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> None:
@@ -1056,7 +1053,7 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
 
 
 async def test_reservation_conflict_mismatch_is_rejected() -> None:
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ReservationConflictError,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
@@ -2091,8 +2088,8 @@ async def test_cumulative_executed_quantity_settlement_watermark() -> None:
 async def test_first_live_entry_reservation_on_cold_start() -> None:
     """Verifies F1: first live entry on empty ExecutionBook succeeds and is admitted."""
     from crypto_momentum_lab.domain.account.models import AccountPositionSnapshot
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
-        ExecutionCoordinator,
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
+        ReservationRegistry,
     )
 
     class InMemoryReservationRepo:
@@ -2126,7 +2123,7 @@ async def test_first_live_entry_reservation_on_cold_start() -> None:
 
     backend = BlockingBackend()
     repo = InMemoryReservationRepo()
-    domain_coord = ExecutionCoordinator()
+    domain_coord = ReservationRegistry()
     book = ExecutionBook(coordinator=domain_coord, reservation_repository=repo)
     coord = OrderExecutionCoordinator(
         backend=backend,

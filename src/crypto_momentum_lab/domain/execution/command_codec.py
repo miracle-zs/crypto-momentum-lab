@@ -23,7 +23,10 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.domain.trading import (
+    OrderType as EntryType,
+    TradeSide as StrategySide,
+)
 
 
 def _required_text(values: Mapping[str, object], field_name: str) -> str:

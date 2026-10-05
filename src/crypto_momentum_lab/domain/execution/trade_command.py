@@ -17,7 +17,10 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerBatch,
     PositionView,
 )
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.domain.trading import (
+    OrderType as EntryType,
+    TradeSide as StrategySide,
+)
 
 
 class ExitPolicyMode(StrEnum):

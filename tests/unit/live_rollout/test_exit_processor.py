@@ -341,7 +341,7 @@ async def test_process_requests_serializes_same_symbol_batches() -> None:
 
 @pytest.mark.asyncio
 async def test_position_readiness_guard_defers_exit_instead_of_killing_daemon():
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ExecutionReadinessError,
     )
     from crypto_momentum_lab.domain.execution.order_submission import (
@@ -374,7 +374,7 @@ async def test_position_readiness_guard_defers_exit_instead_of_killing_daemon():
 async def test_recovery_guard_preserves_receipt_and_post_attempts():
     from unittest.mock import AsyncMock
 
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ExecutionReadinessError,
     )
     from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
@@ -972,7 +972,7 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
 ):
     from unittest.mock import AsyncMock
 
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ExecutionReadinessError,
     )
     from crypto_momentum_lab.domain.execution.order_state import (

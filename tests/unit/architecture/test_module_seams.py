@@ -17,7 +17,6 @@ import pytest
         "crypto_momentum_lab.live_rollout.exit_event_coordinator",
         "crypto_momentum_lab.live_rollout.exit_event_ports",
         "crypto_momentum_lab.live_rollout.entry_orders",
-        "crypto_momentum_lab.live_rollout.account_event_ports",
         "crypto_momentum_lab.live_rollout.telemetry_ports",
         "crypto_momentum_lab.live_rollout.control_plane",
         "crypto_momentum_lab.live_rollout.context",
@@ -27,7 +26,6 @@ import pytest
         "crypto_momentum_lab.domain.execution.missing_order_rules",
         "crypto_momentum_lab.live_rollout.entry_runtime",
         "crypto_momentum_lab.live_rollout.entry_expectations",
-        "crypto_momentum_lab.live_rollout.resource_ports",
         "crypto_momentum_lab.live_rollout.resource_lifecycle",
         "crypto_momentum_lab.research_collector.source",
         "crypto_momentum_lab.research_collector",
@@ -138,7 +136,7 @@ class CoordinationGuard(MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname in {
             'crypto_momentum_lab.domain.execution.execution_book',
-            'crypto_momentum_lab.domain.execution.execution_coordinator',
+            'crypto_momentum_lab.domain.execution.reservation_registry',
             'crypto_momentum_lab.domain.execution.recovery_codec',
         } or fullname.startswith('crypto_momentum_lab.persistence') or (
             fullname == 'sqlalchemy' or fullname.startswith('sqlalchemy.')
@@ -258,7 +256,6 @@ importlib.import_module(sys.argv[1])
     "module",
     [
         "crypto_momentum_lab.live_rollout.account_channel",
-        "crypto_momentum_lab.live_rollout.account_event_ports",
     ],
 )
 def test_account_consumers_do_not_load_order_reconciliation(module: str) -> None:
@@ -429,7 +426,7 @@ class StorageGuard(MetaPathFinder):
                 and fullname not in allowed)
             or fullname in {
                 'crypto_momentum_lab.domain.execution.execution_book',
-                'crypto_momentum_lab.domain.execution.execution_coordinator',
+                'crypto_momentum_lab.domain.execution.reservation_registry',
                 'crypto_momentum_lab.domain.execution.recovery_codec',
             }):
             raise RuntimeError('contract imported storage implementation: ' + fullname)

@@ -684,7 +684,7 @@ async def test_exit_ack_returns_with_durable_deadline_before_projection(
 async def test_transaction_reservation_requires_proven_batch_capacity(
     async_database_url, capacities, message
 ):
-    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
         ReservationConflictError,
     )
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation

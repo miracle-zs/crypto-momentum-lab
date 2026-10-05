@@ -19,8 +19,8 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
@@ -184,7 +184,7 @@ class SimulationExecutionAdapter:
         command: TradeCommand,
         envelope: MarketEnvelope,
         journal: AccountJournal,
-        coordinator: ExecutionCoordinator | None = None,
+        coordinator: ReservationRegistry | None = None,
         *,
         reservation_id: str | None = None,
         fill_model: FillModel | None = None,

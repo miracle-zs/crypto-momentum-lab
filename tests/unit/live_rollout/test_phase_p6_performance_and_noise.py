@@ -16,6 +16,9 @@ from types import SimpleNamespace
 import pytest
 
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_book_recovery import (
+    restore_durable_positions,
+)
 from crypto_momentum_lab.domain.execution.position_recovery import RecoveredPosition
 from crypto_momentum_lab.execution_account.daemon import UserDataAccountSyncDaemon
 from crypto_momentum_lab.market_data.observability import _calculate_lag_percentiles
@@ -41,8 +44,6 @@ def test_event_loop_lag_percentiles_calculation():
     assert res["p95"] == pytest.approx(95.0, abs=1.5)
     assert res["p99"] == pytest.approx(99.0, abs=1.5)
     assert res["max"] == 100.0
-
-
 
 
 async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypatch):
@@ -92,23 +93,24 @@ async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypat
     )
 
     monkeypatch.setattr(
-        "crypto_momentum_lab.domain.execution.execution_book.recover_durable_position",
+        "crypto_momentum_lab.domain.execution.execution_book_recovery.recover_durable_position",
         lambda _: recovered,
     )
 
     info_logs = []
     warning_logs = []
     monkeypatch.setattr(
-        "crypto_momentum_lab.domain.execution.execution_book.log.info",
+        "crypto_momentum_lab.domain.execution.execution_book_recovery.log.info",
         lambda event, **kwargs: info_logs.append((event, kwargs)),
     )
     monkeypatch.setattr(
-        "crypto_momentum_lab.domain.execution.execution_book.log.warning",
+        "crypto_momentum_lab.domain.execution.execution_book_recovery.log.warning",
         lambda event, **kwargs: warning_logs.append((event, kwargs)),
     )
 
     mock_uow = SimpleNamespace(load_positions=AsyncMock(return_value=(state,)))
-    await book._restore_durable_positions(
+    await restore_durable_positions(
+        book.recovery_state, watermark_key=book._order_watermark_key,
         unit_of_work=mock_uow,
         account_label="primary",
         environment="live",
@@ -183,8 +185,7 @@ def test_research_collector_state_conflicts_aggregated(monkeypatch, tmp_path):
     )
 
     conflicting_states = tuple(
-        replace(state, close_price=Decimal(str(100 + i + 1)))
-        for i in range(5)
+        replace(state, close_price=Decimal(str(100 + i + 1))) for i in range(5)
     )
     batch = CollectionBatch(
         batch=MarketStateBatch(

@@ -14,8 +14,6 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import TextClause
 
-_logger = logging.getLogger(__name__)
-
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
     RetentionWatermarkEvaluator,
@@ -27,14 +25,14 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     RUNTIME_STATE_PARTITION_LOOKAHEAD,
     drop_expired_runtime_state_partitions,
     ensure_runtime_state_partitions,
-    runtime_state_table_is_partitioned,
 )
 from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions import (
     EVENT_PARTITION_LOOKAHEAD,
     drop_expired_event_partitions,
     ensure_event_partitions,
-    event_table_is_partitioned,
 )
+
+_logger = logging.getLogger(__name__)
 
 _ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -132,10 +130,6 @@ class PostgresOperationalRetentionRepository:
     ) -> None:
         self._session_factory = session_factory
 
-    async def is_runtime_state_partitioned(self) -> bool:
-        """Check if runtime_market_states_15s table is partitioned."""
-        return await runtime_state_table_is_partitioned(self._session_factory)
-
     async def prune_contract_metadata(
         self,
         *,
@@ -196,21 +190,13 @@ class PostgresOperationalRetentionRepository:
             )
             effective_before = gating.effective_cutoff
 
-        if await runtime_state_table_is_partitioned(self._session_factory):
-            observed_at = datetime.now(UTC)
-            await ensure_runtime_state_partitions(
-                self._session_factory,
-                through=observed_at + RUNTIME_STATE_PARTITION_LOOKAHEAD,
-            )
-            return await drop_expired_runtime_state_partitions(
-                self._session_factory,
-                before=effective_before,
-            )
-        return await self._delete_batch(
-            "runtime_market_states_15s",
-            "bucket_start",
+        await ensure_runtime_state_partitions(
+            self._session_factory,
+            through=datetime.now(UTC) + RUNTIME_STATE_PARTITION_LOOKAHEAD,
+        )
+        return await drop_expired_runtime_state_partitions(
+            self._session_factory,
             before=effective_before,
-            batch_size=batch_size,
         )
 
     async def prune_strategy_runtime_events(
@@ -220,13 +206,7 @@ class PostgresOperationalRetentionRepository:
         batch_size: int = 1_000,
         consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> int:
-        """Drop or delete strategy runtime events outside the retention window.
-
-        Once the table is partitioned by day, whole partitions go away.  The
-        Fresh databases start with ordinary tables until partition cutover;
-        these use small-batch deletion. Partition errors propagate to the
-        background retention loop instead of selecting another delete path.
-        """
+        """Drop expired strategy runtime-event partitions."""
         effective_before = before
         if consumer_requirements:
             gating = RetentionWatermarkEvaluator.evaluate_cutoff(
@@ -235,35 +215,27 @@ class PostgresOperationalRetentionRepository:
             )
             effective_before = gating.effective_cutoff
 
-        if await event_table_is_partitioned(self._session_factory):
-            observed_at = datetime.now(UTC)
-            await ensure_event_partitions(
-                self._session_factory,
-                through=observed_at + EVENT_PARTITION_LOOKAHEAD,
-            )
-            return await drop_expired_event_partitions(
-                self._session_factory,
-                before=effective_before,
-            )
-        return await self._delete_batch(
-            "strategy_runtime_events",
-            "occurred_at",
+        await ensure_event_partitions(
+            self._session_factory,
+            through=datetime.now(UTC) + EVENT_PARTITION_LOOKAHEAD,
+        )
+        return await drop_expired_event_partitions(
+            self._session_factory,
             before=effective_before,
-            batch_size=batch_size,
         )
 
     async def ensure_strategy_runtime_event_partitions(self) -> int:
-        """Create missing daily event partitions; no-op when unpartitioned."""
+        """Create missing daily event partitions."""
         try:
-            if not await event_table_is_partitioned(self._session_factory):
-                return 0
             observed_at = datetime.now(UTC)
             return await ensure_event_partitions(
                 self._session_factory,
                 through=observed_at + EVENT_PARTITION_LOOKAHEAD,
             )
         except Exception:
-            _logger.exception("Failed to ensure strategy runtime event partitions; continuing")
+            _logger.exception(
+                "Failed to ensure strategy runtime event partitions; continuing"
+            )
             return 0
 
     async def prune_account_snapshots(

@@ -11,6 +11,9 @@ from crypto_momentum_lab.domain.execution.command_codec import (
 )
 from crypto_momentum_lab.domain.execution.command_models import DispatchState
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.execution_book_recovery import (
+    restore_durable_positions,
+)
 from crypto_momentum_lab.domain.execution.ports import DurableExecutionPositionState
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -71,7 +74,8 @@ async def test_restore_headless_dispatch_retains_unknown_gate_and_creates_first_
 async def test_missing_previously_created_head_still_seals_book():
     uow = LegacyUow()
     book = ExecutionBook(command_repository=Commands(), execution_unit_of_work=uow)
-    await book._restore_durable_positions(unit_of_work=uow, account_label="primary",
+    await restore_durable_positions(
+        book.recovery_state, watermark_key=book._order_watermark_key,unit_of_work=uow, account_label="primary",
                                          environment="live", as_of=NOW)
     row = legacy_command()
     entry = decode_active_commands((row,), account_label="primary", restored_at=NOW)[0].entry

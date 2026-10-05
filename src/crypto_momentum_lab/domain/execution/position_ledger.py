@@ -42,7 +42,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
     compute_checkpoint_chain_hash,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 
 class PositionLedger:

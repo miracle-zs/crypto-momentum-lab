@@ -92,18 +92,19 @@ async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff()
 
 
 @pytest.mark.parametrize(
-    "method, partition_check, ensure_partitions",
+    "method, ensure_partitions",
     [
-        ("prune_runtime_market_states", "runtime_state_table_is_partitioned", "ensure_runtime_state_partitions"),
-        ("prune_strategy_runtime_events", "event_table_is_partitioned", "ensure_event_partitions"),
+        ("prune_runtime_market_states", "ensure_runtime_state_partitions"),
+        ("prune_strategy_runtime_events", "ensure_event_partitions"),
     ],
 )
 async def test_partition_failure_does_not_switch_to_row_deletion(
-    monkeypatch, method, partition_check, ensure_partitions
+    monkeypatch, method, ensure_partitions
 ) -> None:
-    monkeypatch.setattr(retention, partition_check, AsyncMock(return_value=True))
     monkeypatch.setattr(
-        retention, ensure_partitions, AsyncMock(side_effect=RuntimeError("partition DDL failed"))
+        retention,
+        ensure_partitions,
+        AsyncMock(side_effect=RuntimeError("partition DDL failed")),
     )
     repository = PostgresOperationalRetentionRepository(AsyncMock())
     repository._delete_batch = AsyncMock()

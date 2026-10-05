@@ -15,8 +15,8 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
     ExecutionRequest,
 )
-from crypto_momentum_lab.domain.execution.execution_coordinator import (
-    ExecutionCoordinator,
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
     InMemoryPositionReservationRepository,
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -92,7 +92,7 @@ def test_candidate_lifecycle_preserves_live_repository(reservation) -> None:
     repo.save_reservations(
         (reservation,), batch_quantities={reservation.batch_id: Decimal("2")}
     )
-    coordinator = ExecutionCoordinator(repository=repo)
+    coordinator = ReservationRegistry(repository=repo)
     candidate = coordinator.copy_for_transaction()
     changed = replace(reservation, released_quantity=Decimal("1"))
     candidate.update_reservation(changed)

@@ -4,7 +4,11 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits, LiveLimitContext
+from crypto_momentum_lab.domain.risk.limits import (
+    FixedLiveLimits,
+    LiveLimitContext,
+    validate_quantized_notional,
+)
 from crypto_momentum_lab.domain.risk.models import (
     RiskDecision,
     StrategyLiveState,
@@ -210,11 +214,12 @@ def test_gateway_uses_stricter_position_limit_once():
 
 
 def test_quantized_notional_cannot_exceed_approved_budget():
-    allowed, reason = RiskGateway().validate_quantized_notional(
+    allowed, reason = validate_quantized_notional(
         Decimal("55"),
-        _context(),
         gross_exposure=Decimal("0"),
         approved_notional=Decimal("50"),
+        max_order_notional=_context().risk_config.max_order_notional,
+        max_gross_notional=_context().risk_config.max_gross_notional,
     )
     assert not allowed
     assert reason == "quantized_order_notional_exceeds_approved_notional"

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -57,9 +58,6 @@ from crypto_momentum_lab.live_rollout.context import (
 from crypto_momentum_lab.live_rollout.context_prefetch import (
     LiveContextPrefetcher,
 )
-from crypto_momentum_lab.live_rollout.daemon_lifecycle import (
-    LiveDaemonLifecycle,
-)
 from crypto_momentum_lab.live_rollout.entry_control import (
     LiveEntryControlGate,
 )
@@ -73,6 +71,7 @@ from crypto_momentum_lab.live_rollout.exit_event_coordinator import (
 )
 from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitExecutionLane,
+    ExitLaneOutcome,
 )
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
@@ -108,6 +107,7 @@ from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 from crypto_momentum_lab.risk.gateway import RiskGateway
 
 log = structlog.get_logger()
+_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -356,17 +356,6 @@ class LiveStrategyDaemon:
             decision_filter=config.decision_filter,
             decision_fact_binder=config.decision_fact_binder,
         )
-        self._lifecycle = LiveDaemonLifecycle(
-            run_id=config.run_id,
-            checkpoint_coordinator=self._checkpoint_coordinator,
-            exit_lane=self._exit_lane,
-            exit_manager=self._exit_manager,
-            scheduled_controller=self._scheduled_controller,
-            scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
-            run_market_loop=self._market_loop.run,
-            set_run_active=self._set_run_active,
-            position_locks=self._position_locks,
-        )
 
     @property
     def entry_enabled(self) -> bool:
@@ -513,7 +502,96 @@ class LiveStrategyDaemon:
         self,
         states: AsyncIterable[MarketState15s],
     ) -> market_runtime_contracts.LiveDaemonResult:
-        return await self._lifecycle.run(states)
+        self._set_run_active(True)
+        result: market_runtime_contracts.LiveDaemonResult | None = None
+        exit_outcome = ExitLaneOutcome()
+        shutdown_failure: str | None = None
+        scheduled_task: asyncio.Task[None] | None = None
+        try:
+            await self._checkpoint_coordinator.start()
+            if self._exit_manager is not None:
+                await self._exit_lane.start()
+            if self._config.scheduled_risk_window is not None:
+                scheduled_task = asyncio.create_task(
+                    self._scheduled_controller.run(),
+                    name=f"live-scheduled-risk-window:{self._config.run_id}",
+                )
+            result = await self._market_loop.run(states)
+        finally:
+            if scheduled_task is not None:
+                scheduled_task.cancel()
+                try:
+                    async with asyncio.timeout(_SHUTDOWN_TIMEOUT_SECONDS):
+                        await asyncio.gather(scheduled_task, return_exceptions=True)
+                except TimeoutError:
+                    log.warning(
+                        "live_scheduled_controller_shutdown_timed_out",
+                        run_id=self._config.run_id,
+                        timeout_seconds=_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+            if self._exit_manager is not None:
+                try:
+                    async with asyncio.timeout(_SHUTDOWN_TIMEOUT_SECONDS):
+                        exit_outcome = await self._exit_lane.stop()
+                except TimeoutError:
+                    log.warning(
+                        "live_exit_lane_shutdown_timed_out",
+                        run_id=self._config.run_id,
+                        timeout_seconds=_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                    shutdown_failure = "exit_lane_shutdown_timed_out"
+                except Exception:
+                    log.exception(
+                        "live_exit_lane_shutdown_failed",
+                        run_id=self._config.run_id,
+                    )
+                    shutdown_failure = "exit_lane_shutdown_failed"
+            try:
+                async with asyncio.timeout(_SHUTDOWN_TIMEOUT_SECONDS):
+                    await self._checkpoint_coordinator.stop()
+            except TimeoutError:
+                log.warning(
+                    "live_checkpoint_shutdown_timed_out",
+                    run_id=self._config.run_id,
+                    timeout_seconds=_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                log.exception(
+                    "live_checkpoint_shutdown_failed",
+                    run_id=self._config.run_id,
+                )
+            try:
+                async with asyncio.timeout(_SHUTDOWN_TIMEOUT_SECONDS):
+                    await self._position_locks.drain()
+            except TimeoutError:
+                log.warning(
+                    "live_position_actor_shutdown_timed_out",
+                    run_id=self._config.run_id,
+                    timeout_seconds=_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                log.exception(
+                    "live_position_actor_shutdown_failed",
+                    run_id=self._config.run_id,
+                )
+            self._set_run_active(False)
+        if result is None:
+            raise RuntimeError("live daemon stopped without a result")
+        return market_runtime_contracts.LiveDaemonResult(
+            processed_state_count=result.processed_state_count,
+            approved_intent_count=(
+                result.approved_intent_count
+                + exit_outcome.approved_intent_count
+                + self._scheduled_controller.approved_intent_count
+            ),
+            submitted_order_count=(
+                result.submitted_order_count
+                + exit_outcome.submitted_order_count
+                + self._scheduled_controller.submitted_order_count
+            ),
+            halt_reason=result.halt_reason or shutdown_failure,
+            final_state_at=result.final_state_at,
+        )
 
     def _set_run_active(self, active: bool) -> None:
         self._run_active = active

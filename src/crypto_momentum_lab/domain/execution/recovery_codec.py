@@ -40,7 +40,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 from crypto_momentum_lab.domain.execution.snapshot_encoding import (
     encode_position_snapshot,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 
 ACCOUNT_FACTS_SCHEMA_VERSION = 3
 

@@ -3,14 +3,11 @@
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterable, Awaitable, Callable
+from typing import Protocol
 
 import structlog
 
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.account_event_ports import (
-    AccountEventExitProcessor,
-    AccountEventOrderReconciler,
-)
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     ORDER_IDENTITY_CONFLICT_REASON,
     is_pending_exit_evaluation,
@@ -27,6 +24,17 @@ from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 log = structlog.get_logger()
 
 _MAX_SEEN_FILL_KEYS = 8192
+
+
+class AccountEventExitProcessor(Protocol):
+    async def process_account_event(self, state, *, quote=None) -> str | None: ...
+
+
+class AccountEventOrderReconciler(Protocol):
+    @property
+    def run_id(self) -> str: ...
+
+    async def reconcile_account_event(self, event: AccountEvent) -> None: ...
 
 
 def _never_order_identity_conflict(_error: Exception) -> bool:

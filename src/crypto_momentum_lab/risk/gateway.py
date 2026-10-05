@@ -100,31 +100,6 @@ class RiskGateway:
             approved_notional=capped_notional if is_approved else None,
         )
 
-    def validate_quantized_notional(
-        self,
-        actual_notional: Decimal,
-        context: RiskContext,
-        gross_exposure: Decimal | None = None,
-        *,
-        approved_notional: Decimal | None = None,
-    ) -> tuple[bool, str | None]:
-        """Unified hard risk check on quantized order notional for non-reduce_only entries."""
-        if approved_notional is not None and actual_notional > approved_notional:
-            return False, "quantized_order_notional_exceeds_approved_notional"
-        if context.risk_config.max_order_notional is not None:
-            if actual_notional > context.risk_config.max_order_notional:
-                return False, "quantized_order_notional_exceeds_max_order_notional"
-        if context.risk_config.max_gross_notional is not None:
-            if gross_exposure is None:
-                return False, "missing_gross_exposure"
-            effective_gross = gross_exposure
-            if (
-                effective_gross + actual_notional
-                > context.risk_config.max_gross_notional
-            ):
-                return False, "quantized_order_notional_exceeds_max_gross_notional"
-        return True, None
-
     def _evaluate_authority(
         self,
         intent: OrderIntentCandidate,
