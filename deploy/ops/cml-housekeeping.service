@@ -1,0 +1,15 @@
+[Unit]
+Description=Crypto Momentum Lab host artefact retention
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/server-space-maintenance.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+ExecStart=/opt/crypto-momentum-lab/deploy/ops/cml_housekeeping.sh
+NoNewPrivileges=true
+PrivateTmp=true
+
+# No [Install]: the timer drives this unit.

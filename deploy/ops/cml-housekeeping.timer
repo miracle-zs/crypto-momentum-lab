@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Crypto Momentum Lab host artefact retention
+
+[Timer]
+# Run well before the archive/trim timer at 08:20 Beijing time.
+OnCalendar=*-*-* 04:35:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
