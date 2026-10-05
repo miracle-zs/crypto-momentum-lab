@@ -25,11 +25,11 @@ from typing import Protocol
 
 import structlog
 
-from crypto_momentum_lab.domain.execution.order_read_models import (
-    PersistedExchangeOrder,
-)
 from crypto_momentum_lab.domain.execution.order_execution_port import (
     CoordinatedOrderExecutionPort,
+)
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules

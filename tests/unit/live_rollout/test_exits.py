@@ -8,9 +8,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,

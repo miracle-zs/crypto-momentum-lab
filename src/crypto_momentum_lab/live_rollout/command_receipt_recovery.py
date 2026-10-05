@@ -5,14 +5,14 @@ from crypto_momentum_lab.domain.execution.command_models import (
     OutboxEntry,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.order_execution_port import (
+    CoordinatedOrderExecutionPort,
+)
 from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.ports import (
     OrderReadRepository,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.domain.execution.order_execution_port import (
-    CoordinatedOrderExecutionPort,
-)
 
 
 def _synthesize_order_plan_from_outbox(entry: OutboxEntry) -> OrderExecutionPlan:

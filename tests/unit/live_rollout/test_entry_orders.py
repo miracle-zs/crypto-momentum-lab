@@ -2,12 +2,12 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)

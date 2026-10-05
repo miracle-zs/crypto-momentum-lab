@@ -456,10 +456,10 @@ async def test_incomplete_or_excess_terminal_settlement_still_requires_recovery(
 
 @pytest.mark.asyncio
 async def test_observed_filled_order_reaches_real_book_before_account_trade():
+    from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
     from crypto_momentum_lab.execution_account.orders.coordinator import (
         OrderExecutionCoordinator,
     )
-    from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 
     book = await reserved_book()
     snapshot = ExchangeOrderSnapshot(

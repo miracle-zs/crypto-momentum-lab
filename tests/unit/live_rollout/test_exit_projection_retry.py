@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.account import AccountFillEvent, AccountPosition
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -25,7 +26,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitOrderRequest,

@@ -8,14 +8,14 @@ from unittest.mock import Mock
 
 import pytest
 
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
     LiveDaemonRuntimeContext,
@@ -337,11 +337,11 @@ async def test_process_requests_serializes_same_symbol_batches() -> None:
 
 @pytest.mark.asyncio
 async def test_position_readiness_guard_defers_exit_instead_of_killing_daemon():
-    from crypto_momentum_lab.domain.execution.reservation_registry import (
-        ExecutionReadinessError,
-    )
     from crypto_momentum_lab.domain.execution.order_submission import (
         OrderPreSubmissionError,
+    )
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
+        ExecutionReadinessError,
     )
 
     class ConflictSubmission:
@@ -370,12 +370,12 @@ async def test_position_readiness_guard_defers_exit_instead_of_killing_daemon():
 async def test_recovery_guard_preserves_receipt_and_post_attempts():
     from unittest.mock import AsyncMock
 
-    from crypto_momentum_lab.domain.execution.reservation_registry import (
-        ExecutionReadinessError,
-    )
     from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
     from crypto_momentum_lab.domain.execution.order_submission import (
         OrderPreSubmissionError,
+    )
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
+        ExecutionReadinessError,
     )
 
     class ConflictSubmission:
@@ -968,15 +968,15 @@ async def test_blocked_replacement_keeps_recovery_work_after_old_receipt_is_term
 ):
     from unittest.mock import AsyncMock
 
-    from crypto_momentum_lab.domain.execution.reservation_registry import (
-        ExecutionReadinessError,
-    )
     from crypto_momentum_lab.domain.execution.order_state import (
         FuturesPositionSide,
         OrderExecutionPlan,
     )
     from crypto_momentum_lab.domain.execution.order_submission import (
         OrderProjectionConflictError,
+    )
+    from crypto_momentum_lab.domain.execution.reservation_registry import (
+        ExecutionReadinessError,
     )
     from crypto_momentum_lab.domain.strategy import StrategySide
     from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition

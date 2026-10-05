@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pyarrow as pa
@@ -25,12 +24,122 @@ from crypto_momentum_lab.domain.market.models import (
     NormalizedMarkPrice,
 )
 
-_DatasetRecord = TypeVar("_DatasetRecord")
+_DERIVED_DATASET_SCHEMA_VERSION = 2
+_DECIMAL_TYPE = pa.decimal128(38, 18)
+_TIMESTAMP_TYPE = pa.timestamp("us", tz="UTC")
+_PARQUET_COMPRESSION = "zstd"
+_PARQUET_ROW_GROUP_SIZE = 65_536
+_WRITE_BATCH_ROWS = 4_096
 
 
 class DatasetName(StrEnum):
     MARKET_EVENTS = "market_events"
     MARKET_STATES_15S = "market_states_15s"
+
+
+def _field(name: str, data_type: pa.DataType, *, nullable: bool = True) -> pa.Field:
+    return pa.field(name, data_type, nullable=nullable)
+
+
+_MARKET_EVENTS_SCHEMA = pa.schema(
+    [
+        _field("schema_version", pa.int32(), nullable=False),
+        _field("exchange", pa.string(), nullable=False),
+        _field("environment", pa.string(), nullable=False),
+        _field("event_at", _TIMESTAMP_TYPE, nullable=False),
+        _field("received_at", _TIMESTAMP_TYPE, nullable=False),
+        _field("source_connection_session_id", pa.string(), nullable=False),
+        _field("source_local_sequence", pa.int64(), nullable=False),
+        _field("source_stream", pa.string(), nullable=False),
+        _field("event_type", pa.string(), nullable=False),
+        _field("trade_id", pa.string()),
+        _field("price", _DECIMAL_TYPE),
+        _field("quantity", _DECIMAL_TYPE),
+        _field("notional", _DECIMAL_TYPE),
+        _field("aggressor_side", pa.string()),
+        _field("update_id", pa.string()),
+        _field("bid_price", _DECIMAL_TYPE),
+        _field("bid_quantity", _DECIMAL_TYPE),
+        _field("ask_price", _DECIMAL_TYPE),
+        _field("ask_quantity", _DECIMAL_TYPE),
+        _field("mark_price", _DECIMAL_TYPE),
+        _field("index_price", _DECIMAL_TYPE),
+        _field("estimated_settle_price", _DECIMAL_TYPE),
+        _field("funding_rate", _DECIMAL_TYPE),
+        _field("next_funding_at", _TIMESTAMP_TYPE),
+        _field("open_time", _TIMESTAMP_TYPE),
+        _field("close_time", _TIMESTAMP_TYPE),
+        _field("open_price", _DECIMAL_TYPE),
+        _field("high_price", _DECIMAL_TYPE),
+        _field("low_price", _DECIMAL_TYPE),
+        _field("close_price", _DECIMAL_TYPE),
+        _field("volume", _DECIMAL_TYPE),
+        _field("quote_volume", _DECIMAL_TYPE),
+        _field("kline_trade_count", pa.int64()),
+        _field("closed", pa.bool_()),
+        _field("order_side", pa.string()),
+        _field("average_price", _DECIMAL_TYPE),
+        _field("trade_time", _TIMESTAMP_TYPE),
+    ],
+    metadata={
+        b"cml.dataset": DatasetName.MARKET_EVENTS.value.encode(),
+        b"cml.schema_version": str(_DERIVED_DATASET_SCHEMA_VERSION).encode(),
+    },
+)
+
+_MARKET_STATES_15S_SCHEMA = pa.schema(
+    [
+        _field("schema_version", pa.int32(), nullable=False),
+        _field("exchange", pa.string(), nullable=False),
+        _field("environment", pa.string(), nullable=False),
+        _field("bucket_start", _TIMESTAMP_TYPE, nullable=False),
+        _field("bucket_end", _TIMESTAMP_TYPE, nullable=False),
+        _field("open_price", _DECIMAL_TYPE),
+        _field("high_price", _DECIMAL_TYPE),
+        _field("low_price", _DECIMAL_TYPE),
+        _field("close_price", _DECIMAL_TYPE),
+        _field("trade_count", pa.int64(), nullable=False),
+        _field("trade_notional", _DECIMAL_TYPE, nullable=False),
+        _field("aggressive_buy_notional", _DECIMAL_TYPE, nullable=False),
+        _field("aggressive_sell_notional", _DECIMAL_TYPE, nullable=False),
+        _field("last_bid_price", _DECIMAL_TYPE),
+        _field("last_ask_price", _DECIMAL_TYPE),
+        _field("spread", _DECIMAL_TYPE),
+        _field("midpoint", _DECIMAL_TYPE),
+        _field("liquidation_count", pa.int64(), nullable=False),
+        _field("liquidation_notional", _DECIMAL_TYPE, nullable=False),
+        _field("mark_price", _DECIMAL_TYPE),
+        _field("closed_kline_count", pa.int64(), nullable=False),
+        _field("closed_kline_1m_open_time", _TIMESTAMP_TYPE),
+        _field("closed_kline_1m_close_time", _TIMESTAMP_TYPE),
+        _field("closed_kline_1m_open_price", _DECIMAL_TYPE),
+        _field("closed_kline_1m_close_price", _DECIMAL_TYPE),
+        _field("source_event_count", pa.int64(), nullable=False),
+        _field("first_received_at", _TIMESTAMP_TYPE),
+        _field("last_received_at", _TIMESTAMP_TYPE),
+        _field("data_complete", pa.bool_(), nullable=False),
+        _field("missing_agg_trade_count", pa.int64(), nullable=False),
+    ],
+    metadata={
+        b"cml.dataset": DatasetName.MARKET_STATES_15S.value.encode(),
+        b"cml.schema_version": str(_DERIVED_DATASET_SCHEMA_VERSION).encode(),
+    },
+)
+
+_DECIMAL_FIELD_NAMES = frozenset(
+    field.name
+    for schema in (_MARKET_EVENTS_SCHEMA, _MARKET_STATES_15S_SCHEMA)
+    for field in schema
+    if field.type == _DECIMAL_TYPE
+)
+
+
+def _schema_for(dataset_name: DatasetName) -> pa.Schema:
+    if dataset_name is DatasetName.MARKET_EVENTS:
+        return _MARKET_EVENTS_SCHEMA
+    if dataset_name is DatasetName.MARKET_STATES_15S:
+        return _MARKET_STATES_15S_SCHEMA
+    raise ValueError(f"unsupported dataset schema: {dataset_name}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,13 +293,11 @@ def write_market_events_dataset(
     events: Iterable[NormalizedMarketEvent],
     input_paths: tuple[Path, ...],
 ) -> tuple[DerivedDatasetManifest, ...]:
-    grouped: dict[Path, list[NormalizedMarketEvent]] = {}
-    for event in events:
-        grouped.setdefault(partition_for_market_event(event), []).append(event)
-    return _write_grouped_rows(
+    return _write_streaming_rows(
         root=root,
         dataset_name=DatasetName.MARKET_EVENTS,
-        grouped=grouped,
+        records=events,
+        partition_for_record=partition_for_market_event,
         row_factory=market_event_row,
         input_paths=input_paths,
         event_time_key="event_at",
@@ -203,13 +310,11 @@ def write_market_states_15s_dataset(
     states: Iterable[MarketState15s],
     input_paths: tuple[Path, ...],
 ) -> tuple[DerivedDatasetManifest, ...]:
-    grouped: dict[Path, list[MarketState15s]] = {}
-    for state in states:
-        grouped.setdefault(partition_for_market_state(state), []).append(state)
-    return _write_grouped_rows(
+    return _write_streaming_rows(
         root=root,
         dataset_name=DatasetName.MARKET_STATES_15S,
-        grouped=grouped,
+        records=states,
+        partition_for_record=partition_for_market_state,
         row_factory=market_state_15s_row,
         input_paths=input_paths,
         event_time_key="bucket_start",
@@ -271,81 +376,150 @@ def _utc_date(value: datetime) -> str:
     return value.astimezone(UTC).date().isoformat()
 
 
-def _write_grouped_rows(
+@dataclass(slots=True)
+class _PartitionWriter:
+    partition: Path
+    temporary_path: Path
+    writer: pq.ParquetWriter
+    rows: list[dict[str, object]]
+    row_count: int = 0
+    first_event_at: datetime | None = None
+    last_event_at: datetime | None = None
+
+
+def _write_streaming_rows[DatasetRecord](
     *,
     root: Path,
     dataset_name: DatasetName,
-    grouped: dict[Path, list[_DatasetRecord]],
-    row_factory: Callable[[_DatasetRecord], dict[str, object]],
+    records: Iterable[DatasetRecord],
+    partition_for_record: Callable[[DatasetRecord], Path],
+    row_factory: Callable[[DatasetRecord], dict[str, object]],
     input_paths: tuple[Path, ...],
     event_time_key: str,
 ) -> tuple[DerivedDatasetManifest, ...]:
-    if not grouped:
-        raise ValueError(f"{dataset_name.value} dataset has no rows")
     input_labels = tuple(path.as_posix() for path in input_paths)
     input_sha256 = _input_sha256(input_paths)
     producer_code_commit = resolve_code_commit(required=False)
     python_version = sys.version.split()[0]
     pyarrow_version = pa.__version__
-    manifests: list[DerivedDatasetManifest] = []
-    for partition in sorted(grouped, key=lambda item: item.as_posix()):
-        records = grouped.pop(partition)
-        manifests.append(
-            _write_partition_rows(
+    schema = _schema_for(dataset_name)
+    writers: dict[Path, _PartitionWriter] = {}
+    try:
+        for record in records:
+            partition = partition_for_record(record)
+            writer = writers.get(partition)
+            if writer is None:
+                writer = _new_partition_writer(root, partition, schema)
+                writers[partition] = writer
+            row = row_factory(record)
+            event_at = _row_datetime(row, event_time_key)
+            writer.rows.append(row)
+            writer.row_count += 1
+            writer.first_event_at = (
+                event_at
+                if writer.first_event_at is None or event_at < writer.first_event_at
+                else writer.first_event_at
+            )
+            writer.last_event_at = (
+                event_at
+                if writer.last_event_at is None or event_at > writer.last_event_at
+                else writer.last_event_at
+            )
+            if len(writer.rows) >= _WRITE_BATCH_ROWS:
+                _flush_partition_rows(writer, schema)
+
+        if not writers:
+            raise ValueError(f"{dataset_name.value} dataset has no rows")
+        manifests = [
+            _finalize_partition_writer(
                 root=root,
                 dataset_name=dataset_name,
-                partition=partition,
-                records=records,
-                row_factory=row_factory,
+                writer=writers[partition],
+                schema=schema,
                 input_labels=input_labels,
                 input_sha256=input_sha256,
-                event_time_key=event_time_key,
                 producer_code_commit=producer_code_commit,
                 python_version=python_version,
                 pyarrow_version=pyarrow_version,
             )
-        )
-        del records
+            for partition in sorted(writers, key=lambda item: item.as_posix())
+        ]
+    except BaseException:
+        for writer in writers.values():
+            try:
+                writer.writer.close()
+            except Exception:
+                # Preserve the original write failure; this is only best-effort
+                # cleanup of an unpublished temporary file.
+                pass
+            writer.temporary_path.unlink(missing_ok=True)
+        raise
     return tuple(manifests)
 
 
-def _write_partition_rows(
+def _new_partition_writer(
+    root: Path,
+    partition: Path,
+    schema: pa.Schema,
+) -> _PartitionWriter:
+    partition_dir = root / partition
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    temporary_path = partition_dir / f".part-{uuid4()}.parquet.tmp"
+    return _PartitionWriter(
+        partition=partition,
+        temporary_path=temporary_path,
+        writer=pq.ParquetWriter(
+            temporary_path,
+            schema,
+            compression=_PARQUET_COMPRESSION,
+            version="2.6",
+            data_page_version="2.0",
+            write_statistics=True,
+        ),
+        rows=[],
+    )
+
+
+def _flush_partition_rows(writer: _PartitionWriter, schema: pa.Schema) -> None:
+    if not writer.rows:
+        return
+    table = pa.Table.from_pylist(
+        _parquet_rows(writer.rows, schema=schema),
+        schema=schema,
+    )
+    writer.rows.clear()
+    writer.writer.write_table(table, row_group_size=_PARQUET_ROW_GROUP_SIZE)
+
+
+def _finalize_partition_writer(
     *,
     root: Path,
     dataset_name: DatasetName,
-    partition: Path,
-    records: list[_DatasetRecord],
-    row_factory: Callable[[_DatasetRecord], dict[str, object]],
+    writer: _PartitionWriter,
+    schema: pa.Schema,
     input_labels: tuple[str, ...],
     input_sha256: str,
-    event_time_key: str,
     producer_code_commit: str,
     python_version: str,
     pyarrow_version: str,
 ) -> DerivedDatasetManifest:
-    partition_dir = root / partition
-    partition_dir.mkdir(parents=True, exist_ok=True)
-    temporary_path = partition_dir / f".part-{uuid4()}.parquet.tmp"
-    rows = [row_factory(record) for record in records]
-    row_count = len(rows)
-    first_event_at = min(_row_datetime(row, event_time_key) for row in rows)
-    last_event_at = max(_row_datetime(row, event_time_key) for row in rows)
-    table = pa.Table.from_pylist(_parquet_rows(rows))
-    rows.clear()
-    pq.write_table(table, temporary_path)
-    output_sha256 = _sha256_file(temporary_path)
+    _flush_partition_rows(writer, schema)
+    writer.writer.close()
+    if writer.first_event_at is None or writer.last_event_at is None:
+        raise RuntimeError("partition writer finalized without rows")
+    output_sha256 = _sha256_file(writer.temporary_path)
     manifest_id = uuid5(
         NAMESPACE_URL,
         json.dumps(
             {
                 "dataset_name": dataset_name.value,
-                "partition": partition.as_posix(),
+                "partition": writer.partition.as_posix(),
                 "input_paths": input_labels,
                 "input_sha256": input_sha256,
                 "output_sha256": output_sha256,
-                "row_count": row_count,
-                "first_event_at": first_event_at.isoformat(),
-                "last_event_at": last_event_at.isoformat(),
+                "row_count": writer.row_count,
+                "first_event_at": writer.first_event_at.isoformat(),
+                "last_event_at": writer.last_event_at.isoformat(),
                 "producer_code_commit": producer_code_commit,
                 "python_version": python_version,
                 "pyarrow_version": pyarrow_version,
@@ -354,20 +528,20 @@ def _write_partition_rows(
             separators=(",", ":"),
         ),
     )
-    relative_path = partition / f"part-{manifest_id}.parquet"
+    relative_path = writer.partition / f"part-{manifest_id}.parquet"
     final_path = root / relative_path
-    os.replace(temporary_path, final_path)
+    os.replace(writer.temporary_path, final_path)
     manifest = DerivedDatasetManifest(
         manifest_id=manifest_id,
         dataset_name=dataset_name,
-        schema_version=1,
+        schema_version=_DERIVED_DATASET_SCHEMA_VERSION,
         relative_path=relative_path,
-        row_count=row_count,
+        row_count=writer.row_count,
         input_paths=input_labels,
         input_sha256=input_sha256,
         output_sha256=output_sha256,
-        first_event_at=first_event_at,
-        last_event_at=last_event_at,
+        first_event_at=writer.first_event_at,
+        last_event_at=writer.last_event_at,
         created_at=datetime.now(UTC),
         producer_code_commit=producer_code_commit,
         python_version=python_version,
@@ -430,9 +604,34 @@ def _row_datetime(row: dict[str, object], key: str) -> datetime:
     return value
 
 
-def _parquet_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    # Hive partition columns are supplied by the directory names. Writing the
-    # same column inside the file makes pyarrow fail schema merging.
+def _parquet_rows(
+    rows: list[dict[str, object]],
+    *,
+    schema: pa.Schema,
+) -> list[dict[str, object]]:
+    """Project domain rows onto the immutable on-disk schema.
+
+    Hive partition columns are deliberately absent from the file.  Rejecting
+    an accidental field addition/removal here turns an implicit inference
+    change into an explicit schema migration instead of silently publishing a
+    data set whose physical layout varies by batch.
+    """
+
+    expected = frozenset(schema.names)
+    projected_rows: list[dict[str, object]] = []
     for row in rows:
-        row.pop("symbol", None)
-    return rows
+        projected = {name: value for name, value in row.items() if name != "symbol"}
+        actual = frozenset(projected)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unexpected = sorted(actual - expected)
+            raise ValueError(
+                "derived dataset row does not match its schema "
+                f"(missing={missing}, unexpected={unexpected})"
+            )
+        for name in _DECIMAL_FIELD_NAMES.intersection(projected):
+            value = projected[name]
+            if value is not None:
+                projected[name] = Decimal(str(value))
+        projected_rows.append(projected)
+    return projected_rows

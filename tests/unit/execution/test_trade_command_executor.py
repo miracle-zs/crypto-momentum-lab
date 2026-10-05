@@ -16,10 +16,10 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.domain.execution.trade_command_planner import (
     plan_order_execution,
 )
+from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 RULES = SymbolTradingRules(
     symbol="BTCUSDT",

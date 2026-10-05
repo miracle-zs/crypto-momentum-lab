@@ -12,8 +12,8 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderProjectionConflictError,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,

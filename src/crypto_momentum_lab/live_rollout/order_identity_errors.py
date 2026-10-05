@@ -1,10 +1,10 @@
 """Distinct durable-exit and runtime-channel identity conflict policies."""
 
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ReservationConflictError,
-)
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
+)
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationConflictError,
 )
 
 _DURABLE_CONFLICT_MESSAGES = (

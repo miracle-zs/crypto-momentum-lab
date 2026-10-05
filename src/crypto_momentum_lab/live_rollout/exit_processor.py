@@ -17,18 +17,24 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 
 import crypto_momentum_lab.live_rollout.order_identity_errors as order_identity_errors
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ExecutionReadinessError,
+from crypto_momentum_lab.domain.execution.exit_recovery import (
+    ExitRecoveryClient,
+    ExitRecoveryObservation,
 )
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderProjectionConflictError,
+)
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ExecutionReadinessError,
 )
 from crypto_momentum_lab.domain.market.models import (
     JsonValue,
@@ -40,12 +46,6 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
-from crypto_momentum_lab.domain.execution.exit_recovery import (
-    ExitRecoveryClient,
-    ExitRecoveryObservation,
-)
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )

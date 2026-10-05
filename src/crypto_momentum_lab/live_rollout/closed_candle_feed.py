@@ -19,13 +19,13 @@ from typing import Protocol
 
 import structlog
 
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
     ConnectionLifecycleEvent,
     RawEnvelope,
 )
-from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.market_data.binance.websocket import (
     BinanceWebSocketConnection,
 )

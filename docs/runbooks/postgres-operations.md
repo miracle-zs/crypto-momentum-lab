@@ -18,6 +18,24 @@ SHOW max_wal_size;
 
 部署启用 pg_stat_statements 和 I/O 计时。按当前 PostgreSQL 版本查看统计视图，用同负载窗口的增量比较连接获取、SQL、commit、检查点写入；各阶段 P95 不能相加。时间过滤使用稳定 cutoff 参数或适合索引的 now()，避免逐行 clock_timestamp() 导致不必要扫描；SELECT 返回当前时间不属于同一个问题。
 
+### 当前全实盘连接预算
+
+同一 PostgreSQL 实例上的“逻辑平面”是隔离池，不是隔离实例。按四个实盘账户全部运行的 Compose 配置计算，连接池上限为：四个策略进程各 `9`（执行 `4`、行情 `2`、遥测 `1`、检查点 `1`、心跳 `1`）共 `36`；四个账户同步进程各 `2` 共 `8`；行情 `3`；看板 `6`，合计 **53**。迁移与 bootstrap 只在部署窗口额外使用少量连接。
+
+生产实例 `max_connections=100` 时，应用连接上限按 **80** 管理，至少预留 20 个连接给迁移、运维和故障诊断。增加账户、worker 或某个 pool 的 size/overflow 前，必须重新计算这张表并在低峰执行：
+
+```sql
+SHOW max_connections;
+SELECT application_name, state, count(*)
+FROM pg_stat_activity
+WHERE datname = current_database()
+GROUP BY 1, 2
+ORDER BY 3 DESC, 1, 2;
+```
+
+所有应用连接会同时设置驱动 `command_timeout` 与 PostgreSQL 的
+`statement_timeout`、`idle_in_transaction_session_timeout`。前者限制调用方等待，后者防止断开的调用继续消耗数据库；它们不是放宽慢查询的理由。超过预算应先减少并发或修复查询计划，不能直接提高 `max_connections`。
+
 ## 账户快照保留
 
 当前账户服务默认高频快照保留 7 天，余额历史按 UTC 小时稀疏保留 370 天；每键最新记录保留。任务有批大小、行数和运行时间预算，独立于发单路径。真实 account_fill_events 不由快照保留任务删除。

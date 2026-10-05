@@ -15,11 +15,6 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ReservationRegistry,
-    InMemoryPositionReservationRepository,
-    ReservationConflictError,
-)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
@@ -28,6 +23,11 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionLedgerBatch,
     PositionView,
+)
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    InMemoryPositionReservationRepository,
+    ReservationConflictError,
+    ReservationRegistry,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocation,

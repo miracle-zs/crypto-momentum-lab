@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -24,7 +25,6 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 
 NOW = datetime(2026, 9, 30, 0, 0, 0, tzinfo=UTC)
 

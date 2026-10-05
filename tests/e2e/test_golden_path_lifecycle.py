@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
+    RiskGateway,
     StrategyLiveState,
 )
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
@@ -76,7 +77,6 @@ from crypto_momentum_lab.persistence.postgres.order_submission_repository import
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
-from crypto_momentum_lab.domain.risk import RiskGateway
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
 from tests.fixtures.order_rows import (
     OrderRows,

@@ -6,12 +6,12 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.exit_recovery import (
+    ExitRecoveryInspectionUnknownError,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
-)
-from crypto_momentum_lab.domain.execution.exit_recovery import (
-    ExitRecoveryInspectionUnknownError,
 )
 
 

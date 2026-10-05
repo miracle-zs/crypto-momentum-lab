@@ -2,9 +2,6 @@ from datetime import UTC, datetime, time
 
 import pytest
 
-from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
-    _resolve_scheduled_risk_window,
-)
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
     ScheduledRiskWindowPhase,
@@ -57,15 +54,15 @@ def test_resolve_scheduled_risk_window_from_env(
 ) -> None:
     # Default is 09:00
     monkeypatch.delenv("CML_SCHEDULED_REOPEN_AT", raising=False)
-    default_config = _resolve_scheduled_risk_window()
+    default_config = ScheduledRiskWindowConfig.from_environment()
     assert default_config.reopen_at == time(9, 0)
 
     # Override with env var
     monkeypatch.setenv("CML_SCHEDULED_REOPEN_AT", "09:30")
-    custom_config = _resolve_scheduled_risk_window()
+    custom_config = ScheduledRiskWindowConfig.from_environment()
     assert custom_config.reopen_at == time(9, 30)
 
     # Invalid format fails closed with ValueError
     monkeypatch.setenv("CML_SCHEDULED_REOPEN_AT", "invalid")
     with pytest.raises(ValueError, match="Failed to parse CML_SCHEDULED_REOPEN_AT"):
-        _resolve_scheduled_risk_window()
+        ScheduledRiskWindowConfig.from_environment()

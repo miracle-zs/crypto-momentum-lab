@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -17,7 +18,6 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     OrderSubmissionPreparation,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
@@ -1045,10 +1045,10 @@ async def test_partial_fill_consumes_batches_in_stable_order() -> None:
 
 
 async def test_reservation_conflict_mismatch_is_rejected() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
     from crypto_momentum_lab.domain.execution.reservation_registry import (
         ReservationConflictError,
     )
-    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
     from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
     class ConflictingRepo:

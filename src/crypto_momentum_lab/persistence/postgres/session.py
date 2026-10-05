@@ -1,4 +1,5 @@
 import os
+from math import ceil
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -94,6 +95,23 @@ _DASHBOARD_COMMAND_TIMEOUT_SECONDS = _env_float(
 _DASHBOARD_POOL_RECYCLE_SECONDS = _env_int("CML_DB_DASHBOARD_POOL_RECYCLE_SECONDS", 900)
 
 
+def _server_timeout_settings(command_timeout_seconds: float) -> dict[str, str]:
+    """Return PostgreSQL-side guards matching the client's request budget.
+
+    The driver timeout bounds how long the caller waits; these settings also
+    bound server work and abandoned transactions after a client disconnect.
+    The idle guard is deliberately longer than one command so normal
+    transaction assembly is unaffected.
+    """
+
+    timeout_ms = max(1, ceil(command_timeout_seconds * 1000))
+    idle_transaction_timeout_ms = max(30_000, timeout_ms * 2)
+    return {
+        "statement_timeout": f"{timeout_ms}ms",
+        "idle_in_transaction_session_timeout": f"{idle_transaction_timeout_ms}ms",
+    }
+
+
 def create_async_database_engine(
     database_url: str,
     *,
@@ -112,12 +130,17 @@ def create_async_database_engine(
         raise ValueError("max_overflow must not be negative")
     if pool_timeout_seconds <= 0:
         raise ValueError("pool_timeout_seconds must be positive")
+    if command_timeout_seconds is not None and command_timeout_seconds <= 0:
+        raise ValueError("command_timeout_seconds must be positive")
     if pool_recycle_seconds is not None and pool_recycle_seconds <= 0:
         raise ValueError("pool_recycle_seconds must be positive")
     connect_args = (
         {}
         if command_timeout_seconds is None
-        else {"command_timeout": command_timeout_seconds}
+        else {
+            "command_timeout": command_timeout_seconds,
+            "server_settings": _server_timeout_settings(command_timeout_seconds),
+        }
     )
     engine_options: dict[str, object] = {
         "pool_pre_ping": True,

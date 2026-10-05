@@ -2,10 +2,10 @@
 
 from decimal import Decimal
 
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationConflictError,
 )
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 
 

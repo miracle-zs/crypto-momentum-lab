@@ -18,11 +18,11 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.reservation_registry import (
     ReservationConflictError,
 )
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,

@@ -19,6 +19,8 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.trading import (
     OrderType as EntryType,
+)
+from crypto_momentum_lab.domain.trading import (
     TradeSide as StrategySide,
 )
 

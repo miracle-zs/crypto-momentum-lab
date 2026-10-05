@@ -14,14 +14,16 @@ from crypto_momentum_lab.domain.execution.execution_book import (
 from crypto_momentum_lab.domain.execution.observation_models import (
     Applied,
 )
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
-from crypto_momentum_lab.execution_account.orders.coordinator import OrderExecutionCoordinator
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionCoordinator,
+)
 from tests.fixtures.prepared_submission import submit_prepared
 
 NOW = datetime(2026, 9, 29, 6, 7, 1, tzinfo=UTC)

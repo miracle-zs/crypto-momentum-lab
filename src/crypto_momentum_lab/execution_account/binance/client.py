@@ -33,6 +33,10 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
 )
+from crypto_momentum_lab.domain.execution.exit_recovery import (
+    ExitRecoveryInspectionUnknownError,
+    ExitRecoveryObservation,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     OrderExecutionPlan,
@@ -76,10 +80,6 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     rest_require_string,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
-from crypto_momentum_lab.domain.execution.exit_recovery import (
-    ExitRecoveryInspectionUnknownError,
-    ExitRecoveryObservation,
-)
 
 log = structlog.get_logger(__name__)
 

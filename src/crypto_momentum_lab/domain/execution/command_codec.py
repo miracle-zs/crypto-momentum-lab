@@ -25,6 +25,8 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.trading import (
     OrderType as EntryType,
+)
+from crypto_momentum_lab.domain.trading import (
     TradeSide as StrategySide,
 )
 

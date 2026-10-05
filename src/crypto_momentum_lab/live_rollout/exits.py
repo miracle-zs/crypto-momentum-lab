@@ -21,11 +21,11 @@ from crypto_momentum_lab.domain.execution.position_batches import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
 )
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
-from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,

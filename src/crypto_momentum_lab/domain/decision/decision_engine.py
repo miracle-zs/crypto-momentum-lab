@@ -39,8 +39,8 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
-from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,

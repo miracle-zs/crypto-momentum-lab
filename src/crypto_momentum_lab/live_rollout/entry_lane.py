@@ -16,6 +16,7 @@ from typing import Protocol
 
 import structlog
 
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
@@ -30,7 +31,6 @@ from crypto_momentum_lab.domain.strategy.entry_candidate import (
     entry_limit_price,
     prepare_entry_candidate,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.context import (
     LiveDaemonRuntimeContext,
     LiveEntryFilterContext,

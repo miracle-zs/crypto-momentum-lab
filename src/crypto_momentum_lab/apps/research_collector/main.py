@@ -55,6 +55,7 @@ log = structlog.get_logger()
 _DEFAULT_HUB_URL = "ws://market-data:8766"
 _DEFAULT_ROOT = Path("/app/research-data")
 _BYTES_PER_GIB = 1024**3
+_COLLECTOR_STOP_TIMEOUT_SECONDS = 20.0
 
 
 @app.callback()
@@ -384,20 +385,38 @@ async def _run_collector(
             continue
         registered_signals.append(shutdown_signal)
 
-    collector_task = asyncio.create_task(collector.run())
+    collector_task = asyncio.create_task(
+        collector.run(),
+        name=f"research-collector:{environment}",
+    )
     startup_timer.mark("collector_task_scheduled")
-    stop_task = asyncio.create_task(stop_requested.wait())
+    stop_task = asyncio.create_task(
+        stop_requested.wait(),
+        name=f"research-collector-stop-waiter:{environment}",
+    )
     try:
         done, _pending = await asyncio.wait(
             (collector_task, stop_task),
             return_when=asyncio.FIRST_COMPLETED,
         )
         if stop_task in done and not collector_task.done():
-            collector_task.cancel()
-        await asyncio.gather(collector_task, return_exceptions=False)
+            # Ask the collector to stop first: it owns its source, journal,
+            # materializer and final checkpoint.  Cancelling the top-level
+            # task would skip that durable drain and turn a normal SIGTERM
+            # into a cancelled process exit.
+            await collector.stop()
+        await collector_task
     finally:
         stop_task.cancel()
         await asyncio.gather(stop_task, return_exceptions=True)
+        if not collector_task.done():
+            await collector.stop()
+            try:
+                async with asyncio.timeout(_COLLECTOR_STOP_TIMEOUT_SECONDS):
+                    await collector_task
+            except TimeoutError:
+                collector_task.cancel()
+                await asyncio.gather(collector_task, return_exceptions=True)
         await collector.stop()
         for shutdown_signal in registered_signals:
             loop.remove_signal_handler(shutdown_signal)

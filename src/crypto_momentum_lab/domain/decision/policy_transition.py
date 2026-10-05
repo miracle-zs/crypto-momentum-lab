@@ -34,8 +34,8 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
-from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
 from crypto_momentum_lab.domain.strategy.models import (
     EntryType,
     OrderIntentCandidate,

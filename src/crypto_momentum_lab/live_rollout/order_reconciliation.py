@@ -13,6 +13,9 @@ import structlog
 
 from crypto_momentum_lab.domain.execution.command_models import DispatchState
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.order_execution_port import (
+    CoordinatedOrderExecutionPort,
+)
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
@@ -27,9 +30,6 @@ from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     order_snapshot_from_update,
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.domain.execution.order_execution_port import (
-    CoordinatedOrderExecutionPort,
-)
 from crypto_momentum_lab.live_rollout.command_receipt_recovery import (
     recover_restored_commands,
 )

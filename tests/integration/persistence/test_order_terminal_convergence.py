@@ -33,6 +33,7 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
 from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -44,8 +45,9 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy.models import EntryType, StrategySide
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
-from crypto_momentum_lab.execution_account.orders.coordinator import OrderExecutionCoordinator
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionCoordinator,
+)
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )

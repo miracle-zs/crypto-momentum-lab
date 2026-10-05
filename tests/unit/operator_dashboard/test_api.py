@@ -103,6 +103,23 @@ def test_account_endpoint_accepts_an_account_label() -> None:
     assert response.json()["equity_range"] == "7d"
 
 
+def test_account_performance_rejects_unbounded_or_invalid_query_values() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        too_wide = client.get(
+            "/api/account-performance?window_hours=1000000",
+        )
+        invalid_account = client.get(
+            "/api/performance/accounts/account%20other",
+        )
+        invalid_asset = client.get(
+            "/api/account-performance?asset=usdt",
+        )
+
+    assert too_wide.status_code == 422
+    assert invalid_account.status_code == 422
+    assert invalid_asset.status_code == 422
+
+
 def test_equity_endpoint_exposes_unified_start_comparison_metadata() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
         response = client.get("/api/paper-accounts/equity")
@@ -180,7 +197,7 @@ def test_dashboard_enables_gzip_for_large_static_responses() -> None:
     with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
         index_res = client.get("/")
         asset_match = re.search(
-            r'static/assets/dashboard-[a-f0-9]{16}\.js',
+            r"static/assets/dashboard-[a-f0-9]{16}\.js",
             index_res.text,
         )
         assert asset_match is not None
@@ -283,7 +300,7 @@ def test_static_assets_cache_headers() -> None:
 
         index_res = client.get("/")
         asset_match = re.search(
-            r'static/assets/dashboard-[a-f0-9]{16}\.css',
+            r"static/assets/dashboard-[a-f0-9]{16}\.css",
             index_res.text,
         )
         assert asset_match is not None
@@ -334,6 +351,7 @@ async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
         # An evicted response must be loaded again rather than returned stale.
         async def replacement():
             return "reloaded"
+
         assert await cache.get("key-0", replacement) == "reloaded"
 
         # Now simulate 20 failing loaders with unique keys
@@ -347,7 +365,10 @@ async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
                 pass
 
         # A failed request must not leave the key permanently blocked.
-        assert await asyncio.wait_for(cache.get("fail-key-100", replacement), 1) == "reloaded"
+        assert (
+            await asyncio.wait_for(cache.get("fail-key-100", replacement), 1)
+            == "reloaded"
+        )
     finally:
         await cache.aclose()
 

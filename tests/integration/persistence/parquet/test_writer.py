@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from crypto_momentum_lab.domain.market.models import (
@@ -38,15 +39,21 @@ def test_write_market_events_dataset_creates_parquet_and_manifest(
     table = pq.read_table(output_path)
     rows = table.to_pylist()
     assert rows[0]["event_type"] == "agg_trade"
-    assert rows[0]["price"] == "100.25"
+    assert rows[0]["price"] == Decimal("100.250000000000000000")
+    assert table.schema.field("price").type == pa.decimal128(38, 18)
+    assert table.schema.field("event_at").type == pa.timestamp("us", tz="UTC")
+    assert table.schema.metadata == {
+        b"cml.dataset": b"market_events",
+        b"cml.schema_version": b"2",
+    }
+    assert pq.ParquetFile(output_path).metadata.format_version == "2.6"
     assert manifest.row_count == 1
-    assert manifest.output_sha256 == hashlib.sha256(
-        output_path.read_bytes()
-    ).hexdigest()
-
-    manifest_path = (
-        tmp_path / "derived" / "_manifests" / f"{manifest.manifest_id}.json"
+    assert manifest.schema_version == 2
+    assert (
+        manifest.output_sha256 == hashlib.sha256(output_path.read_bytes()).hexdigest()
     )
+
+    manifest_path = tmp_path / "derived" / "_manifests" / f"{manifest.manifest_id}.json"
     payload = json.loads(manifest_path.read_text())
     assert payload["relative_path"] == manifest.relative_path.as_posix()
     assert payload["input_paths"] == [input_path.as_posix()]
@@ -68,10 +75,35 @@ def test_write_market_states_dataset_creates_parquet_and_manifest(
 
     assert len(manifests) == 1
     output_path = tmp_path / "derived" / manifests[0].relative_path
-    rows = pq.read_table(output_path).to_pylist()
+    table = pq.read_table(output_path)
+    rows = table.to_pylist()
     assert rows[0]["symbol"] == "BTCUSDT"
-    assert rows[0]["trade_notional"] == "100.25"
+    assert rows[0]["trade_notional"] == Decimal("100.250000000000000000")
+    assert table.schema.field("trade_notional").type == pa.decimal128(38, 18)
+    assert table.schema.field("bucket_start").type == pa.timestamp("us", tz="UTC")
+    assert table.schema.metadata == {
+        b"cml.dataset": b"market_states_15s",
+        b"cml.schema_version": b"2",
+    }
+    assert manifests[0].schema_version == 2
     assert manifests[0].row_count == 1
+
+
+def test_market_event_writer_flushes_bounded_batches(tmp_path: Path) -> None:
+    input_path = tmp_path / "raw.jsonl.zst"
+    input_path.write_bytes(b"raw-input")
+
+    manifests = write_market_events_dataset(
+        root=tmp_path / "derived",
+        events=(_event() for _ in range(4_097)),
+        input_paths=(input_path,),
+    )
+
+    assert manifests[0].row_count == 4_097
+    output_path = tmp_path / "derived" / manifests[0].relative_path
+    metadata = pq.ParquetFile(output_path).metadata
+    assert metadata.num_rows == 4_097
+    assert metadata.num_row_groups == 2
 
 
 def _event() -> NormalizedAggTrade:

@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -44,7 +45,7 @@ from crypto_momentum_lab.domain.operational.runtime_metadata import (
     RuntimeMetadataSnapshot,
     compute_trading_rules_hash,
 )
-from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
+from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, RiskGateway
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
@@ -66,7 +67,6 @@ from crypto_momentum_lab.execution_account.hub import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
@@ -241,42 +241,9 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
-from crypto_momentum_lab.domain.risk import RiskGateway
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 
 log = structlog.get_logger()
-
-
-def _resolve_scheduled_risk_window() -> ScheduledRiskWindowConfig:
-    kwargs: dict[str, object] = {}
-    time_env_map = {
-        "CML_SCHEDULED_ENTRY_STOP_AT": "entry_stop_at",
-        "CML_SCHEDULED_FLATTEN_START_AT": "flatten_start_at",
-        "CML_SCHEDULED_FLATTEN_DEADLINE_AT": "flatten_deadline_at",
-        "CML_SCHEDULED_VERIFY_AT": "verify_at",
-        "CML_SCHEDULED_REOPEN_AT": "reopen_at",
-    }
-    for env_key, field_name in time_env_map.items():
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            try:
-                parts = [int(p) for p in val.split(":")]
-                if len(parts) == 2:
-                    kwargs[field_name] = time(parts[0], parts[1])
-                elif len(parts) == 3:
-                    kwargs[field_name] = time(parts[0], parts[1], parts[2])
-                else:
-                    raise ValueError(f"Invalid time format: {val}")
-            except Exception as exc:
-                raise ValueError(
-                    f"Failed to parse {env_key}={val}: expected HH:MM or HH:MM:SS"
-                ) from exc
-
-    tz_val = os.environ.get("CML_SCHEDULED_TIMEZONE", "").strip()
-    if tz_val:
-        kwargs["timezone"] = tz_val
-
-    return ScheduledRiskWindowConfig(**kwargs)
 
 
 async def run_live_daemon(
@@ -1047,7 +1014,7 @@ async def run_live_daemon(
                 entry_universe_snapshot_provider=(entry_universe_snapshot_provider),
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
-                scheduled_risk_window=_resolve_scheduled_risk_window(),
+                scheduled_risk_window=ScheduledRiskWindowConfig.from_environment(),
                 decision_filter=create_authoritative_async_decision_filter(
                     strategy_name,
                     fact_provider=fact_source.build,

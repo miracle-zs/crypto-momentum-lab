@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
-from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )

@@ -1,4 +1,14 @@
+import pytest
+
 from crypto_momentum_lab.persistence.postgres import session
+
+
+def test_database_engine_rejects_non_positive_command_timeout() -> None:
+    with pytest.raises(ValueError, match="command_timeout_seconds must be positive"):
+        session.create_async_database_engine(
+            "postgresql+asyncpg://invalid",
+            command_timeout_seconds=0,
+        )
 
 
 def test_dashboard_engine_bounds_query_memory_risk(monkeypatch) -> None:
@@ -19,7 +29,13 @@ def test_dashboard_engine_bounds_query_memory_risk(monkeypatch) -> None:
     assert captured["max_overflow"] == 2
     assert captured["pool_timeout"] == 5.0
     assert captured["pool_recycle"] == 900
-    assert captured["connect_args"] == {"command_timeout": 10}
+    assert captured["connect_args"] == {
+        "command_timeout": 10,
+        "server_settings": {
+            "statement_timeout": "10000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }
 
 
 def test_execution_engine_uses_a_bounded_dedicated_pool(monkeypatch) -> None:
@@ -39,7 +55,13 @@ def test_execution_engine_uses_a_bounded_dedicated_pool(monkeypatch) -> None:
     assert captured["pool_size"] == 4
     assert captured["max_overflow"] == 0
     assert captured["pool_timeout"] == 3
-    assert captured["connect_args"] == {"command_timeout": 5}
+    assert captured["connect_args"] == {
+        "command_timeout": 5,
+        "server_settings": {
+            "statement_timeout": "5000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }
 
 
 def test_account_engine_uses_a_small_serial_sync_pool(monkeypatch) -> None:
@@ -59,7 +81,13 @@ def test_account_engine_uses_a_small_serial_sync_pool(monkeypatch) -> None:
     assert captured["pool_size"] == 2
     assert captured["max_overflow"] == 0
     assert captured["pool_timeout"] == 3
-    assert captured["connect_args"] == {"command_timeout": 5}
+    assert captured["connect_args"] == {
+        "command_timeout": 5,
+        "server_settings": {
+            "statement_timeout": "5000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }
 
 
 def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
@@ -81,7 +109,13 @@ def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
     assert captured["pool_size"] == 2
     assert captured["max_overflow"] == 2
     assert captured["pool_timeout"] == 5.0
-    assert captured["connect_args"] == {"command_timeout": 10.0}
+    assert captured["connect_args"] == {
+        "command_timeout": 10.0,
+        "server_settings": {
+            "statement_timeout": "10000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }
 
 
 def test_checkpoint_engine_isolated_from_best_effort_telemetry(monkeypatch) -> None:
@@ -103,7 +137,13 @@ def test_checkpoint_engine_isolated_from_best_effort_telemetry(monkeypatch) -> N
     assert captured["pool_size"] == 1
     assert captured["max_overflow"] == 0
     assert captured["pool_timeout"] == 2
-    assert captured["connect_args"] == {"command_timeout": 10}
+    assert captured["connect_args"] == {
+        "command_timeout": 10,
+        "server_settings": {
+            "statement_timeout": "10000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }
 
 
 def test_market_engine_has_a_bounded_read_pool(monkeypatch) -> None:
@@ -123,4 +163,10 @@ def test_market_engine_has_a_bounded_read_pool(monkeypatch) -> None:
     assert captured["pool_size"] == 2
     assert captured["max_overflow"] == 0
     assert captured["pool_timeout"] == 2
-    assert captured["connect_args"] == {"command_timeout": 5}
+    assert captured["connect_args"] == {
+        "command_timeout": 5,
+        "server_settings": {
+            "statement_timeout": "5000ms",
+            "idle_in_transaction_session_timeout": "30000ms",
+        },
+    }

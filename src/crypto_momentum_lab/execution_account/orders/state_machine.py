@@ -2,7 +2,6 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
@@ -18,6 +17,7 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     LiveSubmissionDisabledError,
     OrderExchangeClient,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
     ExchangeOrderFill,
@@ -31,7 +31,6 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission as _PreparedOrderSubmission,
 )
-from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.market.models import JsonValue
 
 log = structlog.get_logger()

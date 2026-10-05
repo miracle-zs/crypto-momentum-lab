@@ -84,4 +84,5 @@ class DashboardQueryProtocol(Protocol):
         environment: str = "live",
         asset: str = "USDT",
         end_time: datetime | None = None,
+        is_empty_proven: bool = False,
     ) -> dict[str, object]: ...

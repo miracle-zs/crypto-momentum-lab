@@ -15,11 +15,11 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionBook,
     ExecutionRequest,
 )
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ReservationRegistry,
-    InMemoryPositionReservationRepository,
-)
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    InMemoryPositionReservationRepository,
+    ReservationRegistry,
+)
 from crypto_momentum_lab.domain.execution.trade_command import (
     PositionReservation,
     TradeCommandType,

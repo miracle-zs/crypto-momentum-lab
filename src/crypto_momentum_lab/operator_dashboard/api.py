@@ -10,7 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar, cast
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+)
+from fastapi import (
+    Path as FastAPIPath,
+)
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -62,6 +71,28 @@ _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 _PERFORMANCE_CACHE_TTL_SECONDS = 30.0
 _PERFORMANCE_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
+
+_MAX_ACCOUNT_PERFORMANCE_WINDOW_HOURS = 24 * 366
+_ACCOUNT_LABEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+_ASSET_PATTERN = r"^[A-Z0-9]{2,12}$"
+AccountLabelQuery = Annotated[
+    str,
+    Query(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
+]
+AccountLabelPath = Annotated[
+    str,
+    FastAPIPath(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
+]
+OptionalAccountLabelQuery = Annotated[
+    str | None,
+    Query(min_length=1, max_length=64, pattern=_ACCOUNT_LABEL_PATTERN),
+]
+PerformanceWindowHours = Annotated[
+    int,
+    Query(ge=1, le=_MAX_ACCOUNT_PERFORMANCE_WINDOW_HOURS),
+]
+AssetCode = Annotated[str, Query(pattern=_ASSET_PATTERN)]
+DashboardEnvironment = Literal["live", "paper", "research"]
 
 
 _cache_status_context: ContextVar[dict[str, str]] = ContextVar("cache_status_context")
@@ -256,8 +287,6 @@ class _ResponseCache:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-
-
 
 
 def create_dashboard_app(
@@ -485,13 +514,14 @@ def create_dashboard_app(
 
     @dashboard.get(
         "/api/performance/accounts/{account_label}",
+        response_model=dict[str, object],
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def account_performance(
-        account_label: str = "primary",
-        window_hours: int = 24,
-        environment: str = "live",
-        asset: str = "USDT",
+        account_label: AccountLabelPath,
+        window_hours: PerformanceWindowHours = 24,
+        environment: DashboardEnvironment = "live",
+        asset: AssetCode = "USDT",
         end_time: datetime | None = None,
     ) -> dict[str, object]:
         try:
@@ -636,7 +666,7 @@ def create_dashboard_app(
     )
     async def account(
         equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
-        account_label: str | None = None,
+        account_label: OptionalAccountLabelQuery = None,
     ) -> AccountOverviewResponse:
         try:
             cache_key = f"account:{account_label or 'latest'}:{equity_range}"
@@ -706,10 +736,10 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def get_account_performance(
-        account_label: str = "primary",
-        window_hours: int = 24,
-        environment: str = "live",
-        asset: str = "USDT",
+        account_label: AccountLabelQuery = "primary",
+        window_hours: PerformanceWindowHours = 24,
+        environment: DashboardEnvironment = "live",
+        asset: AssetCode = "USDT",
         end_time: datetime | None = None,
         is_empty_proven: bool = False,
     ) -> dict[str, object]:

@@ -7,6 +7,9 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution.exit_recovery import (
+    ExitRecoveryInspectionUnknownError,
+)
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -14,9 +17,6 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
     exit_position_quantity,
     open_order_matches_exit,
-)
-from crypto_momentum_lab.domain.execution.exit_recovery import (
-    ExitRecoveryInspectionUnknownError,
 )
 
 

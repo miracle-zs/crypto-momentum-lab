@@ -16,11 +16,11 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
     OrderExchangeClient,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
-from crypto_momentum_lab.domain.execution.reservation_registry import (
-    ReservationRegistry,
-)
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderSubmissionRepository,
+)
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ReservationRegistry,
 )
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot
 from crypto_momentum_lab.domain.strategy.position_exit import (
