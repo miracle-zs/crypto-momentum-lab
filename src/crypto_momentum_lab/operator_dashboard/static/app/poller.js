@@ -138,7 +138,11 @@ export function createPoller({ renderers, onAfterRender }) {
       }
       if (id === "account" && onAfterRender?.account) {
         if (shouldRender) onAfterRender.account.wire(body, data);
-        else onAfterRender.account.updateDynamic(body, data);
+        // Account detail and fleet metrics both mutate large DOM regions.
+        // Keep the poll transaction (and its page scroll guard) open until
+        // both writes finish; otherwise their delayed restore callbacks race
+        // the completed poll and can pull a reader back toward the top.
+        else await onAfterRender.account.updateDynamic(body, data);
       }
       if (id === "overview") updateGlobalMode(data);
       updateGlobalState(id, data);

@@ -89,7 +89,7 @@ export function wireLiveAccounts(root, data, { requestJson = defaultAccountReque
   void loadLiveAccountMetrics(state, root, requestJson, state.selectedLiveAccountMetricsRange);
 }
 
-export function updateLiveAccountsDynamic(root, data) {
+export async function updateLiveAccountsDynamic(root, data) {
   if (!root || !data) return;
   const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
   if (!accounts.length) return;
@@ -183,7 +183,7 @@ export function updateLiveAccountsDynamic(root, data) {
 
   const isSectionHidden = root?.hidden === true || Boolean(root?.closest?.("[hidden]")) || root?.isConnected === false;
   if (isSectionHidden) {
-    return Promise.resolve();
+    return;
   }
 
   const slot = root.querySelector(sel.liveAccountDetail());
@@ -202,10 +202,17 @@ export function updateLiveAccountsDynamic(root, data) {
       { forceFetch: true },
     )
     : Promise.resolve();
-  return Promise.all([
-    detailRefresh,
-    loadLiveAccountMetrics(state, root, requestJson, state.selectedLiveAccountMetricsRange),
-  ]);
+  // These regions are stacked: fleet metrics sit above the selected-account
+  // detail.  Each patch captures/restores page reading position, so concurrent
+  // writes can replay stale offsets. Keep one DOM mutation transaction active
+  // at a time; the poller awaits this whole function before its final guard.
+  await detailRefresh;
+  await loadLiveAccountMetrics(
+    state,
+    root,
+    requestJson,
+    state.selectedLiveAccountMetricsRange,
+  );
 }
 
 export {

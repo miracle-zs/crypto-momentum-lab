@@ -5,6 +5,15 @@ import {
   buildChartOption,
   getChartPayload,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-chart-engine.js";
+import { createPoller } from "../../src/crypto_momentum_lab/operator_dashboard/static/app/poller.js";
+import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
+import {
+  latestSectionData,
+  latestSectionError,
+  latestSectionUpdatedAt,
+  sectionInFlight,
+  sectionRenderKeys,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/app/section-state.js";
 import {
   renderAccount,
   renderLiveAccounts,
@@ -213,4 +222,156 @@ test("same-structure live-account polls refresh selected details and fleet metri
   ]);
   assert.equal(detailSlot.replacements, 0, "a transient detail error must retain the last successful detail DOM");
   assert.equal(metricsSlot.replacements, 0, "a transient metrics error must retain the last successful charts");
+});
+
+test("live account detail settles before fleet metrics starts a second scroll-sensitive patch", async () => {
+  const requestedUrls = [];
+  let releaseDetail;
+  const makeSlot = (dataset) => ({
+    dataset,
+    children: [{}],
+    isConnected: true,
+    style: { minHeight: "" },
+    offsetHeight: 200,
+    ownerDocument: {
+      scrollingElement: { scrollLeft: 0, scrollTop: 0 },
+      documentElement: { style: {} },
+      body: { scrollLeft: 0, scrollTop: 0 },
+      querySelectorAll: () => [],
+    },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    replaceChildren() {},
+    setAttribute() {},
+    removeAttribute() {},
+  });
+  const detailSlot = makeSlot({ accountLabel: "primary", renderedAccount: "primary" });
+  const metricsSlot = makeSlot({ renderedRange: "24h" });
+  const card = {
+    dataset: { liveAccountLabel: "primary" },
+    classList: { toggle() {} },
+    querySelector: () => null,
+    setAttribute() {},
+  };
+  const mockRoot = {
+    querySelector(selector) {
+      if (selector === '[data-live-account-label="primary"]') return card;
+      if (selector === ".live-account-fleet-status" || selector === ".live-account-fleet-kpis") return { innerHTML: "" };
+      if (selector === "[data-live-account-detail]") return detailSlot;
+      if (selector === "[data-live-account-metrics]") return metricsSlot;
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-live-account-label]" ? [card] : [];
+    },
+    __requestJson(url) {
+      requestedUrls.push(url);
+      if (url.startsWith("api/account?")) {
+        return new Promise((resolve) => { releaseDetail = resolve; })
+          .then(() => { throw new Error("synthetic detail refresh failure"); });
+      }
+      throw new Error("synthetic metrics refresh failure");
+    },
+  };
+
+  const refresh = updateLiveAccountsDynamic(mockRoot, {
+    status: "READY",
+    accounts: [{ account_label: "primary", status: "READY" }],
+  });
+  while (!releaseDetail) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(requestedUrls, ["api/account?account_label=primary&equity_range=24h"]);
+
+  releaseDetail();
+  await refresh;
+  assert.deepEqual(requestedUrls, [
+    "api/account?account_label=primary&equity_range=24h",
+    "api/live-account-metrics?equity_range=24h",
+  ]);
+});
+
+test("poller waits for account dynamic refresh before ending the poll transaction", async () => {
+  const data = {
+    status: "READY",
+    _cache_status: null,
+    accounts: [{
+      account_label: "primary",
+      environment: "live",
+      strategy_name: "orderflow_impulse",
+    }],
+  };
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  let dynamicStarted = false;
+  let releaseDynamicRefresh;
+  const dynamicRefresh = new Promise((resolve) => {
+    releaseDynamicRefresh = resolve;
+  });
+  const body = {
+    classList: { remove() {} },
+    removeAttribute() {},
+    querySelector: () => null,
+  };
+  const section = {
+    dataset: { endpoint: "api/live-accounts" },
+    querySelector: (selector) => (selector === ".panel-body" ? body : null),
+  };
+  globalThis.window = { location: { href: "http://dashboard.test/" } };
+  globalThis.document = {
+    body: { dataset: {} },
+    getElementById: (id) => (id === "account" ? section : null),
+    querySelector: () => null,
+  };
+  sectionInFlight.clear();
+  sectionRenderKeys.clear();
+  latestSectionData.clear();
+  latestSectionError.clear();
+  latestSectionUpdatedAt.clear();
+  sectionRenderKeys.set("account", sectionRenderKey("account", data));
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    headers: { get: () => null },
+    json: async () => data,
+  });
+
+  try {
+    const poller = createPoller({
+      renderers: { account: () => ["READY", ""] },
+      onAfterRender: {
+        account: {
+          updateDynamic: () => {
+            dynamicStarted = true;
+            return dynamicRefresh;
+          },
+        },
+      },
+    });
+    let completed = false;
+    const refresh = poller.refreshSection("account").then(() => {
+      completed = true;
+    });
+    while (!dynamicStarted) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.equal(dynamicStarted, true);
+    assert.equal(completed, false, "poll transaction ended before account DOM refresh");
+    releaseDynamicRefresh();
+    await refresh;
+    assert.equal(completed, true);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previousFetch;
+    sectionInFlight.clear();
+    sectionRenderKeys.clear();
+    latestSectionData.clear();
+    latestSectionError.clear();
+    latestSectionUpdatedAt.clear();
+  }
 });
