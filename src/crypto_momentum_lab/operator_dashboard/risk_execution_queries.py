@@ -11,7 +11,6 @@ import re
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import structlog
 from sqlalchemy import func, select
@@ -141,7 +140,6 @@ class RiskExecutionQueries:
         required_symbols: Sequence[str] | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._environment = environment
         self._market_environment = market_environment or (
             os.environ.get("CML_MARKET_ENVIRONMENT", "research")
             if environment == "live"
@@ -198,9 +196,10 @@ class RiskExecutionQueries:
                         .order_by(UniverseSnapshotRow.observed_at.desc())
                         .limit(1)
                     )
-                    if snapshot_id is not None and isinstance(
-                        snapshot_id, (str, int, UUID)
-                    ):
+                    # snapshot_id is the PGUUID primary key, so the ORM already
+                    # guarantees UUID | None; a second type test here would only
+                    # tolerate shapes the column cannot hold.
+                    if snapshot_id is not None:
                         monitored = (
                             await session.scalars(
                                 select(MonitoringMembershipRow.symbol).where(

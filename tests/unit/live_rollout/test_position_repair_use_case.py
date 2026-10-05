@@ -1,4 +1,3 @@
-
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -41,6 +40,7 @@ NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 def repair_book():
     from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+
     book = ExecutionBook()
     # Only the durable projection read is stubbed; locking, repair, retries and
     # publication validation all exercise the real Book implementation.
@@ -157,6 +157,47 @@ def repair_case():
     return request, loaded
 
 
+@pytest.mark.parametrize(
+    "state_payload",
+    [
+        {
+            "recovery_command_ids": [],
+            "external_recovery_ids": [],
+            "last_sequence": None,
+        },
+        {
+            "active_reservation_ids": [],
+            "recovery_command_ids": [],
+            "external_recovery_ids": [],
+        },
+        {
+            "active_reservation_ids": "invalid",
+            "recovery_command_ids": [],
+            "external_recovery_ids": [],
+            "last_sequence": None,
+        },
+        {
+            "active_reservation_ids": [],
+            "recovery_command_ids": [],
+            "external_recovery_ids": [],
+            "last_sequence": True,
+        },
+    ],
+)
+def test_position_repair_rejects_incomplete_durable_head(state_payload):
+    request, loaded = repair_case()
+    head = ExecutionHeadSnapshot(
+        1,
+        request.scope.stream_id,
+        request.scope.stream_epoch,
+        "previous-token",
+        state_payload,
+    )
+
+    with pytest.raises(PositionRepairBlocked, match="durable"):
+        build_position_repair(request, replace(loaded, head=head))
+
+
 class MemoryRepairUow:
     def __init__(self, loaded, failures=0):
         self.loaded = loaded
@@ -191,7 +232,12 @@ class MemoryRepairUow:
                     "hub",
                     "epoch",
                     "old-token",
-                    {"last_sequence": self.loads},
+                    {
+                        "last_sequence": self.loads,
+                        "active_reservation_ids": [],
+                        "recovery_command_ids": [],
+                        "external_recovery_ids": [],
+                    },
                 ),
             )
             raise DecisionCommitConflict("normal observe advanced revision")
@@ -328,7 +374,9 @@ async def test_post_commit_reload_failure_does_not_report_success(failure):
     book.reload_position.side_effect = failure
     book.reload_position.return_value = None
     if failure is None:
-        assert not await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
+        assert not await auto_heal_unmanaged_position(
+            request=request, uow=uow, book=book
+        )
     else:
         with pytest.raises(RuntimeError):
             await auto_heal_unmanaged_position(request=request, uow=uow, book=book)
@@ -391,7 +439,8 @@ async def test_strict_reload_validates_before_publishing_book(corruption):
             )
         with pytest.raises(RuntimeError, match="successful durable restoration"):
             await book.list_position_views(
-                environment=request.key.environment, account_label=request.key.account_label
+                environment=request.key.environment,
+                account_label=request.key.account_label,
             )
     else:
         view = await book.reload_position(

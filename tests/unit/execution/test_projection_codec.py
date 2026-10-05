@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 import crypto_momentum_lab.domain.execution.projection_codec as projection_codec
-from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
+from crypto_momentum_lab.domain.execution.recovery_codec import (
+    PositionRecoveryCodec,
+    RecoverySchemaError,
+)
 
 
 @pytest.fixture
@@ -75,3 +78,11 @@ def test_naive_datetime_remains_rejected(baseline):
         projection_codec.encode_projection(
             replace(projection, event_cut=datetime(2026, 9, 30))
         )
+
+
+def test_projection_requires_every_schema_array(baseline):
+    payload = dict(baseline["payload"])
+    del payload["active_batches"]
+
+    with pytest.raises(RecoverySchemaError, match="fields differ from schema"):
+        PositionRecoveryCodec.decode_projection(payload)

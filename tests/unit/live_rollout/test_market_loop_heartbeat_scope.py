@@ -7,14 +7,6 @@ from crypto_momentum_lab.live_rollout.market_loop import (
 )
 
 
-def test_unconfigured_entry_pool_keeps_every_symbol_eligible() -> None:
-    assert _empty_heartbeat_eligible(
-        "ETHUSDT",
-        entry_symbols=None,
-        open_position_symbols=frozenset(),
-    )
-
-
 def test_entry_pool_member_is_eligible() -> None:
     assert _empty_heartbeat_eligible(
         "BTCUSDT",

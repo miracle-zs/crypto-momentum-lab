@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from functools import lru_cache
+from functools import cache
 from typing import cast
 from uuid import uuid4
 
@@ -31,7 +31,7 @@ from crypto_momentum_lab.domain.execution.projection_codec import (
 )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _dataclass_field_names(cls: type) -> tuple[str, ...]:
     """Field names per dataclass type; the reflection is not free per fact."""
     return tuple(field.name for field in fields(cls))
@@ -87,23 +87,19 @@ class CanonicalFactCache:
     such fact and never affects correctness (entries are keyed by identity).
     """
 
-    __slots__ = ("_entries", "hits", "misses")
+    __slots__ = ("_entries",)
 
     def __init__(self) -> None:
         self._entries: dict[int, tuple[object, object, str]] = {}
-        self.hits = 0
-        self.misses = 0
 
     def entry(self, fact: object) -> tuple[object, str]:
         key = id(fact)
         cached = self._entries.get(key)
         if cached is not None and cached[0] is fact:
-            self.hits += 1
             return cached[1], cached[2]
         element = _canonical_value(fact)
         sort_key = _canonical_sort_key(element)
         self._entries[key] = (fact, element, sort_key)
-        self.misses += 1
         return element, sort_key
 
     def element(self, fact: object) -> object:

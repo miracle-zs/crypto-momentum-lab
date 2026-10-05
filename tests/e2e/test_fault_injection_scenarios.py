@@ -335,6 +335,7 @@ async def test_fault_injection_account_overflow_defers_and_recovers() -> None:
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {
                     "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                     "P": [],
@@ -390,6 +391,7 @@ def test_fault_injection_exchange_clock_rollback_requires_reconciliation() -> No
             "rp": "0.1",
             "n": "0.01",
             "N": "USDT",
+            "T": 1783123203000,
             "R": False,
         },
     }

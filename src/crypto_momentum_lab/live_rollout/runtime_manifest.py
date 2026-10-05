@@ -94,19 +94,12 @@ _ENV_REFERENCE = re.compile(
     r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:-|:\?)(?P<argument>[^}]*))?\}"
 )
 
-_DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
-    target_notional=Decimal("100.00"),
-    hedge_mode=True,
-    entry_long_only=True,
-    entry_leverage=1,
-    margin_type="CROSSED",
-    exit_mode=PositionExitMode.CANDLE_15M,
-    candle_grace_bars=8,
-    candle_grace_decision_profit_pct=Decimal("0.002"),
-    candle_grace_profit_pct=Decimal("0.002"),
-    persist_exchange_operations="submit,cancel",
-    max_concurrency_per_symbol=None,
-)
+# Sentinel accepted for ``accounts[].strategy_config_hash``: "not pinned in the
+# manifest", so the loader derives the hash from the typed strategy inputs.
+# Deployment wiring spells this literal explicitly (deploy/live-runtime.yaml),
+# so the value is part of the wire contract and is defined once here instead of
+# being repeated as a bare string across the loader and the CLI.
+UNSET_STRATEGY_CONFIG_HASH = "unset"
 
 
 def load_live_runtime_manifest(
@@ -169,8 +162,14 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             f"runtime manifest {path} must use schema_version: 1"
         )
 
+    # ``runtime`` is optional metadata, not a trade prerequisite: a manifest that
+    # only carries trading configuration must still load
+    # (see test_manifest_accepts_trading_configuration_without_compliance_metadata).
+    # When the block is present, its values become the per-account defaults.
     runtime = _mapping(root.get("runtime", {}), "runtime", path)
-    default_image_commit = _text(runtime.get("image_commit", "unknown"), "runtime.image_commit")
+    default_image_commit = _text(
+        runtime.get("image_commit", "unknown"), "runtime.image_commit"
+    )
     default_migration_revision = _text(
         runtime.get("migration_revision", "unknown"),
         "runtime.migration_revision",
@@ -201,10 +200,10 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             prefix,
         )
         strategy_config_hash = _text(
-            account.get("strategy_config_hash", "unset"),
+            account.get("strategy_config_hash", UNSET_STRATEGY_CONFIG_HASH),
             f"{prefix}.strategy_config_hash",
         ).lower()
-        if strategy_config_hash == "unset":
+        if strategy_config_hash == UNSET_STRATEGY_CONFIG_HASH:
             strategy_config_hash = _computed_strategy_config_hash(
                 strategy,
                 strategy_inputs,
@@ -218,7 +217,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                     f"{prefix}.session_id",
                 ),
                 lease_owner=_text(
-                    account.get("lease_owner", f"live-worker-{label}"),
+                    account.get("lease_owner"),
                     f"{prefix}.lease_owner",
                 ),
                 image_commit=_text(
@@ -256,6 +255,8 @@ def _mapping(value: Any, field: str, path: Path) -> Mapping[str, Any]:
 
 
 def _text(value: Any, field: str) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)
     if not isinstance(value, str) or not value.strip():
         raise RuntimeManifestError(f"{field} must be a non-empty string")
     return value.strip()
@@ -374,10 +375,10 @@ def _execution_inputs(
     value: Any,
     prefix: str,
 ) -> LiveRuntimeExecutionInputs:
-    if value is None:
-        return _DEFAULT_EXECUTION_INPUTS
     field = f"{prefix}.execution_config"
-    config = _mapping(value, field, Path("runtime-manifest"))
+    if not isinstance(value, Mapping):
+        raise RuntimeManifestError(f"{field} must be an object")
+    config = value
     try:
         hedge_mode = _boolean(
             config.get("hedge_mode"),
@@ -395,10 +396,7 @@ def _execution_inputs(
             raise RuntimeManifestError(
                 f"{field}.entry_leverage must be between 1 and 125"
             )
-        margin_type = _text(
-            config.get("margin_type"),
-            f"{field}.margin_type",
-        ).upper()
+        margin_type = config.get("margin_type")
         if margin_type not in {"CROSSED", "ISOLATED"}:
             raise RuntimeManifestError(
                 f"{field}.margin_type must be CROSSED or ISOLATED"
@@ -439,18 +437,20 @@ def _execution_inputs(
             config.get("persist_exchange_operations"),
             f"{field}.persist_exchange_operations",
         )
-        raw_concurrency = config.get("max_concurrency_per_symbol")
+        if "max_concurrency_per_symbol" not in config:
+            raise RuntimeManifestError(
+                f"{field}.max_concurrency_per_symbol is required"
+            )
+        raw_concurrency = config["max_concurrency_per_symbol"]
         max_concurrency_per_symbol = (
             None
             if raw_concurrency is None
-            or (isinstance(raw_concurrency, str) and not raw_concurrency.strip())
             else _integer(raw_concurrency, f"{field}.max_concurrency_per_symbol")
         )
-        raw_target_notional = config.get("target_notional")
-        target_notional = (
-            _decimal(raw_target_notional, f"{field}.target_notional")
-            if raw_target_notional is not None
-            else Decimal("100.00")
+        if "target_notional" not in config:
+            raise RuntimeManifestError(f"{field}.target_notional is required")
+        target_notional = _decimal(
+            config["target_notional"], f"{field}.target_notional"
         )
         if target_notional <= 0:
             raise RuntimeManifestError(f"{field}.target_notional must be positive")
@@ -474,7 +474,9 @@ def _execution_inputs(
 
 
 def _integer(value: Any, field: str) -> int:
-    if isinstance(value, bool):
+    if type(value) is int:
+        return value
+    if not isinstance(value, str):
         raise RuntimeManifestError(f"{field} must be an integer")
     try:
         return int(value)
@@ -487,8 +489,6 @@ def _decimal(value: Any, field: str) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as error:
         raise RuntimeManifestError(f"{field} must be a decimal") from error
-
-
 
 
 def _operations(value: Any, field: str) -> str:
@@ -514,12 +514,6 @@ def _operations(value: Any, field: str) -> str:
 def _boolean(value: Any, field: str) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes"}:
-            return True
-        if normalized in {"false", "0", "no"}:
-            return False
     raise RuntimeManifestError(f"{field} must be a boolean")
 
 
@@ -529,5 +523,6 @@ __all__ = [
     "LiveRuntimeManifest",
     "LiveRuntimeStrategyInputs",
     "RuntimeManifestError",
+    "UNSET_STRATEGY_CONFIG_HASH",
     "load_live_runtime_manifest",
 ]

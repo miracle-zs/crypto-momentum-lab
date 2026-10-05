@@ -53,8 +53,6 @@ async def load_latest_risk_config(
         max_gross_notional=row.max_gross_notional,
         max_daily_loss=row.max_daily_loss,
         max_open_positions=row.max_open_positions,
-        max_market_state_age_seconds=float(row.max_market_state_age_seconds),
-        max_account_state_age_seconds=float(row.max_account_state_age_seconds),
         allow_reduce_only_while_draining=row.allow_reduce_only_while_draining,
         created_at=row.created_at,
     )

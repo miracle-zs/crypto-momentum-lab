@@ -225,13 +225,6 @@ def _order_entry_time(
     return _entry_fill_at(order, fill_times) or order.updated_at
 
 
-def _batch_id_for_entry(order: _PositionOrder) -> str:
-    identifier = order.client_order_id or order.exchange_order_id
-    if identifier is None:
-        identifier = f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
-    return f"{order.symbol}:{order.position_side.value}:{identifier}"
-
-
 def _position_order_key(order: _PositionOrder) -> str:
     if order.exchange_order_id is not None:
         return f"exchange:{order.exchange_order_id}"
@@ -279,15 +272,3 @@ def _record_earliest_fill(
     previous = fill_times.get(identifier)
     if previous is None or filled_at < previous:
         fill_times[identifier] = filled_at
-
-
-def _record_fill_quantity(
-    fill_quantities: dict[str, Decimal],
-    identifier: str | None,
-    quantity: Decimal,
-) -> None:
-    if identifier is None or quantity <= 0:
-        return
-    fill_quantities[identifier] = (
-        fill_quantities.get(identifier, Decimal("0")) + quantity
-    )

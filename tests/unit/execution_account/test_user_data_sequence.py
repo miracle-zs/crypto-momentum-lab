@@ -64,22 +64,18 @@ def test_duplicate_regression_and_continuity_failure_keep_error_precedence(
 
 
 @pytest.mark.parametrize(
-    "exchange_offset,last_exchange_offset,received_offset,last_received_offset,reason",
+    "exchange_offset,last_exchange_offset,reason",
     [
-        (-1, 0, 1, 0, "stale_exchange_event"),
-        (0, 0, -1, 0, None),
-        (1, 0, -1, 0, None),
-        (0, None, -1, 0, None),
-        (None, 0, -1, 0, "stale_local_event"),
-        (None, 0, 0, 0, None),
-        (None, 0, 1, 0, None),
-        (None, 0, -1, None, None),
-        (None, None, 0, None, None),
-        (-1, 0, -1, 0, "stale_exchange_event"),
+        (-1, 0, "stale_exchange_event"),
+        (0, 0, None),
+        (1, 0, None),
+        (0, None, None),
+        (None, 0, None),
+        (None, None, None),
     ],
 )
 def test_stale_event_time_precedence_and_microsecond_boundaries(
-    exchange_offset, last_exchange_offset, received_offset, last_received_offset, reason
+    exchange_offset, last_exchange_offset, reason
 ):
     base = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -89,13 +85,11 @@ def test_stale_event_time_precedence_and_microsecond_boundaries(
     observation = replace(
         event(None, None),
         exchange_event_at=timestamp(exchange_offset),
-        received_at=base + timedelta(microseconds=received_offset),
     )
     assert (
         stale_user_data_reason(
             observation,
             last_exchange_event_at=timestamp(last_exchange_offset),
-            last_received_at=timestamp(last_received_offset),
         )
         == reason
     )
@@ -110,11 +104,17 @@ def test_journal_receipt_preserves_exchange_evidence_and_raw_payload():
     )
 
     payload = {
-        "e": "ACCOUNT_UPDATE", "E": 1790784000000, "T": 1790784000000,
-        "u": 9, "pu": 8,
+        "e": "ACCOUNT_UPDATE",
+        "E": 1790784000000,
+        "T": 1790784000000,
+        "u": 9,
+        "pu": 8,
         "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
     }
-    event = parse_user_data_event(payload, received_at=datetime(2026, 10, 1, tzinfo=UTC))
+    event = parse_user_data_event(
+        payload,
+        received_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
     receipt = event.to_receipt()
     assert type(receipt) is AccountEventReceipt
     assert asdict(receipt) == asdict(event)

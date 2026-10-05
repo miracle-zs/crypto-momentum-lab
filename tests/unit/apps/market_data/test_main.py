@@ -478,32 +478,6 @@ async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
 
     assert cleaned_up.is_set()
 
-
-async def test_run_market_data_for_reuses_supervised_runtime_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: dict[str, object] = {}
-
-    async def fake_run(
-        config_path: Path,
-        *,
-        stop_requested: asyncio.Event | None = None,
-    ) -> None:
-        assert stop_requested is not None
-        seen["config_path"] = config_path
-        seen["stop_requested"] = stop_requested
-        await stop_requested.wait()
-
-    monkeypatch.setattr(main, "run_market_data", fake_run)
-
-    await main.run_market_data_for(Path("server.yaml"), seconds=0)
-
-    assert seen["config_path"] == Path("server.yaml")
-    stop_requested = seen["stop_requested"]
-    assert isinstance(stop_requested, asyncio.Event)
-    assert stop_requested.is_set()
-
-
 async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1209,9 +1183,8 @@ async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
     assert "S25USDT" not in capture.calls[-1][0]
 
 
-async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit() -> (
-    None
-):
+async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit(
+) -> None:
     class FakeCapture:
         def __init__(self) -> None:
             self.calls = []
@@ -1244,5 +1217,6 @@ async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_e
     )
     await observer.snapshot_updated(second)
 
-    # S35 was NEVER in the trade tier; leaving the universe must NOT give it an aggTrade stream.
+    # S35 was NEVER in the trade tier; leaving the universe must NOT give it
+    # an aggTrade stream.
     assert "S35USDT" not in capture.calls[-1][0]

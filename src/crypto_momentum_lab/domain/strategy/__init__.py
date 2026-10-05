@@ -16,9 +16,7 @@ from crypto_momentum_lab.domain.strategy.entry_policy_evaluation import (
     universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.domain.strategy.models import (
-    CURRENT_STRATEGY_CHECKPOINT_SCHEMA_VERSION,
     EntryType,
-    IncompatibleCheckpointError,
     OrderIntentCandidate,
     RejectionReason,
     RunMode,
@@ -50,7 +48,6 @@ from crypto_momentum_lab.domain.strategy.sizing import (
 )
 
 __all__ = [
-    "CURRENT_STRATEGY_CHECKPOINT_SCHEMA_VERSION",
     "ClosedCandle15m",
     "DEFAULT_EMA_MAX_AGE",
     "EmaPolicyState",
@@ -64,7 +61,6 @@ __all__ = [
     "evaluate_entry_candidate",
     "EquityFractionSizingModel",
     "FixedNotionalSizingModel",
-    "IncompatibleCheckpointError",
     "OrderIntentCandidate",
     "PolicyInputSnapshot",
     "PositionExitPolicy",

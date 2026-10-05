@@ -2014,10 +2014,7 @@ def test_account_journal_appends_fill_with_nested_position_side():
     assert len(journal.read_cut().fills) == 1
 
 
-@pytest.mark.asyncio
-async def test_restore_durable_positions_migrates_projection_digest_when_no_reservations() -> (
-    None
-):
+def test_recover_durable_position_recomputes_stale_projection_digest() -> None:
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
@@ -2066,6 +2063,9 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
         "view_digest": "old-stale-view-digest",
         "journal_revision": 1,
         "active_reservation_ids": [],
+        "recovery_command_ids": [],
+        "external_recovery_ids": [],
+        "last_sequence": None,
     }
     head = ExecutionHeadSnapshot(
         stream_id=scope.stream_id,
@@ -2083,21 +2083,16 @@ async def test_restore_durable_positions_migrates_projection_digest_when_no_rese
         watermarks=(),
     )
 
-    class StubUow:
-        async def load_positions(self, **kwargs):
-            return (state,)
-
-    unit_of_work = StubUow()
-    book = ExecutionBook(execution_unit_of_work=unit_of_work)
-    # Restoration must succeed and migrate the digest instead of crashing
-    await book._restore_durable_positions(
-        unit_of_work=unit_of_work,
-        account_label="primary",
-        environment="live",
-        as_of=datetime.now(UTC),
+    from crypto_momentum_lab.domain.execution.position_recovery import (
+        recover_durable_position,
     )
-    assert key.canonical_id in book._books
-    assert book._head_projection_digests[key.canonical_id] != "old-stale-digest"
+
+    recovered = recover_durable_position(state)
+    assert recovered.projection_digest != "old-stale-digest"
+    assert any(
+        event == "execution_head_projection_migrated"
+        for event, _ in recovered.diagnostics
+    )
 
 
 @pytest.mark.parametrize("has_position", [False, True])
@@ -2184,6 +2179,115 @@ def test_reconnect_selects_latest_registered_epoch_for_each_account() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "state_payload",
+    [
+        {"active_reservation_ids": "invalid", "last_sequence": None},
+        {"active_reservation_ids": [1], "last_sequence": None},
+        {"active_reservation_ids": [], "last_sequence": True},
+        {"active_reservation_ids": []},
+    ],
+)
+@pytest.mark.asyncio
+async def test_reload_rejects_malformed_durable_head_fields(state_payload) -> None:
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+        ExecutionHeadSnapshot,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="epoch"
+    )
+    now = datetime(2026, 9, 29, 10, tzinfo=UTC)
+    cut = DurableJournalCut(
+        scope=scope,
+        facts=AccountFacts(position_key=key, stream_scope=scope),
+        revision=0,
+        as_of=now,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=ExecutionHeadSnapshot(
+            revision=1,
+            stream_id=scope.stream_id,
+            stream_epoch=scope.stream_epoch,
+            projection_version="pv-1",
+            state_payload=state_payload,
+        ),
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    class UnitOfWork:
+        async def load_position(self, requested_key, *, as_of):
+            assert requested_key == key
+            assert as_of == now
+            return state
+
+    book = ExecutionBook(execution_unit_of_work=UnitOfWork())
+    with pytest.raises(RuntimeError, match="durable execution head"):
+        await book.reload_position(key, as_of=now)
+
+
+@pytest.mark.asyncio
+async def test_reservation_divergence_requires_a_reloaded_expected_set() -> None:
+    from crypto_momentum_lab.domain.execution.ports import (
+        DurableExecutionPositionState,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+        PositionKey,
+    )
+    from crypto_momentum_lab.domain.execution.recovery_models import (
+        AccountFacts,
+        DurableJournalCut,
+    )
+
+    key = PositionKey("live", "primary", "BTCUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="epoch"
+    )
+    now = datetime(2026, 9, 29, 10, tzinfo=UTC)
+    cut = DurableJournalCut(
+        scope=scope,
+        facts=AccountFacts(position_key=key, stream_scope=scope),
+        revision=0,
+        as_of=now,
+    )
+    state = DurableExecutionPositionState(
+        scope=scope,
+        cut=cut,
+        head=None,
+        trade_ids=(),
+        evidence_ids=(),
+        watermarks=(),
+    )
+
+    class UnitOfWork:
+        async def load_position(self, requested_key, *, as_of):
+            assert requested_key == key
+            assert as_of == now
+            return state
+
+    book = ExecutionBook(execution_unit_of_work=UnitOfWork())
+    identity = f"reservation_divergence:{key.canonical_id}"
+    book._recovery_required_commands.add(identity)
+
+    assert not await book.reconcile_reservation_divergence(key, as_of=now)
+    assert identity in book._recovery_required_commands
+
+
 @pytest.mark.asyncio
 async def test_restore_durable_positions_migrates_facts_hash_when_no_reservations() -> (
     None
@@ -2232,10 +2336,17 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
             "stream_epoch": scope.stream_epoch,
         },
         "facts_hash": "fabricated-or-stale-hash",
-        "projection_digest": "361b284fd6b1a250a670107f715f5522acd1c6e59c3e07f30bfaa76e436b648e",
-        "view_digest": "dffb40e034709dccfa27eda3ead495ca8254381e08a474f559643ffb6a99c2d4",
+        "projection_digest": (
+            "361b284fd6b1a250a670107f715f5522acd1c6e59c3e07f30bfaa76e436b648e"
+        ),
+        "view_digest": (
+            "dffb40e034709dccfa27eda3ead495ca8254381e08a474f559643ffb6a99c2d4"
+        ),
         "journal_revision": 1,
         "active_reservation_ids": [],
+        "recovery_command_ids": [],
+        "external_recovery_ids": [],
+        "last_sequence": None,
     }
     head = ExecutionHeadSnapshot(
         stream_id=scope.stream_id,
@@ -2259,7 +2370,8 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
 
     unit_of_work = StubUow()
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
-    # Must succeed without raising RuntimeError("durable position facts do not match the execution head")
+    # Must succeed without raising RuntimeError:
+    # "durable position facts do not match the execution head"
     await book._restore_durable_positions(
         unit_of_work=unit_of_work,
         account_label="primary",
@@ -2269,9 +2381,8 @@ async def test_restore_durable_positions_migrates_facts_hash_when_no_reservation
     assert key.canonical_id in book._books
 
 
-async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations() -> (
-    None
-):
+async def test_restore_durable_positions_heals_mismatch_even_with_active_reservations(
+) -> None:
     from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
     from crypto_momentum_lab.domain.execution.ports import (
         DurableExecutionPositionState,
@@ -2326,6 +2437,9 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
         "recovery_checkpoint": "diverged-checkpoint",
         "journal_revision": 1,
         "active_reservation_ids": ["res-1"],
+        "recovery_command_ids": [],
+        "external_recovery_ids": [],
+        "last_sequence": None,
     }
     head = ExecutionHeadSnapshot(
         stream_id=scope.stream_id,
@@ -2349,7 +2463,8 @@ async def test_restore_durable_positions_heals_mismatch_even_with_active_reserva
 
     unit_of_work = StubUow()
     book = ExecutionBook(execution_unit_of_work=unit_of_work)
-    # The current durable snapshot repairs the in-memory head while reservations remain active.
+    # The current durable snapshot repairs the in-memory head while
+    # reservations remain active.
     await book._restore_durable_positions(
         unit_of_work=unit_of_work,
         account_label="primary",
@@ -2971,6 +3086,9 @@ async def test_restore_preserves_diverged_reservations_and_provides_recovery() -
         "recovery_checkpoint": "diverged-checkpoint",
         "journal_revision": 1,
         "active_reservation_ids": ["res-1", "res-2"],
+        "recovery_command_ids": [],
+        "external_recovery_ids": [],
+        "last_sequence": None,
     }
     head = ExecutionHeadSnapshot(
         stream_id=scope.stream_id,

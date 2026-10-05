@@ -16,7 +16,6 @@
 ## 历史工具
 
 - [research_archive](research_archive/README.md)：旧研究/回放；部分依赖退役代码。
-- [maintenance_archive](maintenance_archive/README.md)：固定日期的修复和身份审计，不直接重跑生产补丁。
 - [review_archive](review_archive/README.md)：手动复现；正式安全回归在当前测试中。
 
 归档不进入默认测试集。旧运行源码可在基线 02e6581f3bc71feac0f91f84fa405460ea26730f 查看；本地研究源码和数据另需备份，Git 无法恢复被忽略文件。

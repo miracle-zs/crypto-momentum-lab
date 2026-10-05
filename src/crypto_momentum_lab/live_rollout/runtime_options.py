@@ -37,6 +37,7 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _live_strategy_config_hash,
 )
 from crypto_momentum_lab.live_rollout.runtime_manifest import (
+    UNSET_STRATEGY_CONFIG_HASH,
     LiveRuntimeAccount,
     RuntimeManifestError,
     load_live_runtime_manifest,
@@ -139,7 +140,7 @@ def runtime_manifest_strategy_config_hash(account: LiveRuntimeAccount) -> str:
         )
     except (TypeError, ValueError) as error:
         raise LiveRuntimeOptionsError(str(error)) from error
-    if account.strategy_config_hash != "unset":
+    if account.strategy_config_hash != UNSET_STRATEGY_CONFIG_HASH:
         configured = _validate_hex_hash(
             account.strategy_config_hash,
             "runtime manifest strategy_config_hash",
@@ -427,11 +428,8 @@ def resolve_live_runtime_config(
             execution_inputs.entry_leverage,
             "--entry-leverage",
         )
-        configured_margin_type = (
-            None if options.margin_type is None else options.margin_type.strip().upper()
-        )
         margin_type = resolve_manifest_option(
-            configured_margin_type,
+            options.margin_type,
             execution_inputs.margin_type,
             "--margin-type",
         )
@@ -468,10 +466,11 @@ def resolve_live_runtime_config(
 
         git_commit_hash = manifest_account.image_commit
 
-
         manifest_strategy_hash = runtime_manifest_strategy_config_hash(manifest_account)
         strategy_config_hash = manifest_strategy_hash
 
+    if margin_type not in {"CROSSED", "ISOLATED"}:
+        raise LiveRuntimeOptionsError("--margin-type must be CROSSED or ISOLATED")
     if (
         session_id is None
         or profile is None

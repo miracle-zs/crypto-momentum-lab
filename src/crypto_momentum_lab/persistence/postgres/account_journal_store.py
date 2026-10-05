@@ -13,12 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crypto_momentum_lab.domain.account.models import (
-    AccountFillEvent,
-    AccountFillReconciliationCursor,
-    AccountPositionSnapshot,
-    extract_fill_position_side,
-)
+from crypto_momentum_lab.domain.account.models import AccountFillReconciliationCursor
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactConflict,
@@ -37,21 +32,10 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     PositionRecoveryCheckpoint,
     RecoverySchemaError,
 )
-from crypto_momentum_lab.persistence.postgres.account_fact_rows import (
-    account_fill_from_row,
-)
-from crypto_momentum_lab.persistence.postgres.models import (
-    AccountFillEventRow,
-    AccountFillReconciliationCursorRow,
-    AccountPositionSnapshotRow,
-)
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
     PositionRecoveryCheckpointRow,
 )
-
-LEGACY_STREAM_ID = "legacy-postgres-account"
-LEGACY_STREAM_EPOCH = "unversioned"
 
 
 class JournalFactConflict(RuntimeError):
@@ -128,7 +112,9 @@ class PostgresAccountJournalStore:
                     "event_id": event_id,
                     "payload_hash": payload_hash,
                     "source_revision": revision,
-                    "occurred_at": occurred_at if occurred_at is not None else func.now(),
+                    "occurred_at": (
+                        occurred_at if occurred_at is not None else func.now()
+                    ),
                     "payload": payload,
                 }
             )
@@ -357,11 +343,6 @@ class PostgresAccountJournalStore:
         include_checkpoint_prefix: bool = False,
     ) -> DurableJournalCut:
         _require_aware(as_of, "as_of")
-        if scope.stream_id == LEGACY_STREAM_ID:
-            return await self._load_legacy_recovery_in_session(
-                session, scope=scope, as_of=as_of
-            )
-
         statement = (
             select(PositionFactJournalEventRow)
             .where(
@@ -488,139 +469,13 @@ class PostgresAccountJournalStore:
             )
             if key is not None:
                 statement = statement.where(
-                    model.symbol == key.symbol, model.position_side == key.position_side.value,
+                    model.symbol == key.symbol,
+                    model.position_side == key.position_side.value,
                 )
             for row in (await session.execute(statement)).all():
                 scopes.add(_scope_from_columns(row))
 
-        legacy_symbols: dict[str, set[str]] = defaultdict(set)
-        fill_statement = select(AccountFillEventRow).where(
-            AccountFillEventRow.environment == environment,
-            AccountFillEventRow.account_label == account_label,
-        )
-        if key is not None:
-            fill_statement = fill_statement.where(AccountFillEventRow.symbol == key.symbol)
-        for row in (await session.scalars(fill_statement)).all():
-            raw_side = _raw_position_side(row.raw_payload)
-            side = raw_side or "BOTH"
-            if side in {"BOTH", "LONG", "SHORT"}:
-                legacy_symbols[row.symbol].add(side)
-
-        snapshot_statement = select(AccountPositionSnapshotRow).where(
-            AccountPositionSnapshotRow.environment == environment,
-            AccountPositionSnapshotRow.account_label == account_label,
-        )
-        if key is not None:
-            snapshot_statement = snapshot_statement.where(
-                AccountPositionSnapshotRow.symbol == key.symbol,
-                AccountPositionSnapshotRow.position_side == key.position_side.value,
-            )
-        for row in (await session.scalars(snapshot_statement)).all():
-            side = str(row.position_side).upper()
-            if side in {"BOTH", "LONG", "SHORT"}:
-                legacy_symbols[row.symbol].add(side)
-
-        for symbol, sides in legacy_symbols.items():
-            for side in sides:
-                if key is not None and side != key.position_side.value:
-                    continue
-                scopes.add(
-                    AccountFactStreamScope(
-                        environment=environment,
-                        account_label=account_label,
-                        symbol=symbol,
-                        position_side=FuturesPositionSide(side),
-                        stream_id=LEGACY_STREAM_ID,
-                        stream_epoch=LEGACY_STREAM_EPOCH,
-                    )
-                )
         return tuple(sorted(scopes, key=lambda item: item.canonical_id))
-
-    async def _load_legacy_recovery_in_session(
-        self,
-        session: AsyncSession,
-        *,
-        scope: AccountFactStreamScope,
-        as_of: datetime,
-    ) -> DurableJournalCut:
-        key = PositionKey(
-            environment=scope.environment,
-            account_label=scope.account_label,
-            symbol=scope.symbol,
-            position_side=scope.position_side,
-        )
-        fill_statement = select(AccountFillEventRow).where(
-            AccountFillEventRow.environment == scope.environment,
-            AccountFillEventRow.account_label == scope.account_label,
-            AccountFillEventRow.symbol == scope.symbol,
-            AccountFillEventRow.trade_at <= as_of,
-        )
-        fills: list[AccountFillEvent] = []
-        issues = [
-            "Legacy account tables have no stream epoch or continuous coverage proof"
-        ]
-        for row in (await session.scalars(fill_statement)).all():
-            raw_side = _raw_position_side(row.raw_payload)
-            if raw_side is not None and raw_side not in {"BOTH", "LONG", "SHORT"}:
-                issues.append(
-                    f"Legacy fill {row.trade_id} has unknown positionSide {raw_side}"
-                )
-                continue
-            if raw_side is None:
-                if scope.position_side.value != "BOTH":
-                    continue
-                issues.append(
-                    f"Legacy fill {row.trade_id} lacks positionSide; "
-                    "assigned only to BOTH"
-                )
-            elif raw_side != scope.position_side.value:
-                continue
-            fills.append(account_fill_from_row(row))
-
-        snapshot_statement = select(AccountPositionSnapshotRow).where(
-            AccountPositionSnapshotRow.environment == scope.environment,
-            AccountPositionSnapshotRow.account_label == scope.account_label,
-            AccountPositionSnapshotRow.symbol == scope.symbol,
-            AccountPositionSnapshotRow.position_side == scope.position_side.value,
-            AccountPositionSnapshotRow.observed_at <= as_of,
-        )
-        snapshots = tuple(
-            _snapshot_from_row(row)
-            for row in (await session.scalars(snapshot_statement)).all()
-        )
-        cursor_statement = select(AccountFillReconciliationCursorRow).where(
-            AccountFillReconciliationCursorRow.environment == scope.environment,
-            AccountFillReconciliationCursorRow.account_label == scope.account_label,
-            AccountFillReconciliationCursorRow.symbol == scope.symbol,
-            AccountFillReconciliationCursorRow.last_checked_at <= as_of,
-        )
-        cursor_row = await session.scalar(cursor_statement)
-        cursor = _cursor_from_row(cursor_row) if cursor_row is not None else None
-        if cursor is not None:
-            issues.append(
-                "Legacy reconciliation cursor lacks side, stream epoch, and "
-                "proven load start"
-            )
-        facts = AccountFacts(
-            position_key=key,
-            fills=tuple(sorted(fills, key=lambda item: (item.trade_at, item.trade_id))),
-            snapshots=tuple(
-                sorted(
-                    snapshots, key=lambda item: (item.observed_at, item.position_side)
-                )
-            ),
-            stream_scope=scope,
-            integrity_issues=tuple(dict.fromkeys(issues)),
-            fill_cursor_provenance=cursor,
-        )
-        return DurableJournalCut(
-            scope=scope,
-            as_of=as_of,
-            facts=facts,
-            revision=0,
-            integrity_issues=facts.integrity_issues,
-            cursor_provenance=cursor,
-        )
 
 
 def _fact_event_specs(
@@ -1037,40 +892,6 @@ def _max_fact_time(facts: AccountFacts) -> datetime | None:
     if facts.recovery_checkpoint is not None:
         return facts.recovery_checkpoint.event_cut
     return None
-
-
-_raw_position_side = extract_fill_position_side
-
-
-def _snapshot_from_row(row: AccountPositionSnapshotRow) -> AccountPositionSnapshot:
-    return AccountPositionSnapshot(
-        environment=row.environment,
-        account_label=row.account_label,
-        symbol=row.symbol,
-        position_side=row.position_side,
-        position_amt=row.position_amt,
-        entry_price=row.entry_price,
-        mark_price=row.mark_price,
-        unrealized_pnl=row.unrealized_pnl,
-        notional=row.notional,
-        leverage=row.leverage,
-        margin_type=row.margin_type,
-        observed_at=row.observed_at,
-        raw_payload=row.raw_payload,
-    )
-
-
-def _cursor_from_row(
-    row: AccountFillReconciliationCursorRow,
-) -> AccountFillReconciliationCursor:
-    return AccountFillReconciliationCursor(
-        environment=row.environment,
-        account_label=row.account_label,
-        symbol=row.symbol,
-        from_id=row.from_id,
-        start_time_ms=row.start_time_ms,
-        last_checked_at=row.last_checked_at,
-    )
 
 
 def _require_aware(value: datetime, name: str) -> None:

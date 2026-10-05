@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,11 +9,7 @@ from sqlalchemy.sql import Select
 from crypto_momentum_lab.persistence.postgres.command_repository import (
     PostgresCommandRepository,
 )
-from crypto_momentum_lab.persistence.postgres.models import (
-    ExchangeFillRow,
-    ExchangeOrderEventRow,
-    ExecutionCommandRow,
-)
+from crypto_momentum_lab.persistence.postgres.models import ExecutionCommandRow
 
 
 def _scope(account_label: str = "account-a") -> dict[str, str]:
@@ -63,13 +58,9 @@ class _FakeSession:
         self,
         *,
         commands: list[object],
-        events: list[object] | None = None,
-        fills: list[object] | None = None,
     ) -> None:
         self._rows = {
             ExecutionCommandRow: commands,
-            ExchangeOrderEventRow: events or [],
-            ExchangeFillRow: fills or [],
         }
 
     async def __aenter__(self) -> _FakeSession:
@@ -143,58 +134,10 @@ async def test_incomplete_other_account_terminal_does_not_block_restore() -> Non
 
 
 @pytest.mark.asyncio
-async def test_old_terminal_watermark_is_recovered_from_cumulative_order_event() -> (
-    None
-):
-    command = _command("legacy", scope=_scope())
-    event = SimpleNamespace(
-        client_order_id=command.client_order_id,
-        details={
-            "account_label": "account-a",
-            "symbol": "BTCUSDT",
-            "position_side": "both",
-            "executed_quantity": "4",
-            "cumulative_quote_quantity": "404",
-        },
-    )
-    repository = _repository(commands=[command], events=[event])
-
-    rows = await repository.load_execution_order_watermarks("account-a")
-
-    assert len(rows) == 1
-    assert rows[0]["cumulative_filled_quantity"] == Decimal("4")
-    assert rows[0]["cumulative_filled_quote"] == Decimal("404")
-
-
-@pytest.mark.asyncio
-async def test_old_terminal_watermark_is_recovered_from_persisted_fills() -> None:
-    command = _command("legacy", scope=_scope())
-    fills = [
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            quantity=Decimal("2"),
-            price=Decimal("100"),
-        ),
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            quantity=Decimal("3"),
-            price=Decimal("101"),
-        ),
-    ]
-    repository = _repository(commands=[command], fills=fills)
-
-    rows = await repository.load_execution_order_watermarks("account-a")
-
-    assert len(rows) == 1
-    assert rows[0]["cumulative_filled_quantity"] == Decimal("5")
-    assert rows[0]["cumulative_filled_quote"] == Decimal("503")
-
-
-@pytest.mark.asyncio
-async def test_old_terminal_without_trusted_fill_facts_fails_closed() -> None:
+async def test_incomplete_terminal_watermark_is_rejected() -> None:
     repository = _repository(commands=[_command("legacy", scope=_scope())])
 
-    with pytest.raises(ValueError, match="migration/recovery required"):
+    with pytest.raises(ValueError, match="incomplete cumulative watermark"):
         await repository.load_execution_order_watermarks("account-a")
 
 
@@ -213,70 +156,6 @@ async def test_positive_cumulative_quantity_requires_positive_quote() -> None:
 
     with pytest.raises(ValueError, match="zero quote with positive quantity"):
         await repository.load_execution_order_watermarks("account-a")
-
-
-@pytest.mark.asyncio
-async def test_unpriced_intermediate_event_followed_by_priced_event_recovers() -> None:
-    command = _command("intermediate", scope=_scope())
-    events = [
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            details={
-                "account_label": "account-a",
-                "symbol": "BTCUSDT",
-                "position_side": "both",
-                "executed_quantity": "2",
-                "average_price": "0",
-            },
-        ),
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            details={
-                "account_label": "account-a",
-                "symbol": "BTCUSDT",
-                "position_side": "both",
-                "executed_quantity": "2",
-                "average_price": "50000",
-            },
-        ),
-    ]
-    repository = _repository(commands=[command], events=events)
-    rows = await repository.load_execution_order_watermarks("account-a")
-
-    assert len(rows) == 1
-    assert rows[0]["cumulative_filled_quantity"] == Decimal("2")
-    assert rows[0]["cumulative_filled_quote"] == Decimal("100000")
-
-
-@pytest.mark.asyncio
-async def test_matching_fill_and_event_with_rounding_difference_reconciles() -> None:
-    command = _command("rounding", scope=_scope())
-    events = [
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            details={
-                "account_label": "account-a",
-                "symbol": "BTCUSDT",
-                "position_side": "both",
-                "executed_quantity": "3",
-                "cumulative_quote_quantity": "300.00",
-            },
-        ),
-    ]
-    fills = [
-        SimpleNamespace(
-            client_order_id=command.client_order_id,
-            quantity=Decimal("3"),
-            price=Decimal("100.001"),
-        ),
-    ]
-    repository = _repository(commands=[command], events=events, fills=fills)
-    rows = await repository.load_execution_order_watermarks("account-a")
-
-    assert len(rows) == 1
-    assert rows[0]["cumulative_filled_quantity"] == Decimal("3")
-    # Prefers the fill watermark (3 * 100.001 = 300.003)
-    assert rows[0]["cumulative_filled_quote"] == Decimal("300.003")
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,5 @@
 """Immutable recovered order values shared by storage and execution callers."""
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -35,13 +34,24 @@ class PersistedOrderReceipt:
         if self.executed_quantity > 0 and self.average_price <= 0:
             raise ValueError("persisted positive execution requires a priced fact")
         if self.account_fills:
-            if len({fill.trade_id for fill in self.account_fills}) != len(self.account_fills):
-                raise ValueError("persisted settlement trades must have distinct identities")
-            if any(fill.order_id not in {self.client_order_id, self.exchange_order_id}
-                   for fill in self.account_fills):
+            if len({fill.trade_id for fill in self.account_fills}) != len(
+                self.account_fills
+            ):
+                raise ValueError(
+                    "persisted settlement trades must have distinct identities"
+                )
+            if any(
+                fill.order_id not in {self.client_order_id, self.exchange_order_id}
+                for fill in self.account_fills
+            ):
                 raise ValueError("persisted settlement trade order identity mismatch")
-            if sum((fill.quantity for fill in self.account_fills), Decimal(0)) != self.executed_quantity:
-                raise ValueError("persisted settlement trades do not match executed quantity")
+            if (
+                sum((fill.quantity for fill in self.account_fills), Decimal(0))
+                != self.executed_quantity
+            ):
+                raise ValueError(
+                    "persisted settlement trades do not match executed quantity"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,15 +79,6 @@ class OrderObservation:
     created_at: datetime
     updated_at: datetime
     price: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class OrderIdentityEvent:
-    client_order_id: str | None
-    exchange_order_id: str | None
-    state: str
-    occurred_at: datetime
-    details: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)

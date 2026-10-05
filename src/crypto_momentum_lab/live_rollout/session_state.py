@@ -7,7 +7,7 @@ from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 
 class LiveSessionStateReader(Protocol):
     async def load_latest_operating_state(self, session_id: str) -> str | None:
-        """Latest transition excluding preflight and shadow preflight."""
+        """Latest transition excluding preflight."""
         ...
 
 

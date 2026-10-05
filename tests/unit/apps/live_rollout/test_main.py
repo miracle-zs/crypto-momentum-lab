@@ -15,7 +15,11 @@ from crypto_momentum_lab.apps.live_rollout import main
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
-from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
+from crypto_momentum_lab.live_rollout import runtime_config
+from crypto_momentum_lab.live_rollout.runtime_options import (
+    LiveRuntimeOptionsError,
+    parse_exchange_operations,
+)
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     restore_live_strategy_from_checkpoint,
     validate_live_warmup_coverage,
@@ -130,6 +134,7 @@ accounts:
       entry_order_type: limit
       entry_limit_ttl_seconds: 1200
     execution_config:
+      target_notional: 100.00
       hedge_mode: true
       entry_long_only: true
       entry_leverage: 7
@@ -139,6 +144,7 @@ accounts:
       candle_grace_decision_profit_pct: 0.001
       candle_grace_profit_pct: 0
       persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
 """,
         encoding="utf-8",
     )
@@ -523,17 +529,17 @@ def test_live_exchange_operation_option_is_parsed_explicitly(
     raw_value: str,
     expected: frozenset[str] | None,
 ) -> None:
-    assert main._parse_exchange_operations(raw_value) == expected
+    assert parse_exchange_operations(raw_value) == expected
 
 
 def test_live_exchange_operation_option_rejects_empty_tokens() -> None:
-    with pytest.raises(BadParameter, match="comma-separated list"):
-        main._parse_exchange_operations("submit,,cancel")
+    with pytest.raises(LiveRuntimeOptionsError, match="comma-separated list"):
+        parse_exchange_operations("submit,,cancel")
 
 
 def test_live_exchange_operation_option_rejects_mixed_all_mode() -> None:
-    with pytest.raises(BadParameter, match="'all' only by itself"):
-        main._parse_exchange_operations("submit,all")
+    with pytest.raises(LiveRuntimeOptionsError, match="'all' only by itself"):
+        parse_exchange_operations("submit,all")
 
 
 @pytest.mark.parametrize(
@@ -877,6 +883,18 @@ accounts:
       entry_policy_mode: enforce
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      target_notional: 100.00
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 5
+      margin_type: CROSSED
+      exit_mode: candle_15m
+      candle_grace_bars: 8
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0.0088
+      persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
 """,
         encoding="utf-8",
     )
@@ -939,6 +957,18 @@ accounts:
       entry_policy_mode: enforce
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      target_notional: 100.00
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 5
+      margin_type: CROSSED
+      exit_mode: candle_15m
+      candle_grace_bars: 8
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0.0088
+      persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
 """,
         encoding="utf-8",
     )
@@ -1555,6 +1585,62 @@ async def test_resilient_account_event_stream_retries_after_hub_failure() -> Non
     assert source.attempts == 2
 
 
+async def _run_account_event_channel(
+    *,
+    source,
+    daemon,
+    latest_market_states,
+    latest_market_quotes,
+    order_reconciliation=None,
+    run_id=None,
+    telemetry=None,
+    on_exit_failure=None,
+    on_account_snapshot=None,
+    on_account_snapshot_recovery=None,
+) -> None:
+    from crypto_momentum_lab.live_rollout import order_identity_errors, runtime_errors
+    from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
+
+    runtime = LiveAccountEventRuntime(
+        daemon=daemon,
+        latest_market_states=latest_market_states,
+        latest_market_quotes=latest_market_quotes,
+        order_reconciliation=order_reconciliation,
+        run_id=run_id,
+        telemetry=telemetry,
+        is_transient_error=runtime_errors.is_transient_runtime_error,
+        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
+        on_exit_failure=on_exit_failure,
+        on_account_snapshot=on_account_snapshot,
+        on_account_snapshot_recovery=on_account_snapshot_recovery,
+    )
+    await runtime.run(source)
+
+
+async def _run_grace_timeout_channel(
+    *,
+    daemon,
+    latest_market_states,
+    latest_market_quotes,
+    interval_seconds=1.0,
+    on_exit_failure=None,
+    on_order_identity_conflict=None,
+) -> None:
+    from crypto_momentum_lab.live_rollout import order_identity_errors, runtime_errors
+    from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
+
+    runtime = LiveExitChannelRuntime(
+        daemon=daemon,
+        latest_market_quotes=latest_market_quotes,
+        latest_market_states=latest_market_states,
+        is_transient_error=runtime_errors.is_transient_runtime_error,
+        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
+        on_exit_failure=on_exit_failure,
+        on_order_identity_conflict=on_order_identity_conflict,
+    )
+    await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
+
+
 @pytest.mark.asyncio
 async def test_account_event_reconciles_order_before_publishing_snapshot() -> None:
     event = SimpleNamespace(
@@ -1582,7 +1668,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot() -> No
             return stream()
 
     latest_market_states = SimpleNamespace(for_symbols=lambda _symbols: ())
-    await runtime_orchestrator._run_account_event_channel(
+    await _run_account_event_channel(
         source=Source(),
         daemon=None,
         latest_market_states=latest_market_states,
@@ -1632,7 +1718,7 @@ async def test_account_event_pending_position_does_not_wait_or_promote_failure(
             return stream()
 
     daemon = Daemon()
-    await runtime_orchestrator._run_account_event_channel(
+    await _run_account_event_channel(
         source=Source(),
         daemon=daemon,
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
@@ -1679,7 +1765,7 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
 
             return stream()
 
-    await runtime_orchestrator._run_account_event_channel(
+    await _run_account_event_channel(
         source=Source(),
         daemon=Daemon(),
         latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
@@ -1718,7 +1804,7 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
             raise ValueError("client order ID is already bound to a different order")
 
     with pytest.raises(asyncio.CancelledError):
-        await runtime_orchestrator._run_grace_timeout_channel(
+        await _run_grace_timeout_channel(
             daemon=Daemon(),
             latest_market_states=SimpleNamespace(
                 for_symbols=lambda _symbols: (state,),

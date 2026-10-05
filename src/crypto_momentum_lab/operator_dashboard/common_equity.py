@@ -172,39 +172,6 @@ def paper_equity_observations_from_values(
     ]
 
 
-def live_equity_observations(
-    rows: Iterable[AccountBalanceSnapshotRow],
-    *,
-    account_label: str,
-    cash_flow_adjustments: Sequence[LiveCashFlowAdjustment],
-) -> list[EquityObservation]:
-    raw_by_timestamp: dict[datetime, Decimal] = {}
-    for row in rows:
-        if row.account_label != account_label:
-            continue
-        observed_at = as_utc(row.observed_at)
-        raw_by_timestamp[observed_at] = (
-            raw_by_timestamp.get(
-                observed_at,
-                Decimal("0"),
-            )
-            + row.wallet_balance
-            + (row.unrealized_pnl or Decimal("0"))
-        )
-
-    return apply_live_cash_flow_adjustments(
-        (
-            EquityObservation(
-                observed_at=observed_at,
-                equity=equity,
-                source_observed_at=observed_at,
-            )
-            for observed_at, equity in raw_by_timestamp.items()
-        ),
-        account_label=account_label,
-        cash_flow_adjustments=cash_flow_adjustments,
-    )
-
 
 def live_aggregated_equity_observations(
     rows: Iterable[tuple[datetime, Decimal]],

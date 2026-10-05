@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
-    Select,
     select,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -69,7 +68,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     CashFlowCorrectionRow,
     LiveSessionTransitionRow,
-    StrategyRuntimeCheckpointRow,
 )
 
 _EQUITY_WINDOW = timedelta(hours=24)
@@ -91,23 +89,6 @@ LiveAccountQueries = _account_queries.LiveAccountQueries
 
 
 DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS: tuple[LiveCashFlowAdjustment, ...] = ()
-
-
-def _latest_checkpoint_at_statement() -> Select[tuple[datetime]]:
-    return (
-        select(StrategyRuntimeCheckpointRow.saved_at)
-        .order_by(StrategyRuntimeCheckpointRow.saved_at.desc())
-        .limit(1)
-    )
-
-
-def _checkpoint_times_statement(
-    run_ids: Sequence[str],
-) -> Select[tuple[str, datetime]]:
-    return select(
-        StrategyRuntimeCheckpointRow.run_id,
-        StrategyRuntimeCheckpointRow.saved_at,
-    ).where(StrategyRuntimeCheckpointRow.run_id.in_(run_ids))
 
 
 def parse_live_cash_flow_adjustments(

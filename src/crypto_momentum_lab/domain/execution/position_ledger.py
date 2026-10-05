@@ -1626,17 +1626,11 @@ def _has_verified_flat_snapshot_anchor(
 
 
 def _episode_counter(episode_id: str) -> int:
-    try:
-        return int(episode_id.rsplit("_", maxsplit=1)[1])
-    except (IndexError, ValueError):
-        return 0
+    return int(episode_id.rsplit("_", maxsplit=1)[1])
 
 
 def _batch_counter(batch_id: str) -> int:
-    try:
-        return int(batch_id.rsplit("_b", maxsplit=1)[1])
-    except (IndexError, ValueError):
-        return 0
+    return int(batch_id.rsplit("_b", maxsplit=1)[1])
 
 
 def _escalate_status(

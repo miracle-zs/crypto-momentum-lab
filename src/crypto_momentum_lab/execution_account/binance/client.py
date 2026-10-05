@@ -52,8 +52,8 @@ from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
 from crypto_momentum_lab.execution_account.binance.request_rules import (
     entry_leverage_candidates,
     normalize_fill_cursors,
-    normalize_margin_type,
     normalize_symbols,
+    require_margin_type,
 )
 from crypto_momentum_lab.execution_account.binance.response_rules import (
     exchange_error_code,
@@ -63,15 +63,17 @@ from crypto_momentum_lab.execution_account.binance.response_rules import (
 )
 from crypto_momentum_lab.execution_account.binance.rest_parser import (
     account_fill_from_trade_item,
+    account_open_order_from_item,
     balances_from_response,
-    decimal_value,
     json_mapping,
     order_snapshot_from_response,
     positions_from_response,
     rest_optional_int,
-    rest_optional_str,
+    rest_require_bool,
+    rest_require_int,
     rest_require_mapping,
     rest_require_sequence_of_mappings,
+    rest_require_string,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
 from crypto_momentum_lab.execution_account.orders.recovery import (
@@ -82,7 +84,7 @@ from crypto_momentum_lab.execution_account.orders.recovery import (
 log = structlog.get_logger(__name__)
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:
-# /fapi/v3/account, /fapi/v3/balance, /fapi/v3/positionRisk,
+# /fapi/v1/accountConfig, /fapi/v3/balance, /fapi/v3/positionRisk,
 # /fapi/v1/openOrders, /fapi/v1/userTrades.
 
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
@@ -386,18 +388,16 @@ class BinanceUsdMPrivateReadClient:
         values["last_status"] = status
 
     async def fetch_account_config(self) -> AccountConfigSnapshot:
-        payload = await self._signed_get("/fapi/v3/account")
+        payload = await self._signed_get("/fapi/v1/accountConfig")
         data = rest_require_mapping(payload)
-        position_mode_payload = await self._signed_get("/fapi/v1/positionSide/dual")
-        position_mode = rest_require_mapping(position_mode_payload)
-        hedge_mode = bool(position_mode.get("dualSidePosition", False))
+        hedge_mode = rest_require_bool(data, "dualSidePosition")
+        multi_assets_mode = rest_require_bool(data, "multiAssetsMargin")
         raw_payload = json_mapping(data)
-        raw_payload["dualSidePosition"] = hedge_mode
         observed_at = self._now()
         return AccountConfigSnapshot(
             environment=self._environment,
             account_label=self._account_label,
-            multi_assets_mode=bool(data.get("multiAssetsMargin", False)),
+            multi_assets_mode=multi_assets_mode,
             hedge_mode=hedge_mode,
             fee_tier=rest_optional_int(data.get("feeTier")),
             observed_at=observed_at,
@@ -440,60 +440,46 @@ class BinanceUsdMPrivateReadClient:
             {"symbol": normalized_symbol},
         )
         for item in rest_require_sequence_of_mappings(payload):
-            if str(item.get("symbol", "")).upper() != normalized_symbol:
-                continue
-            raw_margin_type = rest_optional_str(item.get("marginType"))
-            return (
-                None
-                if raw_margin_type is None
-                else normalize_margin_type(raw_margin_type)
-            )
+            response_symbol = normalize_symbols((rest_require_string(item, "symbol"),))[
+                0
+            ]
+            if response_symbol != normalized_symbol:
+                raise ValueError(
+                    "Binance symbolConfig response contained another symbol"
+                )
+            return require_margin_type(rest_require_string(item, "marginType"))
         return None
 
-    async def fetch_symbol_margin_types(self) -> dict[str, str | None]:
+    async def fetch_symbol_margin_types(self) -> dict[str, str]:
         """Read all exchange symbol-level futures margin modes at once."""
         payload = await self._signed_get("/fapi/v1/symbolConfig")
-        margin_types: dict[str, str | None] = {}
-        for item in rest_require_sequence_of_mappings(payload):
-            raw_symbol = rest_optional_str(item.get("symbol"))
-            if raw_symbol is None:
-                continue
-            symbol = normalize_symbols((raw_symbol,))[0]
-            raw_margin_type = rest_optional_str(item.get("marginType"))
-            margin_types[symbol] = (
-                None
-                if raw_margin_type is None
-                else normalize_margin_type(raw_margin_type)
+        return {
+            normalize_symbols((rest_require_string(item, "symbol"),))[0]: (
+                require_margin_type(rest_require_string(item, "marginType"))
             )
-        return margin_types
+            for item in rest_require_sequence_of_mappings(payload)
+        }
 
     async def fetch_open_orders(
         self,
         symbol: str | None = None,
     ) -> tuple[AccountOpenOrderSnapshot, ...]:
         params: dict[str, str | int | float | bool | None] | None = None
+        expected_symbol = None
         if symbol is not None:
             if not symbol.strip():
                 raise ValueError("symbol must not be empty")
-            params = {"symbol": symbol.strip().upper()}
+            expected_symbol = symbol.strip().upper()
+            params = {"symbol": expected_symbol}
         payload = await self._signed_get("/fapi/v1/openOrders", params)
         observed_at = self._now()
         return tuple(
-            AccountOpenOrderSnapshot(
+            account_open_order_from_item(
+                item,
                 environment=self._environment,
                 account_label=self._account_label,
-                symbol=str(item.get("symbol", "")),
-                order_id=str(item.get("orderId", "")),
-                client_order_id=str(item.get("clientOrderId", "")),
-                side=str(item.get("side", "")),
-                order_type=str(item.get("type", "")),
-                status=str(item.get("status", "")),
-                price=decimal_value(item.get("price", "0")),
-                original_quantity=decimal_value(item.get("origQty", "0")),
-                executed_quantity=decimal_value(item.get("executedQty", "0")),
-                reduce_only=bool(item.get("reduceOnly", False)),
                 observed_at=observed_at,
-                raw_payload=json_mapping(item),
+                expected_symbol=expected_symbol,
             )
             for item in rest_require_sequence_of_mappings(payload)
         )
@@ -544,29 +530,15 @@ class BinanceUsdMPrivateReadClient:
 
                 max_seen_trade_id: int | None = None
                 for item in items:
-                    trade_id = str(item.get("id", ""))
-                    if trade_id.isdigit():
-                        tid_int = int(trade_id)
-                        if max_seen_trade_id is None or tid_int > max_seen_trade_id:
-                            max_seen_trade_id = tid_int
-                    fill = AccountFillEvent(
+                    fill = account_fill_from_trade_item(
+                        item,
                         environment=self._environment,
                         account_label=self._account_label,
-                        symbol=str(item.get("symbol", symbol)),
-                        trade_id=trade_id,
-                        order_id=str(item.get("orderId", "")),
-                        side=str(item.get("side", "")),
-                        price=decimal_value(item.get("price", "0")),
-                        quantity=decimal_value(item.get("qty", "0")),
-                        realized_pnl=decimal_value(item.get("realizedPnl", "0")),
-                        fee=decimal_value(item.get("commission", "0")),
-                        fee_asset=str(item.get("commissionAsset", "")),
-                        trade_at=datetime.fromtimestamp(
-                            int(str(item.get("time", 0))) / 1000,
-                            tz=UTC,
-                        ),
-                        raw_payload=json_mapping(item),
+                        expected_symbol=symbol,
                     )
+                    trade_id = int(fill.trade_id)
+                    if max_seen_trade_id is None or trade_id > max_seen_trade_id:
+                        max_seen_trade_id = trade_id
                     fills[(fill.symbol, fill.trade_id)] = fill
 
                 # If the returned batch is less than limit, symbol coverage is complete
@@ -679,7 +651,7 @@ class BinanceUsdMPrivateReadClient:
                         item,
                         environment=self._environment,
                         account_label=self._account_label,
-                        fallback_symbol=normalized_symbol,
+                        expected_symbol=normalized_symbol,
                     )
                     fill_time_ms = int(fill.trade_at.timestamp() * 1000)
                     if fill_time_ms > window_end_ms:
@@ -752,7 +724,7 @@ class BinanceUsdMPrivateReadClient:
         """Create a Binance USD-M Futures listen key for account events."""
         payload = await self._user_data_request("POST", "/fapi/v1/listenKey")
         data = rest_require_mapping(payload)
-        listen_key = str(data.get("listenKey", "")).strip()
+        listen_key = rest_require_string(data, "listenKey").strip()
         if not listen_key:
             raise ValueError("Binance listen-key response did not contain listenKey")
         return listen_key
@@ -917,16 +889,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
         entry_leverage: int | None = None,
         margin_type: str | None = None,
-        leverage_fallback_steps: int = 2,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
             raise ValueError("entry_leverage must be between 1 and 125")
-        if leverage_fallback_steps < 0:
-            raise ValueError("leverage_fallback_steps must be non-negative")
         normalized_margin_type = (
-            None if margin_type is None else normalize_margin_type(margin_type)
+            None if margin_type is None else require_margin_type(margin_type)
         )
         super().__init__(
             api_key=api_key,
@@ -947,7 +916,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
-        self._leverage_fallback_steps = leverage_fallback_steps
         self._entry_margin_type = normalized_margin_type
         self._configured_leverage_by_symbol: dict[str, int] = {}
         self._configured_margin_type_by_symbol: dict[str, str] = {}
@@ -1084,7 +1052,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             time_in_force = plan.time_in_force
             if not time_in_force:
                 raise OrderPreSubmissionError(
-                    f"Limit order {plan.client_order_id} is missing required time_in_force"
+                    f"Limit order {plan.client_order_id} is missing required "
+                    "time_in_force"
                 )
             params["timeInForce"] = time_in_force
             if time_in_force == "GTD":
@@ -1188,7 +1157,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         entry_leverage: int | None = None,
         delays: tuple[float, ...] = (0.05, 0.1, 0.2),
     ) -> ExchangeOrderSnapshot:
-        """Resolve authoritative average_price when Binance POST returns 0 on immediate fills."""
+        """Resolve authoritative average_price when Binance POST returns 0
+        on immediate fills.
+        """
         log.info(
             "binance_submit_order_resolving_fill_price",
             symbol=plan.symbol,
@@ -1332,9 +1303,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if configured is not None:
             return configured
 
-        candidates = entry_leverage_candidates(
-            self._entry_leverage, max_steps=self._leverage_fallback_steps
-        )
+        candidates = entry_leverage_candidates(self._entry_leverage)
         last_rejection: str | None = None
         for leverage in candidates:
             if leverage != self._entry_leverage:
@@ -1353,8 +1322,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 )
                 response = rest_require_mapping(payload)
                 if (
-                    str(response.get("symbol", "")) != symbol
-                    or int(str(response.get("leverage", 0))) != leverage
+                    rest_require_string(response, "symbol") != symbol
+                    or rest_require_int(response, "leverage") != leverage
                 ):
                     raise ValueError("unexpected leverage response")
             except httpx.HTTPStatusError as exc:
@@ -1528,7 +1497,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         if not plan.reduce_only:
             raise ValueError("emergency flatten plan must be reduce-only")
         return await self.submit_order(plan)
-
 
 
 def _raise_for_status(response: httpx.Response) -> None:

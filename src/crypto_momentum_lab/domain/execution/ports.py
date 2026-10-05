@@ -1,10 +1,11 @@
 """Durable execution contracts implemented by storage adapters."""
 
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import AsyncContextManager, Protocol
+from typing import Protocol
 
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
@@ -204,7 +205,7 @@ class ExecutionUnitOfWorkPort(Protocol):
         key: PositionKey,
         *,
         account_scope: str | None = None,
-    ) -> AsyncContextManager[ExecutionTransactionPort]: ...
+    ) -> AbstractAsyncContextManager[ExecutionTransactionPort]: ...
 
 
 class CommandRepository(Protocol):

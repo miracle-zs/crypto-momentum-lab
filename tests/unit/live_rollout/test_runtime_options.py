@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
     ResolvedBinanceCredentials,
@@ -134,3 +136,21 @@ def test_manifest_option_conflict_is_rejected() -> None:
         assert "--entry-leverage" in str(error)
     else:
         raise AssertionError("manifest conflict was not rejected")
+
+
+@pytest.mark.parametrize("margin_type", ["cross", "isolated", " CROSSED "])
+def test_runtime_options_reject_margin_type_aliases(margin_type: str) -> None:
+    with pytest.raises(ValueError, match="margin-type"):
+        resolve_live_runtime_config(
+            _options(margin_type=margin_type),
+            credentials=_credentials(),
+            environment={
+                "CML_LIVE_IMPULSE_WINDOW_BUCKETS": "2",
+                "CML_LIVE_CONFIRMATION_BUCKETS": "1",
+                "CML_LIVE_MIN_RETURN_PCT": "0.0075",
+                "CML_LIVE_MIN_IMBALANCE": "0.30",
+                "CML_LIVE_MIN_INTENSITY": "3.0",
+                "CML_LIVE_MIN_NOTIONAL_5M_VS_30M": "1.25",
+                "CML_LIVE_COOLDOWN_BUCKETS": "0",
+            },
+        )

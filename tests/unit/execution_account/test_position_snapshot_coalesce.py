@@ -75,10 +75,13 @@ async def _publish(service, positions, observed_at):
     )
     event = parse_user_data_event(
         {"e": "ACCOUNT_UPDATE", "E": int(observed_at.timestamp() * 1000),
+        "T": int(observed_at.timestamp() * 1000),
          "a": {"B": [], "P": []}}, received_at=observed_at,
     )
     result = await service.persist_user_data_event(
-        snapshot=AccountSnapshot(config=config, balances=(), positions=positions, open_orders=()),
+        snapshot=AccountSnapshot(
+            config=config, balances=(), positions=positions, open_orders=()
+        ),
         event=event,
     )
     assert result.snapshot.positions == positions
@@ -87,12 +90,15 @@ async def _publish(service, positions, observed_at):
 async def test_identical_position_events_preserve_live_view_without_repeating_history():
     repo = _RecordingRepo()
     t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
-    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    service = ExecutionAccountSyncService(
+        client=_NoopClient(), repository=repo, config=_config(t0)
+    )
     first = _position("266", entry="0.2317431", observed_at=t0)
     await _publish(service, (first,), t0)
     for offset in (1, 10, 50, 1000):
         at = t0 + timedelta(milliseconds=offset)
-        await _publish(service, (_position("266", entry="0.2317431", observed_at=at),), at)
+        pos = _position("266", entry="0.2317431", observed_at=at)
+        await _publish(service, (pos,), at)
     assert repo.positions == [first]
     at = t0 + timedelta(seconds=3)
     later = _position("266", entry="0.2317431", observed_at=at)
@@ -103,7 +109,9 @@ async def test_identical_position_events_preserve_live_view_without_repeating_hi
 async def test_zero_event_records_a_real_close_without_creating_unknown_positions():
     repo = _RecordingRepo()
     t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
-    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    service = ExecutionAccountSyncService(
+        client=_NoopClient(), repository=repo, config=_config(t0)
+    )
     await _publish(service, (_position("0", entry="0", observed_at=t0),), t0)
     assert repo.positions == []
     opening = _position("266", entry="0.23", observed_at=t0)
@@ -117,7 +125,9 @@ async def test_zero_event_records_a_real_close_without_creating_unknown_position
 async def test_partial_close_is_persisted_even_within_the_history_coalescing_window():
     repo = _RecordingRepo()
     t0 = datetime(2026, 9, 16, 23, 45, tzinfo=UTC)
-    service = ExecutionAccountSyncService(client=_NoopClient(), repository=repo, config=_config(t0))
+    service = ExecutionAccountSyncService(
+        client=_NoopClient(), repository=repo, config=_config(t0)
+    )
     opening = _position("266", entry="0.23", observed_at=t0)
     await _publish(service, (opening,), t0)
     at = t0 + timedelta(milliseconds=50)

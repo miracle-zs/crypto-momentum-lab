@@ -243,15 +243,18 @@ def test_to_account_facts_filters_stale_pre_episode_fills() -> None:
 def test_order_without_price_does_not_invent_a_unit_price():
     key = PositionKey(environment="live", account_label="primary", symbol="BTCUSDT")
     order = replace(get_b2_system_order_facts(symbol="BTCUSDT")[0], price=None)
-    facts = build_position_account_facts(
-        position_key=key, orders=(order,)
-    )
+    facts = build_position_account_facts(position_key=key, orders=(order,))
     assert facts.fills == ()
     assert not facts.has_synthetic_fills
 
 
 def test_observation_without_timestamp_does_not_invent_snapshot_time():
     key = PositionKey(environment="live", account_label="primary", symbol="BTCUSDT")
-    observation = replace(get_b2_position_observation(symbol="BTCUSDT", position_amt=Decimal("120")), observed_at=None)
-    facts = build_position_account_facts(position_key=key, orders=(), observation=observation)
+    observation = replace(
+        get_b2_position_observation(symbol="BTCUSDT", position_amt=Decimal("120")),
+        observed_at=None,
+    )
+    facts = build_position_account_facts(
+        position_key=key, orders=(), observation=observation
+    )
     assert facts.snapshots == ()

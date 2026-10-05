@@ -73,7 +73,7 @@ def test_orderflow_impulse_keeps_missing_close_when_midpoint_exists() -> None:
 
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
-    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert strategy.buffered_state_count == 1
 
 
 def test_volume_filter_requires_140_consecutive_states_for_warmup() -> None:
@@ -129,7 +129,7 @@ def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
     restored = _strategy()
     restored.restore_checkpoint(checkpoint)
 
-    assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 7}
+    assert restored.buffered_state_count == 7
 
 
 def test_orderflow_impulse_compact_checkpoint_omits_market_buffer_payload() -> None:
@@ -138,7 +138,7 @@ def test_orderflow_impulse_compact_checkpoint_omits_market_buffer_payload() -> N
 
     checkpoint = strategy.checkpoint(include_market_state_buffers=False)
 
-    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 7}
+    assert checkpoint.warmup_buckets_by_symbol == {"BTCUSDT": 7}
     assert "market_state_buffers" not in checkpoint.payload
     assert checkpoint.payload["signal_sequence"] == 1
 
@@ -154,7 +154,7 @@ def test_orderflow_impulse_warm_recovery_advances_last_processed_watermark() -> 
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
     }
-    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert checkpoint.warmup_buckets_by_symbol == {"BTCUSDT": 1}
     assert checkpoint.payload["signal_sequence"] == 0
 
 
@@ -179,7 +179,7 @@ def test_orderflow_impulse_warm_recovery_advances_over_missing_price_bucket() ->
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
     }
-    assert checkpoint.payload["buffer_sizes"] == {}
+    assert checkpoint.warmup_buckets_by_symbol == {}
 
 
 def test_orderflow_impulse_warm_recovery_keeps_missing_close_with_midpoint() -> None:
@@ -202,7 +202,7 @@ def test_orderflow_impulse_warm_recovery_keeps_missing_close_with_midpoint() -> 
     assert checkpoint.last_processed_at_by_symbol == {
         "BTCUSDT": state.bucket_start,
     }
-    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert checkpoint.warmup_buckets_by_symbol == {"BTCUSDT": 1}
 
 
 def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
@@ -217,7 +217,7 @@ def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
 
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
-    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert strategy.buffered_state_count == 1
 
 
 def test_orderflow_impulse_prunes_only_inactive_unprotected_symbols() -> None:
@@ -232,8 +232,8 @@ def test_orderflow_impulse_prunes_only_inactive_unprotected_symbols() -> None:
     )
 
     assert evicted == ("ETHUSDT",)
-    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
     assert strategy.buffered_symbol_count == 1
+    assert strategy.buffered_state_count == 1
 
 
 def test_orderflow_impulse_keeps_symbol_while_cooldown_is_active() -> None:

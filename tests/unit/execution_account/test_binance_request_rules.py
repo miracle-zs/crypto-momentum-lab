@@ -3,8 +3,8 @@ import pytest
 from crypto_momentum_lab.execution_account.binance.request_rules import (
     entry_leverage_candidates,
     normalize_fill_cursors,
-    normalize_margin_type,
     normalize_symbols,
+    require_margin_type,
 )
 
 
@@ -54,46 +54,29 @@ def test_invalid_cursor_symbol_type_and_sign_keep_existing_errors(cursors, error
 
 
 @pytest.mark.parametrize(
-    "value,expected",
-    [
-        ("CROSS", "CROSSED"),
-        ("CROSSED", "CROSSED"),
-        ("ISOLATED", "ISOLATED"),
-        (" cross ", "CROSSED"),
-        (" crossed ", "CROSSED"),
-        (" isolated ", "ISOLATED"),
-    ],
+    "value",
+    ["CROSSED", "ISOLATED"],
 )
-def test_margin_type_aliases_and_whitespace(value, expected):
-    assert normalize_margin_type(value) == expected
-
-
-@pytest.mark.parametrize("value", ["", " ", "portfolio", "cross-margin"])
-def test_margin_type_errors_keep_allowed_values_and_cause(value):
-    with pytest.raises(
-        ValueError, match="margin_type must be one of: CROSSED, ISOLATED"
-    ) as caught:
-        normalize_margin_type(value)
-    assert isinstance(caught.value.__cause__, KeyError)
+def test_margin_type_accepts_exchange_enums(value):
+    assert require_margin_type(value) == value
 
 
 @pytest.mark.parametrize(
-    "requested,steps,expected",
+    "value",
+    ["CROSS", "cross", " cross ", " crossed ", " isolated ", "", "portfolio"],
+)
+def test_margin_type_rejects_aliases_and_whitespace(value):
+    with pytest.raises(ValueError, match="margin_type must be CROSSED or ISOLATED"):
+        require_margin_type(value)
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
     [
-        (5, 2, (5, 4, 3)),
-        (2, 2, (2, 1)),
-        (1, 5, (1,)),
-        (5, 0, (5,)),
-        (5, -1, ()),
-        (0, 2, (1,)),
-        (-2, 2, (1,)),
+        (5, (5, 4, 3)),
+        (2, (2, 1)),
+        (1, (1,)),
     ],
 )
-def test_leverage_candidates_keep_order_floor_deduplication_and_step_semantics(
-    requested, steps, expected
-):
-    assert entry_leverage_candidates(requested, max_steps=steps) == expected
-
-
-def test_leverage_candidates_default_to_two_fallback_steps():
-    assert entry_leverage_candidates(5) == (5, 4, 3)
+def test_leverage_candidates_keep_the_configured_strategy(requested, expected):
+    assert entry_leverage_candidates(requested) == expected

@@ -8,8 +8,6 @@ from crypto_momentum_lab.domain.live_rollout.authorization import (
 )
 from crypto_momentum_lab.domain.live_rollout.models import (
     LIVE_APPROVAL_CONFIRMATION,
-    LiveGateDecision,
-    LiveGateStatus,
     LiveOperatorApproval,
     LiveSessionState,
     LiveSessionTransition,
@@ -22,8 +20,6 @@ __all__ = [
     "EMERGENCY_FLATTEN_COMMAND",
     "EMERGENCY_FLATTEN_CONFIRMATION",
     "LIVE_APPROVAL_CONFIRMATION",
-    "LiveGateDecision",
-    "LiveGateStatus",
     "LiveOperatorApproval",
     "LiveSessionState",
     "LiveSessionTransition",

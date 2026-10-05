@@ -25,8 +25,6 @@ def test_risk_config_allows_unbounded_capacity_limits() -> None:
         max_gross_notional=None,
         max_daily_loss=None,
         max_open_positions=None,
-        max_market_state_age_seconds=30,
-        max_account_state_age_seconds=30,
         allow_reduce_only_while_draining=True,
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )
@@ -78,8 +76,6 @@ def _risk_config(
         max_gross_notional=Decimal("500"),
         max_daily_loss=Decimal("25"),
         max_open_positions=1,
-        max_market_state_age_seconds=30,
-        max_account_state_age_seconds=30,
         allow_reduce_only_while_draining=allow_reduce_only_while_draining,
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )

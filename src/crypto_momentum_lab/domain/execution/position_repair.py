@@ -74,14 +74,38 @@ def build_position_repair(
             "current entry episode is not owned by this strategy run"
         )
     previous = head.state_payload if head is not None else {}
-    reservations = previous.get("active_reservation_ids", [])
-    if not isinstance(reservations, list) or any(
-        not isinstance(r, str) or not r for r in reservations
-    ):
-        raise PositionRepairBlocked("durable reservation identities are malformed")
-    sequence = previous.get("last_sequence")
-    if sequence is not None and (type(sequence) is not int or sequence < 0):
-        raise PositionRepairBlocked("durable sequence is malformed")
+    if head is None:
+        reservations = []
+        sequence = None
+        recovery_command_ids = []
+        external_recovery_ids = []
+    else:
+        reservations = previous.get("active_reservation_ids")
+        if not isinstance(reservations, list) or any(
+            not isinstance(r, str) or not r for r in reservations
+        ):
+            raise PositionRepairBlocked("durable reservation identities are malformed")
+        recovery_command_ids = previous.get("recovery_command_ids")
+        if not isinstance(recovery_command_ids, list) or any(
+            not isinstance(identity, str) or not identity
+            for identity in recovery_command_ids
+        ):
+            raise PositionRepairBlocked(
+                "durable recovery command identities are malformed"
+            )
+        external_recovery_ids = previous.get("external_recovery_ids")
+        if not isinstance(external_recovery_ids, list) or any(
+            not isinstance(identity, str) or not identity
+            for identity in external_recovery_ids
+        ):
+            raise PositionRepairBlocked(
+                "durable external recovery identities are malformed"
+            )
+        if "last_sequence" not in previous:
+            raise PositionRepairBlocked("durable sequence is missing")
+        sequence = previous["last_sequence"]
+        if sequence is not None and (type(sequence) is not int or sequence < 0):
+            raise PositionRepairBlocked("durable sequence is malformed")
     payload = {
         "schema_version": 1,
         "position_key": dict(
@@ -105,6 +129,8 @@ def build_position_repair(
         "last_sequence": sequence,
         "seen_trade_count": len(facts.fills),
         "active_reservation_ids": list(reservations),
+        "recovery_command_ids": list(recovery_command_ids),
+        "external_recovery_ids": list(external_recovery_ids),
     }
     needs_write = (
         head is None

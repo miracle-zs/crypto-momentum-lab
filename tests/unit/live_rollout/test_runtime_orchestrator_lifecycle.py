@@ -191,7 +191,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
         environment="live", account_label="account-1",
         max_open_positions=5, max_gross_notional=Decimal("1000"),
         max_order_notional=Decimal("200"), max_daily_loss=Decimal("100"),
-        max_market_state_age_seconds=30, max_account_state_age_seconds=30,
         allow_reduce_only_while_draining=True, created_at=datetime.now(UTC),
     )
     monkeypatch.setattr(
@@ -209,10 +208,6 @@ async def test_runtime_failure_is_not_classified_as_startup_retryable_error(
     monkeypatch.setattr(
         "crypto_momentum_lab.live_rollout.runtime_orchestrator.BinanceUsdMTradeClient",
         lambda **kwargs: mock_client,
-    )
-    monkeypatch.setattr(
-        "crypto_momentum_lab.live_rollout.runtime_orchestrator._bootstrap_execution_position_facts",
-        AsyncMock(return_value=MagicMock()),
     )
     candle_sources_mock = MagicMock()
     candle_sources_mock.closed_candle_feed = MagicMock()

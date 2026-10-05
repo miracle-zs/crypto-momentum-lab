@@ -1,29 +1,25 @@
-from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.live_rollout import (
-    LiveGateStatus,
+from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+from crypto_momentum_lab.domain.risk import RiskConfigSnapshot
+from crypto_momentum_lab.live_rollout.gates import (
+    LiveGateContext,
+    has_entry_order_conflict,
+    order_state_is_uncertain,
 )
-from crypto_momentum_lab.domain.risk import (
-    RiskConfigSnapshot,
-)
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
 
 
-def test_live_gate_rejects_when_live_submit_disabled() -> None:
-    decision = evaluate_live_gate(replace(_context(), live_submit_enabled=False))
+def test_order_state_is_uncertain() -> None:
+    assert order_state_is_uncertain(ExchangeOrderState.INTENT_APPROVED) is True
+    assert order_state_is_uncertain(ExchangeOrderState.FILLED) is False
+    assert order_state_is_uncertain(ExchangeOrderState.CANCELED) is False
 
-    assert "live_submit_disabled" in decision.reasons
 
-
-def test_enabled_trading_is_admitted() -> None:
-    decision = evaluate_live_gate(_context())
-
-    assert decision.status is LiveGateStatus.APPROVED
-    assert decision.reasons == ()
+def test_has_entry_order_conflict_empty() -> None:
+    assert has_entry_order_conflict("BTCUSDT", orders=(), states=()) is False
 
 
 
@@ -53,8 +49,6 @@ def _risk_config() -> RiskConfigSnapshot:
         max_gross_notional=Decimal("25"),
         max_daily_loss=Decimal("10"),
         max_open_positions=1,
-        max_market_state_age_seconds=30,
-        max_account_state_age_seconds=30,
         allow_reduce_only_while_draining=True,
         created_at=NOW,
     )

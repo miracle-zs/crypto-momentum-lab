@@ -92,8 +92,6 @@ def _context(
             max_gross_notional=Decimal("500"),
             max_daily_loss=Decimal("25"),
             max_open_positions=1,
-            max_market_state_age_seconds=30,
-            max_account_state_age_seconds=30,
             allow_reduce_only_while_draining=True,
             created_at=NOW,
         ),

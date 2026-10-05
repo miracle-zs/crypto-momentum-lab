@@ -1,5 +1,4 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Any, cast
 
 from sqlalchemy import select, update
@@ -59,12 +58,6 @@ def risk_config_row(config: RiskConfigSnapshot) -> dict[str, object]:
         "max_gross_notional": config.max_gross_notional,
         "max_daily_loss": config.max_daily_loss,
         "max_open_positions": config.max_open_positions,
-        "max_market_state_age_seconds": Decimal(
-            str(config.max_market_state_age_seconds)
-        ),
-        "max_account_state_age_seconds": Decimal(
-            str(config.max_account_state_age_seconds)
-        ),
         "allow_reduce_only_while_draining": (config.allow_reduce_only_while_draining),
         "created_at": config.created_at,
     }

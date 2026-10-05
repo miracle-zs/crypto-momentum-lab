@@ -93,12 +93,7 @@ class PostgresLiveRolloutRepository:
                 select(LiveSessionTransitionRow.state)
                 .where(
                     LiveSessionTransitionRow.session_id == session_id,
-                    LiveSessionTransitionRow.state.not_in(
-                        (
-                            LiveSessionState.PREFLIGHT.value,
-                            LiveSessionState.SHADOW_PREFLIGHT.value,
-                        )
-                    ),
+                    LiveSessionTransitionRow.state != LiveSessionState.PREFLIGHT.value,
                 )
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
                 .limit(1)

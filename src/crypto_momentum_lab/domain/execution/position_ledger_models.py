@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from crypto_momentum_lab.domain.account.models import (
     AccountFillEvent,
@@ -110,7 +110,6 @@ class CoverageEvidence:
             and self.page_exhausted == provenance.page_exhausted
             and self.not_truncated == (not provenance.truncated)
             and self.fill_checked_through == provenance.checked_through
-            and (expected_scope is None or self.stream_scope == expected_scope)
             and self.evidence_observed_at is not None
             and self.evidence_observed_at.tzinfo is not None
             and self.evidence_observed_at.utcoffset() is not None
@@ -139,19 +138,9 @@ def compose_fact_coverage(
         end,
         expected_scope=expected_scope,
     ):
-        checked_through = evidence.fill_checked_through
-        checkpoint_cut = evidence.checkpoint_event_cut
-        load_start = evidence.fill_load_start
-        if checked_through is None or checkpoint_cut is None or load_start is None:
-            return FactCoverageInterval(
-                start_at=start,
-                end_at=end,
-                source_cursor=evidence.fill_cursor_id,
-                status=FactCoverageStatus.PENDING,
-                confirmed_revision=None,
-                stream_scope=evidence.stream_scope,
-                evidence_observed_at=evidence.evidence_observed_at,
-            )
+        checked_through = cast(datetime, evidence.fill_checked_through)
+        checkpoint_cut = cast(datetime, evidence.checkpoint_event_cut)
+        load_start = cast(datetime, evidence.fill_load_start)
         return FactCoverageInterval(
             start_at=max(start, load_start),
             end_at=min(end, checked_through, checkpoint_cut),

@@ -294,7 +294,12 @@ def test_user_data_order_fact_survives_account_hub_transport() -> None:
         "i": 123,
     }
     source = parse_user_data_event(
-        {"e": "ORDER_TRADE_UPDATE", "E": int(now.timestamp() * 1000), "o": fact},
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": int(now.timestamp() * 1000),
+            "T": int(now.timestamp() * 1000),
+            "o": fact,
+        },
         received_at=now,
     )
     result = SimpleNamespace(

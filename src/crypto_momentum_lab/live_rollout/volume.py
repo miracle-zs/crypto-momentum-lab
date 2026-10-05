@@ -57,7 +57,6 @@ class WebSocketQuoteVolumeProvider:
             raise ValueError("history_size must be positive")
         self._history_size = history_size
         self._snapshots: dict[str, deque[QuoteVolume24hSnapshot]] = {}
-        self.last_refresh_at: datetime | None = None
         self._lookup_hit_count: int = 0
         self._lookup_miss_count: int = 0
         self._task: asyncio.Task[None] | None = None
@@ -170,7 +169,6 @@ class WebSocketQuoteVolumeProvider:
             deque(maxlen=self._history_size),
         )
         history.append(normalized)
-        self.last_refresh_at = normalized.fetched_at
         return True
 
     async def _run(self) -> None:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from crypto_momentum_lab.live_rollout.runtime_manifest import (
     RuntimeManifestError,
@@ -99,6 +100,18 @@ accounts:
     profile_ref: profile.yaml
     limits_ref: postgres:risk_config/primary
     services: [live-strategy]
+    execution_config:
+      target_notional: 100
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 5
+      margin_type: CROSSED
+      exit_mode: candle_15m
+      candle_grace_bars: 8
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0.0088
+      persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
       confirmation_buckets: 1
@@ -143,6 +156,18 @@ accounts:
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy]
+    execution_config:
+      target_notional: 100
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 5
+      margin_type: CROSSED
+      exit_mode: candle_15m
+      candle_grace_bars: 8
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0.0088
+      persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
       confirmation_buckets: 1
@@ -164,6 +189,18 @@ accounts:
     profile_ref: profile.yaml
     limits_ref: limits.yaml
     services: [live-strategy-2]
+    execution_config:
+      target_notional: 100
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 5
+      margin_type: CROSSED
+      exit_mode: candle_15m
+      candle_grace_bars: 8
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0.0088
+      persist_exchange_operations: submit,cancel
+      max_concurrency_per_symbol: 2
     strategy_config:
       impulse_window_buckets: 4
       confirmation_buckets: 1
@@ -187,20 +224,93 @@ accounts:
 
 
 def test_manifest_accepts_trading_configuration_without_compliance_metadata(tmp_path):
-    import yaml
-
-    document = yaml.safe_load(Path("deploy/live-runtime.yaml").read_text())
-    for account in document["accounts"]:
-        account.pop("image_commit", None)
-    document.pop("runtime")
-    for account in document["accounts"]:
-        account.pop("lease_owner", None)
-        account.pop("migration_revision", None)
+    document = _trading_manifest_document()
     path = tmp_path / "trading.yaml"
     path.write_text(yaml.safe_dump(document))
     manifest = load_live_runtime_manifest(path, environment={})
     assert manifest.account("primary").execution_inputs.candle_grace_bars == 8
-    assert manifest.account("account-4").strategy_inputs.entry_order_type.value == "limit"
+    assert (
+        manifest.account("account-4").strategy_inputs.entry_order_type.value == "limit"
+    )
+
+
+def test_runtime_manifest_requires_explicit_execution_config(tmp_path: Path) -> None:
+    document = _trading_manifest_document()
+    document["accounts"][0].pop("execution_config")
+    path = tmp_path / "runtime.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    with pytest.raises(
+        RuntimeManifestError, match="execution_config must be an object"
+    ):
+        load_live_runtime_manifest(path, environment={})
+
+
+def test_runtime_manifest_requires_explicit_lease_owner(tmp_path: Path) -> None:
+    document = _trading_manifest_document()
+    document["accounts"][0].pop("lease_owner")
+    path = tmp_path / "runtime.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    with pytest.raises(RuntimeManifestError, match=r"accounts\[0\]\.lease_owner"):
+        load_live_runtime_manifest(path, environment={})
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["target_notional", "max_concurrency_per_symbol"],
+)
+def test_runtime_manifest_requires_explicit_sizing_fields(
+    tmp_path: Path, field: str
+) -> None:
+    document = _trading_manifest_document()
+    document["accounts"][0]["execution_config"].pop(field)
+    path = tmp_path / "runtime.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    with pytest.raises(RuntimeManifestError, match=field):
+        load_live_runtime_manifest(path, environment={})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("entry_leverage", 5.5, "entry_leverage must be an integer"),
+        ("hedge_mode", "yes", "hedge_mode must be a boolean"),
+    ],
+)
+def test_runtime_manifest_rejects_coerced_execution_settings(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    document = _trading_manifest_document()
+    document["accounts"][0]["execution_config"][field] = value
+    path = tmp_path / "runtime.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    with pytest.raises(RuntimeManifestError, match=message):
+        load_live_runtime_manifest(path, environment={})
+
+
+@pytest.mark.parametrize("value", ["cross", "isolated", " CROSSED "])
+def test_runtime_manifest_rejects_margin_type_aliases(
+    tmp_path: Path, value: str
+) -> None:
+    document = _trading_manifest_document()
+    document["accounts"][0]["execution_config"]["margin_type"] = value
+    path = tmp_path / "runtime.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    with pytest.raises(RuntimeManifestError, match="margin_type"):
+        load_live_runtime_manifest(path, environment={})
+
+
+def _trading_manifest_document():
+    document = yaml.safe_load(Path("deploy/live-runtime.yaml").read_text())
+    document.pop("runtime")
+    for account in document["accounts"]:
+        account.pop("image_commit", None)
+        account.pop("migration_revision", None)
+    return document
 
 
 def test_unknown_strategy_does_not_produce_unset_hash(tmp_path):

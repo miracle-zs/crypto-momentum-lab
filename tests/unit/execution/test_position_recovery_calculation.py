@@ -57,6 +57,8 @@ def state():
         recovery_checkpoint=None,
         journal_revision=0,
         active_reservation_ids=["existing-reservation"],
+        recovery_command_ids=[],
+        external_recovery_ids=[],
         last_sequence=42,
     )
     return DurableExecutionPositionState(
@@ -109,6 +111,19 @@ def test_existing_migration_policy_returns_diagnostic_and_recomputed_digest(
         ("active_reservation_ids", "reservation"),
         ("active_reservation_ids", [""]),
         ("active_reservation_ids", [1]),
+        ("recovery_command_ids", None),
+        ("recovery_command_ids", [""]),
+        ("recovery_command_ids", [1]),
+        ("external_recovery_ids", None),
+        ("external_recovery_ids", [""]),
+        ("external_recovery_ids", [1]),
+        ("last_sequence", -1),
+        ("last_sequence", True),
+        ("last_sequence", False),
+        ("last_sequence", 1.0),
+        ("last_sequence", "42"),
+        ("last_sequence", []),
+        ("last_sequence", {}),
     ],
 )
 def test_malformed_head_cannot_produce_recovery_candidate(state, field, value):
@@ -119,16 +134,23 @@ def test_malformed_head_cannot_produce_recovery_candidate(state, field, value):
         )
 
 
-@pytest.mark.parametrize("sequence", [-1, True, False, 1.0, "42", [], {}])
-def test_legacy_invalid_sequence_normalization_is_explicit(state, sequence):
-    payload = dict(state.head.state_payload, last_sequence=sequence)
-    recovered = recover_durable_position(
-        replace(state, head=replace(state.head, state_payload=payload))
-    )
-    assert recovered.last_sequence == 0
-    assert recovered.diagnostics == (
-        ("durable_execution_head_sequence_invalid", {"sequence": sequence}),
-    )
+def test_missing_sequence_cannot_produce_recovery_candidate(state):
+    payload = dict(state.head.state_payload)
+    payload.pop("last_sequence")
+    with pytest.raises(RuntimeError, match="malformed"):
+        recover_durable_position(
+            replace(state, head=replace(state.head, state_payload=payload))
+        )
+
+
+@pytest.mark.parametrize("field", ["recovery_command_ids", "external_recovery_ids"])
+def test_missing_recovery_id_lists_cannot_produce_recovery_candidate(state, field):
+    payload = dict(state.head.state_payload)
+    payload.pop(field)
+    with pytest.raises(RuntimeError, match="malformed"):
+        recover_durable_position(
+            replace(state, head=replace(state.head, state_payload=payload))
+        )
 
 
 def test_headless_recovery_has_no_invented_revision_or_reservations(state):

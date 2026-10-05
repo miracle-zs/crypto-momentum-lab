@@ -8,14 +8,10 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 LIVE_APPROVAL_CONFIRMATION = "ENABLE SMALL LIVE TRADING"
 
 
-class LiveGateStatus(StrEnum):
-    APPROVED = "approved"
-    BLOCKED = "blocked"
 
 
 class LiveSessionState(StrEnum):
     PREFLIGHT = "preflight"
-    SHADOW_PREFLIGHT = "shadow_preflight"
     LIVE_ENABLED = "live_enabled"
     DRAINING = "draining"
     HALTED = "halted"
@@ -62,14 +58,6 @@ class LiveOperatorApproval:
                 raise ValueError("approval expiration must be after creation")
 
 
-@dataclass(frozen=True, slots=True)
-class LiveGateDecision:
-    status: LiveGateStatus
-    reasons: tuple[str, ...]
-
-    @property
-    def approved(self) -> bool:
-        return self.status is LiveGateStatus.APPROVED
 
 
 @dataclass(frozen=True, slots=True)

@@ -1751,26 +1751,6 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
             loop.remove_signal_handler(shutdown_signal)
 
 
-async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
-    stop_requested = asyncio.Event()
-    timer_task = asyncio.create_task(_request_stop_after(seconds, stop_requested))
-    try:
-        await run_market_data(
-            config_path,
-            stop_requested=stop_requested,
-        )
-    finally:
-        timer_task.cancel()
-        await asyncio.gather(timer_task, return_exceptions=True)
-
-
-async def _request_stop_after(
-    seconds: float,
-    stop_requested: asyncio.Event,
-) -> None:
-    await asyncio.sleep(seconds)
-    stop_requested.set()
-
 
 @app.command()
 def run_universe_scheduler(

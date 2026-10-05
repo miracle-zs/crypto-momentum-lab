@@ -22,7 +22,7 @@ from crypto_momentum_lab.operator_dashboard.common_equity import (
     live_account_equity_point as _live_account_equity_point,
 )
 from crypto_momentum_lab.operator_dashboard.common_equity import (
-    live_equity_observations as _live_equity_observations,
+    live_aggregated_equity_observations as _live_aggregated_equity_observations,
 )
 from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
     account_equity_statement as _account_equity_statement,
@@ -64,8 +64,6 @@ from crypto_momentum_lab.operator_dashboard.paper_equity_queries import (
 from crypto_momentum_lab.operator_dashboard.queries import (
     FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
-    _checkpoint_times_statement,
-    _latest_checkpoint_at_statement,
     parse_common_equity_start_at,
     parse_live_cash_flow_adjustments,
 )
@@ -422,7 +420,7 @@ def test_dashboard_facade_keeps_telemetry_query_in_its_domain_module() -> None:
         "src/crypto_momentum_lab/operator_dashboard/telemetry_queries.py"
     ).read_text(encoding="utf-8")
 
-    assert "StrategyRuntimeCheckpointRow" in facade_source
+    assert "AccountBalanceSnapshotRow" in facade_source
     assert "StrategyRuntimeEventRow" not in facade_source
     assert "StrategyRuntimeEventRow" in telemetry_source
 
@@ -602,21 +600,6 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     assert response.window_end == window_end
     assert response.persisted_event_count == 1
     assert session.statement is not None
-
-
-def test_latest_checkpoint_query_selects_only_timestamp() -> None:
-    statement = _latest_checkpoint_at_statement()
-
-    assert [column.key for column in statement.selected_columns] == ["saved_at"]
-
-
-def test_paper_checkpoint_query_selects_only_identity_and_timestamp() -> None:
-    statement = _checkpoint_times_statement(["paper-a", "paper-b"])
-
-    assert [column.key for column in statement.selected_columns] == [
-        "run_id",
-        "saved_at",
-    ]
 
 
 def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
@@ -1055,20 +1038,10 @@ def test_common_equity_curve_respects_shared_source_watermark() -> None:
 
 def test_live_common_equity_removes_configured_external_deposit() -> None:
     observed_at = datetime(2026, 8, 21, 9, 45, tzinfo=UTC)
-    observations = _live_equity_observations(
+    observations = _live_aggregated_equity_observations(
         [
-            SimpleNamespace(
-                account_label="primary",
-                observed_at=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
-                wallet_balance=Decimal("1000"),
-                unrealized_pnl=Decimal("0"),
-            ),
-            SimpleNamespace(
-                account_label="primary",
-                observed_at=observed_at,
-                wallet_balance=Decimal("1202"),
-                unrealized_pnl=Decimal("0"),
-            ),
+            (datetime(2026, 8, 21, 9, 30, tzinfo=UTC), Decimal("1000")),
+            (observed_at, Decimal("1202")),
         ],
         account_label="primary",
         cash_flow_adjustments=parse_live_cash_flow_adjustments(
@@ -1360,7 +1333,8 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
     assert resp.status == OperationalStatus.UNKNOWN
 
 
-async def test_readiness_identifies_stale_strategy_stream_without_blame_on_market_data() -> None:
+async def test_readiness_identifies_stale_strategy_stream_without_blame_on_market_data(
+) -> None:
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
         LiveAccountsResponse,
@@ -1423,13 +1397,15 @@ async def test_readiness_identifies_stale_strategy_stream_without_blame_on_marke
             )
 
     response = await StubOverviewQueries().readiness()
-    assert response.tradeability.entry_gate_reason == "runtime_readiness_missing_or_stale"
+    assert (
+        response.tradeability.entry_gate_reason
+        == "runtime_readiness_missing_or_stale"
+    )
     assert response.stream_readiness.streams["market-data"] == "READY"
 
 
-async def test_readiness_allows_fully_tradeable_when_services_include_database_ready() -> (
-    None
-):
+async def test_readiness_allows_fully_tradeable_when_services_include_database_ready(
+) -> None:
     from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
     from crypto_momentum_lab.operator_dashboard.schemas import (
         LiveAccountsResponse,
@@ -1738,7 +1714,9 @@ async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
 
 
 async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
-    """F04: Incomplete symbol coverage must cause STALE status, even if present symbol is fresh."""
+    """F04: Incomplete symbol coverage must cause STALE status,
+    even if present symbol is fresh.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
@@ -1776,7 +1754,9 @@ async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
 
 
 async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
-    """F04: When all required symbols have complete, fresh data, status is READY / LIVE."""
+    """F04: When all required symbols have complete, fresh data,
+    status is READY / LIVE.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
@@ -1817,8 +1797,11 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
     assert resp.coverage_scope == "2/2 covered"
 
 
-async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_extended() -> None:
-    """Snapshot UUIDs and active target memberships are loaded without falling back to all historical symbols."""
+async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_extended(
+) -> None:
+    """Snapshot UUIDs and active target memberships are loaded
+    without falling back to all historical symbols.
+    """
     from unittest.mock import AsyncMock, MagicMock
     from uuid import uuid4
 
@@ -1859,7 +1842,9 @@ async def test_risk_execution_loads_universe_snapshot_with_uuid_and_filters_exte
 
 
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
-    """F04: When coverage query fails, API MUST return only safe error code & trace ID without raw exception text."""
+    """F04: When coverage query fails, API MUST return only safe error code
+    & trace ID without raw exception text.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
@@ -1900,7 +1885,8 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
         resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
     )
 
-    # Critical security assertion: NEVER leak raw exception, credentials, or internal topology to the response!
+    # Critical security assertion: NEVER leak raw exception, credentials,
+    # or internal topology to the response!
     assert "secret_12345" not in resp.coverage_error
     assert "db.internal" not in resp.coverage_error
     assert "RuntimeError" not in resp.coverage_error
@@ -1908,7 +1894,9 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
 
 
 async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
-    """F04: If halts exist when coverage query fails, status is HALTED but safe error code & trace are preserved."""
+    """F04: If halts exist when coverage query fails, status is HALTED but
+    safe error code & trace are preserved.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
@@ -1950,7 +1938,9 @@ async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> N
 
 
 def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
-    """F04: Log sanitization must redact client_secret, access_token, JSON/colon passwords, Authorization Bearer, and DSNs."""
+    """F04: Log sanitization must redact client_secret, access_token,
+    JSON/colon passwords, Authorization Bearer, and DSNs.
+    """
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import (
         _sanitize_error_detail,
     )
@@ -1975,7 +1965,9 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
 
     # 3. JSON format passwords and secrets
     exc_json = ValueError(
-        'Invalid json {"password": "p@ssw0rd123", "client_secret": "cs_json_456", "access_token": "at_json_789"}'
+        "Invalid json "
+        '{"password": "p@ssw0rd123", "client_secret": "cs_json_456", '
+        '"access_token": "at_json_789"}'
     )
     sanitized_json = _sanitize_error_detail(exc_json)
     assert "p@ssw0rd123" not in sanitized_json
@@ -2026,7 +2018,8 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     assert "sig1234567" not in sanitized_api
 
     exc_query = RuntimeError(
-        "URL request https://api.binance.com/api/v3/order?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed"
+        "URL request https://api.binance.com/api/v3/order"
+        "?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed"
     )
     sanitized_query = _sanitize_error_detail(exc_query)
     assert "d98a72ef8912" not in sanitized_query
@@ -2034,7 +2027,9 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
 
     # 8. Private key blocks
     exc_pkey = RuntimeError(
-        "Bad key: -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----"
+        "Bad key: -----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEowIBAAKCAQEA0...\n"
+        "-----END RSA PRIVATE KEY-----"
     )
     sanitized_pkey = _sanitize_error_detail(exc_pkey)
     assert "MIIEowIBAAKCAQEA0" not in sanitized_pkey

@@ -30,29 +30,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
-def _has_execution_watermark_identity(
-    row: ExecutionCommandRow,
-    details: Mapping[str, Any],
-) -> bool:
-    scope = details.get("scope")
-    return (
-        isinstance(scope, Mapping)
-        and all(
-            isinstance(scope.get(field_name), str) and scope[field_name].strip()
-            for field_name in (
-                "environment",
-                "account_label",
-                "symbol",
-                "position_side",
-            )
-        )
-        and details.get("cumulative_filled_quantity") is not None
-        and details.get("cumulative_filled_quote") is not None
-        and isinstance(row.client_order_id, str)
-        and bool(row.client_order_id.strip())
-    )
-
-
 def _execution_decimal(
     value: object,
     *,
@@ -72,114 +49,6 @@ def _execution_decimal(
             "migration/recovery required"
         )
     return result
-
-
-def _recover_execution_watermark(
-    command_id: str,
-    events: list[ExchangeOrderEventRow],
-    fills: list[ExchangeFillRow],
-) -> tuple[Decimal, Decimal]:
-    event_pairs: list[tuple[Decimal, Decimal]] = []
-    for event in events:
-        details = event.details
-        raw_quantity = details.get(
-            "executed_quantity", details.get("cumulative_filled_quantity")
-        )
-        if raw_quantity is None:
-            continue
-        quantity = _execution_decimal(
-            raw_quantity,
-            command_id=command_id,
-            field_name="persisted event executed_quantity",
-        )
-        raw_quote = details.get(
-            "cumulative_quote_quantity", details.get("cumulative_filled_quote")
-        )
-        if raw_quote is None:
-            raw_average_price = details.get("average_price")
-            if quantity == Decimal("0"):
-                quote = Decimal("0")
-            elif raw_average_price is not None:
-                average_price = _execution_decimal(
-                    raw_average_price,
-                    command_id=command_id,
-                    field_name="persisted event average_price",
-                )
-                if average_price == Decimal("0"):
-                    # Intermediate unpriced event from exchange; skip to allow
-                    # subsequent priced events or fills to provide the watermark.
-                    continue
-                quote = quantity * average_price
-            else:
-                continue
-        else:
-            quote = _execution_decimal(
-                raw_quote,
-                command_id=command_id,
-                field_name="persisted event cumulative quote",
-            )
-        if quantity == Decimal("0") and quote != Decimal("0"):
-            continue
-        if quantity > Decimal("0") and quote == Decimal("0"):
-            continue
-        event_pairs.append((quantity, quote))
-
-    event_watermark: tuple[Decimal, Decimal] | None = None
-    if event_pairs:
-        event_pairs.sort(key=lambda pair: pair[0])
-        event_watermark = event_pairs[0]
-        for pair in event_pairs[1:]:
-            previous_quantity, previous_quote = event_watermark
-            quantity, quote = pair
-            if quantity == previous_quantity:
-                event_watermark = (quantity, max(previous_quote, quote))
-            elif quote < previous_quote:
-                event_watermark = (quantity, previous_quote)
-            else:
-                event_watermark = pair
-
-    fill_watermark: tuple[Decimal, Decimal] | None = None
-    if fills:
-        fill_quantity = Decimal("0")
-        fill_quote = Decimal("0")
-        for fill in fills:
-            quantity = _execution_decimal(
-                fill.quantity,
-                command_id=command_id,
-                field_name="persisted fill quantity",
-            )
-            price = _execution_decimal(
-                fill.price,
-                command_id=command_id,
-                field_name="persisted fill price",
-            )
-            if quantity == Decimal("0") or price == Decimal("0"):
-                continue
-            fill_quantity += quantity
-            fill_quote += quantity * price
-        if fill_quantity > Decimal("0") or fill_quote > Decimal("0"):
-            fill_watermark = (fill_quantity, fill_quote)
-
-    if event_watermark is None and fill_watermark is None:
-        raise ValueError(
-            f"execution command {command_id} has no persisted cumulative order "
-            "event or fill facts; migration/recovery required"
-        )
-    if event_watermark is None:
-        assert fill_watermark is not None
-        return fill_watermark
-    if fill_watermark is None:
-        return event_watermark
-
-    event_quantity, event_quote = event_watermark
-    fill_quantity, fill_quote = fill_watermark
-    if event_quantity == fill_quantity:
-        return fill_watermark if fill_quote > Decimal("0") else event_watermark
-    if event_quantity > fill_quantity and event_quote >= fill_quote:
-        return event_watermark
-    if fill_quantity > event_quantity and fill_quote >= event_quote:
-        return fill_watermark
-    return max(event_watermark, fill_watermark, key=lambda pair: (pair[0], pair[1]))
 
 
 class PostgresCommandRepository:
@@ -364,10 +233,7 @@ class PostgresCommandRepository:
         Terminal commands are included because a later order response can be
         stale or duplicated after the active outbox row has closed.
 
-        Legacy terminal rows without a watermark are reconstructed only from
-        persisted order events or fills. If their identity or cumulative cut
-        cannot be recovered, fail closed so a later cumulative report cannot
-        be applied again from an invented zero baseline.
+        Each command must persist its complete scope and cumulative watermarks.
         """
         async with self._session_factory() as session:
             rows = (
@@ -377,57 +243,6 @@ class PostgresCommandRepository:
                     )
                 )
             ).all()
-
-            candidate_client_ids: set[str] = set()
-            for row in rows:
-                if row.command in (
-                    "resolve_unknown_order",
-                    "manual_reduce_only_recovery",
-                    "manual_recovery_result",
-                ):
-                    continue
-                details = dict(row.details)
-                scope = details.get("scope")
-                if (
-                    account_label is not None
-                    and isinstance(scope, Mapping)
-                    and isinstance(scope.get("account_label"), str)
-                    and scope["account_label"].strip()
-                    and scope["account_label"] != account_label
-                ):
-                    continue
-                if _has_execution_watermark_identity(row, details):
-                    continue
-                client_order_id = row.client_order_id
-                if isinstance(client_order_id, str) and client_order_id.strip():
-                    candidate_client_ids.add(client_order_id)
-
-            events_by_client: dict[str, list[ExchangeOrderEventRow]] = {}
-            fills_by_client: dict[str, list[ExchangeFillRow]] = {}
-            if candidate_client_ids:
-                event_rows = (
-                    await session.scalars(
-                        select(ExchangeOrderEventRow)
-                        .where(
-                            ExchangeOrderEventRow.client_order_id.in_(
-                                candidate_client_ids
-                            )
-                        )
-                        .order_by(ExchangeOrderEventRow.occurred_at)
-                    )
-                ).all()
-                for event in event_rows:
-                    events_by_client.setdefault(event.client_order_id, []).append(event)
-
-                fill_rows = (
-                    await session.scalars(
-                        select(ExchangeFillRow).where(
-                            ExchangeFillRow.client_order_id.in_(candidate_client_ids)
-                        )
-                    )
-                ).all()
-                for fill in fill_rows:
-                    fills_by_client.setdefault(fill.client_order_id, []).append(fill)
 
         result: list[dict[str, object]] = []
         for row in rows:
@@ -457,40 +272,6 @@ class PostgresCommandRepository:
                     "migration/recovery required"
                 )
 
-            order_events = events_by_client.get(client_order_id, [])
-            for event in order_events:
-                event_details = event.details
-                for field_name in (
-                    "environment",
-                    "account_label",
-                    "symbol",
-                    "position_side",
-                ):
-                    event_value = event_details.get(field_name)
-                    scope_value = scope.get(field_name)
-                    if not isinstance(event_value, str) or not event_value.strip():
-                        continue
-                    if (
-                        isinstance(scope_value, str)
-                        and scope_value.strip()
-                        and scope_value != event_value
-                    ):
-                        raise ValueError(
-                            f"execution command {row.command_id} conflicts with "
-                            f"persisted order event {field_name}; "
-                            "migration/recovery required"
-                        )
-                    if not isinstance(scope_value, str) or not scope_value.strip():
-                        scope[field_name] = event_value
-
-            if (
-                account_label is not None
-                and isinstance(scope.get("account_label"), str)
-                and scope["account_label"].strip()
-                and scope["account_label"] != account_label
-            ):
-                continue
-
             missing_scope = tuple(
                 field_name
                 for field_name in (
@@ -505,45 +286,14 @@ class PostgresCommandRepository:
             if missing_scope:
                 raise ValueError(
                     f"execution command {row.command_id} has incomplete scope "
-                    f"({', '.join(missing_scope)}); migration/recovery required"
+                    f"({', '.join(missing_scope)})"
                 )
 
             if quantity is None or quote is None:
-                recovered = _recover_execution_watermark(
-                    row.command_id,
-                    order_events,
-                    fills_by_client.get(client_order_id, []),
+                raise ValueError(
+                    f"execution command {row.command_id} has incomplete cumulative "
+                    "watermark"
                 )
-                recovered_quantity, recovered_quote = recovered
-                if (
-                    quantity is not None
-                    and _execution_decimal(
-                        quantity,
-                        command_id=row.command_id,
-                        field_name="cumulative_filled_quantity",
-                    )
-                    != recovered_quantity
-                ):
-                    raise ValueError(
-                        f"execution command {row.command_id} has a partial quantity "
-                        "watermark that conflicts with persisted recovery facts; "
-                        "migration/recovery required"
-                    )
-                if (
-                    quote is not None
-                    and _execution_decimal(
-                        quote,
-                        command_id=row.command_id,
-                        field_name="cumulative_filled_quote",
-                    )
-                    != recovered_quote
-                ):
-                    raise ValueError(
-                        f"execution command {row.command_id} has a partial quote "
-                        "watermark that conflicts with persisted recovery facts; "
-                        "migration/recovery required"
-                    )
-                quantity, quote = recovered
 
             cumulative_quantity = _execution_decimal(
                 quantity,

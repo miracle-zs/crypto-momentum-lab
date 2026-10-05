@@ -19,7 +19,6 @@ from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_read_models import (
-    OrderIdentityEvent,
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_rules import (
@@ -55,12 +54,8 @@ from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.order_facts_loader import (
     _resolve_symbol_fill_horizon,
 )
-from crypto_momentum_lab.live_rollout.order_identity import (
-    _ms_to_dt,
-)
 from crypto_momentum_lab.live_rollout.position_batches import (
     _record_earliest_fill,
-    _record_fill_quantity,
 )
 from crypto_momentum_lab.live_rollout.position_classification import (
     _classify_live_positions_detailed,
@@ -77,7 +72,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
-    load_order_identity_metadata,
+    load_position_account_fills,
     order_observation,
     position_observation,
 )
@@ -924,11 +919,6 @@ class PostgresLiveContextProvider(LiveContextReader):
                 return _book_owned_account_exposure(active, process_at)
             orders: list[ExchangeOrderRow] = []
             entry_fill_times: dict[str, datetime] = {}
-            account_fill_quantities: dict[str, Decimal] = {}
-            order_identity_events: Mapping[
-                str,
-                tuple[OrderIdentityEvent, ...],
-            ] = {}
             domain_account_fills: tuple[AccountFillEvent, ...] = ()
             since_time: datetime | None = None
             if active:
@@ -945,26 +935,17 @@ class PostgresLiveContextProvider(LiveContextReader):
                     )
                 )
                 since_time = _resolve_symbol_fill_horizon(orders, active)
-                order_identity_metadata = await load_order_identity_metadata(
+                domain_account_fills = await load_position_account_fills(
                     session,
                     orders,
                     account_label=self._account_label,
                     since=since_time,
                 )
-                domain_account_fills = order_identity_metadata.account_fills
-                order_identity_events = (
-                    order_identity_metadata.events_by_client_order_id
-                )
-                for account_fill in order_identity_metadata.account_fills:
+                for account_fill in domain_account_fills:
                     _record_earliest_fill(
                         entry_fill_times,
                         account_fill.order_id,
                         account_fill.trade_at,
-                    )
-                    _record_fill_quantity(
-                        account_fill_quantities,
-                        account_fill.order_id,
-                        account_fill.quantity,
                     )
                 if entry_client_order_ids:
                     exchange_fills = (
@@ -985,10 +966,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         active = [row for row in rows if row.position_amt != 0]
         exit_batch_ids = await _load_exit_batch_bindings(self._sessions, orders)
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
-        if active or (
-            reconciliation is not None
-            and reconciliation.status == "ready"
-        ):
+        if active or (reconciliation is not None and reconciliation.status == "ready"):
             async with self._sessions() as cursor_session:
                 fill_cursors = (
                     await cursor_session.scalars(
@@ -1012,8 +990,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             unresolved,
             entry_fill_times=entry_fill_times,
             exit_batch_ids=exit_batch_ids,
-            order_identity_events=order_identity_events,
-            account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
             build_managed_positions=self._execution_book is None,
@@ -1058,11 +1034,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             return _book_owned_account_exposure(active, snapshot.config.observed_at)
         orders: list[ExchangeOrderRow] = []
         entry_fill_times: dict[str, datetime] = {}
-        account_fill_quantities: dict[str, Decimal] = {}
-        order_identity_events: Mapping[
-            str,
-            tuple[OrderIdentityEvent, ...],
-        ] = {}
         domain_account_fills: tuple[AccountFillEvent, ...] = ()
         if active:
             async with self._sessions() as session:
@@ -1079,26 +1050,17 @@ class PostgresLiveContextProvider(LiveContextReader):
                     )
                 )
                 since_time = _resolve_symbol_fill_horizon(orders, active)
-                order_identity_metadata = await load_order_identity_metadata(
+                domain_account_fills = await load_position_account_fills(
                     session,
                     orders,
                     account_label=self._account_label,
                     since=since_time,
                 )
-                domain_account_fills = order_identity_metadata.account_fills
-                order_identity_events = (
-                    order_identity_metadata.events_by_client_order_id
-                )
-                for account_fill in order_identity_metadata.account_fills:
+                for account_fill in domain_account_fills:
                     _record_earliest_fill(
                         entry_fill_times,
                         account_fill.order_id,
                         account_fill.trade_at,
-                    )
-                    _record_fill_quantity(
-                        account_fill_quantities,
-                        account_fill.order_id,
-                        account_fill.quantity,
                     )
                 if entry_client_order_ids:
                     exchange_fills = (
@@ -1129,10 +1091,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 .order_by(AccountReconciliationRunRow.observed_at.desc())
                 .limit(1)
             )
-            if (
-                reconciliation is not None
-                and reconciliation.status == "ready"
-            ):
+            if reconciliation is not None and reconciliation.status == "ready":
                 fill_cursors = (
                     await session.scalars(
                         select(AccountFillReconciliationCursorRow).where(
@@ -1156,8 +1115,6 @@ class PostgresLiveContextProvider(LiveContextReader):
             unresolved,
             entry_fill_times=entry_fill_times,
             exit_batch_ids=exit_batch_ids,
-            order_identity_events=order_identity_events,
-            account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
             coverage_by_symbol=coverage_by_symbol,
             build_managed_positions=self._execution_book is None,
@@ -1263,10 +1220,7 @@ def _coverage_evidence_from_sources(
         checked_through = fill_cursor.last_checked_at
     checkpoint_id: str | None = None
     checkpoint_cut: datetime | None = None
-    if (
-        reconciliation is not None
-        and reconciliation.status == "ready"
-    ):
+    if reconciliation is not None and reconciliation.status == "ready":
         checkpoint_id = reconciliation.reconciliation_id
         checkpoint_cut = reconciliation.observed_at
     return CoverageEvidence(
@@ -1302,6 +1256,12 @@ def _book_owned_account_exposure(
         frozenset(),
         {},
     )
+
+
+def _ms_to_dt(value: int | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value / 1000.0, tz=UTC)
 
 
 def _context_cache_can_be_reused(

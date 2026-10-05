@@ -1010,8 +1010,6 @@ class RiskConfigSnapshotRow(Base):
         nullable=True,
     )
     max_open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    max_market_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
-    max_account_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     allow_reduce_only_while_draining: Mapped[bool] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

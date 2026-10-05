@@ -344,7 +344,6 @@ class ExecutionBook:
         self._active_streams: set[tuple[str, str, str, str]] = set()
         self._latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
         self._head_revisions: dict[str, int] = {}
-        self._head_projection_digests: dict[str, str] = {}
         self._head_expected_reservation_ids: dict[str, set[str]] = {}
         self._journal_revisions: dict[str, int] = {}
         self._last_sequences: dict[str, int] = {}
@@ -391,7 +390,7 @@ class ExecutionBook:
         environment: str,
         account_label: str,
     ) -> tuple[str, str] | None:
-        """Return the active (stream_id, stream_epoch) registered for this account, if known."""
+        """Return active (stream_id, stream_epoch) for this account, if known."""
         latest = self._latest_active_streams.get((environment, account_label))
         if latest is not None:
             return latest
@@ -461,9 +460,9 @@ class ExecutionBook:
     ) -> bool:
         """Attempt to reconcile reservation divergence for a position.
 
-        If force=True, acknowledges the current reservations and clears the recovery gate.
-        Otherwise, reloads the position from durable storage to verify whether actual
-        active reservations now match the head expectation.
+        If force=True, acknowledges current reservations and clears the gate.
+        Otherwise, reloads durable storage to verify whether active reservations
+        now match the head expectation.
         """
         async with self._mutation_lock(key):
             canon = key.canonical_id
@@ -478,7 +477,9 @@ class ExecutionBook:
             view = await self._reload_position(key, as_of=as_of)
             if view is None:
                 return False
-            expected_ids = self._head_expected_reservation_ids.get(canon, set())
+            expected_ids = self._head_expected_reservation_ids.get(canon)
+            if expected_ids is None:
+                return False
             actual_ids = {r.reservation_id for r in self.get_active_reservations(key)}
             if actual_ids == expected_ids:
                 self._recovery_required_commands.discard(divergence_identity)
@@ -537,19 +538,25 @@ class ExecutionBook:
         scope = target_state.cut.scope
         if head is not None:
             payload = head.state_payload
+            active_res = payload.get("active_reservation_ids")
+            if not isinstance(active_res, list) or any(
+                not isinstance(identity, str) or not identity for identity in active_res
+            ):
+                raise RuntimeError("durable execution head has malformed reservations")
+            if "last_sequence" not in payload:
+                raise RuntimeError("durable execution head is missing last_sequence")
+            last_sequence = payload["last_sequence"]
+            if last_sequence is not None and (
+                type(last_sequence) is not int or last_sequence < 0
+            ):
+                raise RuntimeError("durable execution head has malformed last_sequence")
             view = book.get_view()
             book.use_durable_projection_version(
                 head.projection_version,
                 event_cut=view.event_cut,
             )
             self._head_revisions[canon] = head.revision
-            self._head_projection_digests[canon] = str(
-                payload.get("projection_digest", "")
-            )
-            active_res = payload.get("active_reservation_ids", [])
-            expected_res_set = (
-                set(active_res) if isinstance(active_res, list) else set()
-            )
+            expected_res_set = set(active_res)
             self._head_expected_reservation_ids[canon] = expected_res_set
             divergence_identity = f"reservation_divergence:{canon}"
             actual_res_ids = {
@@ -562,8 +569,7 @@ class ExecutionBook:
                 self._recovery_required_commands.discard(divergence_identity)
                 self._external_recovery_positions.pop(divergence_identity, None)
                 self._head_expected_reservation_ids.pop(canon, None)
-            last_sequence = payload.get("last_sequence")
-            if isinstance(last_sequence, int) and last_sequence >= 0:
+            if last_sequence is not None:
                 self._last_sequences[canon] = last_sequence
             else:
                 self._last_sequences.pop(canon, None)
@@ -662,7 +668,6 @@ class ExecutionBook:
         candidate._active_streams = set(self._active_streams)
         candidate._latest_active_streams = dict(self._latest_active_streams)
         candidate._head_revisions = dict(self._head_revisions)
-        candidate._head_projection_digests = dict(self._head_projection_digests)
         candidate._journal_revisions = dict(self._journal_revisions)
         candidate._last_sequences = dict(self._last_sequences)
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
@@ -693,7 +698,6 @@ class ExecutionBook:
             "_active_streams",
             "_latest_active_streams",
             "_head_revisions",
-            "_head_projection_digests",
             "_journal_revisions",
             "_last_sequences",
             "_recovery_adoption_scope",
@@ -825,14 +829,11 @@ class ExecutionBook:
             self._head_revisions[canon] = recovered.head_revision
             if state.head is not None:
                 self._recovery_required_commands.update(
-                    state.head.state_payload.get("recovery_command_ids", ())
+                    state.head.state_payload["recovery_command_ids"]
                 )
-                for identity in state.head.state_payload.get(
-                    "external_recovery_ids", ()
-                ):
+                for identity in state.head.state_payload["external_recovery_ids"]:
                     self._external_recovery_positions[identity] = key
                     self._recovery_required_commands.add(identity)
-                self._head_projection_digests[canon] = recovered.projection_digest
                 self._head_expected_reservation_ids[canon] = set(
                     recovered.reservation_ids
                 )
@@ -882,11 +883,9 @@ class ExecutionBook:
             self._journals.clear()
             self._stream_scopes.clear()
             self._head_revisions.clear()
-            self._head_projection_digests.clear()
             self._head_expected_reservation_ids.clear()
             self._journal_revisions.clear()
             self._last_sequences.clear()
-            self._head_expected_reservation_ids.clear()
             self._seen_evidence_ids.clear()
             self._seen_trade_ids.clear()
             self._order_cumulative_fills.clear()
@@ -1137,7 +1136,7 @@ class ExecutionBook:
         stream_id: str | None = None,
         stream_epoch: str | None = None,
     ) -> PositionView:
-        """Read a published position, or a persisted historical cut, without mutation."""
+        """Read a published position or historical cut without mutation."""
         if (stream_id is None) != (stream_epoch is None):
             raise ValueError("stream_id and stream_epoch must be supplied together")
         if (
@@ -1204,8 +1203,9 @@ class ExecutionBook:
             ):
                 if self._requires_verified_stream_adoption(key):
                     raise PositionStreamMismatchError(
-                        "requested account stream does not match the restored position; "
-                        "durable history requires a verified source-anchored scan"
+                        "requested account stream does not match the restored "
+                        "position; durable history requires a verified "
+                        "source-anchored scan"
                     )
                 target_scope = AccountFactStreamScope.for_position_key(
                     key, stream_id=stream_id, stream_epoch=stream_epoch
@@ -1451,14 +1451,17 @@ class ExecutionBook:
                             else:
                                 return Blocked(
                                     reason=(
-                                        "Position source stream changed without a validated "
-                                        "recovery checkpoint"
+                                        "Position source stream changed without a "
+                                        "validated recovery checkpoint"
                                     )
                                 )
                         else:
                             if self._head_revisions.get(canon) != head.revision:
                                 return Blocked(
-                                    reason="Position projection is stale; reload durable facts"
+                                    reason=(
+                                        "Position projection is stale; "
+                                        "reload durable facts"
+                                    )
                                 )
                             if (
                                 current_view.projection_version
@@ -1466,8 +1469,8 @@ class ExecutionBook:
                             ):
                                 return Blocked(
                                     reason=(
-                                        "Position projection differs from its durable head; "
-                                        "reload before trading"
+                                        "Position projection differs from its "
+                                        "durable head; reload before trading"
                                     )
                                 )
                     candidate._active_transaction = tx
@@ -1533,9 +1536,6 @@ class ExecutionBook:
                         is_flat_adoption=adopting_epoch,
                     )
                     candidate._head_revisions[canon] = next_revision
-                    candidate._head_projection_digests[canon] = str(
-                        head_payload["projection_digest"]
-                    )
                 candidate._active_transaction = None
                 self._publish_candidate(candidate)
                 return result
@@ -1636,7 +1636,10 @@ class ExecutionBook:
                 )
             if alloc_plan.total_allocated_quantity <= 0:
                 return Blocked(
-                    reason="Insufficient active batch capacity for requested exit quantity",
+                    reason=(
+                        "Insufficient active batch capacity for requested exit"
+                        " quantity"
+                    ),
                     diagnostics=(
                         f"Requested: {request.requested_quantity}, "
                         f"Total active: {view.total_quantity}",
@@ -1731,7 +1734,10 @@ class ExecutionBook:
                         self._persistence_failed = True
                         self._recovery_required_commands.add(command.command_id)
                         return Blocked(
-                            reason="Reservation identity lookup failed; restore is required",
+                            reason=(
+                                "Reservation identity lookup failed; restore is"
+                                " required"
+                            ),
                             diagnostics=(str(load_error),),
                         )
                     to_save.append(res)
@@ -1941,9 +1947,6 @@ class ExecutionBook:
                         .projection_version,
                         state_payload=head_payload,
                         updated_at=datetime.now(UTC),
-                    )
-                    candidate._head_projection_digests[canon] = str(
-                        head_payload["projection_digest"]
                     )
                 candidate._active_transaction = None
                 self._publish_candidate(candidate)
@@ -2297,13 +2300,15 @@ class ExecutionBook:
                         expected_head_revision = 0
                         if self._head_revisions.get(canon, 0) != 0:
                             raise RuntimeError(
-                                "local execution head exists but durable head is missing"
+                                "local execution head exists but durable head"
+                                " is missing"
                             )
                     else:
                         expected_head_revision = head.revision
                         if self._head_revisions.get(canon) != head.revision:
                             raise RuntimeError(
-                                "execution head changed in another process; restore required"
+                                "execution head changed in another process;"
+                                " restore required"
                             )
                         if (
                             head.stream_id != scope.stream_id
@@ -2520,8 +2525,9 @@ class ExecutionBook:
                             EvidenceConflict(
                                 evidence_id=evidence.evidence_id,
                                 reason=(
-                                    f"account event sequence {evidence.sequence} does not "
-                                    f"advance prior sequence {previous_sequence}"
+                                    f"account event sequence {evidence.sequence} "
+                                    f"does not advance prior sequence "
+                                    f"{previous_sequence}"
                                 ),
                             )
                         )
@@ -2575,8 +2581,8 @@ class ExecutionBook:
                                 EvidenceConflict(
                                     evidence_id=evidence.evidence_id,
                                     reason=(
-                                        f"trade {fill.trade_id} was already consumed but "
-                                        "its journal facts are unavailable"
+                                        f"trade {fill.trade_id} was already consumed "
+                                        "but its journal facts are unavailable"
                                     ),
                                 )
                             )
@@ -2620,7 +2626,10 @@ class ExecutionBook:
                             raise _AbortObservation(
                                 EvidenceConflict(
                                     evidence_id=evidence.evidence_id,
-                                    reason="ordered replay did not produce a verified checkpoint",
+                                    reason=(
+                                        "ordered replay did not produce a"
+                                        " verified checkpoint"
+                                    ),
                                 )
                             )
                     if adopting_epoch and not can_rollover and checkpoint is None:
@@ -2655,7 +2664,9 @@ class ExecutionBook:
                         raise _AbortObservation(
                             EvidenceConflict(
                                 evidence_id=evidence.evidence_id,
-                                reason="durable account journal reported a fact conflict",
+                                reason=(
+                                    "durable account journal reported a fact conflict"
+                                ),
                             )
                         )
                     candidate._journal_revisions[canon] = persist_result.revision
@@ -2696,9 +2707,6 @@ class ExecutionBook:
                             else None
                         ),
                         is_flat_adoption=can_rollover,
-                    )
-                    candidate._head_projection_digests[canon] = str(
-                        head_payload["projection_digest"]
                     )
                 candidate._active_transaction = None
                 self._publish_candidate(candidate)
@@ -3122,7 +3130,10 @@ class ExecutionBook:
                 self._recovery_required_commands.discard(command_id)
                 if pending.external_order_id is not None:
                     self._recovery_required_commands.discard(pending.external_order_id)
-                    external_identity = f"external:{self._order_watermark_key(key, pending.external_order_id)}"
+                    watermark = self._order_watermark_key(
+                        key, pending.external_order_id
+                    )
+                    external_identity = f"external:{watermark}"
                     self._recovery_required_commands.discard(external_identity)
                     self._external_recovery_positions.pop(external_identity, None)
 

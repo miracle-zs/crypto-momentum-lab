@@ -779,117 +779,6 @@ def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
     assert batch.opened_at == current_at
 
 
-def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -> None:
-    current_entry_at = NOW + timedelta(days=30)
-    legacy_client_id = "legacy-zero-fill-exit"
-
-    managed, _pending, unmanaged = _classify_with_trade_fixtures(
-        [
-            _position(
-                symbol="MINAUSDT",
-                position_amt=Decimal("926"),
-            )
-        ],
-        [
-            _order(
-                symbol="MINAUSDT",
-                reduce_only=True,
-                side="SELL",
-                quantity=Decimal("1813"),
-                executed_quantity=Decimal("0"),
-                state=ExchangeOrderState.CANCELED.value,
-                created_at=NOW + timedelta(minutes=10),
-                updated_at=NOW + timedelta(minutes=20),
-                exchange_order_id="legacy-exit-b",
-                client_order_id=legacy_client_id,
-            ),
-            _order(
-                symbol="MINAUSDT",
-                reduce_only=False,
-                side="BUY",
-                quantity=Decimal("926"),
-                executed_quantity=Decimal("926"),
-                created_at=current_entry_at,
-                updated_at=current_entry_at,
-                exchange_order_id="current-entry",
-                client_order_id="current-entry-client",
-            ),
-        ],
-        order_identity_events={
-            legacy_client_id: (
-                SimpleNamespace(
-                    exchange_order_id="legacy-exit-a",
-                    state=ExchangeOrderState.CANCELED.value,
-                    occurred_at=NOW + timedelta(minutes=19),
-                    details={"executed_quantity": "0"},
-                ),
-                SimpleNamespace(
-                    exchange_order_id="legacy-exit-b",
-                    state=ExchangeOrderState.CANCELED.value,
-                    occurred_at=NOW + timedelta(minutes=20),
-                    details={"executed_quantity": "0"},
-                ),
-            )
-        },
-        environment="live",
-        account_label="primary",
-    )
-
-    assert unmanaged == frozenset()
-    assert len(managed) == 1
-    assert managed[0].quantity == Decimal("926")
-    assert managed[0].opened_at == current_entry_at
-
-
-def test_active_zero_fill_legacy_identity_collision_remains_blocked() -> None:
-    legacy_client_id = "legacy-active-zero-fill-exit"
-    managed, _pending, unmanaged = _classify_with_trade_fixtures(
-        [_position(symbol="MINAUSDT", position_amt=Decimal("926"))],
-        [
-            _order(
-                symbol="MINAUSDT",
-                reduce_only=True,
-                side="SELL",
-                quantity=Decimal("1813"),
-                executed_quantity=Decimal("0"),
-                state=ExchangeOrderState.ACKNOWLEDGED.value,
-                exchange_order_id="legacy-exit-b",
-                client_order_id=legacy_client_id,
-            ),
-            _order(
-                symbol="MINAUSDT",
-                reduce_only=False,
-                side="BUY",
-                quantity=Decimal("926"),
-                executed_quantity=Decimal("926"),
-                exchange_order_id="current-entry",
-                client_order_id="current-entry-client",
-            ),
-        ],
-        order_identity_events={
-            legacy_client_id: (
-                SimpleNamespace(
-                    exchange_order_id="legacy-exit-a",
-                    state=ExchangeOrderState.CANCELED.value,
-                    occurred_at=NOW + timedelta(minutes=19),
-                    details={"executed_quantity": "0"},
-                ),
-                SimpleNamespace(
-                    exchange_order_id="legacy-exit-b",
-                    state=ExchangeOrderState.ACKNOWLEDGED.value,
-                    occurred_at=NOW + timedelta(minutes=20),
-                    details={"executed_quantity": "0"},
-                ),
-            )
-        },
-        environment="live",
-        account_label="primary",
-    )
-
-    assert managed == ()
-    assert unmanaged == frozenset({"MINAUSDT"})
-
-
 def test_draining_control_survives_a_later_operational_halt() -> None:
     assert (
         _resolve_strategy_live_state("draining", "halted") is StrategyLiveState.DRAINING
@@ -1179,6 +1068,7 @@ async def test_execution_book_reports_stale_positions_only_when_set_changes(
 ) -> None:
     class Book:
         context_revision = 0
+
         async def list_position_views(self, **_kwargs):
             return (
                 SimpleNamespace(
@@ -1224,6 +1114,7 @@ async def test_execution_book_reads_only_current_exposure_scopes(monkeypatch) ->
 
     class Book:
         context_revision = 0
+
         def get_active_stream(self, environment, account_label):
             return None
 
@@ -1271,6 +1162,7 @@ async def test_execution_book_reads_all_scopes_without_an_account_snapshot(
 
     class Book:
         context_revision = 0
+
         async def list_position_views(self, **kwargs):
             calls.append(kwargs)
             return ()
@@ -2033,9 +1925,9 @@ def test_resolve_symbol_fill_horizon_safe_on_empty() -> None:
     assert _resolve_symbol_fill_horizon([], []) is None
 
 
-async def testload_order_identity_metadata_dual_track_query() -> None:
+async def test_position_account_fills_uses_exact_and_symbol_query_tracks() -> None:
     from crypto_momentum_lab.persistence.postgres.order_identity_repository import (
-        load_order_identity_metadata,
+        load_position_account_fills,
     )
 
     captured_query = None
@@ -2066,7 +1958,7 @@ async def testload_order_identity_metadata_dual_track_query() -> None:
     session = CaptureSession()
     # Query with since = t_now - 24h (which is newer than t_order_old)
     since = t_now - timedelta(hours=24)
-    await load_order_identity_metadata(
+    await load_position_account_fills(
         session,  # type: ignore[arg-type]
         [order],
         account_label="primary",
@@ -2182,6 +2074,7 @@ async def test_unknown_account_exposure_does_not_authorize_book_actions(
 ) -> None:
     class Book:
         context_revision = 0
+
         async def list_position_views(self, **_kwargs):
             raise AssertionError("unknown exposure must not trigger a Book scan")
 
@@ -2326,18 +2219,39 @@ def _classify_with_trade_fixtures(positions, orders, *args, **kwargs):
     fill_times = kwargs.get("entry_fill_times", {})
     for index, order in enumerate(orders):
         quantity = order.executed_quantity
-        order_id = order.exchange_order_id or order.client_order_id or f"fixture-order-{index}"
+        order_id = (
+            order.exchange_order_id or order.client_order_id or f"fixture-order-{index}"
+        )
         filled_at = fill_times.get(order_id) or fill_times.get(order.client_order_id)
         if quantity <= 0 and filled_at is None:
             continue
-        price = next(position.entry_price for position in positions if position.symbol == order.symbol)
-        fills.append(AccountFillEvent(
-            environment=kwargs["environment"], account_label=kwargs["account_label"],
-            symbol=order.symbol, trade_id=f"fixture-trade-{index}", order_id=order_id,
-            side=order.side, price=price, quantity=quantity if quantity > 0 else order.quantity,
-            realized_pnl=Decimal("0"), fee=Decimal("0"), fee_asset="USDT",
-            trade_at=filled_at or order.created_at,
-            raw_payload={"positionSide": order.position_side, "is_system": True,
-                         "client_order_id": order.client_order_id, "reduce_only": order.reduce_only},
-        ))
-    return _classify_live_positions_detailed(positions, orders, *args, account_fills=tuple(fills), **kwargs)
+        price = next(
+            position.entry_price
+            for position in positions
+            if position.symbol == order.symbol
+        )
+        fills.append(
+            AccountFillEvent(
+                environment=kwargs["environment"],
+                account_label=kwargs["account_label"],
+                symbol=order.symbol,
+                trade_id=f"fixture-trade-{index}",
+                order_id=order_id,
+                side=order.side,
+                price=price,
+                quantity=quantity if quantity > 0 else order.quantity,
+                realized_pnl=Decimal("0"),
+                fee=Decimal("0"),
+                fee_asset="USDT",
+                trade_at=filled_at or order.created_at,
+                raw_payload={
+                    "positionSide": order.position_side,
+                    "is_system": True,
+                    "client_order_id": order.client_order_id,
+                    "reduce_only": order.reduce_only,
+                },
+            )
+        )
+    return _classify_live_positions_detailed(
+        positions, orders, *args, account_fills=tuple(fills), **kwargs
+    )

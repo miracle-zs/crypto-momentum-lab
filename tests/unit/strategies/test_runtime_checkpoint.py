@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.strategies.runtime_checkpoint import (
     market_state_from_payload,
@@ -25,6 +27,22 @@ def test_market_state_checkpoint_round_trips_quality_and_kline_fields() -> None:
 
     assert restored == state
     assert buffered == state
+
+
+def test_market_state_checkpoint_rejects_invalid_required_decimal() -> None:
+    payload = market_state_payload(_state())
+    payload["trade_notional"] = None
+
+    with pytest.raises(ValueError, match="required decimal fields"):
+        market_state_from_payload(payload)
+
+
+def test_market_state_checkpoint_rejects_malformed_buffer_entry() -> None:
+    with pytest.raises(ValueError, match="must be a mapping"):
+        restore_market_state_buffers(
+            {"BTCUSDT": [None]},
+            maxlen=2,
+        )
 
 
 def _state(
@@ -71,36 +89,3 @@ def _state(
         data_complete=data_complete,
         missing_agg_trade_count=missing_agg_trade_count,
     )
-
-
-def test_strategy_checkpoint_incompatible_version_blocks_recovery() -> None:
-    import pytest
-
-    from crypto_momentum_lab.domain.strategy.models import (
-        IncompatibleCheckpointError,
-        StrategyCheckpoint,
-    )
-
-    t0 = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
-
-    # Future checkpoint schema version 2 must be rejected by version 1 code
-    with pytest.raises(
-        IncompatibleCheckpointError, match="Incompatible strategy checkpoint"
-    ):
-        StrategyCheckpoint(
-            last_processed_at_by_symbol={"BTCUSDT": t0},
-            warmup_buckets_by_symbol={"BTCUSDT": 10},
-            cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-            payload={"version": 2},
-            schema_version=2,
-        )
-
-    # Current schema version 1 must be accepted
-    cp_ok = StrategyCheckpoint(
-        last_processed_at_by_symbol={"BTCUSDT": t0},
-        warmup_buckets_by_symbol={"BTCUSDT": 10},
-        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-        payload={"version": 1},
-        schema_version=1,
-    )
-    assert cp_ok.schema_version == 1

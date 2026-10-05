@@ -42,27 +42,23 @@ def parse_decimal(value: object, field_name: str) -> Decimal:
         raise UserDataStateError(f"{field_name} is not numeric") from error
 
 
-def parse_bool(value: object) -> bool:
+def parse_bool(value: object, field_name: str) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        return value.lower() in {"1", "true", "yes"}
-    return bool(value)
+    raise UserDataStateError(f"{field_name} must be a boolean")
 
 
 def parse_timestamp(
     value: object,
     *,
-    fallback: datetime,
     field_name: str,
 ) -> datetime:
-    if value is None:
-        return fallback
+    if type(value) is not int or value <= 0:
+        raise UserDataStateError(f"{field_name} must be a positive integer timestamp")
     try:
-        result = datetime.fromtimestamp(float(str(value)) / 1000, tz=UTC)
-    except (TypeError, ValueError, OverflowError, OSError) as error:
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError) as error:
         raise UserDataStateError(f"{field_name} is not a valid timestamp") from error
-    return result
 
 
 def event_raw_payload(

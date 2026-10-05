@@ -52,6 +52,7 @@ def test_stream_classifies_only_nonzero_trade_updates_as_fill_events() -> None:
         {
             "e": "ORDER_TRADE_UPDATE",
             "E": 1783209600000,
+            "T": 1783209600000,
             "o": {"x": "TRADE", "l": "0.01"},
         },
         received_at=datetime(2026, 8, 28, tzinfo=UTC),
@@ -60,6 +61,7 @@ def test_stream_classifies_only_nonzero_trade_updates_as_fill_events() -> None:
         {
             "e": "ORDER_TRADE_UPDATE",
             "E": 1783209600000,
+            "T": 1783209600000,
             "o": {"x": "TRADE", "l": "0"},
         },
         received_at=datetime(2026, 8, 28, tzinfo=UTC),
@@ -74,6 +76,7 @@ def test_stream_extracts_unique_fill_identity() -> None:
         {
             "e": "ORDER_TRADE_UPDATE",
             "E": 1783209600000,
+            "T": 1783209600000,
             "o": {
                 "s": "btcusdt",
                 "t": 42,

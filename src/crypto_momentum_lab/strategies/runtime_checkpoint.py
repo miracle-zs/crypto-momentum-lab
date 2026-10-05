@@ -58,14 +58,17 @@ def restore_market_state_buffers(
     restored: dict[str, deque[MarketState15s]] = {}
     for symbol, raw_states in payload.items():
         if not isinstance(raw_states, list):
-            continue
+            raise ValueError(f"checkpoint buffer for {symbol} must be a list")
         states: deque[MarketState15s] = deque(maxlen=maxlen)
         for raw_state in raw_states:
             if not isinstance(raw_state, dict):
-                continue
+                raise ValueError(f"checkpoint state for {symbol} must be a mapping")
             state = market_state_from_payload(raw_state)
             if state.symbol != symbol:
-                continue
+                raise ValueError(
+                    f"checkpoint buffer key {symbol} does not match state symbol "
+                    f"{state.symbol}"
+                )
             states.append(state)
         if states:
             restored[symbol] = states
@@ -76,17 +79,19 @@ def market_state_from_payload(
     payload: dict[str, JsonValue],
 ) -> MarketState15s:
     return MarketState15s(
-        schema_version=int(str(payload["schema_version"])),
-        exchange=str(payload["exchange"]),
-        environment=str(payload["environment"]),
-        symbol=str(payload["symbol"]),
-        bucket_start=datetime.fromisoformat(str(payload["bucket_start"])),
-        bucket_end=datetime.fromisoformat(str(payload["bucket_end"])),
+        schema_version=_required_int(payload, "schema_version"),
+        exchange=_required_string(payload, "exchange"),
+        environment=_required_string(payload, "environment"),
+        symbol=_required_string(payload, "symbol"),
+        bucket_start=datetime.fromisoformat(
+            _required_string(payload, "bucket_start")
+        ),
+        bucket_end=datetime.fromisoformat(_required_string(payload, "bucket_end")),
         open_price=_payload_decimal(payload["open_price"]),
         high_price=_payload_decimal(payload["high_price"]),
         low_price=_payload_decimal(payload["low_price"]),
         close_price=_payload_decimal(payload["close_price"]),
-        trade_count=int(str(payload["trade_count"])),
+        trade_count=_required_int(payload, "trade_count"),
         trade_notional=_required_decimal(payload["trade_notional"]),
         aggressive_buy_notional=_required_decimal(payload["aggressive_buy_notional"]),
         aggressive_sell_notional=_required_decimal(payload["aggressive_sell_notional"]),
@@ -94,10 +99,10 @@ def market_state_from_payload(
         last_ask_price=_payload_decimal(payload["last_ask_price"]),
         spread=_payload_decimal(payload["spread"]),
         midpoint=_payload_decimal(payload["midpoint"]),
-        liquidation_count=int(str(payload["liquidation_count"])),
+        liquidation_count=_required_int(payload, "liquidation_count"),
         liquidation_notional=_required_decimal(payload["liquidation_notional"]),
         mark_price=_payload_decimal(payload["mark_price"]),
-        closed_kline_count=int(str(payload["closed_kline_count"])),
+        closed_kline_count=_required_int(payload, "closed_kline_count"),
         closed_kline_1m_open_time=_payload_datetime(
             payload["closed_kline_1m_open_time"]
         ),
@@ -110,11 +115,11 @@ def market_state_from_payload(
         closed_kline_1m_close_price=_payload_decimal(
             payload["closed_kline_1m_close_price"]
         ),
-        source_event_count=int(str(payload["source_event_count"])),
+        source_event_count=_required_int(payload, "source_event_count"),
         first_received_at=_payload_datetime(payload["first_received_at"]),
         last_received_at=_payload_datetime(payload["last_received_at"]),
         data_complete=_payload_bool(payload, "data_complete"),
-        missing_agg_trade_count=int(str(payload["missing_agg_trade_count"])),
+        missing_agg_trade_count=_required_int(payload, "missing_agg_trade_count"),
     )
 
 
@@ -129,20 +134,38 @@ def _datetime_payload(value: datetime | None) -> str | None:
 def _payload_decimal(value: JsonValue) -> Decimal | None:
     if value is None:
         return None
-    return Decimal(str(value))
+    if not isinstance(value, str):
+        raise ValueError("checkpoint decimal fields must be strings or null")
+    return Decimal(value)
 
 
 def _required_decimal(value: JsonValue) -> Decimal:
     parsed = _payload_decimal(value)
     if parsed is None:
-        return Decimal("0")
+        raise ValueError("checkpoint required decimal fields must not be null")
     return parsed
 
 
 def _payload_datetime(value: JsonValue) -> datetime | None:
     if value is None:
         return None
-    return datetime.fromisoformat(str(value))
+    if not isinstance(value, str):
+        raise ValueError("checkpoint datetime fields must be strings or null")
+    return datetime.fromisoformat(value)
+
+
+def _required_string(payload: dict[str, JsonValue], key: str) -> str:
+    value = payload[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _required_int(payload: dict[str, JsonValue], key: str) -> int:
+    value = payload[key]
+    if type(value) is not int:
+        raise ValueError(f"{key} must be an integer")
+    return value
 
 
 def _payload_bool(payload: dict[str, JsonValue], key: str) -> bool:

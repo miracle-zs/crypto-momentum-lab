@@ -138,5 +138,6 @@ def _account_update_payload(event_timestamp_ms: int) -> dict[str, object]:
     return {
         "e": "ACCOUNT_UPDATE",
         "E": event_timestamp_ms,
+        "T": event_timestamp_ms,
         "a": {"B": [], "P": []},
     }

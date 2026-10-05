@@ -30,23 +30,11 @@ def normalize_fill_cursors(
     return normalized
 
 
-_MARGIN_TYPE_ALIASES = {
-    "CROSS": "CROSSED",
-    "CROSSED": "CROSSED",
-    "ISOLATED": "ISOLATED",
-}
+def entry_leverage_candidates(requested: int) -> tuple[int, ...]:
+    return tuple(dict.fromkeys(max(1, requested - offset) for offset in range(3)))
 
 
-def entry_leverage_candidates(requested: int, max_steps: int = 2) -> tuple[int, ...]:
-    return tuple(
-        dict.fromkeys(max(1, requested - offset) for offset in range(max_steps + 1))
-    )
-
-
-def normalize_margin_type(value: str) -> str:
-    normalized = value.strip().upper()
-    try:
-        return _MARGIN_TYPE_ALIASES[normalized]
-    except KeyError as exc:
-        allowed = ", ".join(sorted(set(_MARGIN_TYPE_ALIASES.values())))
-        raise ValueError(f"margin_type must be one of: {allowed}") from exc
+def require_margin_type(value: str) -> str:
+    if value not in {"CROSSED", "ISOLATED"}:
+        raise ValueError("margin_type must be CROSSED or ISOLATED")
+    return value

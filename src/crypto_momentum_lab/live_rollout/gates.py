@@ -5,10 +5,6 @@ from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
-from crypto_momentum_lab.domain.live_rollout import (
-    LiveGateDecision,
-    LiveGateStatus,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,18 +13,6 @@ class LiveGateContext:
     account_label: str
     strategy_name: str
     strategy_config_hash: str
-
-
-def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
-    reasons: list[str] = []
-    if not context.live_submit_enabled:
-        reasons.append("live_submit_disabled")
-    if not context.account_label.strip():
-        reasons.append("missing_account_label")
-    return LiveGateDecision(
-        status=LiveGateStatus.BLOCKED if reasons else LiveGateStatus.APPROVED,
-        reasons=tuple(reasons),
-    )
 
 
 def order_state_is_uncertain(state: ExchangeOrderState) -> bool:

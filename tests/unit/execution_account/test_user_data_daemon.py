@@ -195,7 +195,8 @@ async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up
     assert service.heartbeat_states[-1] == ExecutionAccountStatus.RUNNING
 
     # An authoritative REST reconciliation may take much longer than a
-    # heartbeat interval. Active service continues publishing RUNNING while that work runs.
+    # heartbeat interval. Active service continues publishing RUNNING while
+    # that work runs.
     daemon._accept_events = False
     daemon._reconciliation_active = True
     await daemon._publish_heartbeat()
@@ -284,6 +285,7 @@ async def test_healthy_ws_persists_events_without_rest_polling() -> None:
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
             },
             received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
@@ -412,6 +414,7 @@ async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {
                     "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                     "P": [],
@@ -428,6 +431,7 @@ async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123202000,
+                "T": 1783123202000,
                 "a": {
                     "B": [],
                     "P": [
@@ -551,6 +555,7 @@ async def test_events_received_during_reconciliation_are_replayed() -> None:
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {
                     "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                     "P": [],
@@ -617,6 +622,7 @@ async def test_daemon_notifies_live_consumers_before_slow_persistence() -> None:
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -658,6 +664,7 @@ async def test_daemon_returns_after_apply_while_persistence_runs_in_background()
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -707,6 +714,7 @@ async def test_replayed_user_data_event_preserves_syncing_readiness() -> None:
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -734,6 +742,7 @@ async def test_persistence_failure_fails_closed_and_recovers_from_rest() -> None
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -819,6 +828,7 @@ async def test_raw_event_is_durable_before_application_even_during_repair(frozen
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
         },
         received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
@@ -912,6 +922,7 @@ async def test_pending_raw_receipt_cannot_be_included_in_a_background_cut():
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {"B": [{"a": "USDT", "wb": "101", "cw": "81"}], "P": []},
         },
         received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
@@ -973,6 +984,7 @@ async def test_slow_journal_does_not_block_receive_and_captures_each_stream_toke
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000 + i,
+                "T": 1783123201000 + i,
                 "a": {"B": [{"a": "USDT", "wb": str(101 + i), "cw": "81"}], "P": []},
             },
             received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),

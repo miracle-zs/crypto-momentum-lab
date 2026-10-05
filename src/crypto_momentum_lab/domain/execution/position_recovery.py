@@ -276,6 +276,8 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
     if head is not None:
         payload = head.state_payload
         stored_reservations = payload.get("active_reservation_ids")
+        recovery_command_ids = payload.get("recovery_command_ids")
+        external_recovery_ids = payload.get("external_recovery_ids")
         expected_key = {
             "environment": key.environment,
             "account_label": key.account_label,
@@ -296,9 +298,27 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
             or (not isinstance(payload.get("view_digest"), str))
             or (type(payload.get("journal_revision")) is not int)
             or (payload.get("journal_revision") != journal.revision)
+            or "last_sequence" not in payload
+            or (
+                payload["last_sequence"] is not None
+                and (
+                    type(payload["last_sequence"]) is not int
+                    or payload["last_sequence"] < 0
+                )
+            )
             or (not isinstance(stored_reservations, list))
             or any(
                 not isinstance(value, str) or not value for value in stored_reservations
+            )
+            or (not isinstance(recovery_command_ids, list))
+            or any(
+                not isinstance(value, str) or not value
+                for value in recovery_command_ids
+            )
+            or (not isinstance(external_recovery_ids, list))
+            or any(
+                not isinstance(value, str) or not value
+                for value in external_recovery_ids
             )
         ):
             raise RuntimeError("durable execution head is malformed")
@@ -381,19 +401,7 @@ def recover_durable_position(state: DurableExecutionPositionState) -> RecoveredP
         book.use_durable_projection_version(
             projection_version, event_cut=view.event_cut
         )
-        stored_sequence = payload.get("last_sequence")
-        if stored_sequence is None:
-            last_sequence = None
-        elif type(stored_sequence) is int and stored_sequence >= 0:
-            last_sequence = stored_sequence
-        else:
-            diagnostics.append(
-                (
-                    "durable_execution_head_sequence_invalid",
-                    {"sequence": stored_sequence},
-                )
-            )
-            last_sequence = 0
+        last_sequence = payload["last_sequence"]
         head_revision = head.revision
         reservation_ids = set(stored_reservations)
     else:

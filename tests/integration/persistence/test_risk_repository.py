@@ -110,8 +110,6 @@ async def test_save_unbounded_risk_config(
         max_gross_notional=None,
         max_daily_loss=None,
         max_open_positions=None,
-        max_market_state_age_seconds=30,
-        max_account_state_age_seconds=30,
         allow_reduce_only_while_draining=True,
         created_at=NOW,
     )

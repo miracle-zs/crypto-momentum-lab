@@ -14,7 +14,6 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution.order_read_models import (
-    OrderIdentityEvent,
     OrderObservation,
     PersistedExchangeOrder,
     PositionObservation,
@@ -22,6 +21,7 @@ from crypto_momentum_lab.domain.execution.order_read_models import (
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     FuturesPositionSide,
+    OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.position_batches import PositionOrderFact
 from crypto_momentum_lab.domain.execution.position_ledger_models import CoverageEvidence
@@ -30,17 +30,7 @@ from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.order_facts_loader import (
     _resolve_symbol_fill_horizon,
 )
-from crypto_momentum_lab.live_rollout.order_identity import (
-    _expand_legacy_order_row,
-    _legacy_order_identity_is_ambiguous,
-    _legacy_order_identity_is_reconstructible,
-    _legacy_order_identity_is_zero_fill_terminal,
-    _optional_text,
-    _position_order_from_plan,
-    _position_order_from_row,
-)
 from crypto_momentum_lab.live_rollout.position_batches import (
-    _batch_id_for_entry,
     _build_position_batches,
     _exit_fill_quantity,
     _is_entry_fill_observed,
@@ -87,12 +77,6 @@ def _classify_live_positions_detailed(
     account_label: str,
     entry_fill_times: Mapping[str, datetime] | None = None,
     exit_batch_ids: Mapping[str, str] | None = None,
-    order_identity_events: Mapping[
-        str,
-        Sequence[OrderIdentityEvent],
-    ]
-    | None = None,
-    account_fill_quantities: Mapping[str, Decimal] | None = None,
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
     coverage_by_symbol: Mapping[str, CoverageEvidence] | None = None,
@@ -104,49 +88,7 @@ def _classify_live_positions_detailed(
 ]:
     resolved_since = since_time or _resolve_symbol_fill_horizon(orders, positions)
     fill_times = entry_fill_times or {}
-    identity_events = order_identity_events or {}
-    fill_quantities = account_fill_quantities or {}
-    ambiguous_identity_ids = frozenset(
-        client_order_id
-        for client_order_id, events in identity_events.items()
-        if _legacy_order_identity_is_ambiguous(events)
-    )
-    reconstructible_identity_ids = frozenset(
-        client_order_id
-        for client_order_id in ambiguous_identity_ids
-        if _legacy_order_identity_is_reconstructible(
-            identity_events[client_order_id],
-            fill_quantities,
-        )
-    )
-    zero_fill_terminal_identity_ids = frozenset(
-        client_order_id
-        for client_order_id in ambiguous_identity_ids
-        if _legacy_order_identity_is_zero_fill_terminal(
-            identity_events[client_order_id],
-            fill_quantities,
-        )
-    )
-    unresolved_identity_ids = frozenset(
-        client_order_id
-        for client_order_id in ambiguous_identity_ids
-        if client_order_id
-        not in reconstructible_identity_ids | zero_fill_terminal_identity_ids
-    )
-    if ambiguous_identity_ids:
-        log.warning(
-            "live_legacy_order_identity_conflict",
-            ambiguous_client_order_ids=sorted(ambiguous_identity_ids),
-            reconstructed_client_order_ids=sorted(reconstructible_identity_ids),
-            zero_fill_terminal_client_order_ids=sorted(zero_fill_terminal_identity_ids),
-            unresolved_client_order_ids=sorted(unresolved_identity_ids),
-        )
-    position_orders = _normalise_position_orders(
-        orders,
-        unresolved,
-        order_identity_events=identity_events,
-        account_fill_quantities=fill_quantities,
-    )
+    position_orders = _normalise_position_orders(orders, unresolved)
     if exit_batch_ids:
         position_orders = tuple(
             replace(
@@ -159,15 +101,6 @@ def _classify_live_positions_detailed(
             )
             for order in position_orders
         )
-    position_orders, binding_unresolved_identity_ids = (
-        _repair_legacy_exit_batch_bindings(
-            position_orders,
-            identity_events=identity_events,
-            account_fill_quantities=fill_quantities,
-            fill_times=fill_times,
-        )
-    )
-    blocked_identity_ids = unresolved_identity_ids | binding_unresolved_identity_ids
     managed: list[ManagedLivePosition] = []
     pending: set[str] = set()
     unmanaged: set[str] = set()
@@ -185,24 +118,6 @@ def _classify_live_positions_detailed(
             for order in position_orders
             if order.symbol == position.symbol and order.position_side is position_side
         ]
-        if any(
-            order.client_order_id in blocked_identity_ids for order in matching_orders
-        ):
-            log.critical(
-                "live_position_batch_attribution_blocked",
-                symbol=position.symbol,
-                account_label=account_label,
-                ambiguous_client_order_ids=sorted(
-                    {
-                        order.client_order_id
-                        for order in matching_orders
-                        if order.client_order_id in blocked_identity_ids
-                    }
-                ),
-                reason="legacy_order_identity_not_reconstructible",
-            )
-            unmanaged.add(position.symbol)
-            continue
         opening_candidates = [
             order
             for order in matching_orders
@@ -401,12 +316,6 @@ def _has_recent_pending_entry_order(
 def _normalise_position_orders(
     orders: Sequence[OrderObservation],
     unresolved: Sequence[PersistedExchangeOrder],
-    *,
-    order_identity_events: Mapping[
-        str,
-        Sequence[OrderIdentityEvent],
-    ],
-    account_fill_quantities: Mapping[str, Decimal],
 ) -> tuple[_PositionOrder, ...]:
     unresolved_by_client_id = {item.plan.client_order_id: item for item in unresolved}
     normalised: list[_PositionOrder] = []
@@ -418,29 +327,6 @@ def _normalise_position_orders(
             if client_order_id is None
             else unresolved_by_client_id.get(client_order_id)
         )
-        legacy_events = (
-            ()
-            if client_order_id is None
-            else order_identity_events.get(client_order_id, ())
-        )
-        expanded_orders = _expand_legacy_order_row(
-            row,
-            plan=None if persisted is None else persisted.plan,
-            fallback_state=None if persisted is None else persisted.state,
-            fallback_executed_quantity=(
-                None if persisted is None else persisted.executed_quantity
-            ),
-            events=legacy_events,
-            account_fill_quantities=account_fill_quantities,
-        )
-        if expanded_orders is not None:
-            for expanded in expanded_orders:
-                key = _position_order_key(expanded)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                normalised.append(expanded)
-            continue
         order = _position_order_from_row(
             row,
             plan=None if persisted is None else persisted.plan,
@@ -466,77 +352,96 @@ def _normalise_position_orders(
     return tuple(normalised)
 
 
-def _repair_legacy_exit_batch_bindings(
-    orders: Sequence[_PositionOrder],
+def _position_order_from_row(
+    row: OrderObservation,
     *,
-    identity_events: Mapping[
-        str,
-        Sequence[OrderIdentityEvent],
-    ],
-    account_fill_quantities: Mapping[str, Decimal],
-    fill_times: Mapping[str, datetime],
-) -> tuple[tuple[_PositionOrder, ...], frozenset[str]]:
-    """Replace stale legacy exit bindings with the nearest prior entry.
-
-    A reused client ID can carry an old ``batch_id`` in
-    ``order_intent_executions``.  Once the exchange attempts are split, the
-    attempt timestamp gives us a stronger identity boundary than that stale
-    metadata: a reduce-only SELL belongs to the latest filled LONG entry
-    before that attempt (and vice versa).  If that boundary cannot be proven,
-    fail closed for the affected client ID instead of retaining a wrong lot.
-    """
-
-    reconstructible_ids = frozenset(
-        client_order_id
-        for client_order_id, events in identity_events.items()
-        if _legacy_order_identity_is_ambiguous(events)
-        and _legacy_order_identity_is_reconstructible(
-            events,
-            account_fill_quantities,
+    plan: OrderExecutionPlan | None,
+    fallback_state: ExchangeOrderState | None,
+    fallback_executed_quantity: Decimal | None,
+) -> _PositionOrder | None:
+    try:
+        position_side = FuturesPositionSide(row.position_side)
+    except (TypeError, ValueError):
+        return None
+    if row.created_at is None or row.updated_at is None:
+        return None
+    state = _normalise_order_state(row.state, fallback=fallback_state)
+    executed_quantity = _decimal_or_zero(row.executed_quantity)
+    if fallback_executed_quantity is not None:
+        executed_quantity = max(
+            executed_quantity,
+            _decimal_or_zero(fallback_executed_quantity),
         )
+    quantity = max(_decimal_or_zero(row.quantity), executed_quantity)
+    if quantity <= 0:
+        return None
+    price_value = (
+        row.price if row.price is not None else None if plan is None else plan.price
     )
-    if not reconstructible_ids:
-        return tuple(orders), frozenset()
-    entry_orders = tuple(
-        order
-        for order in orders
-        if not order.reduce_only and _is_entry_fill_observed(order, fill_times)
+    return _PositionOrder(
+        symbol=str(row.symbol),
+        position_side=position_side,
+        side=str(row.side).upper(),
+        reduce_only=bool(row.reduce_only),
+        order_type=str(row.order_type).upper(),
+        quantity=quantity,
+        executed_quantity=executed_quantity,
+        state=state,
+        client_order_id=_optional_text(row.client_order_id),
+        exchange_order_id=_optional_text(row.exchange_order_id),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        price=None if price_value is None else _decimal_or_zero(price_value),
+        plan=plan,
     )
-    repaired: list[_PositionOrder] = []
-    unresolved: set[str] = set()
-    for order in orders:
-        client_order_id = order.client_order_id
-        if not order.reduce_only or client_order_id not in reconstructible_ids:
-            repaired.append(order)
-            continue
-        exit_side = StrategySide.LONG if order.side == "SELL" else StrategySide.SHORT
-        candidates = [
-            entry
-            for entry in entry_orders
-            if entry.symbol == order.symbol
-            and entry.position_side is order.position_side
-            and _opening_order_matches_side(entry.side, exit_side)
-            and _order_entry_time(entry, fill_times) <= order.created_at
-        ]
-        if not candidates:
-            unresolved.add(client_order_id)
-            repaired.append(order)
-            continue
-        target = max(
-            candidates,
-            key=lambda entry: (
-                _order_entry_time(entry, fill_times),
-                entry.updated_at,
-                entry.created_at,
-            ),
-        )
-        repaired.append(
-            replace(
-                order,
-                exit_batch_id=_batch_id_for_entry(target),
-            )
-        )
-    return tuple(repaired), frozenset(unresolved)
+
+
+def _position_order_from_plan(item: PersistedExchangeOrder) -> _PositionOrder:
+    plan = item.plan
+    return _PositionOrder(
+        symbol=plan.symbol,
+        position_side=FuturesPositionSide(plan.position_side),
+        side=plan.side.upper(),
+        reduce_only=plan.reduce_only,
+        order_type=plan.order_type.upper(),
+        quantity=plan.quantity,
+        executed_quantity=max(Decimal("0"), item.executed_quantity),
+        state=_normalise_order_state(item.state),
+        client_order_id=plan.client_order_id,
+        exchange_order_id=item.exchange_order_id,
+        created_at=plan.created_at,
+        updated_at=item.updated_at,
+        price=plan.price,
+        plan=plan,
+    )
+
+
+def _normalise_order_state(
+    value: object,
+    *,
+    fallback: ExchangeOrderState | None = None,
+) -> ExchangeOrderState:
+    if isinstance(value, ExchangeOrderState):
+        return value
+    if value is not None:
+        try:
+            return ExchangeOrderState(str(value))
+        except ValueError:
+            pass
+    return fallback or ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
+def _decimal_or_zero(value: object) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    return Decimal(str(value))
 
 
 def _strategy_side(

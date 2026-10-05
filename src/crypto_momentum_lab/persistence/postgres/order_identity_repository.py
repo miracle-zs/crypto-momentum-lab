@@ -1,7 +1,6 @@
 """Postgres order-identity evidence loading and ORM-to-value mapping."""
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -10,22 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.order_read_models import (
-    OrderIdentityEvent,
     OrderObservation,
     PositionObservation,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     AccountPositionSnapshotRow,
-    ExchangeOrderEventRow,
     ExchangeOrderRow,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class OrderIdentityMetadata:
-    events_by_client_order_id: Mapping[str, tuple[OrderIdentityEvent, ...]]
-    account_fills: tuple[AccountFillEvent, ...]
 
 
 def order_observation(row: ExchangeOrderRow) -> OrderObservation:
@@ -56,56 +47,23 @@ def position_observation(row: AccountPositionSnapshotRow) -> PositionObservation
     )
 
 
-def order_identity_event(row: ExchangeOrderEventRow) -> OrderIdentityEvent:
-    return OrderIdentityEvent(
-        client_order_id=row.client_order_id,
-        exchange_order_id=row.exchange_order_id,
-        state=row.state,
-        occurred_at=row.occurred_at,
-        details=dict(row.details),
-    )
-
-
-async def load_order_identity_metadata(
+async def load_position_account_fills(
     session: AsyncSession,
     orders: Sequence[ExchangeOrderRow],
     *,
     account_label: str,
     since: datetime | None = None,
-) -> OrderIdentityMetadata:
-    """Load exchange identity evidence and authoritative account fills."""
+) -> tuple[AccountFillEvent, ...]:
+    """Load authoritative account fills for the active position symbols."""
 
-    client_order_ids = tuple(
-        sorted({order.client_order_id for order in orders if order.client_order_id})
-    )
-    events_by_client: dict[str, list[OrderIdentityEvent]] = {}
     exchange_order_ids: set[str] = set()
-    if client_order_ids:
-        event_rows = tuple(
-            (
-                await session.scalars(
-                    select(ExchangeOrderEventRow).where(
-                        ExchangeOrderEventRow.client_order_id.in_(client_order_ids)
-                    )
-                )
-            ).all()
-        )
-        for event in event_rows:
-            events_by_client.setdefault(event.client_order_id, []).append(
-                order_identity_event(event)
-            )
-            if event.exchange_order_id:
-                exchange_order_ids.add(event.exchange_order_id)
     row_exchange_order_ids = {
         order.exchange_order_id for order in orders if order.exchange_order_id
     }
     exchange_order_ids.update(row_exchange_order_ids)
     active_symbols = tuple(sorted({order.symbol for order in orders if order.symbol}))
     if not exchange_order_ids and not active_symbols:
-        return OrderIdentityMetadata(
-            {key: tuple(value) for key, value in events_by_client.items()},
-            (),
-        )
+        return ()
 
     predicates = [
         AccountFillEventRow.environment == "live",
@@ -115,9 +73,7 @@ async def load_order_identity_metadata(
     # Resolve symbol scan lower bound to protect against full table scan
     symbol_since = since
     if symbol_since is None:
-        order_times = [
-            order.created_at for order in orders if order.created_at
-        ]
+        order_times = [order.created_at for order in orders if order.created_at]
         if order_times:
             symbol_since = min(order_times) - timedelta(hours=24)
         else:
@@ -177,7 +133,4 @@ async def load_order_identity_metadata(
         )
         for row in account_fills
     )
-    return OrderIdentityMetadata(
-        {key: tuple(value) for key, value in events_by_client.items()},
-        domain_account_fills,
-    )
+    return domain_account_fills

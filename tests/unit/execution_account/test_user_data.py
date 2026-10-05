@@ -14,8 +14,10 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
+from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     BinancePayloadError,
+    order_snapshot_from_update,
     parse_user_data_event,
 )
 from crypto_momentum_lab.execution_account.expectations import (
@@ -91,18 +93,41 @@ def test_parse_user_data_event_accepts_listen_key_expired() -> None:
     assert event.event_type == "listenKeyExpired"
 
 
+def test_parse_user_data_event_rejects_combined_stream_wrapper() -> None:
+    with pytest.raises(BinancePayloadError, match="missing string field e"):
+        parse_user_data_event(
+            {
+                "stream": "!userData",
+                "data": {
+                    "e": "ACCOUNT_UPDATE",
+                    "E": 1783123200000,
+                    "T": 1783123200000,
+                    "a": {"B": [], "P": []},
+                },
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         {},
         {"e": "ACCOUNT_UPDATE"},
         {"e": "ACCOUNT_UPDATE", "E": "not-a-timestamp"},
+        {"e": "ACCOUNT_UPDATE", "E": "1783123200000"},
+        {"e": "ACCOUNT_UPDATE", "E": 1783123200000.0},
+        {"e": "ACCOUNT_UPDATE", "E": True},
         {"e": "ACCOUNT_UPDATE", "E": 1783123200000, "a": []},
+        {"e": "ORDER_TRADE_UPDATE", "E": 1783123200000, "o": {}},
     ],
 )
 def test_parse_user_data_event_rejects_malformed_payload(payload) -> None:
     with pytest.raises(BinancePayloadError):
-        parse_user_data_event(payload)
+        parse_user_data_event(
+            payload,
+            received_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        )
 
 
 def test_account_user_data_state_merges_partial_account_update() -> None:
@@ -245,6 +270,7 @@ def test_account_user_data_state_uses_exchange_time_for_order_ordering() -> None
             "rp": "0.1",
             "n": "0.01",
             "N": "USDT",
+            "T": 1783123203000,
             "R": False,
         },
     }
@@ -282,7 +308,12 @@ def test_account_user_data_state_rejects_exchange_update_gap() -> None:
         "T": 1783123201000,
         "a": {"B": [], "P": []},
     }
-    state.apply(parse_user_data_event({**base, "u": 10}))
+    state.apply(
+        parse_user_data_event(
+            {**base, "u": 10},
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+    )
 
     with pytest.raises(UserDataStateError, match="not contiguous"):
         state.apply(
@@ -293,7 +324,8 @@ def test_account_user_data_state_rejects_exchange_update_gap() -> None:
                     "T": 1783123202000,
                     "u": 12,
                     "pu": 9,
-                }
+                },
+                received_at=datetime(2026, 7, 4, 0, 0, 2, tzinfo=UTC),
             )
         )
 
@@ -306,6 +338,7 @@ def test_account_user_data_state_requests_reconcile_for_unknown_position() -> No
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {
                     "B": [],
                     "P": [
@@ -319,7 +352,8 @@ def test_account_user_data_state_requests_reconcile_for_unknown_position() -> No
                         }
                     ],
                 },
-            }
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
         )
     )
 
@@ -357,6 +391,7 @@ def test_account_user_data_state_accepts_registered_entry_position() -> None:
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {
                     "B": [],
                     "P": [
@@ -414,6 +449,7 @@ def test_no_fill_terminal_order_discards_registered_entry() -> None:
             {
                 "e": "ORDER_TRADE_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {},
                 "o": {
                     "s": "ETHUSDT",
@@ -426,6 +462,7 @@ def test_no_fill_terminal_order_discards_registered_entry() -> None:
                     "x": "CANCELED",
                     "X": "CANCELED",
                     "z": "0",
+                    "l": "0",
                     "R": False,
                 },
             },
@@ -671,27 +708,172 @@ def test_invalid_rest_time_does_not_suppress_account_event(baseline_time) -> Non
     assert update.snapshot.balances[0].wallet_balance == Decimal("90")
 
 
-def test_event_time_fallback_is_not_rest_coverage_evidence() -> None:
-    original = _initial_snapshot()
-    state = AccountUserDataState(
-        replace(
-            original,
-            balances=(
-                replace(
-                    original.balances[0],
-                    raw_payload={"updateTime": 1783123202000},
-                ),
-            ),
-        )
-    )
-    update = state.apply(
+def test_account_update_requires_transaction_time_for_rest_ordering() -> None:
+    with pytest.raises(BinancePayloadError, match="positive integer T"):
         parse_user_data_event(
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
                 "a": {"B": [{"a": "USDT", "wb": "90"}], "P": []},
             },
-            received_at=original.config.observed_at + timedelta(seconds=4),
+            received_at=datetime(2026, 7, 4, 0, 0, 4, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize("field", ["p", "q", "z", "R", "x", "l"])
+def test_order_update_rejects_missing_exchange_fact(field: str) -> None:
+    order = {
+        "s": "BTCUSDT",
+        "c": "entry-1",
+        "S": "BUY",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "x": "NEW",
+        "X": "NEW",
+        "i": 1001,
+        "z": "0",
+        "l": "0",
+        "R": False,
+    }
+    del order[field]
+
+    with pytest.raises(UserDataStateError):
+        AccountUserDataState(_initial_snapshot()).apply(
+            parse_user_data_event(
+                {
+                    "e": "ORDER_TRADE_UPDATE",
+                    "E": 1783123201000,
+                    "T": 1783123201000,
+                    "o": order,
+                },
+                received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+            )
+        )
+
+
+def test_invalid_order_event_does_not_partially_update_order_state() -> None:
+    initial = _initial_snapshot()
+    state = AccountUserDataState(initial)
+    order = {
+        "s": "BTCUSDT",
+        "c": "entry-1",
+        "S": "BUY",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "x": "NEW",
+        "X": "NEW",
+        "i": 1001,
+        "z": "0",
+        "R": False,
+    }
+
+    with pytest.raises(UserDataStateError):
+        state.apply(
+            parse_user_data_event(
+                {
+                    "e": "ORDER_TRADE_UPDATE",
+                    "E": 1783123201000,
+                    "T": 1783123201000,
+                    "o": order,
+                },
+                received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+            )
+        )
+
+    assert state.snapshot(initial.config.observed_at).open_orders == initial.open_orders
+    assert state._last_order_exchange_event_at == {}
+
+
+@pytest.mark.parametrize("field", ["cw", "ps", "ep", "up"])
+def test_account_update_rejects_missing_exchange_fact(field: str) -> None:
+    initial = _initial_snapshot()
+    state = AccountUserDataState(initial)
+    balance = {"a": "NEW", "wb": "10", "cw": "8"}
+    position = {
+        "s": "ETHUSDT",
+        "pa": "0.5",
+        "ep": "3000",
+        "up": "0",
+        "mt": "cross",
+        "ps": "BOTH",
+    }
+    (balance if field == "cw" else position).pop(field)
+
+    with pytest.raises(UserDataStateError):
+        state.apply(
+            parse_user_data_event(
+                {
+                    "e": "ACCOUNT_UPDATE",
+                    "E": 1783123201000,
+                    "T": 1783123201000,
+                    "a": {"B": [balance], "P": [position]},
+                },
+                received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+            )
+        )
+
+    snapshot = state.snapshot(initial.config.observed_at)
+    assert snapshot.balances == initial.balances
+    assert snapshot.positions == initial.positions
+    assert state._last_account_exchange_event_at is None
+
+
+def test_order_snapshot_from_update_accepts_integer_exchange_facts() -> None:
+    snapshot = order_snapshot_from_update(_exchange_order_update(), _order_plan())
+
+    assert snapshot is not None
+    assert snapshot.exchange_order_id == "1001"
+    assert snapshot.observed_at == datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("i", "1001"),
+        ("i", 1001.0),
+        ("i", True),
+        ("T", "1783123201000"),
+        ("T", 1783123201000.0),
+        ("T", True),
+    ],
+)
+def test_order_snapshot_from_update_rejects_coerced_exchange_facts(field, value):
+    order = _exchange_order_update()
+    order[field] = value
+
+    assert order_snapshot_from_update(order, _order_plan()) is None
+
+
+def _exchange_order_update() -> dict[str, object]:
+    return {
+        "c": "entry-1",
+        "s": "BTCUSDT",
+        "S": "BUY",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": False,
+        "ps": "BOTH",
+        "i": 1001,
+        "X": "NEW",
+        "z": "0",
+        "ap": "0",
+        "T": 1783123201000,
+    }
+
+
+def _order_plan() -> OrderExecutionPlan:
+    return OrderExecutionPlan(
+        intent_id="candidate-1",
+        run_id="run-1",
+        client_order_id="entry-1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=False,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )
-    assert update.snapshot.balances[0].wallet_balance == Decimal("90")

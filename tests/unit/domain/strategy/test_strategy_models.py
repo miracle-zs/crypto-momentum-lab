@@ -118,7 +118,7 @@ def test_strategy_records_validate_timestamps_and_relationships() -> None:
         last_processed_at_by_symbol={"BTCUSDT": detected_at},
         warmup_buckets_by_symbol={"BTCUSDT": 4},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-        payload={"buffer_sizes": {"BTCUSDT": 4}},
+        payload={"signal_sequence": 4},
     )
 
     decision = StrategyDecision(
@@ -446,7 +446,7 @@ def _checkpoint(detected_at: datetime) -> StrategyCheckpoint:
         last_processed_at_by_symbol={"BTCUSDT": detected_at},
         warmup_buckets_by_symbol={"BTCUSDT": 4},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
-        payload={"buffer_sizes": {"BTCUSDT": 4}},
+        payload={"signal_sequence": 4},
     )
 
 

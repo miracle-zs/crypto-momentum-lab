@@ -19,31 +19,16 @@ from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _execution_database_url as _execution_database_url,
 )
 from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _issue_one_shot_risk_control_command as _issue_one_shot_risk_control_command,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _load_or_save_risk_control_command as _load_or_save_risk_control_command,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _load_transition as _load_transition,
+    _issue_one_shot_risk_control_command,
+    _load_transition,
+    _publish_risk_control_event,
+    _save_transition,
 )
 from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _market_database_url as _market_database_url,
 )
 from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
     _observability_database_url as _observability_database_url,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _publish_risk_control_event as _publish_risk_control_event,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _require_matching_risk_control_command as _require_matching_risk_control_command,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _resolve_database_url as _resolve_database_url,
-)
-from crypto_momentum_lab.apps.live_rollout.risk_control_cli import (
-    _save_transition as _save_transition,
 )
 from crypto_momentum_lab.config import (
     BinanceCredentialRole,
@@ -87,14 +72,14 @@ from crypto_momentum_lab.live_rollout.runtime_config import (
     _LIVE_MARKET_WEBSOCKET_URL,
     _live_strategy_config_hash,
 )
-from crypto_momentum_lab.live_rollout.runtime_manifest import LiveRuntimeAccount
+from crypto_momentum_lab.live_rollout.runtime_manifest import (
+    UNSET_STRATEGY_CONFIG_HASH,
+    LiveRuntimeAccount,
+)
 from crypto_momentum_lab.live_rollout.runtime_options import (
     LiveRunOptions,
     LiveRuntimeOptionsError,
     resolve_live_runtime_config,
-)
-from crypto_momentum_lab.live_rollout.runtime_options import (
-    parse_exchange_operations as _parse_runtime_exchange_operations,
 )
 from crypto_momentum_lab.live_rollout.runtime_options import (
     resolve_live_entry_positive_gainer_top_count as _resolve_runtime_top_count,
@@ -135,11 +120,6 @@ _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RENEW_LEASE_CONFIRMATION = "RENEW LIVE RISK LEASE"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
 _LIVE_ENTRY_POLICY_MODES = frozenset({"enforce"})
-# These two columns are retained by the existing risk-config schema for paper
-# and shadow sessions. Live execution no longer enforces state-age limits; the
-# large compatibility value makes that explicit without a destructive schema
-_LIVE_DEFAULT_MAX_STATE_AGE_SECONDS = 30.0
-_LIVE_UNENFORCED_STATE_AGE_SECONDS = _LIVE_DEFAULT_MAX_STATE_AGE_SECONDS
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
@@ -565,7 +545,7 @@ def approve_command(
     )
     if (
         configured_strategy_hash
-        and configured_strategy_hash != "unset"
+        and configured_strategy_hash != UNSET_STRATEGY_CONFIG_HASH
         and strategy_config_hash != configured_strategy_hash
     ):
         raise typer.BadParameter(
@@ -638,7 +618,7 @@ def approve_runtime_command(
     )
     if (
         configured_strategy_hash
-        and configured_strategy_hash != "unset"
+        and configured_strategy_hash != UNSET_STRATEGY_CONFIG_HASH
         and configured_strategy_hash != strategy_config_hash
     ):
         raise typer.BadParameter(
@@ -757,7 +737,7 @@ def refresh_approval_runtime_command(
     )
     if (
         configured_strategy_hash
-        and configured_strategy_hash != "unset"
+        and configured_strategy_hash != UNSET_STRATEGY_CONFIG_HASH
         and configured_strategy_hash != strategy_config_hash
     ):
         raise typer.BadParameter(
@@ -1449,8 +1429,6 @@ async def _prepare_live_risk_gates(
         max_gross_notional=max_gross_notional,
         max_daily_loss=max_daily_loss,
         max_open_positions=max_open_positions,
-        max_market_state_age_seconds=_LIVE_UNENFORCED_STATE_AGE_SECONDS,
-        max_account_state_age_seconds=_LIVE_UNENFORCED_STATE_AGE_SECONDS,
         allow_reduce_only_while_draining=True,
         created_at=now,
     )
@@ -1592,14 +1570,6 @@ def _resolve_live_profile_options(
     except LiveRuntimeOptionsError as error:
         raise typer.BadParameter(str(error)) from error
 
-
-def _parse_exchange_operations(
-    raw_value: str,
-) -> frozenset[str] | None:
-    try:
-        return _parse_runtime_exchange_operations(raw_value)
-    except LiveRuntimeOptionsError as error:
-        raise typer.BadParameter(str(error)) from error
 
 
 def _parse_optional_decimal_limit(

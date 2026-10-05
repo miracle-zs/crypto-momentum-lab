@@ -1,28 +1,26 @@
 # 仓库现状
 
-核对日期：2026-10-04。基线 `3c652c4d`，包含本次尚未提交的入口、调度、事件反馈、上下文、领域依赖及策略配置简化。本文不报告服务器此刻状态。
+核对日期：2026-10-05。本文描述当前工作树，不代表服务器正在运行的镜像或账户状态。
 
-## 当前运行范围
+## 当前范围
 
-- Binance USD-M 永续合约：公共行情采集、Orderflow 实盘、账户同步、研究采集器和只读看板。
-- 安装入口共五个：`cml-market-data`、`cml-execution-account`、`cml-research-collector`、`cml-live-rollout`、`cml-operator-dashboard`；以 [pyproject.toml](../pyproject.toml) 为准。
-- [基础 Compose](../compose.server.yaml) 与[账户 overlay](../compose.live.accounts.yaml) 支持四账户：primary、account-2、account-3、account-4。共享行情、采集器、看板与 PostgreSQL；每账户独立账户同步和策略进程，共 11 个应用进程加 PostgreSQL。
-- 每个账户策略内部使用 asyncio；订单按账户、symbol、position_side 串行，同批次追加开仓与退出按真实成交和预留归属。没有每个信号启动一个持仓专用线程。
-- 实盘直接构建 EffectivePolicy；运行入口不再接收租约所有者或 migration 参数，清单中的 commit/migration 元数据也不再必填。
-- 当前交易主链路不以 Shadow、CapabilityEvaluator、租约、Git/migration 比对或对账整体状态作为运行证明。旧行政命令和数据库字段仍可能存在，不代表热路径依赖它们。
-- 旧 Research、Replay/Paper、独立 Shadow CLI 和 Compression/Liquidation 运行实现已退役；历史模型、数据库迁移及部分历史展示保留。
-- 本地研究使用 `local_optimization/`，该目录不受 Git 跟踪。旧实现可在清理前基线 `02e6581f3bc71feac0f91f84fa405460ea26730f` 查看。
+- Binance USD-M 永续合约的公共行情、Orderflow 实盘、账户同步、研究采集和只读看板。
+- 五个安装入口：`cml-market-data`、`cml-execution-account`、`cml-research-collector`、`cml-live-rollout`、`cml-operator-dashboard`；以 [pyproject.toml](../pyproject.toml) 为准。
+- PostgreSQL 是单体事实库。基础 Compose 与账户 overlay 支持 primary、account-2、account-3、account-4；每个账户有独立同步与策略进程，共享行情、采集器、看板和数据库。
+- 每个策略进程使用 asyncio。订单按账户、标的、持仓方向串行；没有“每个信号一个线程”或 Shadow 运行链路。
+- 开仓只经过上下文事实、内存硬限额和单次数据库终审；对账与通知异步执行。`reduce_only` 退出不被对账状态阻断。
+- 5 倍杠杆被交易所拒绝后，客户端按 4 倍、3 倍继续尝试；这是明确策略，不是兼容回退。
 
-## 本地验证
+## 已移除的旧机制
 
-最近架构简化后的回归：Python unit/smoke/e2e 2964 通过、1 跳过（缺真实采集环境）；PostgreSQL 集成 176 通过；Node 前端 63 通过。修改文件 Ruff F/I 和差异空白检查通过，不等同于全仓库 Ruff/mypy 全绿。详见[测试说明](testing/behavior-tests.md)。本次文档整理检查全部本地链接，核对 Live/部署及六个本地研究 CLI；smoke 49 通过、1 因缺真实采集环境跳过，前端 63 通过。
+CapabilityEvaluator、重复准入围栏、Shadow、运行期 Git/migration 比对、三阶段订单补偿、旧 client-order-id 重建、旧账户表恢复、旧命令成交水位重建、协议字段默认值和保证金模式别名均不在当前交易链路。风险配置不再保存未执行的状态年龄限制；历史影子运行表已删除。订单网络超时仅保留原订单反查；账户与仓位事实由后台同步校准。
 
-## 生产证据边界
+## 验证与生产边界
 
-本地修改尚未部署。此前 `f2ffacf6` 的部署十分钟观察报告无新增重启或交易运行错误，但没有新订单样本；启动期间数据库读取超时后重试恢复。不能由此推断新改动的实盘延迟改善或宽限退出已在该窗口实际发生。
+当前工作树最近完整回归为 `3224 passed, 5 skipped, 2 warnings`。跳过项需要真实数据库或本机回环权限；两个警告来自 Starlette/httpx 弃用和一个既有测试协程清理问题。
 
-保留的 JSON/CSV 记录较早版本的事故与观测，统一见[故障记录](diagnostics/incidents.md)。历史记录不作为实时故障列表。要确认当前镜像、账户持仓、订单、告警或性能，必须重新读取服务器；本轮文档整理没有连接服务器或执行交易。
+本地改动尚未部署。历史服务器观测、已发生事故和不能从健康检查推导出的结论见 [故障记录](diagnostics/incidents.md)。确认当前镜像、订单、仓位、告警或性能时必须重新读取服务器。
 
-## 剩余工作
+## 文档边界
 
-[简化状态](architecture/simplification.md) 集中列出订单结算状态收敛、最小启动恢复、增量账本发布及性能测量。没有将这些未完成工作标成已完成。
+系统职责与调用链见 [架构](architecture/overview.md)，订单状态与恢复底线见 [执行契约](architecture/execution-contracts.md)。历史扫描表、原始 JSON/CSV 导出和逐批改造日志不再维护在工作树；Git 历史仍可追溯。

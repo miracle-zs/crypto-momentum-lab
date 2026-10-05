@@ -1080,7 +1080,7 @@ def _require_schema_version(
 
 
 def _array(data: dict[str, object], name: str) -> list[object]:
-    value = data.get(name, [])
+    value = data[name]
     if not isinstance(value, list):
         raise RecoverySchemaError(f"{name} must be an array")
     return value

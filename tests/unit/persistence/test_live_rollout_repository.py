@@ -53,7 +53,7 @@ async def test_operating_state_query_excludes_preflight_and_preserves_unknown() 
         )
     )
     assert "'s1'" in compiled
-    assert "NOT IN ('preflight', 'shadow_preflight')" in compiled
+    assert "state != 'preflight'" in compiled
     assert "occurred_at DESC" in compiled
     assert "LIMIT 1" in compiled
 

@@ -46,15 +46,19 @@ async def test_private_request_has_finite_timeouts(monkeypatch) -> None:
 
     monkeypatch.setattr(httpx, "AsyncClient", transport_client)
     client = BinanceUsdMPrivateReadClient(
-        api_key="key", api_secret="secret", environment="live",
-        account_label="primary", base_url="https://fapi.binance.com",
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
     )
     try:
         assert await client.fetch_balances() == ()
         assert sent_timeouts
         assert all(
             value is not None and 0 < value <= 5
-            for timeouts in sent_timeouts for value in timeouts.values()
+            for timeouts in sent_timeouts
+            for value in timeouts.values()
         )
     finally:
         await client.aclose()
@@ -215,16 +219,15 @@ async def test_client_fetches_account_and_position_modes() -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requested_paths.append(request.url.path)
-        if request.url.path == "/fapi/v3/account":
-            return httpx.Response(
-                200,
-                json={
-                    "multiAssetsMargin": False,
-                    "feeTier": 0,
-                },
-            )
-        assert request.url.path == "/fapi/v1/positionSide/dual"
-        return httpx.Response(200, json={"dualSidePosition": True})
+        assert request.url.path == "/fapi/v1/accountConfig"
+        return httpx.Response(
+            200,
+            json={
+                "multiAssetsMargin": False,
+                "dualSidePosition": True,
+                "feeTier": 0,
+            },
+        )
 
     client = BinanceUsdMPrivateReadClient(
         api_key="key",
@@ -244,11 +247,109 @@ async def test_client_fetches_account_and_position_modes() -> None:
     finally:
         await client.aclose()
 
-    assert requested_paths == [
-        "/fapi/v3/account",
-        "/fapi/v1/positionSide/dual",
-    ]
+    assert requested_paths == ["/fapi/v1/accountConfig"]
     assert config.hedge_mode is True
+    assert config.multi_assets_mode is False
+    assert config.fee_tier == 0
+    assert config.raw_payload == {
+        "multiAssetsMargin": False,
+        "dualSidePosition": True,
+        "feeTier": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "field,payload",
+    [
+        ("multiAssetsMargin", {"dualSidePosition": False, "feeTier": 0}),
+        ("dualSidePosition", {"multiAssetsMargin": False, "feeTier": 0}),
+    ],
+)
+async def test_client_rejects_account_mode_responses_missing_required_booleans(
+    field: str, payload: dict[str, object]
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/accountConfig"
+        return httpx.Response(200, json=payload)
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ValueError, match=field):
+            await client.fetch_account_config()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"marginType": "CROSSED"},
+        {"symbol": "BTCUSDT"},
+    ],
+)
+async def test_client_rejects_incomplete_symbol_configuration_rows(
+    row: dict[str, object],
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/symbolConfig"
+        return httpx.Response(200, json=[row])
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+    )
+
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_symbol_margin_types()
+    finally:
+        await client.aclose()
+
+
+async def test_client_rejects_symbol_configuration_for_a_different_symbol() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/symbolConfig"
+        return httpx.Response(
+            200,
+            json=[{"symbol": "ETHUSDT", "marginType": "CROSSED"}],
+        )
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="another symbol"):
+            await client.fetch_symbol_margin_type("BTCUSDT")
+    finally:
+        await client.aclose()
 
 
 async def test_client_fetches_recent_user_trades() -> None:
@@ -298,6 +399,33 @@ async def test_client_fetches_recent_user_trades() -> None:
     assert fills[0].price == Decimal("30000.5")
     assert fills[0].realized_pnl == Decimal("-0.25")
     assert fills[0].fee == Decimal("0.12")
+
+
+async def test_client_rejects_incomplete_user_trade_fact() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"symbol": "BTCUSDT", "id": 42, "orderId": 1001}],
+        )
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="side"):
+            await client.fetch_recent_fills(("BTCUSDT",))
+    finally:
+        await client.aclose()
 
 
 async def test_client_paginates_user_trades_across_pages() -> None:
@@ -720,7 +848,7 @@ async def test_trade_client_inspects_exit_order_and_current_position() -> None:
                 json=[
                     {
                         "symbol": "BTCUSDT",
-                        "orderId": "2",
+                        "orderId": 2,
                         "clientOrderId": "cml_other_exit",
                         "side": "SELL",
                         "type": "LIMIT",
@@ -799,7 +927,7 @@ async def test_trade_client_does_not_treat_one_way_entry_as_exit() -> None:
                 json=[
                     {
                         "symbol": "BTCUSDT",
-                        "orderId": "2",
+                        "orderId": 2,
                         "clientOrderId": "cml_entry",
                         "side": "SELL",
                         "type": "LIMIT",
@@ -1778,6 +1906,7 @@ async def test_flat_bootstrap_reads_explicit_zero_position_rows_from_v2() -> Non
                     "positionAmt": "0",
                     "entryPrice": "0",
                     "markPrice": "30000",
+                    "unRealizedProfit": "0",
                     "notional": "0",
                 },
                 {
@@ -1786,6 +1915,7 @@ async def test_flat_bootstrap_reads_explicit_zero_position_rows_from_v2() -> Non
                     "positionAmt": "0",
                     "entryPrice": "0",
                     "markPrice": "30000",
+                    "unRealizedProfit": "0",
                     "notional": "0",
                 },
             ]

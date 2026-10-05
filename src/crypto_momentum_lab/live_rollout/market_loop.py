@@ -20,14 +20,13 @@ from datetime import datetime, timedelta
 
 import structlog
 
-import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
-import crypto_momentum_lab.live_rollout.runtime_errors as runtime_errors
 from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
 from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
+from crypto_momentum_lab.live_rollout import market_runtime_contracts, runtime_errors
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
@@ -492,18 +491,15 @@ def _strategy_decision_details(
 def _empty_heartbeat_eligible(
     symbol: str,
     *,
-    entry_symbols: frozenset[str] | None,
+    entry_symbols: frozenset[str],
     open_position_symbols: frozenset[str] | None,
 ) -> bool:
     """Whether an empty strategy-output heartbeat should be durable for ``symbol``.
 
-    ``entry_symbols is None`` means the pool is unconfigured (legacy), so every
-    monitored symbol stays eligible.  Otherwise only entry-pool members and
-    symbols that currently hold a position keep the 60s empty heartbeat.
+    Only entry-pool members and symbols that currently hold a position keep the
+    60s empty heartbeat.
     """
 
-    if entry_symbols is None:
-        return True
     if symbol in entry_symbols:
         return True
     return symbol in (open_position_symbols or frozenset())

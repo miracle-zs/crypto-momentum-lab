@@ -330,6 +330,7 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783123201000,
+            "T": 1783123201000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -964,7 +965,8 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
 
     result = await service.sync_once(include_fills=True)
 
-    # When fill coverage is incomplete (catching up), service remains RUNNING with progress reason
+    # When fill coverage is incomplete (catching up), service remains RUNNING
+    # with progress reason
     assert result.status is ExecutionAccountStatus.RUNNING
     assert result.fills_catching_up is True
     # But cursor must advance to continuation point so work is not lost
@@ -979,7 +981,8 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
         "BTCUSDT"
     ]
 
-    # Persisted process state is RUNNING with fills_catching_up reason, not a blocking SYNCING state
+    # Persisted process state is RUNNING with fills_catching_up reason,
+    # not a blocking SYNCING state
     assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
@@ -987,6 +990,7 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
         {
             "e": "ACCOUNT_UPDATE",
             "E": 1783166400000,
+            "T": 1783166400000,
             "a": {
                 "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
                 "P": [],
@@ -1003,7 +1007,7 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     assert event_result.fills_catching_up is True
     assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
 
-    # Heartbeat during incomplete sync publishes RUNNING with fills_catching_up progress reason
+    # Heartbeat during incomplete sync publishes RUNNING with progress reason
     heartbeat_time = datetime(2026, 7, 4, 12, 1, tzinfo=UTC)
     await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
     assert repository.process_states[-1].state is ExecutionAccountStatus.RUNNING
@@ -1209,6 +1213,7 @@ async def test_rest_network_wait_does_not_delay_ws_commit_or_regress_history():
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
             },
             received_at=initial_at + timedelta(seconds=1),
@@ -1268,6 +1273,7 @@ async def test_materialized_rest_commit_finishes_before_newer_ws_commit():
             {
                 "e": "ACCOUNT_UPDATE",
                 "E": 1783123201000,
+                "T": 1783123201000,
                 "a": {"B": [{"a": "USDT", "wb": "101", "cw": "80"}], "P": []},
             },
             received_at=_config().observed_at + timedelta(seconds=1),

@@ -20,24 +20,13 @@ from crypto_momentum_lab.strategies.runtime_checkpoint import (
 
 @dataclass(slots=True)
 class StrategyRuntimeState:
-    """Shared bookkeeping for strategies with a rolling market-state buffer.
+    """Bookkeeping for the order-flow strategy's rolling market-state buffer."""
 
-    The payload key is intentionally supplied by each strategy.  This keeps
-    checkpoint compatibility explicit while sharing the lifecycle of the
-    derived buffers and control maps used by the orderflow and liquidation
-    runtimes.
-    """
-
-    buffer_payload_key: str
     buffers: dict[str, deque[MarketState15s]] = field(default_factory=dict)
     warmup: dict[str, int] = field(default_factory=dict)
     cooldown_remaining: dict[str, int] = field(default_factory=dict)
     last_processed: dict[str, datetime] = field(default_factory=dict)
     signal_sequence: int = 0
-
-    def __post_init__(self) -> None:
-        if not self.buffer_payload_key:
-            raise ValueError("buffer_payload_key must not be empty")
 
     def restore(
         self,
@@ -55,8 +44,10 @@ class StrategyRuntimeState:
         self.warmup = dict(checkpoint.warmup_buckets_by_symbol)
         self.cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self.last_processed = dict(checkpoint.last_processed_at_by_symbol)
-        restored_buffers = checkpoint.payload.get(self.buffer_payload_key)
-        if isinstance(restored_buffers, dict):
+        if "market_state_buffers" in checkpoint.payload:
+            restored_buffers = checkpoint.payload["market_state_buffers"]
+            if not isinstance(restored_buffers, dict):
+                raise ValueError("checkpoint market_state_buffers must be a mapping")
             self.buffers = restore_market_state_buffers(
                 restored_buffers,
                 maxlen=max_buffer_length,
@@ -136,14 +127,9 @@ class StrategyRuntimeState:
         *,
         include_market_state_buffers: bool = True,
     ) -> StrategyCheckpoint:
-        payload: dict[str, JsonValue] = {
-            "buffer_sizes": {
-                symbol: len(buffer) for symbol, buffer in self.buffers.items()
-            },
-            "signal_sequence": self.signal_sequence,
-        }
+        payload: dict[str, JsonValue] = {"signal_sequence": self.signal_sequence}
         if include_market_state_buffers:
-            payload[self.buffer_payload_key] = {
+            payload["market_state_buffers"] = {
                 symbol: [market_state_payload(state) for state in buffer]
                 for symbol, buffer in self.buffers.items()
             }

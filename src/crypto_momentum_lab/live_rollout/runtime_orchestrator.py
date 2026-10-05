@@ -7,11 +7,6 @@ module owns the runtime assembly and lifecycle of one live daemon.
 import asyncio
 import json
 import os
-from collections.abc import (
-    AsyncIterable,
-    Awaitable,
-    Callable,
-)
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
@@ -76,10 +71,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
-from crypto_momentum_lab.live_rollout.account_event_ports import (
-    AccountEventExitProcessor,
-    AccountEventOrderReconciler,
-)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
 )
@@ -101,7 +92,6 @@ from crypto_momentum_lab.live_rollout.execution_runtime import (
     build_live_execution_runtime,
     build_live_policy,
 )
-from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exit_receipt_recovery import (
     LiveExitReceiptRecovery,
@@ -221,7 +211,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     RUNTIME_METADATA_SNAPSHOT,
     LiveRuntimeTelemetry,
 )
-from crypto_momentum_lab.live_rollout.telemetry_ports import AccountFillSink
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
@@ -1543,66 +1532,3 @@ async def run_live_daemon(
                 await ownership_registry.teardown_all()
             except Exception:
                 log.exception("ownership_registry_teardown_failed")
-
-
-async def _bootstrap_execution_position_facts(
-    client: BinanceUsdMTradeClient,
-    coordinator: OrderExecutionCoordinator,
-) -> None:
-    """Seed only exchange-returned facts before allowing entry submission."""
-    async with asyncio.timeout(15):
-        positions = await client.fetch_positions(include_flat=True)
-        for position in positions:
-            await coordinator.observe_account_snapshot(position)
-
-
-async def _run_account_event_channel(
-    *,
-    source: AsyncIterable[AccountEvent],
-    daemon: AccountEventExitProcessor,
-    latest_market_states: LatestMarketStateCache,
-    latest_market_quotes: LatestMarketQuoteCache,
-    order_reconciliation: AccountEventOrderReconciler | None = None,
-    run_id: str | None = None,
-    telemetry: AccountFillSink | None = None,
-    on_exit_failure: Callable[[str, str | None], None] | None = None,
-    on_account_snapshot: Callable[[AccountEvent], Awaitable[None]] | None = None,
-    on_account_snapshot_recovery: Callable[[str], None] | None = None,
-) -> None:
-    runtime = LiveAccountEventRuntime(
-        daemon=daemon,
-        latest_market_states=latest_market_states,
-        latest_market_quotes=latest_market_quotes,
-        order_reconciliation=order_reconciliation,
-        run_id=run_id,
-        telemetry=telemetry,
-        is_transient_error=runtime_errors.is_transient_runtime_error,
-        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
-        on_exit_failure=on_exit_failure,
-        on_account_snapshot=on_account_snapshot,
-        on_account_snapshot_recovery=on_account_snapshot_recovery,
-    )
-    await runtime.run(source)
-
-
-async def _run_grace_timeout_channel(
-    *,
-    daemon: ExitChannelProcessor,
-    latest_market_states: LatestMarketStateCache,
-    latest_market_quotes: LatestMarketQuoteCache,
-    interval_seconds: float = 1.0,
-    on_exit_failure: Callable[[str, str | None], None] | None = None,
-    on_order_identity_conflict: Callable[[str], None] | None = None,
-) -> None:
-    """Keep the historical test/CLI seam backed by the extracted runtime."""
-
-    runtime = LiveExitChannelRuntime(
-        daemon=daemon,
-        latest_market_quotes=latest_market_quotes,
-        latest_market_states=latest_market_states,
-        is_transient_error=runtime_errors.is_transient_runtime_error,
-        is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
-        on_exit_failure=on_exit_failure,
-        on_order_identity_conflict=on_order_identity_conflict,
-    )
-    await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
