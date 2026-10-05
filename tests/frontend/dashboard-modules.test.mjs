@@ -108,6 +108,21 @@ test("syncing/ready_readonly flips do not rebuild the account section", () => {
   assert.equal(sectionRenderKey("account", base), sectionRenderKey("account", flipped));
 });
 
+test("account cache freshness changes do not rebuild the account section", () => {
+  const base = {
+    status: "READY",
+    _cache_status: "STALE",
+    accounts: [{
+      account_label: "primary",
+      environment: "live",
+      strategy_name: "orderflow_impulse",
+    }],
+  };
+  const refreshed = { ...base, _cache_status: "HIT" };
+
+  assert.equal(sectionRenderKey("account", base), sectionRenderKey("account", refreshed));
+});
+
 test("overview account heartbeats do not rebuild the section", () => {
   const first = {
     status: "READY",
@@ -1502,6 +1517,5 @@ test("createScrollGuard can force-restore even while a scroll gesture is active"
     else globalThis.window = previousWindow;
   }
 });
-
 
 

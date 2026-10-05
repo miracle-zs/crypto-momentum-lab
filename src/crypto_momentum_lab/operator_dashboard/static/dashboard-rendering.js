@@ -35,6 +35,9 @@ export function sectionRenderKey(id, data) {
     // every sync cycle (syncing ↔ ready_readonly) and must NOT rebuild the
     // DOM — a full rebuild blanks chart slots and collapses document height,
     // which clamps scrollTop and reads as an auto jump to the top.
+    // Cache freshness is presentation state too. A stale-cache response must
+    // update the badge without replacing this scroll-heavy account subtree.
+    delete snapshot._cache_status;
     const fields = [
       "account_label",
       "strategy_name",
