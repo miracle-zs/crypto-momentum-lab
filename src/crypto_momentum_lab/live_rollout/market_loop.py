@@ -491,7 +491,7 @@ def _strategy_decision_details(
 def _empty_heartbeat_eligible(
     symbol: str,
     *,
-    entry_symbols: frozenset[str],
+    entry_symbols: frozenset[str] | None,
     open_position_symbols: frozenset[str] | None,
 ) -> bool:
     """Whether an empty strategy-output heartbeat should be durable for ``symbol``.
@@ -500,7 +500,10 @@ def _empty_heartbeat_eligible(
     60s empty heartbeat.
     """
 
-    if symbol in entry_symbols:
+    # The entry-symbol loader is intentionally lazy. A stream reconnect can
+    # deliver a state before that loader has populated its first pool, in
+    # which case no symbol is eligible by virtue of entry membership yet.
+    if symbol in (entry_symbols or frozenset()):
         return True
     return symbol in (open_position_symbols or frozenset())
 

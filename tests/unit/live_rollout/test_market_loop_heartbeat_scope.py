@@ -23,6 +23,14 @@ def test_open_position_symbol_is_eligible_outside_entry_pool() -> None:
     )
 
 
+def test_unloaded_entry_pool_does_not_abort_empty_heartbeat_evaluation() -> None:
+    assert not _empty_heartbeat_eligible(
+        "DOGEUSDT",
+        entry_symbols=None,
+        open_position_symbols=frozenset(),
+    )
+
+
 def test_unrelated_symbol_is_not_eligible() -> None:
     assert not _empty_heartbeat_eligible(
         "DOGEUSDT",
