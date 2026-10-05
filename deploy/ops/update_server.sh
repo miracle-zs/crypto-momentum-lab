@@ -292,6 +292,7 @@ if ! command -v timeout >/dev/null 2>&1; then
 fi
 cd "$remote_dir"
 deploy_started_at="$(date +%s)"
+deploy_phase=checkout
 
 run_with_timeout() {
   local quiet=0
