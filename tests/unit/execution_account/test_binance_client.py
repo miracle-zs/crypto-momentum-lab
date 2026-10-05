@@ -1182,7 +1182,6 @@ async def test_trade_client_cancels_one_known_order_without_operator_command() -
                 "orderId": 12345,
                 "status": "CANCELED",
                 "executedQty": "0",
-                "avgPrice": "0",
             },
         )
 
@@ -1207,6 +1206,39 @@ async def test_trade_client_cancels_one_known_order_without_operator_command() -
 
     assert captured_path == "/fapi/v1/order"
     assert snapshot.state is ExchangeOrderState.CANCELED
+
+
+async def test_trade_client_treats_malformed_cancel_response_as_unknown_outcome(
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "orderId": 12345,
+                "status": "CANCELED",
+                "executedQty": "0",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeCancellationUnknownError, match="unreadable"):
+            await client.cancel_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
 
 
 async def test_trade_client_treats_cancel_rate_limit_as_unknown_outcome() -> None:

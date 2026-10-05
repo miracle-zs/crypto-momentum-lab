@@ -11,7 +11,10 @@ from crypto_momentum_lab.domain.account.models import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderSnapshot
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.order_status import (
     exchange_order_state,
@@ -150,8 +153,20 @@ def order_snapshot_from_response(
     observed_at: datetime,
     entry_leverage: int | None = None,
 ) -> ExchangeOrderSnapshot:
+    state = exchange_order_state(rest_require_string(data, "status"))
     executed_quantity = decimal_value(rest_require_string(data, "executedQty"))
-    average_price = decimal_value(rest_require_string(data, "avgPrice"))
+    raw_average_price = data.get("avgPrice")
+    if raw_average_price is None:
+        # Binance's cancel response for an entirely unfilled limit order omits
+        # avgPrice.  There is no execution price to preserve in that terminal
+        # state, so represent it exactly as zero rather than rejecting a valid
+        # response.  Every other response remains schema-strict below.
+        if state is not ExchangeOrderState.CANCELED or executed_quantity != 0:
+            average_price = decimal_value(rest_require_string(data, "avgPrice"))
+        else:
+            average_price = Decimal("0")
+    else:
+        average_price = decimal_value(rest_require_string(data, "avgPrice"))
     if executed_quantity > Decimal("0") and average_price == Decimal("0"):
         cum_quote = decimal_value(rest_require_string(data, "cumQuote"))
         if cum_quote < Decimal("0"):
@@ -161,7 +176,7 @@ def order_snapshot_from_response(
     return ExchangeOrderSnapshot(
         client_order_id=rest_require_string(data, "clientOrderId"),
         exchange_order_id=str(rest_require_int(data, "orderId")),
-        state=exchange_order_state(rest_require_string(data, "status")),
+        state=state,
         observed_at=observed_at,
         executed_quantity=executed_quantity,
         average_price=average_price,

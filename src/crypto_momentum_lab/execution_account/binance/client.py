@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import TypedDict
 from urllib.parse import urlencode
@@ -1388,9 +1388,15 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeOrderQueryUnknownError(
                 "Binance order lookup failed; order state requires reconciliation"
             ) from exc
-        return order_snapshot_from_response(
-            rest_require_mapping(payload), observed_at=self._now()
-        )
+        try:
+            return order_snapshot_from_response(
+                rest_require_mapping(payload), observed_at=self._now()
+            )
+        except (DecimalException, KeyError, TypeError, ValueError) as exc:
+            raise ExchangeOrderQueryUnknownError(
+                "Binance order lookup response was unreadable; "
+                "order state must be reconciled"
+            ) from exc
 
     async def cancel_order_by_client_id(
         self,
@@ -1479,9 +1485,15 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeCancellationUnknownError(
                 "Binance cancel request was rejected; order state must be reconciled"
             ) from exc
-        return order_snapshot_from_response(
-            rest_require_mapping(payload), observed_at=self._now()
-        )
+        try:
+            return order_snapshot_from_response(
+                rest_require_mapping(payload), observed_at=self._now()
+            )
+        except (DecimalException, KeyError, TypeError, ValueError) as exc:
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel response was unreadable; "
+                "order state must be reconciled"
+            ) from exc
 
     async def emergency_flatten(
         self,

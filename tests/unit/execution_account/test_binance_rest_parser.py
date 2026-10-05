@@ -309,6 +309,29 @@ def test_order_response_uses_cumulative_quote_for_zero_average(
     assert data["avgPrice"] == average
 
 
+def test_order_response_accepts_zero_fill_cancellation_without_average_price():
+    """Binance omits avgPrice when cancelling an unfilled limit order."""
+
+    result = order_snapshot_from_response(
+        {
+            "orderId": 1736408134,
+            "symbol": "NILUSDT",
+            "status": "CANCELED",
+            "clientOrderId": "cml_4a7aa2d9d808951f20619326f0ef997d",
+            "price": "0.098190",
+            "origQty": "1026.3",
+            "executedQty": "0.0",
+            "cumQty": "0.0",
+            "timeInForce": "GTC",
+            "type": "LIMIT",
+        },
+        observed_at=datetime(2026, 10, 5, tzinfo=UTC),
+    )
+
+    assert result.state.value == "canceled"
+    assert result.executed_quantity == result.average_price == Decimal("0")
+
+
 @pytest.mark.parametrize(
     "field",
     ["clientOrderId", "orderId", "status", "executedQty", "avgPrice"],
