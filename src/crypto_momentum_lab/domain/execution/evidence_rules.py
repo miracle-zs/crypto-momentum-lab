@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, replace
 
+from crypto_momentum_lab.domain.execution.evidence_digest import digest_json_payload
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
@@ -26,6 +27,26 @@ def _canonical_evidence_payload(evidence: ExecutionEvidence) -> dict[str, object
     if isinstance(cumulative_order, dict):
         cumulative_order.pop("observed_at", None)
     return payload
+
+
+def content_addressed_evidence_id(
+    evidence: ExecutionEvidence,
+    *,
+    prefix: str,
+) -> str:
+    """Return a stable ID whose preimage contains every canonical fact.
+
+    The evidence and its embedded order event use the generated ID at runtime,
+    so normalize both IDs while deriving the digest to avoid hashing the value
+    being generated.  Transport observation timestamps are already excluded by
+    ``_canonical_evidence_payload``.
+    """
+    payload = _canonical_evidence_payload(evidence)
+    payload["evidence_id"] = "content-addressed-evidence-v1"
+    order_event = payload.get("order_event")
+    if isinstance(order_event, dict):
+        order_event["event_id"] = "content-addressed-evidence-v1"
+    return f"{prefix}_{digest_json_payload(payload)}"
 
 
 def _evidence_identity(evidence: ExecutionEvidence) -> str:

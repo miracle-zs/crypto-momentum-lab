@@ -36,6 +36,9 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
     ExecutionCumulativeOrderReport,
     ExecutionEvidence,
 )
+from crypto_momentum_lab.domain.execution.evidence_rules import (
+    content_addressed_evidence_id,
+)
 from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeOrderRejectedError,
     LiveSubmissionDisabledError,
@@ -58,10 +61,10 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     EvidencePendingReason,
     WaitingForEvidence,
 )
-from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrderReceipt
 from crypto_momentum_lab.domain.execution.order_execution_port import (
     OrderExecutionPort as _OrderExecutionPort,
 )
+from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrderReceipt
 from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -1066,30 +1069,10 @@ class OrderExecutionCoordinator:
             )
         cumulative_quote = cumulative_quantity * average_price
         position_side = plan.position_side.value
-        identity = "\x1f".join(
-            (
-                self._account_label,
-                plan.symbol,
-                position_side,
-                res.client_order_id,
-                str(res.exchange_order_id or ""),
-                res.state.value,
-                str(cumulative_quantity),
-                str(cumulative_quote),
-            )
-        )
-        if settlement_fills:
-            from crypto_momentum_lab.domain.execution.evidence_digest import (
-                trade_payload_digest,
-            )
-
-            identity += "\x1f" + "\x1f".join(
-                trade_payload_digest(fill)
-                for fill in sorted(settlement_fills, key=lambda item: item.trade_id)
-            )
-        identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         order_event = ExchangeOrderEvent(
-            event_id=f"order_{identity_hash}",
+            # Replaced with the canonical content-addressed ID before this
+            # observation is submitted to the Book.
+            event_id="order-content-addressed-v1",
             client_order_id=res.client_order_id,
             state=res.state,
             occurred_at=now_dt,
@@ -1130,23 +1113,28 @@ class OrderExecutionCoordinator:
                             "cumulative order report has no restored Book stream "
                             "identity and no active stream scope is registered"
                         )
-            result = await self._execution_book.observe(
-                ExecutionEvidence(
-                    evidence_id=order_event.event_id,
-                    scope=scope,
+            evidence = ExecutionEvidence(
+                evidence_id=order_event.event_id,
+                scope=scope,
+                observed_at=now_dt,
+                order_event=order_event,
+                stream_id=stream_id,
+                stream_epoch=stream_epoch,
+                cumulative_order=ExecutionCumulativeOrderReport(
+                    order_id=res.client_order_id,
+                    cumulative_quantity=cumulative_quantity,
+                    cumulative_quote=cumulative_quote,
                     observed_at=now_dt,
-                    order_event=order_event,
-                    stream_id=stream_id,
-                    stream_epoch=stream_epoch,
-                    cumulative_order=ExecutionCumulativeOrderReport(
-                        order_id=res.client_order_id,
-                        cumulative_quantity=cumulative_quantity,
-                        cumulative_quote=cumulative_quote,
-                        observed_at=now_dt,
-                    ),
-                    settlement_fills=settlement_fills,
-                )
+                ),
+                settlement_fills=settlement_fills,
             )
+            evidence_id = content_addressed_evidence_id(evidence, prefix="order")
+            evidence = replace(
+                evidence,
+                evidence_id=evidence_id,
+                order_event=replace(order_event, event_id=evidence_id),
+            )
+            result = await self._execution_book.observe(evidence)
             if isinstance(result, WaitingForEvidence):
                 if res.state.terminal:
                     self._execution_book.require_command_recovery(res.client_order_id)

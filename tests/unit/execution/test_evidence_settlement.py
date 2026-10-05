@@ -15,6 +15,7 @@ from crypto_momentum_lab.domain.execution.evidence_models import (
 from crypto_momentum_lab.domain.execution.evidence_rules import (
     _canonical_evidence_payload,
     _evidence_identity,
+    content_addressed_evidence_id,
 )
 from crypto_momentum_lab.domain.execution.evidence_settlement import (
     cumulative_fill_delta,
@@ -161,4 +162,29 @@ def test_identity_binds_epoch_and_canonical_digest_excludes_transport_observatio
     )
     assert _canonical_evidence_payload(evidence) != _canonical_evidence_payload(
         replace(evidence, fill=replace(fill, quantity=Decimal("6")))
+    )
+
+
+def test_content_addressed_evidence_id_changes_for_any_canonical_fact(fill):
+    scope = ExecutionScope("live", "account-3", "TESTUSDT", FuturesPositionSide.LONG)
+    evidence = ExecutionEvidence(
+        "temporary-order-id",
+        scope,
+        NOW,
+        fill=fill,
+        stream_id="hub",
+        stream_epoch="epoch-1",
+    )
+
+    assert content_addressed_evidence_id(evidence, prefix="order") == (
+        content_addressed_evidence_id(
+            replace(evidence, observed_at=NOW + timedelta(seconds=1)),
+            prefix="order",
+        )
+    )
+    assert content_addressed_evidence_id(evidence, prefix="order") != (
+        content_addressed_evidence_id(
+            replace(evidence, fill=replace(fill, quantity=Decimal("6"))),
+            prefix="order",
+        )
     )

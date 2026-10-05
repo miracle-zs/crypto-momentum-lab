@@ -207,7 +207,11 @@ class ExecutionTransaction:
                 or existing.sequence != evidence.sequence
             ):
                 raise _DecisionCommitConflict(
-                    f"evidence {evidence.evidence_id} was reused with different data"
+                    f"evidence {evidence.evidence_id} was reused with different data "
+                    f"(existing_payload_digest={existing.payload_digest}, "
+                    f"attempted_payload_digest={evidence.payload_digest}, "
+                    f"existing_sequence={existing.sequence}, "
+                    f"attempted_sequence={evidence.sequence})"
                 )
             return False
         self.session.add(
