@@ -306,6 +306,7 @@ async def restore_durable_positions(
     states = await unit_of_work.load_positions(
         environment=environment, account_label=account_label, as_of=as_of
     )
+    benign_facts_migration_count = 0
     for durable_state in states:
         scope = durable_state.scope
         key = PositionKey(
@@ -317,6 +318,12 @@ async def restore_durable_positions(
         canon = key.canonical_id
         recovered = recover_durable_position(durable_state)
         for event, values in recovered.diagnostics:
+            if (
+                event == "execution_head_facts_migrated"
+                and not values.get("has_active_reservations")
+            ):
+                benign_facts_migration_count += 1
+                continue
             if event == "execution_head_view_migrated" and not values.get(
                 "has_active_reservations"
             ):
@@ -347,6 +354,12 @@ async def restore_durable_positions(
             key_for_order = watermark_key(key, watermark.order_id)
             state.order_cumulative_fills[key_for_order] = watermark.cumulative_quantity
             state.order_cumulative_quotes[key_for_order] = watermark.cumulative_quote
+    if benign_facts_migration_count:
+        log.info(
+            "execution_head_facts_migrations_recovered",
+            account_label=account_label,
+            migration_count=benign_facts_migration_count,
+        )
 
 
 @dataclass(frozen=True, slots=True)

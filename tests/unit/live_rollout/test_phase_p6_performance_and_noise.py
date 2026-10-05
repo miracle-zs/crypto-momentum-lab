@@ -2,8 +2,8 @@
 
 Verifies:
 1. Event loop latency telemetry calculates p50, p95, p99, and max percentiles.
-2. Market data manifest saves are decoupled from the ingestion loop via background worker.
-3. Execution head view migration logs as info when no active reservations are present.
+2. Market data manifest saves are decoupled from ingestion via a background worker.
+3. Inactive execution-head migrations are consolidated into one info log.
 4. Routine Binance account configuration updates log at info level instead of error.
 5. Research collector state conflicts are aggregated to avoid alert floods.
 """
@@ -46,7 +46,7 @@ def test_event_loop_lag_percentiles_calculation():
     assert res["max"] == 100.0
 
 
-async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypatch):
+async def test_inactive_head_migrations_are_consolidated_at_info_level(monkeypatch):
     book = ExecutionBook()
     from unittest.mock import AsyncMock
 
@@ -71,11 +71,15 @@ async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypat
     mock_book = SimpleNamespace()
     diagnostics = [
         (
-            "execution_head_view_migrated",
+            "execution_head_facts_migrated",
             {"has_active_reservations": False, "symbol": "BTCUSDT"},
         ),
         (
-            "execution_head_view_migrated",
+            "execution_head_facts_migrated",
+            {"has_active_reservations": False, "symbol": "SOLUSDT"},
+        ),
+        (
+            "execution_head_facts_migrated",
             {"has_active_reservations": True, "symbol": "ETHUSDT"},
         ),
     ]
@@ -117,13 +121,17 @@ async def test_view_migration_logs_as_info_when_no_active_reservations(monkeypat
         as_of=datetime.now(UTC),
     )
 
-    # Inactive reservations logged as info, active as warning
+    # Benign state upgrades become one account-scoped info record; a migration
+    # touching active reservations remains a per-position warning.
     assert len(info_logs) == 1
-    assert info_logs[0][0] == "execution_head_view_migrated"
-    assert info_logs[0][1]["symbol"] == "BTCUSDT"
+    assert info_logs[0][0] == "execution_head_facts_migrations_recovered"
+    assert info_logs[0][1] == {
+        "account_label": "primary",
+        "migration_count": 2,
+    }
 
     assert len(warning_logs) == 1
-    assert warning_logs[0][0] == "execution_head_view_migrated"
+    assert warning_logs[0][0] == "execution_head_facts_migrated"
     assert warning_logs[0][1]["symbol"] == "ETHUSDT"
 
 
