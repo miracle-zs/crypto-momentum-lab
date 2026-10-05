@@ -10,6 +10,7 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
+  CML_LIVE_CANARY_CONCURRENCY  first Live batch size (default: 1)
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS  general health wait timeout (default: 300)
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS  market-data health timeout (default: 900)
   CML_CONSUMER_WAIT_TIMEOUT_SECONDS  Paper/research health timeout (default: 300)
@@ -36,6 +37,8 @@ leaves strategy and Paper services untouched.
 --sync-dashboard forces updating CML_DASHBOARD_IMAGE to the target commit image;
 by default, dashboard images referencing an ancestor repository commit are also
 automatically advanced, while custom non-repo images remain preserved.
+Leave --sync-dashboard unset for a localized runtime rollout: dashboard health
+does not require recreating the dashboard process.
 --dashboard-only builds the target commit image and recreates only the
 dashboard service, updating CML_DASHBOARD_IMAGE while leaving market-data,
 research-collector, live strategies, and execution accounts completely untouched.
@@ -131,6 +134,7 @@ fi
 server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
+live_canary_concurrency="${CML_LIVE_CANARY_CONCURRENCY:-1}"
 deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
 market_data_wait_timeout="${CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS:-900}"
 consumer_wait_timeout="${CML_CONSUMER_WAIT_TIMEOUT_SECONDS:-300}"
@@ -191,7 +195,7 @@ fi
 
 client_started_at="$(date +%s)"
 if "${runner[@]}" \
-  "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
+  "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" "$live_canary_concurrency" \
   "$deploy_wait_timeout" "$market_data_wait_timeout" \
   "$consumer_wait_timeout" "$live_wait_timeout" \
   "$live_stop_timeout" \
@@ -206,19 +210,20 @@ remote_dir="${1}"
 target_ref="${2}"
 live_update="${3}"
 live_concurrency="${4}"
-deploy_wait_timeout="${5}"
-market_data_wait_timeout="${6}"
-consumer_wait_timeout="${7}"
-live_wait_timeout="${8}"
-live_stop_timeout="${9}"
-deploy_operation_timeout="${10}"
-deploy_build_timeout="${11}"
-dashboard_required="${12}"
-dashboard_proxy_url="${13}"
-crash_log_directory="${14}"
-sync_dashboard="${15}"
-execution_accounts_only="${16}"
-dashboard_only="${17}"
+live_canary_concurrency="${5}"
+deploy_wait_timeout="${6}"
+market_data_wait_timeout="${7}"
+consumer_wait_timeout="${8}"
+live_wait_timeout="${9}"
+live_stop_timeout="${10}"
+deploy_operation_timeout="${11}"
+deploy_build_timeout="${12}"
+dashboard_required="${13}"
+dashboard_proxy_url="${14}"
+crash_log_directory="${15}"
+sync_dashboard="${16}"
+execution_accounts_only="${17}"
+dashboard_only="${18}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -251,6 +256,10 @@ if [[ "$execution_accounts_only" != 0 && "$execution_accounts_only" != 1 ]]; the
 fi
 if [[ "$execution_accounts_only" == 1 && "$live_update" != 1 ]]; then
   echo "Execution-account-only rollout requires --live" >&2
+  exit 64
+fi
+if [[ "$live_canary_concurrency" != 1 ]]; then
+  echo "Invalid CML_LIVE_CANARY_CONCURRENCY: $live_canary_concurrency" >&2
   exit 64
 fi
 if [[ "$dashboard_only" != 0 && "$dashboard_only" != 1 ]]; then
@@ -310,12 +319,22 @@ run_with_timeout() {
   return "$status"
 }
 
+deployment_audit_file=""
+write_deployment_audit() {
+  [[ -n "$deployment_audit_file" ]] || return 0
+  printf '{"at":"%s","phase":"%s","operation":"%s","service":"%s","status":"%s","elapsed_seconds":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${deploy_phase:-unknown}" "$1" "$2" "$3" "$4" \
+    >>"$deployment_audit_file" || true
+}
+
 log_service_timing() {
   local operation="$1"
   local service="$2"
   local started_at="$3"
   local status="$4"
-  echo "service-timing phase=${deploy_phase:-unknown} operation=$operation service=$service status=$status elapsed_seconds=$(( $(date +%s) - started_at ))"
+  local elapsed_seconds=$(( $(date +%s) - started_at ))
+  echo "service-timing phase=${deploy_phase:-unknown} operation=$operation service=$service status=$status elapsed_seconds=$elapsed_seconds"
+  write_deployment_audit "$operation" "$service" "$status" "$elapsed_seconds"
 }
 
 log_service_timings() {
@@ -332,6 +351,12 @@ log_service_timings() {
 git_dir="$(git rev-parse --git-dir)"
 deploy_lock_file="$git_dir/cml-deploy.lock"
 deploy_state_file="$git_dir/cml-deploy-state"
+deployment_audit_directory="$(dirname "$crash_log_directory")/deployment-audit"
+if mkdir -p "$deployment_audit_directory" 2>/dev/null; then
+  deployment_audit_file="$deployment_audit_directory/$(date -u +%Y%m%dT%H%M%S.%NZ)_${target_ref//[^A-Za-z0-9_.-]/_}.jsonl"
+else
+  echo "deployment audit directory unavailable: $deployment_audit_directory" >&2
+fi
 if ! command -v flock >/dev/null 2>&1; then
   echo "Refusing deployment: flock is required for the deployment lock" >&2
   exit 69
@@ -436,11 +461,14 @@ write_deploy_state running checkout
 # application consumers.
 runtime_changed=0
 schema_changed=0
+destructive_schema_changed=0
 market_changed=0
 research_changed=0
 paper_changed=0
 dashboard_changed=0
 live_changed=0
+execution_account_changed=0
+strategy_changed=0
 recovery_run=0
 resume_from_phase=""
 changed_files="$(git diff --name-only "$deployment_base_commit" "$target_commit")"
@@ -454,16 +482,23 @@ while IFS= read -r changed_path; do
       paper_changed=1
       dashboard_changed=1
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
       case "$changed_path" in
         alembic.ini|alembic/*) schema_changed=1 ;;
       esac
       ;;
     src/crypto_momentum_lab/live_rollout/*|\
-    src/crypto_momentum_lab/apps/live_rollout/*|\
+    src/crypto_momentum_lab/apps/live_rollout/*)
+      runtime_changed=1
+      live_changed=1
+      strategy_changed=1
+      ;;
     src/crypto_momentum_lab/apps/execution_account/*|\
     src/crypto_momentum_lab/execution_account/*)
       runtime_changed=1
       live_changed=1
+      execution_account_changed=1
       ;;
     src/crypto_momentum_lab/operator_dashboard/*|\
     src/crypto_momentum_lab/apps/operator_dashboard/*)
@@ -483,11 +518,15 @@ while IFS= read -r changed_path; do
       paper_changed=1
       dashboard_changed=1
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
       ;;
     src/crypto_momentum_lab/persistence/postgres/order_repository.py)
       runtime_changed=1
       research_changed=1
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
       ;;
     src/crypto_momentum_lab/persistence/*)
       runtime_changed=1
@@ -496,6 +535,8 @@ while IFS= read -r changed_path; do
       paper_changed=1
       dashboard_changed=1
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
       ;;
     src/crypto_momentum_lab/strategies/*|\
     src/crypto_momentum_lab/apps/strategy_runner/*|\
@@ -503,6 +544,7 @@ while IFS= read -r changed_path; do
       runtime_changed=1
       paper_changed=1
       live_changed=1
+      strategy_changed=1
       ;;
     src/*)
       runtime_changed=1
@@ -511,10 +553,16 @@ while IFS= read -r changed_path; do
       paper_changed=1
       dashboard_changed=1
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
       ;;
     *)
       ;;
   esac
+  if [[ "$changed_path" == alembic/versions/* ]] \
+    && grep -Fxq "$(basename "$changed_path")" deploy/ops/destructive_migrations.txt; then
+    destructive_schema_changed=1
+  fi
 done <<<"$changed_files"
 
 # If the previous attempt reached the target checkout but failed before all
@@ -541,6 +589,8 @@ if [[ "$target_commit" == "$previous_commit" \
       schema_changed=1
       if [[ "$live_update" == 1 ]]; then
         live_changed=1
+        execution_account_changed=1
+        strategy_changed=1
       fi
     fi
   elif [[ "$runtime_commit" == "$target_commit" ]]; then
@@ -552,9 +602,13 @@ if [[ "$target_commit" == "$previous_commit" \
     schema_changed=1
     if [[ "$live_update" == 1 ]]; then
       live_changed=1
+      execution_account_changed=1
+      strategy_changed=1
     fi
   elif [[ "$live_update" == 1 ]]; then
     live_changed=1
+    execution_account_changed=1
+    strategy_changed=1
   fi
   echo "recovery_run=1 reason=target_checkout_already_present resume_from_phase=$resume_from_phase runtime_commit=$runtime_commit"
 fi
@@ -588,6 +642,11 @@ elif [[ "$runtime_changed" == 0 ]]; then
   # operator updates approvals. Reconcile only the active Live services even
   # when the target checkout and image were already deployed.
   live_changed=1
+fi
+
+if [[ "$destructive_schema_changed" == 1 && "$live_update" == 1 ]]; then
+  echo "Refusing Live deployment: target includes a destructive schema migration. Stage an expand/contract release before retrying --live." >&2
+  exit 1
 fi
 
 if [[ ! -f .env.server ]]; then
@@ -979,7 +1038,8 @@ service_requires_target_image() {
     market-data) [[ "$market_changed" == 1 ]] ;;
     research-collector) [[ "$research_changed" == 1 ]] ;;
     paper-*) [[ "$paper_changed" == 1 ]] ;;
-    execution-account-live*|live-strategy*) [[ "$live_changed" == 1 ]] ;;
+    execution-account-live*) [[ "$execution_account_changed" == 1 ]] ;;
+    live-strategy*) [[ "$strategy_changed" == 1 ]] ;;
     *) return 0 ;;
   esac
 }
@@ -1410,6 +1470,16 @@ print(
     done
   }
 
+  live_up_and_wait_canary() {
+    local health_timeout="$1"
+    local parallel="$2"
+    shift 2
+    (( $# > 0 )) || return 0
+    live_up_and_wait_parallel "$health_timeout" "$live_canary_concurrency" "$1"
+    shift
+    live_up_and_wait_parallel "$health_timeout" "$parallel" "$@"
+  }
+
   collect_active_live_pairs() {
     active_pairs=()
     local pair account execution_service strategy_service
@@ -1761,10 +1831,10 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
       fi
     fi
   done
-  if (( ${#execution_services[@]} > 0 )); then
+  if [[ "$execution_account_changed" == 1 ]] && (( ${#execution_services[@]} > 0 )); then
     execution_started_at="$(date +%s)"
     echo "update execution wave (${#execution_services[@]} services)"
-    live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
+    live_up_and_wait_canary "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
     echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
   else
     echo "phase=execution skipped no_active_services=1"
@@ -1783,26 +1853,28 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
       fi
     fi
   done
-  if (( ${#strategy_services[@]} > 0 )); then
+  if [[ "$strategy_changed" == 1 ]] && (( ${#strategy_services[@]} > 0 )); then
     strategy_started_at="$(date +%s)"
     echo "update strategy wave (${#strategy_services[@]} services)"
-    live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${strategy_services[@]}"
+    live_up_and_wait_canary "$live_wait_timeout" "$live_concurrency" "${strategy_services[@]}"
     echo "phase=strategy elapsed_seconds=$(( $(date +%s) - strategy_started_at ))"
   else
     echo "phase=strategy skipped no_active_services=1"
   fi
-  live_readiness_started_at="$(date +%s)"
-  for pair in "${live_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_live_service_active "$strategy_service"; then
-      verify_live_readiness "$strategy_service" "$account"
-    fi
-  done
-  echo "phase=live-readiness elapsed_seconds=$(( $(date +%s) - live_readiness_started_at ))"
-  verification_services+=(
-    "${execution_candidates[@]}"
-    "${strategy_candidates[@]}"
-  )
+  if [[ "$strategy_changed" == 1 ]]; then
+    live_readiness_started_at="$(date +%s)"
+    for pair in "${live_pairs[@]}"; do
+      IFS=: read -r account execution_service strategy_service <<<"$pair"
+      if is_live_service_active "$strategy_service"; then
+        verify_live_readiness "$strategy_service" "$account"
+      fi
+    done
+    echo "phase=live-readiness elapsed_seconds=$(( $(date +%s) - live_readiness_started_at ))"
+    verification_services+=("${strategy_candidates[@]}")
+  fi
+  if [[ "$execution_account_changed" == 1 ]]; then
+    verification_services+=("${execution_candidates[@]}")
+  fi
   echo "phase=live elapsed_seconds=$(( $(date +%s) - live_started_at ))"
 fi
 

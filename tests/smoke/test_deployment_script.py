@@ -19,6 +19,7 @@ def test_remote_argument_decoder_preserves_timeouts_and_rollout_scope() -> None:
         "origin/main",
         "1",
         "2",
+        "1",
         "301",
         "902",
         "303",
@@ -34,7 +35,8 @@ def test_remote_argument_decoder_preserves_timeouts_and_rollout_scope() -> None:
         "0",
     ]
     variables = (
-        "remote_dir target_ref live_update live_concurrency deploy_wait_timeout "
+        "remote_dir target_ref live_update live_concurrency "
+        "live_canary_concurrency deploy_wait_timeout "
         "market_data_wait_timeout consumer_wait_timeout live_wait_timeout "
         "live_stop_timeout deploy_operation_timeout deploy_build_timeout "
         "dashboard_required dashboard_proxy_url crash_log_directory "
@@ -138,6 +140,14 @@ def test_deployment_script_reports_service_level_timings() -> None:
     assert "verify_service_target_timed" in script
     assert 'log_service_timing "health-wait"' in script
     assert 'log_service_timing "verify"' in script
+
+
+def test_deployment_script_records_machine_readable_audit_events() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "deployment-audit" in script
+    assert "write_deployment_audit" in script
+    assert '"elapsed_seconds":%s' in script
 
 
 def test_paper_rollout_removes_retired_services() -> None:
@@ -743,19 +753,26 @@ def test_dashboard_only_deployment_mode_is_configured() -> None:
 
 
 @pytest.mark.parametrize(
-    ("service", "affected", "state", "expected"),
+    ("service", "execution_affected", "strategy_affected", "state", "expected"),
     [
-        ("market-data", 0, "running|healthy", 0),
-        ("research-collector", 0, "running|healthy", 0),
-        ("dashboard", 0, "running|healthy", 0),
-        ("live-strategy", 1, "running|healthy", 1),
-        ("market-data", 1, "running|healthy", 1),
-        ("market-data", 0, "running|unhealthy", 1),
-        ("market-data", 0, "exited|none", 1),
+        ("market-data", 0, 0, "running|healthy", 0),
+        ("research-collector", 0, 0, "running|healthy", 0),
+        ("dashboard", 0, 0, "running|healthy", 0),
+        ("live-strategy", 0, 1, "running|healthy", 1),
+        ("live-strategy", 1, 0, "running|healthy", 0),
+        ("execution-account-live", 1, 0, "running|healthy", 1),
+        ("execution-account-live", 0, 1, "running|healthy", 0),
+        ("market-data", 1, 1, "running|healthy", 1),
+        ("market-data", 0, 0, "running|unhealthy", 1),
+        ("market-data", 0, 0, "exited|none", 1),
     ],
 )
 def test_restart_selection_preserves_unaffected_healthy_services(
-    service: str, affected: int, state: str, expected: int
+    service: str,
+    execution_affected: int,
+    strategy_affected: int,
+    state: str,
+    expected: int,
 ) -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     start = script.index("service_requires_target_image() {")
@@ -765,7 +782,7 @@ def test_restart_selection_preserves_unaffected_healthy_services(
         + """
 compose=(compose_stub)
 compose_stub() { printf container; }
-test_state=$3
+test_state=$4
 service_status() { printf '%s' "$test_state"; }
 docker() { printf old-image; }
 expected_image_for_service() { printf target-image; }
@@ -773,6 +790,8 @@ market_changed=$2
 research_changed=$2
 dashboard_changed=$2
 live_changed=$2
+execution_account_changed=$2
+strategy_changed=$3
 paper_changed=$2
 sync_dashboard=0
 dashboard_only=0
@@ -780,7 +799,16 @@ service_is_converged "$1"
 """
     )
     result = subprocess.run(
-        ["bash", "-c", invocation, "test", service, str(affected), state],
+        [
+            "bash",
+            "-c",
+            invocation,
+            "test",
+            service,
+            str(execution_affected),
+            str(strategy_affected),
+            state,
+        ],
         capture_output=True,
         text=True,
         timeout=5,
@@ -789,13 +817,32 @@ service_is_converged "$1"
 
 
 @pytest.mark.parametrize(
-    "path",
+    (
+        "path",
+        "execution_affected",
+        "strategy_affected",
+        "all_services_affected",
+        "destructive_schema",
+    ),
     [
-        "src/crypto_momentum_lab/apps/execution_account/main.py",
-        "src/crypto_momentum_lab/live_rollout/daemon.py",
+        ("src/crypto_momentum_lab/apps/execution_account/main.py", 1, 0, 0, 0),
+        ("src/crypto_momentum_lab/live_rollout/daemon.py", 0, 1, 0, 0),
+        (
+            "alembic/versions/20261005_0047_drop_unused_risk_state_age_limits.py",
+            1,
+            1,
+            1,
+            1,
+        ),
     ],
 )
-def test_live_only_change_selects_only_live_group(path: str) -> None:
+def test_live_only_change_selects_only_the_affected_live_role(
+    path: str,
+    execution_affected: int,
+    strategy_affected: int,
+    all_services_affected: int,
+    destructive_schema: int,
+) -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     start = script.index("runtime_changed=0\n")
     end = script.index("\n# If the previous attempt", start)
@@ -803,9 +850,32 @@ def test_live_only_change_selects_only_live_group(path: str) -> None:
         "deployment_base_commit=base; target_commit=target; test_path=$1\n"
         'git() { printf "%s" "$test_path"; }\n'
         + script[start:end]
-        + '\nprintf "%s" "$runtime_changed|$live_changed|$market_changed|$research_changed|$dashboard_changed|$paper_changed"\n'
+        + '\nprintf "%s" "$runtime_changed|$live_changed|$execution_account_changed|$strategy_changed|$market_changed|$research_changed|$dashboard_changed|$paper_changed|$destructive_schema_changed"\n'
     )
     result = subprocess.check_output(
         ["bash", "-c", invocation, "test", path], text=True
     )
-    assert result == "1|1|0|0|0|0"
+    assert (
+        result
+        == f"1|1|{execution_affected}|{strategy_affected}|{all_services_affected}|{all_services_affected}|{all_services_affected}|{all_services_affected}|{destructive_schema}"
+    )
+
+
+def test_live_rollout_uses_a_single_canary_before_parallel_batches() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "live_up_and_wait_canary()" in script
+    assert '"$live_canary_concurrency" "$1"' in script
+    assert '"$live_wait_timeout" "$live_concurrency"' in script
+
+
+def test_destructive_live_schema_migrations_are_blocked_from_registry() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    registry = (ROOT / "deploy/ops/destructive_migrations.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "grep -Fxq" in script
+    assert "destructive_schema_changed" in script
+    assert "Refusing Live deployment" in script
+    assert "20261005_0047_drop_unused_risk_state_age_limits.py" in registry
