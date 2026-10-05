@@ -40,6 +40,60 @@ def test_event_loop_lag_level_uses_warning_and_critical_thresholds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_data_health_emits_task_diagnostics_for_critical_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = asyncio.Event()
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLog:
+        def info(self, event: str, **fields: object) -> None:
+            del event, fields
+
+        def warning(self, event: str, **fields: object) -> None:
+            warnings.append((event, fields))
+            if event == "market_data_critical_event_loop_lag_diagnostics":
+                reported.set()
+
+    monkeypatch.setattr(observability, "log", FakeLog())
+    task = asyncio.create_task(
+        observability.monitor_market_data_health(
+            capture_metrics=_capture_metrics,
+            connection_metrics=lambda: (
+                observability.BinanceConnectionPoolMetricsSnapshot(
+                    active_connections=0,
+                    ready_connections=0,
+                    desired_subscriptions=0,
+                    reconnect_count=0,
+                    ack_mismatch_count=0,
+                    control_commands_sent=0,
+                    received_messages=0,
+                )
+            ),
+            report_interval_seconds=0.01,
+            sample_interval_seconds=0.001,
+            event_loop_lag_warning_seconds=0.000001,
+            event_loop_lag_critical_seconds=0.000002,
+        )
+    )
+    try:
+        await asyncio.wait_for(reported.wait(), timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    diagnostics = next(
+        fields
+        for event, fields in warnings
+        if event == "market_data_critical_event_loop_lag_diagnostics"
+    )
+    task_diagnostics = diagnostics["task_diagnostics"]
+    assert isinstance(task_diagnostics, tuple)
+    assert task_diagnostics
+    assert all("stack" in item for item in task_diagnostics)
+
+
+@pytest.mark.asyncio
 async def test_market_data_health_monitor_reports_runtime_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

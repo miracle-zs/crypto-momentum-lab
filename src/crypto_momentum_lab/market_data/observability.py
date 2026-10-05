@@ -115,13 +115,17 @@ async def monitor_market_data_health(
                 "ingress_queue_events": snapshot.ingress_queue_events,
                 "ingress_queue_dropped_events": snapshot.ingress_queue_dropped_events,
                 "ingress_queue_max_events": snapshot.ingress_queue_max_events,
-                "ingress_queue_high_watermark_events": snapshot.ingress_queue_high_watermark_events,
+                "ingress_queue_high_watermark_events": (
+                    snapshot.ingress_queue_high_watermark_events
+                ),
                 "reader_task_alive": snapshot.reader_task_alive,
                 "dispatch_task_alive": snapshot.dispatch_task_alive,
                 "realtime_queue_events": snapshot.realtime_queue_events,
                 "realtime_queue_dropped_events": snapshot.realtime_queue_dropped_events,
                 "realtime_queue_max_events": snapshot.realtime_queue_max_events,
-                "realtime_queue_high_watermark_events": snapshot.realtime_queue_high_watermark_events,
+                "realtime_queue_high_watermark_events": (
+                    snapshot.realtime_queue_high_watermark_events
+                ),
                 "realtime_dispatch_task_alive": snapshot.realtime_dispatch_task_alive,
             }
             for snapshot in connections.connection_snapshots
@@ -190,6 +194,16 @@ async def monitor_market_data_health(
                     event_loop_lag_critical_seconds * 1000,
                     3,
                 ),
+            )
+        if lag_level == "critical":
+            # A lag sample only says that the loop did not get scheduled.  Keep a
+            # bounded view of the tasks that were still pending once it did run
+            # again, so a later incident can be tied to a concrete coroutine
+            # instead of guessing from subscription or queue correlations.
+            log.warning(
+                "market_data_critical_event_loop_lag_diagnostics",
+                lag_ms=round(maximum_lag_seconds * 1000, 3),
+                task_diagnostics=_pending_task_diagnostics(),
             )
         dead_dispatchers = tuple(
             detail["group_id"]
@@ -273,6 +287,51 @@ def _event_loop_lag_level(
     if lag_seconds < warning_threshold_seconds:
         return None
     return "critical" if lag_seconds >= critical_threshold_seconds else "warning"
+
+
+def _pending_task_diagnostics(
+    *,
+    task_limit: int = 16,
+    frame_limit: int = 3,
+) -> tuple[dict[str, object], ...]:
+    """Return a bounded, value-free view of pending tasks in this event loop.
+
+    Stack locals are deliberately excluded: besides being high-cardinality, they
+    may contain credentials or market payloads.  This function runs only after a
+    critical lag sample, not on the normal health-reporting path.
+    """
+    current_task = asyncio.current_task()
+    tasks = sorted(
+        (
+            task
+            for task in asyncio.all_tasks()
+            if task is not current_task and not task.done()
+        ),
+        key=lambda task: task.get_name(),
+    )
+    diagnostics: list[dict[str, object]] = []
+    for task in tasks[:task_limit]:
+        coroutine = task.get_coro()
+        frames = task.get_stack(limit=frame_limit)
+        diagnostics.append(
+            {
+                "task_name": task.get_name(),
+                "coroutine": getattr(
+                    coroutine,
+                    "__qualname__",
+                    type(coroutine).__name__,
+                ),
+                "stack": tuple(
+                    {
+                        "function": frame.f_code.co_name,
+                        "file": frame.f_code.co_filename.rsplit("/", 1)[-1],
+                        "line": frame.f_lineno,
+                    }
+                    for frame in frames
+                ),
+            }
+        )
+    return tuple(diagnostics)
 
 
 def _queue_utilization(capture: CaptureMetricsSnapshot) -> float:

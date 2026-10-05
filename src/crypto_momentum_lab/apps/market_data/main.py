@@ -391,6 +391,7 @@ class LoggingRefreshService:
 async def monitor_market_data_freshness(
     *,
     latest_observed_at: Callable[[], datetime | None],
+    diagnostic_snapshot: Callable[[], dict[str, object]] | None = None,
     startup_grace_seconds: float = _MARKET_DATA_STARTUP_GRACE_SECONDS,
     stale_after_seconds: float = _MARKET_DATA_STALE_AFTER_SECONDS,
     check_interval_seconds: float = _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS,
@@ -405,13 +406,40 @@ async def monitor_market_data_freshness(
         if observed_at is None:
             startup_age = (now - started_at).total_seconds()
             if startup_age > startup_grace_seconds:
+                log.error(
+                    "market_data_freshness_violation",
+                    reason="no_market_data_after_startup_grace",
+                    age_seconds=round(startup_age, 3),
+                    diagnostics=_freshness_diagnostics(diagnostic_snapshot),
+                )
                 raise MarketDataStaleError(
                     f"no market data after {startup_age:.1f} seconds"
                 )
             continue
         age = (now - observed_at).total_seconds()
         if age > stale_after_seconds:
+            log.error(
+                "market_data_freshness_violation",
+                reason="market_data_stale",
+                age_seconds=round(age, 3),
+                observed_at=observed_at.isoformat(),
+                diagnostics=_freshness_diagnostics(diagnostic_snapshot),
+            )
             raise MarketDataStaleError(f"market data stale by {age:.1f} seconds")
+
+
+def _freshness_diagnostics(
+    diagnostic_snapshot: Callable[[], dict[str, object]] | None,
+) -> dict[str, object] | None:
+    """Collect incident context without allowing diagnostics to mask the stop."""
+    if diagnostic_snapshot is None:
+        return None
+    try:
+        return diagnostic_snapshot()
+    except Exception as error:
+        # The watchdog is a safety boundary.  A broken metrics provider must not
+        # turn a stale feed into a healthy-looking process.
+        return {"diagnostic_error_type": type(error).__name__}
 
 
 class CaptureSubscriptionApplier(Protocol):
@@ -1062,6 +1090,48 @@ def _archive_retention_repository(
     return runtime.maintenance_capture_repository or runtime.capture_repository
 
 
+def _market_data_watchdog_diagnostics(
+    runtime: MarketDataRuntime,
+) -> dict[str, object]:
+    """Build a bounded context snapshot only when the freshness guard fires."""
+    capture = runtime.capture.metrics_snapshot()
+    connections = runtime.connection_pool.metrics_snapshot()
+    return {
+        "capture": {
+            "state": capture.state.value,
+            "monitoring_generation": capture.monitoring_generation,
+            "monitoring_symbols": capture.monitoring_symbols,
+            "queue_events": capture.queue_events,
+            "queue_bytes": capture.queue_bytes,
+            "queue_max_events": capture.queue_max_events,
+            "queue_max_bytes": capture.queue_max_bytes,
+            "queue_high_watermark_events": capture.queue_high_watermark_events,
+            "queue_high_watermark_bytes": capture.queue_high_watermark_bytes,
+            "queue_dropped_events": capture.queue_dropped_events,
+            "queue_backpressure_wait_count": capture.queue_backpressure_wait_count,
+        },
+        "connections": tuple(
+            {
+                "group_id": snapshot.group_id,
+                "stream": snapshot.stream.value,
+                "active": snapshot.active,
+                "ready": snapshot.ready,
+                "phase": snapshot.phase,
+                "desired_subscriptions": snapshot.desired_subscriptions,
+                "reconnect_count": snapshot.reconnect_count,
+                "last_message_age_seconds": snapshot.last_message_age_seconds,
+                "last_close_code": snapshot.last_close_code,
+                "reader_task_alive": snapshot.reader_task_alive,
+                "dispatch_task_alive": snapshot.dispatch_task_alive,
+            }
+            for snapshot in connections.connection_snapshots[:20]
+        ),
+        "runtime_state_lateness": (
+            runtime.runtime_state_publisher.lateness_metrics_snapshot()
+        ),
+    }
+
+
 @asynccontextmanager
 async def build_market_data_runtime(
     config_path: Path,
@@ -1578,7 +1648,10 @@ async def run_market_data(
                     monitor_market_data_freshness(
                         latest_observed_at=lambda: (
                             runtime.runtime_state_publisher.metrics.latest_watermark_at
-                        )
+                        ),
+                        diagnostic_snapshot=lambda: _market_data_watchdog_diagnostics(
+                            runtime
+                        ),
                     )
                 ),
                 asyncio.create_task(
