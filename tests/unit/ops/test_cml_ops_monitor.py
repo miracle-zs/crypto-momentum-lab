@@ -1026,6 +1026,36 @@ def test_database_state_uses_checkpoint_without_retired_lease(
     assert "account_reconciliation_runs" in sql
 
 
+def test_database_state_reads_checkpoint_and_session_in_one_snapshot(tmp_path) -> None:
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return (
+                "checkpoint_age\t12\n"
+                "live_ready\ttrue\n"
+                "live_session_state_ready\ttrue\n"
+                "live_checkpoint_present\ttrue\n"
+                "pg_stat_statements\ttrue\n"
+                "track_io_timing\ton\n"
+                "track_wal_io_timing\ton\n"
+                "parallel_maintenance\t0\n"
+            )
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"), runner=runner
+    )
+
+    monitor._database_state("postgres")
+    sql = str(runner.last_args[-1])
+
+    assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;" in sql
+    assert sql.rstrip().endswith("COMMIT;")
+
+
 def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> None:
     alerts = evaluate_database_state(
         now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),

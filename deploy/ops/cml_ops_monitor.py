@@ -2561,6 +2561,7 @@ class OpsMonitor:
             live_account_label or self._config.live_account_label
         )
         sql = f"""
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT 'checkpoint_age' || E'\\t' || COALESCE(
   EXTRACT(EPOCH FROM (clock_timestamp() - max(saved_at)))::text, '-1'
 )
@@ -2685,6 +2686,7 @@ WHERE o.run_id = {run_id}
   AND o.state IN ('canceled', 'filled')
   AND c.status IN ('acknowledged', 'submitted')
   AND c.requested_at < clock_timestamp() - interval '60 seconds';
+COMMIT;
 """
         output = self._runner.run(
             [
