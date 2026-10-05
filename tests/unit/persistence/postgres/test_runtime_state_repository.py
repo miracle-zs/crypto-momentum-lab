@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+import crypto_momentum_lab.persistence.postgres.runtime_state_repository as repository
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     runtime_state_row,
@@ -55,6 +56,26 @@ def test_validate_closed_states_rejects_naive_timestamp() -> None:
 
     with pytest.raises(ValueError, match="bucket_start must be timezone-aware"):
         validate_closed_states((naive,))
+
+
+@pytest.mark.asyncio
+async def test_revision_reference_inserts_are_chunked_at_the_database_safe_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunks: list[list[dict[str, object]]] = []
+
+    async def record_batch(
+        _session: object,
+        values: list[dict[str, object]],
+    ) -> None:
+        chunks.append(values)
+
+    monkeypatch.setattr(repository, "_insert_revision_refs_batch", record_batch)
+    values = [{"revision_id": str(index)} for index in range(501)]
+
+    await repository._insert_revision_refs_idempotent(object(), values)
+
+    assert [len(chunk) for chunk in chunks] == [500, 1]
 
 
 def fixture_state(symbol: str, bucket_index: int) -> MarketState15s:

@@ -222,11 +222,7 @@ class PostgresRuntimeMarketStateRepository:
                     }
                     for state in adjusted_states
                 ]
-                await session.execute(
-                    insert(MarketRevisionRefRow)
-                    .values(revision_values)
-                    .on_conflict_do_nothing()
-                )
+                await _insert_revision_refs_idempotent(session, revision_values)
                 for environment in sorted({state.environment for state in states}):
                     await session.execute(
                         text("SELECT pg_notify(:channel, :payload)"),
@@ -324,11 +320,7 @@ class PostgresRuntimeMarketStateRepository:
                     for row in updated_rows
                 ]
                 if revision_values:
-                    await session.execute(
-                        insert(MarketRevisionRefRow)
-                        .values(revision_values)
-                        .on_conflict_do_nothing()
-                    )
+                    await _insert_revision_refs_idempotent(session, revision_values)
 
     async def load_after(
         self,
@@ -546,6 +538,27 @@ async def _insert_many_idempotent(
             session,
             values[start : start + _MAX_RUNTIME_STATE_INSERT_ROWS],
         )
+
+
+async def _insert_revision_refs_idempotent(
+    session: AsyncSession,
+    values: list[dict[str, object]],
+) -> None:
+    """Keep revision-reference inserts below asyncpg's bind-parameter limit."""
+    for start in range(0, len(values), _MAX_RUNTIME_STATE_INSERT_ROWS):
+        await _insert_revision_refs_batch(
+            session,
+            values[start : start + _MAX_RUNTIME_STATE_INSERT_ROWS],
+        )
+
+
+async def _insert_revision_refs_batch(
+    session: AsyncSession,
+    values: list[dict[str, object]],
+) -> None:
+    await session.execute(
+        insert(MarketRevisionRefRow).values(values).on_conflict_do_nothing()
+    )
 
 
 async def _insert_batch_idempotent(
