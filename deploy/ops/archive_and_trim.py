@@ -52,6 +52,7 @@ from crypto_momentum_lab.domain.operational.retention_models import (  # noqa: E
 _ARCHIVER = _HERE / "archive_table.py"
 _ARCHIVE_ROOT = Path("/var/lib/crypto-momentum-lab/table-archive")
 _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
+_MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
 
 # table, time column -- the window is half-open [oldest, cutoff).
 # Order matters only for readability; each table is independent.  Deleting
@@ -91,6 +92,8 @@ def _psql(sql: str, *, container: str, database: str, user: str) -> str:
         [
             "docker",
             "exec",
+            "-e",
+            f"PGOPTIONS={_MAINTENANCE_PGOPTIONS}",
             container,
             "psql",
             "-U",
@@ -151,6 +154,8 @@ class PsqlSession:
                 "docker",
                 "exec",
                 "-i",
+                "-e",
+                f"PGOPTIONS={_MAINTENANCE_PGOPTIONS}",
                 self._container,
                 "psql",
                 "-U",

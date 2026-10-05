@@ -57,6 +57,7 @@ def test_range_fingerprint_streams_rows_without_database_sort_or_aggregate(
     expected.update(b'{"id":2}\n')
     assert digest == expected.hexdigest()
     sql = commands[0][-1]
+    assert "PGOPTIONS=-c work_mem=4MB -c temp_file_limit=256MB" in commands[0]
     assert "row_to_json(t)::text" in sql
     assert "string_agg" not in sql
     assert "ORDER BY" not in sql

@@ -44,6 +44,7 @@ _DEFAULT_OUT = "/var/lib/crypto-momentum-lab/table-archive"
 _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
 _DEFAULT_DATABASE = "cml"
 _DEFAULT_USER = "cml"
+_MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
@@ -66,6 +67,8 @@ def _psql(prefix: list[str], container: str, user: str, database: str) -> list[s
         *prefix,
         "docker",
         "exec",
+        "-e",
+        f"PGOPTIONS={_MAINTENANCE_PGOPTIONS}",
         container,
         "psql",
         "-U",
