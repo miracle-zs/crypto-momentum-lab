@@ -627,6 +627,7 @@ fi
 if [[ "${dashboard_only:-0}" == 1 ]]; then
   if service_is_converged dashboard && image_exists; then
     echo "dashboard_already_converged=1"
+    write_deployment_audit "deployment" dashboard unchanged "$(( $(date +%s) - deploy_started_at ))"
     write_deploy_state success unchanged
     echo "deployed_dashboard_image=$dashboard_image"
     exit 0
@@ -634,6 +635,7 @@ if [[ "${dashboard_only:-0}" == 1 ]]; then
 elif [[ "$runtime_changed" == 0 ]]; then
   echo "runtime_unchanged=1"
   if [[ "$live_update" != 1 ]]; then
+    write_deployment_audit "deployment" all unchanged "$(( $(date +%s) - deploy_started_at ))"
     write_deploy_state success unchanged
     echo "deployed_checkout=$target_commit"
     exit 0
@@ -1623,6 +1625,7 @@ if [[ "$execution_accounts_only" == 1 ]]; then
   # strategy restart after account workers have recovered.
   deploy_phase=volume-init
   write_deploy_state running "$deploy_phase"
+  write_deployment_audit "deployment" execution-accounts partial-success "$(( $(date +%s) - deploy_started_at ))"
   exit 0
 fi
 
@@ -1659,6 +1662,7 @@ if [[ "$dashboard_only" == 1 ]]; then
   fi
   set_env_value CML_DASHBOARD_IMAGE "$dashboard_image"
   chmod 600 .env.server
+  write_deployment_audit "deployment" dashboard success "$(( $(date +%s) - deploy_started_at ))"
   write_deploy_state success complete
   run_with_timeout --quiet "docker-image-prune" 30 docker image prune --force </dev/null || true
   echo "phase=dashboard-only elapsed_seconds=$(( $(date +%s) - dashboard_only_started_at ))"
@@ -1893,6 +1897,7 @@ echo "phase=verify elapsed_seconds=$(( $(date +%s) - verification_started_at )) 
 set_env_value CML_CODE_COMMIT "$runtime_commit"
 set_env_value CML_DASHBOARD_IMAGE "$dashboard_image"
 chmod 600 .env.server
+write_deployment_audit "deployment" all success "$(( $(date +%s) - deploy_started_at ))"
 write_deploy_state success complete
 echo "phase=total elapsed_seconds=$(( $(date +%s) - deploy_started_at ))"
 
