@@ -95,7 +95,11 @@ _DASHBOARD_COMMAND_TIMEOUT_SECONDS = _env_float(
 _DASHBOARD_POOL_RECYCLE_SECONDS = _env_int("CML_DB_DASHBOARD_POOL_RECYCLE_SECONDS", 900)
 
 
-def _server_timeout_settings(command_timeout_seconds: float) -> dict[str, str]:
+def _server_timeout_settings(
+    command_timeout_seconds: float,
+    *,
+    application_name: str | None = None,
+) -> dict[str, str]:
     """Return PostgreSQL-side guards matching the client's request budget.
 
     The driver timeout bounds how long the caller waits; these settings also
@@ -106,10 +110,13 @@ def _server_timeout_settings(command_timeout_seconds: float) -> dict[str, str]:
 
     timeout_ms = max(1, ceil(command_timeout_seconds * 1000))
     idle_transaction_timeout_ms = max(30_000, timeout_ms * 2)
-    return {
+    settings = {
         "statement_timeout": f"{timeout_ms}ms",
         "idle_in_transaction_session_timeout": f"{idle_transaction_timeout_ms}ms",
     }
+    if application_name:
+        settings["application_name"] = application_name
+    return settings
 
 
 def create_async_database_engine(
@@ -121,6 +128,7 @@ def create_async_database_engine(
     pool_timeout_seconds: float = _POOL_TIMEOUT_SECONDS,
     command_timeout_seconds: float | None = None,
     pool_recycle_seconds: int | None = None,
+    application_name: str | None = None,
 ) -> AsyncEngine:
     if not pooled:
         return create_async_engine(database_url, poolclass=NullPool)
@@ -139,7 +147,10 @@ def create_async_database_engine(
         if command_timeout_seconds is None
         else {
             "command_timeout": command_timeout_seconds,
-            "server_settings": _server_timeout_settings(command_timeout_seconds),
+            "server_settings": _server_timeout_settings(
+                command_timeout_seconds,
+                application_name=application_name,
+            ),
         }
     )
     engine_options: dict[str, object] = {
@@ -170,6 +181,7 @@ def create_execution_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.execution",
     )
 
 
@@ -189,6 +201,7 @@ def create_account_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.account",
     )
 
 
@@ -208,6 +221,7 @@ def create_maintenance_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.maintenance",
     )
 
 
@@ -227,6 +241,7 @@ def create_market_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.market",
     )
 
 
@@ -246,6 +261,7 @@ def create_observability_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.observability",
     )
 
 
@@ -265,6 +281,7 @@ def create_checkpoint_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+        application_name="cml.checkpoint",
     )
 
 
@@ -286,6 +303,7 @@ def create_dashboard_database_engine(
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         pool_recycle_seconds=pool_recycle_seconds,
+        application_name="cml.dashboard",
     )
 
 

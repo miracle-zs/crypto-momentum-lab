@@ -801,6 +801,11 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
                     "memory.swap.current=128\n"
                     "memory.events.max=12\n"
                     "memory.stat.anon=150\n"
+                    "memory.stat.file=420\n"
+                    "memory.stat.shmem=160\n"
+                    "memory.stat.slab=12\n"
+                    "memory.stat.file_dirty=8\n"
+                    "memory.stat.file_writeback=4\n"
                 )
             if args and args[0] == "systemctl":
                 # The retention-schedule check reads systemd on the host; this
@@ -824,6 +829,44 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
     assert stats.peak_bytes == 900
     assert stats.swap_current_bytes == 128
     assert stats.events_max == 12
+    assert stats.file_bytes == 420
+    assert stats.shmem_bytes == 160
+    assert stats.slab_bytes == 12
+    assert stats.file_dirty_bytes == 8
+    assert stats.file_writeback_bytes == 4
+
+
+def test_postgres_memory_pressure_context_is_aggregate_and_query_text_free(
+    tmp_path,
+) -> None:
+    class Runner:
+        args: list[str] | None = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.args = args
+            return (
+                '{"connections":{"total":65,"active":1},'
+                '"temp_heavy_queries":[{"queryid":"42","temp_blks_written":99}]}'
+            )
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    context = monitor._postgres_memory_pressure_context("postgres")
+
+    assert context["connections"] == {"total": 65, "active": 1}
+    assert context["temp_heavy_queries"] == [
+        {"queryid": "42", "temp_blks_written": 99}
+    ]
+    assert runner.args is not None
+    sql = str(runner.args[-1])
+    assert "pg_stat_statements" in sql
+    assert "queryid" in sql
+    assert "'query', query" not in sql
 
 
 def test_market_delay_reads_only_event_backed_buckets(tmp_path) -> None:

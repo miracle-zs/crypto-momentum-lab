@@ -326,6 +326,14 @@ class ContainerSnapshot:
     memory_peak_bytes: int | None = None
     memory_swap_current_bytes: int | None = None
     memory_events_max: int | None = None
+    # Cgroup v2 composition. ``shmem`` is a subset of ``file`` and must never
+    # be summed with it; retaining the raw counters lets a pressure alert say
+    # whether cache, anonymous memory, or writeback was actually dominant.
+    memory_file_bytes: int | None = None
+    memory_shmem_bytes: int | None = None
+    memory_slab_bytes: int | None = None
+    memory_file_dirty_bytes: int | None = None
+    memory_file_writeback_bytes: int | None = None
     # When the container started.  One that was just (re)created -- by a deploy
     # or by anything else -- is legitimately unhealthy and silent for a while,
     # so lifecycle alerts wait out a grace period before firing.
@@ -345,6 +353,11 @@ class ContainerMemoryStats:
     peak_bytes: int | None = None
     swap_current_bytes: int | None = None
     events_max: int | None = None
+    file_bytes: int | None = None
+    shmem_bytes: int | None = None
+    slab_bytes: int | None = None
+    file_dirty_bytes: int | None = None
+    file_writeback_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1776,7 +1789,22 @@ class OpsMonitor:
                     rss_critical_fraction=self._config.rss_critical_fraction,
                 )
             )
-            alerts.extend(self._memory_pressure_alerts(snapshot))
+            memory_pressure_alerts = self._memory_pressure_alerts(snapshot)
+            if memory_pressure_alerts and snapshot.service == "postgres":
+                pressure_context = self._postgres_memory_pressure_context(
+                    snapshot.container_id
+                )
+                memory_pressure_alerts = tuple(
+                    replace(
+                        alert,
+                        details={
+                            **alert.details,
+                            "postgres_pressure_context": pressure_context,
+                        },
+                    )
+                    for alert in memory_pressure_alerts
+                )
+            alerts.extend(memory_pressure_alerts)
             pressure_bytes, pressure_source = _memory_pressure_reading(snapshot)
             alerts.extend(
                 self._memory_growth_alerts(
@@ -2343,6 +2371,11 @@ class OpsMonitor:
                     memory_peak_bytes=memory.peak_bytes,
                     memory_swap_current_bytes=memory.swap_current_bytes,
                     memory_events_max=memory.events_max,
+                    memory_file_bytes=memory.file_bytes,
+                    memory_shmem_bytes=memory.shmem_bytes,
+                    memory_slab_bytes=memory.slab_bytes,
+                    memory_file_dirty_bytes=memory.file_dirty_bytes,
+                    memory_file_writeback_bytes=memory.file_writeback_bytes,
                     started_at=_parse_started_at(state.get("StartedAt")),
                 )
             )
@@ -2397,6 +2430,11 @@ class OpsMonitor:
             peak_bytes=cgroup.get("memory.peak"),
             swap_current_bytes=cgroup.get("memory.swap.current"),
             events_max=cgroup.get("memory.events.max"),
+            file_bytes=cgroup.get("memory.stat.file"),
+            shmem_bytes=cgroup.get("memory.stat.shmem"),
+            slab_bytes=cgroup.get("memory.stat.slab"),
+            file_dirty_bytes=cgroup.get("memory.stat.file_dirty"),
+            file_writeback_bytes=cgroup.get("memory.stat.file_writeback"),
         )
 
     def _cgroup_memory_stats(self, container_id: str) -> dict[str, int]:
@@ -2424,8 +2462,10 @@ class OpsMonitor:
                         "fi; done < /sys/fs/cgroup/memory.events; fi; "
                         "if [ -r /sys/fs/cgroup/memory.stat ]; then "
                         "while read -r key value _; do "
-                        'if [ "$key" = anon ]; then '
-                        "printf 'memory.stat.anon=%s\\n' \"$value\"; "
+                        'case "$key" in '
+                        "anon|file|shmem|slab|file_dirty|file_writeback) "
+                        "printf 'memory.stat.%s=%s\\n' \"$key\" \"$value\"; "
+                        ";; esac; "
                         "fi; done < /sys/fs/cgroup/memory.stat; fi"
                     ),
                 ],
@@ -2451,6 +2491,11 @@ class OpsMonitor:
                     "memory.swap.current",
                     "memory.events.max",
                     "memory.stat.anon",
+                    "memory.stat.file",
+                    "memory.stat.shmem",
+                    "memory.stat.slab",
+                    "memory.stat.file_dirty",
+                    "memory.stat.file_writeback",
                 }
                 and value >= 0
             ):
@@ -2547,6 +2592,97 @@ class OpsMonitor:
             deferred_exits=tuple(deferred_exits),
             expired_candidates=tuple(expired_candidates),
         )
+
+    def _postgres_memory_pressure_context(
+        self,
+        container_id: str,
+    ) -> Mapping[str, object]:
+        """Capture bounded, query-text-free evidence when Postgres swaps.
+
+        This is deliberately invoked only after the swap-growth detector fires.
+        A single SQL statement gives its subqueries one read snapshot, records
+        aggregate connection/vacuum/checkpoint state, and identifies expensive
+        query *ids* without copying SQL text or parameters into alerts.
+        """
+
+        sql = """
+WITH activity AS (
+  SELECT
+    count(*) AS total_connections,
+    count(*) FILTER (WHERE state = 'active') AS active_connections,
+    count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction
+  FROM pg_stat_activity
+), checkpoint AS (
+  SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time,
+         checkpoint_sync_time, buffers_checkpoint, buffers_backend
+  FROM pg_stat_bgwriter
+), temp_queries AS (
+  SELECT json_agg(
+    json_build_object(
+      'queryid', queryid::text,
+      'calls', calls,
+      'temp_blks_written', temp_blks_written,
+      'total_exec_ms', round(total_exec_time::numeric, 3)
+    ) ORDER BY temp_blks_written DESC NULLS LAST
+  ) AS rows
+  FROM (
+    SELECT queryid, calls, temp_blks_written, total_exec_time
+    FROM pg_stat_statements
+    ORDER BY temp_blks_written DESC NULLS LAST
+    LIMIT 5
+  ) ranked
+)
+SELECT json_build_object(
+  'connections', json_build_object(
+    'total', activity.total_connections,
+    'active', activity.active_connections,
+    'idle_in_transaction', activity.idle_in_transaction
+  ),
+  'vacuum_workers', (SELECT count(*) FROM pg_stat_progress_vacuum),
+  'settings', json_build_object(
+    'work_mem', current_setting('work_mem'),
+    'hash_mem_multiplier', current_setting('hash_mem_multiplier'),
+    'autovacuum_work_mem', current_setting('autovacuum_work_mem'),
+    'autovacuum_max_workers', current_setting('autovacuum_max_workers')
+  ),
+  'checkpoint', json_build_object(
+    'timed', checkpoint.checkpoints_timed,
+    'requested', checkpoint.checkpoints_req,
+    'write_ms', checkpoint.checkpoint_write_time,
+    'sync_ms', checkpoint.checkpoint_sync_time,
+    'buffers_checkpoint', checkpoint.buffers_checkpoint,
+    'buffers_backend', checkpoint.buffers_backend
+  ),
+  'temp_heavy_queries', COALESCE(temp_queries.rows, '[]'::json)
+)::text
+FROM activity CROSS JOIN checkpoint CROSS JOIN temp_queries;
+"""
+        try:
+            output = self._runner.run(
+                [
+                    "docker",
+                    "exec",
+                    container_id,
+                    "psql",
+                    "-U",
+                    "cml",
+                    "-d",
+                    "cml",
+                    "-At",
+                    "-X",
+                    "-q",
+                    "-c",
+                    sql,
+                ],
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+            payload = json.loads(output.strip())
+        except Exception as error:
+            return {
+                "capture_error_type": type(error).__name__,
+                "capture_error": str(error),
+            }
+        return payload if isinstance(payload, dict) else {"capture_error": "bad_json"}
 
     def _database_state(
         self,
@@ -3147,6 +3283,24 @@ LEFT JOIN (
                     "memory_swap_growth_bytes": growth,
                     "memory_swap_growth_mb": _mib(growth),
                     "memory_events_max": snapshot.memory_events_max,
+                    "memory_anon_bytes": snapshot.memory_anon_bytes,
+                    "memory_anon_mb": _mib(snapshot.memory_anon_bytes),
+                    "memory_file_bytes": snapshot.memory_file_bytes,
+                    "memory_file_mb": _mib(snapshot.memory_file_bytes),
+                    # ``shmem`` is included in ``file``: it explains how much
+                    # of file-backed cgroup charge is PostgreSQL shared state.
+                    "memory_shmem_bytes": snapshot.memory_shmem_bytes,
+                    "memory_shmem_mb": _mib(snapshot.memory_shmem_bytes),
+                    "memory_slab_bytes": snapshot.memory_slab_bytes,
+                    "memory_slab_mb": _mib(snapshot.memory_slab_bytes),
+                    "memory_file_dirty_bytes": snapshot.memory_file_dirty_bytes,
+                    "memory_file_dirty_mb": _mib(snapshot.memory_file_dirty_bytes),
+                    "memory_file_writeback_bytes": (
+                        snapshot.memory_file_writeback_bytes
+                    ),
+                    "memory_file_writeback_mb": _mib(
+                        snapshot.memory_file_writeback_bytes
+                    ),
                 },
             ),
         )

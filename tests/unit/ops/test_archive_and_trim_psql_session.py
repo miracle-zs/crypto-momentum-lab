@@ -4,9 +4,10 @@ from deploy.ops.archive_and_trim import (
     PsqlSession,
     _terminated,
     build_batch_delete_sql,
-    build_freeze_fingerprint_sql,
     build_freeze_targets_sql,
+    build_frozen_content_digest_sql,
 )
+from deploy.ops.stream_digest import StreamingContentDigest
 
 
 def test_terminated_adds_a_missing_semicolon() -> None:
@@ -19,7 +20,7 @@ def test_terminated_adds_a_missing_semicolon() -> None:
 def test_statements_built_for_the_session_are_terminated() -> None:
     for sql in (
         build_freeze_targets_sql("strategy_runtime_events", "occurred_at", "a", "b"),
-        build_freeze_fingerprint_sql(),
+        build_frozen_content_digest_sql("strategy_runtime_events"),
         build_batch_delete_sql("strategy_runtime_events", 1000),
     ):
         assert sql.rstrip().endswith(";")
@@ -53,3 +54,29 @@ def test_run_terminates_the_statement_it_writes_to_the_session() -> None:
         "SELECT 1;\n",
         "SELECT '__cml_done_1__';\n",
     ]
+
+
+def test_stream_digest_folds_row_hashes_without_retaining_the_result_set() -> None:
+    class FakeStdin:
+        def write(self, text: str) -> None:
+            del text
+
+        def flush(self) -> None:
+            return None
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = iter(["row-hash-a\n", "row-hash-b\n", "__cml_done_1__\n"])
+            self.stderr = None
+
+        def poll(self) -> None:
+            return None
+
+    session = PsqlSession(container="c", database="d", user="u")
+    session._proc = FakeProcess()
+
+    expected = StreamingContentDigest()
+    expected.update(b"row-hash-a\n")
+    expected.update(b"row-hash-b\n")
+    assert session.stream_digest("SELECT row_hash") == expected.hexdigest()

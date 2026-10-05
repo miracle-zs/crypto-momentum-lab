@@ -34,6 +34,12 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from stream_digest import StreamingContentDigest  # noqa: E402
+
 _DEFAULT_OUT = "/var/lib/crypto-momentum-lab/table-archive"
 _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
 _DEFAULT_DATABASE = "cml"
@@ -135,19 +141,33 @@ def compute_range_fingerprint(
     start: str,
     end: str,
 ) -> str:
-    """Deterministic content fingerprint of rows in [start, end) range."""
+    """Stream an order-independent content digest of rows in [start, end).
+
+    PostgreSQL must never sort and aggregate an entire retention range merely
+    to prove its archive.  It emits one canonical JSON row at a time; this
+    process retains only a small multiset accumulator.
+    """
     sql = (
-        "SELECT count(*)::text || '|' || "
-        "coalesce(md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))), '') "
-        f'FROM (SELECT * FROM "{table}" '
-        f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00') t"
+        "SELECT row_to_json(t)::text "
+        f'FROM "{table}" t '
+        f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
     )
-    result = _run([*_psql(prefix, container, user, database), "-At", "-c", sql])
-    if result.returncode != 0:
+    process = subprocess.Popen(  # noqa: S603 - argv and SQL are built here
+        [*_psql(prefix, container, user, database), "-At", "-c", sql],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    digest = StreamingContentDigest()
+    for row in process.stdout:
+        digest.update(row)
+    stderr = process.stderr.read() if process.stderr else b""
+    process.wait()
+    if process.returncode != 0:
         raise SystemExit(
-            f"fingerprint failed: {result.stderr.decode(errors='replace').strip()}"
+            f"fingerprint failed: {stderr.decode(errors='replace').strip()}"
         )
-    return result.stdout.decode().strip()
+    return digest.hexdigest()
 
 
 def export_range(

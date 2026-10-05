@@ -26,12 +26,21 @@ def _load_module() -> Any:
     return module
 
 
+_DIGEST = "sha256-multiset-v1:0:" + "0" * 64 + ":" + "0" * 64
+
+
 class FakeSession:
     """Records SQL in order and replays scripted scalar results."""
 
-    def __init__(self, results: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        results: dict[str, str] | None = None,
+        *,
+        digest: str = _DIGEST,
+    ) -> None:
         self.sql: list[str] = []
         self._results = results or {}
+        self._digest = digest
 
     def run(self, sql: str) -> str:
         self.sql.append(sql)
@@ -39,6 +48,10 @@ class FakeSession:
             if key in sql:
                 return value
         return ""
+
+    def stream_digest(self, sql: str) -> str:
+        self.sql.append(sql)
+        return self._digest
 
 
 class FakeAuthority:
@@ -72,6 +85,24 @@ def test_freeze_sql_captures_ctid_set_not_recomputed_range() -> None:
     assert "occurred_at" in sql
 
 
+def test_content_fingerprint_avoids_database_sort_and_aggregate() -> None:
+    """A retention check must not sort and aggregate a whole batch in Postgres.
+
+    The previous ``string_agg(md5(... ) ORDER BY md5(...))`` plan spilled more
+    than a gigabyte of temporary data on the live database.  The replacement
+    returns one row digest at a time; Python folds that bounded stream while
+    the advisory lock protects the frozen target set.
+    """
+
+    mod = _load_module()
+    sql = mod.build_frozen_content_digest_sql("demo_table")
+
+    assert "row_to_json(t)::text" in sql
+    assert "prune_targets" in sql
+    assert "string_agg" not in sql
+    assert "ORDER BY" not in sql
+
+
 def test_batch_delete_consumes_frozen_set_only() -> None:
     mod = _load_module()
     sql = mod.build_batch_delete_sql("demo_table", 100)
@@ -94,8 +125,6 @@ def test_lock_held_across_fence_and_delete() -> None:
                 return "3" if prior == 1 else "0"
             if "count(*) FROM del" in sql:
                 return "3"
-            if "md5(string_agg" in sql:
-                return "3|deadbeef"
             return ""
 
     session = DrainSession()
@@ -112,6 +141,7 @@ def test_lock_held_across_fence_and_delete() -> None:
         to_dt="2026-08-01",
         batch_rows=10,
         db={},
+        expected_fingerprint=_DIGEST,
     )
     assert result == (3, 3)
     assert authority.fence_calls >= 1
@@ -145,6 +175,7 @@ def test_frozen_count_mismatch_aborts_without_delete() -> None:
             to_dt="2026-08-01",
             batch_rows=10,
             db={},
+            expected_fingerprint=_DIGEST,
         )
     assert authority.fence_calls >= 1
     assert any("pg_advisory_unlock" in s for s in session.sql)
@@ -178,6 +209,7 @@ def test_deleted_count_mismatch_raises() -> None:
             to_dt="2026-08-01",
             batch_rows=10,
             db={},
+            expected_fingerprint=_DIGEST,
         )
 
 
@@ -215,11 +247,8 @@ def test_save_dependency_takes_advisory_xact_lock() -> None:
 def test_frozen_content_fingerprint_mismatch_aborts_without_delete() -> None:
     mod = _load_module()
     session = FakeSession(
-        {
-            "count(*) FROM prune_targets": "3",
-            "md5(string_agg(id::text": "3|targethash",
-            "md5(t::text)": "3|wronghash",
-        }
+        {"count(*) FROM prune_targets": "3"},
+        digest="sha256-multiset-v1:3:" + "1" * 64 + ":" + "2" * 64,
     )
     authority = FakeAuthority()
     with pytest.raises(RuntimeError, match="Frozen prune targets content fingerprint"):
@@ -235,7 +264,7 @@ def test_frozen_content_fingerprint_mismatch_aborts_without_delete() -> None:
             to_dt="2026-08-01",
             batch_rows=10,
             db={},
-            expected_fingerprint="3|expectedhash",
+            expected_fingerprint=_DIGEST,
         )
     assert authority.fence_calls >= 1
     assert any("pg_advisory_unlock" in s for s in session.sql)
@@ -253,10 +282,6 @@ def test_frozen_content_fingerprint_match_proceeds() -> None:
                 return "3" if prior == 1 else "0"
             if "count(*) FROM del" in sql:
                 return "3"
-            if "md5(string_agg(id::text" in sql:
-                return "3|deadbeef"
-            if "md5(t::text)" in sql:
-                return "3|matching_content_hash"
             return ""
 
     session = DrainSession()
@@ -273,7 +298,7 @@ def test_frozen_content_fingerprint_match_proceeds() -> None:
         to_dt="2026-08-01",
         batch_rows=10,
         db={},
-        expected_fingerprint="3|matching_content_hash",
+        expected_fingerprint=_DIGEST,
     )
     assert result == (3, 3)
     assert authority.fence_calls >= 1

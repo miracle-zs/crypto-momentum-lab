@@ -30,6 +30,10 @@ _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from stream_digest import StreamingContentDigest  # noqa: E402
 
 from crypto_momentum_lab.domain.operational.retention_authority import (  # noqa: E402
     RetentionAuthority,
@@ -193,6 +197,35 @@ class PsqlSession:
             if line.rstrip("\n") == marker:
                 return "".join(out)
             out.append(line)
+        raise RuntimeError(
+            "psql session ended before marker: " + "".join(self._stderr_lines)
+        )
+
+    def stream_digest(self, sql: str) -> str:
+        """Digest one query result row at a time in the locked psql session.
+
+        The query deliberately has no global ordering or aggregate.  The
+        accumulator is commutative, so this preserves a stable content check
+        while keeping both PostgreSQL and this process at constant memory.
+        """
+
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdout is None:
+            raise RuntimeError("psql session is not started")
+        if proc.poll() is not None:
+            raise RuntimeError(
+                "psql session already exited: " + "".join(self._stderr_lines)
+            )
+        self._seq += 1
+        marker = f"__cml_done_{self._seq}__"
+        proc.stdin.write(_terminated(sql) + "\n")
+        proc.stdin.write(f"SELECT '{marker}';\n")
+        proc.stdin.flush()
+        digest = StreamingContentDigest()
+        for line in proc.stdout:
+            if line.rstrip("\n") == marker:
+                return digest.hexdigest()
+            digest.update(line.encode("utf-8"))
         raise RuntimeError(
             "psql session ended before marker: " + "".join(self._stderr_lines)
         )
@@ -514,21 +547,11 @@ def build_freeze_targets_sql(
     )
 
 
-def build_freeze_fingerprint_sql() -> str:
-    """Content fingerprint of the frozen delete set (ctid identity)."""
+def build_frozen_content_digest_sql(table: str) -> str:
+    """Return frozen rows without sorting or aggregating them in PostgreSQL."""
     return (
-        "SELECT count(*)::text || '|' || "
-        "coalesce(md5(string_agg(id::text, ',' ORDER BY id)), '') "
-        "FROM prune_targets;"
-    )
-
-
-def build_freeze_content_fingerprint_sql(table: str) -> str:
-    """Deterministic content fingerprint of frozen targets joined back to table rows."""
-    return (
-        "SELECT count(*)::text || '|' || "
-        "coalesce(md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))), '') "
-        f"FROM (SELECT t.* FROM {table} t JOIN prune_targets p ON t.ctid = p.id) t;"
+        "SELECT row_to_json(t)::text "
+        f"FROM {table} t JOIN prune_targets p ON t.ctid = p.id;"
     )
 
 
@@ -602,24 +625,27 @@ def run_locked_prune(
                 f"manifest rows ({recorded}). Aborting so rows outside "
                 "the archive are never deleted."
             )
-        fingerprint = session.run(build_freeze_fingerprint_sql()).strip()
-        print(f"  frozen target fingerprint {fingerprint}")
-
-        if expected_fingerprint:
-            content_fingerprint = session.run(
-                build_freeze_content_fingerprint_sql(table)
-            ).strip()
-            if content_fingerprint != expected_fingerprint:
-                raise RuntimeError(
-                    f"Frozen prune targets content fingerprint ({content_fingerprint}) "
-                    f"does not match archived manifest fingerprint "
-                    f"({expected_fingerprint})! "
-                    "Aborting prune to prevent deleting unarchived or modified data."
-                )
-            print(
-                f"  verified content fingerprint matches archive: "
-                f"{content_fingerprint}"
+        if not expected_fingerprint or not expected_fingerprint.startswith(
+            "sha256-multiset-v1:"
+        ):
+            raise RuntimeError(
+                "Archive manifest has no bounded streaming content fingerprint; "
+                "refusing to delete. Recreate the archive with the current tool."
             )
+        content_fingerprint = session.stream_digest(
+            build_frozen_content_digest_sql(table)
+        )
+        if content_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                f"Frozen prune targets content fingerprint ({content_fingerprint}) "
+                f"does not match archived manifest fingerprint "
+                f"({expected_fingerprint})! "
+                "Aborting prune to prevent deleting unarchived or modified data."
+            )
+        print(
+            f"  verified content fingerprint matches archive: "
+            f"{content_fingerprint}"
+        )
 
         deleted = 0
         while deleted < recorded:
@@ -654,7 +680,7 @@ def run_locked_prune(
             raise RuntimeError(
                 f"{leftover} frozen targets remain undeleted; aborting."
             )
-        print(f"  deleted {deleted} rows (fingerprint {fingerprint})")
+        print(f"  deleted {deleted} rows (fingerprint {content_fingerprint})")
         return (recorded, deleted)
     finally:
         for k in reversed(lock_keys):

@@ -34,6 +34,7 @@ def test_dashboard_engine_bounds_query_memory_risk(monkeypatch) -> None:
         "server_settings": {
             "statement_timeout": "10000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.dashboard",
         },
     }
 
@@ -60,6 +61,7 @@ def test_execution_engine_uses_a_bounded_dedicated_pool(monkeypatch) -> None:
         "server_settings": {
             "statement_timeout": "5000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.execution",
         },
     }
 
@@ -86,6 +88,7 @@ def test_account_engine_uses_a_small_serial_sync_pool(monkeypatch) -> None:
         "server_settings": {
             "statement_timeout": "5000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.account",
         },
     }
 
@@ -114,6 +117,7 @@ def test_observability_engine_has_a_small_best_effort_pool(monkeypatch) -> None:
         "server_settings": {
             "statement_timeout": "10000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.observability",
         },
     }
 
@@ -142,6 +146,7 @@ def test_checkpoint_engine_isolated_from_best_effort_telemetry(monkeypatch) -> N
         "server_settings": {
             "statement_timeout": "10000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.checkpoint",
         },
     }
 
@@ -168,5 +173,6 @@ def test_market_engine_has_a_bounded_read_pool(monkeypatch) -> None:
         "server_settings": {
             "statement_timeout": "5000ms",
             "idle_in_transaction_session_timeout": "30000ms",
+            "application_name": "cml.market",
         },
     }
