@@ -168,6 +168,8 @@ class LiveTelemetrySink(
         *,
         occurred_at: datetime,
         received_at: datetime,
+        published_at: datetime | None = None,
+        socket_received_at: datetime | None = None,
     ) -> None: ...
 
 
@@ -509,6 +511,8 @@ class LiveRuntimeTelemetry:
         *,
         occurred_at: datetime,
         received_at: datetime,
+        published_at: datetime | None = None,
+        socket_received_at: datetime | None = None,
     ) -> None:
         """Persist a sampled market watermark and receive-delay observation.
 
@@ -520,6 +524,10 @@ class LiveRuntimeTelemetry:
 
         _require_aware(occurred_at, "occurred_at")
         _require_aware(received_at, "received_at")
+        if published_at is not None:
+            _require_aware(published_at, "published_at")
+        if socket_received_at is not None:
+            _require_aware(socket_received_at, "socket_received_at")
         if (
             state.is_backfill
             or not state.data_complete
@@ -545,6 +553,20 @@ class LiveRuntimeTelemetry:
                 "market_delay_ms": max(
                     0.0,
                     (received_at - state.bucket_end).total_seconds() * 1000,
+                ),
+                "hub_published_at": _optional_iso(published_at),
+                "hub_socket_received_at": _optional_iso(socket_received_at),
+                "bucket_to_hub_publish_ms": _duration_ms(
+                    state.bucket_end,
+                    published_at,
+                ),
+                "hub_publish_to_socket_receive_ms": _duration_ms(
+                    published_at,
+                    socket_received_at,
+                ),
+                "socket_receive_to_prefetch_ms": _duration_ms(
+                    socket_received_at,
+                    received_at,
                 ),
                 "source_last_received_at": _optional_iso(state.last_received_at),
                 "source_event_count": state.source_event_count,
@@ -1210,6 +1232,15 @@ def _exchange_operation_is_allowed(
 
 def _optional_iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _duration_ms(
+    started_at: datetime | None,
+    finished_at: datetime | None,
+) -> float | None:
+    if started_at is None or finished_at is None:
+        return None
+    return max(0.0, round((finished_at - started_at).total_seconds() * 1000, 3))
 
 
 

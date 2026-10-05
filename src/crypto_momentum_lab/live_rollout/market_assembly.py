@@ -15,7 +15,7 @@ from collections.abc import (
     Callable,
 )
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 
@@ -36,6 +36,7 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 )
 from crypto_momentum_lab.live_rollout.hub_cursor import LiveHubCursorState
 from crypto_momentum_lab.live_rollout.market_cache import LatestMarketStateCache
+from crypto_momentum_lab.live_rollout.market_timing import LiveMarketTimingTracker
 from crypto_momentum_lab.live_rollout.postgres_runtime import poll_live_market_states
 from crypto_momentum_lab.live_rollout.runtime_config import _LIVE_STARTUP_BUFFER_LIMIT
 from crypto_momentum_lab.live_rollout.runtime_session import ResourceOwnershipRegistry
@@ -54,7 +55,10 @@ from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
     ClosedCandleEmaProvider,
 )
-from crypto_momentum_lab.market_data.hub import WebSocketMarketStateSource
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateBatch,
+    WebSocketMarketStateSource,
+)
 from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
     WebSocketMarketQuoteVolumeSource,
@@ -84,10 +88,12 @@ class LiveStartupMarketAssembly:
         buffer: StartupMarketStateBuffer | None,
         hub_source: WebSocketMarketStateSource | None,
         task: asyncio.Task[None] | None,
+        timing_tracker: LiveMarketTimingTracker | None = None,
     ) -> None:
         self.buffer = buffer
         self.hub_source = hub_source
         self.task = task
+        self.timing_tracker = timing_tracker
         self._control_plane_listener: (
             Callable[[bool, str | None], None] | None
         ) = None
@@ -216,18 +222,29 @@ def assemble_live_startup_market_buffer(
         max_states=max_states,
         on_state_skipped=hub_cursor_state.acknowledge_state,
     )
+    timing_tracker = LiveMarketTimingTracker()
     assembly = LiveStartupMarketAssembly(
         buffer=buffer,
         hub_source=None,
         task=None,
+        timing_tracker=timing_tracker,
     )
+
+    def observe_batch(batch: MarketStateBatch) -> None:
+        # Keep cursor acknowledgement and diagnostic correlation independent:
+        # neither becomes a prerequisite for market-state delivery.
+        hub_cursor_state.observe_batch(batch)
+        timing_tracker.observe_batch(
+            batch,
+            received_at=datetime.now(tz=UTC),
+        )
 
     hub_source = WebSocketMarketStateSource(
         url=market_state_hub_url,
         environment=market_environment,
         consumer_id=f"live-strategy:{session_id}",
         on_connection_change=assembly.on_connection_change,
-        on_batch=hub_cursor_state.observe_batch,
+        on_batch=observe_batch,
         fail_on_replay_unavailable=True,
         preserve_sequence_on_overflow=True,
     )

@@ -13,6 +13,7 @@ from crypto_momentum_lab.health.memory import (
     current_rss_bytes,
     tracemalloc_memory_snapshot,
 )
+from crypto_momentum_lab.health.resources import ProcessResourceSampler
 
 log = structlog.get_logger()
 
@@ -30,6 +31,7 @@ class LiveRuntimeCacheMaintenance:
         pending_entry_symbols: Callable[[], Iterable[str]],
         strategy: RuntimeStrategy,
         volume_metrics_provider: Callable[[], dict[str, object]] | None = None,
+        resource_snapshot: Callable[[], dict[str, int | float | None]] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -37,6 +39,11 @@ class LiveRuntimeCacheMaintenance:
         self._pending_entry_symbols = pending_entry_symbols
         self._strategy = strategy
         self._volume_metrics_provider = volume_metrics_provider
+        self._resource_snapshot = (
+            ProcessResourceSampler().snapshot
+            if resource_snapshot is None
+            else resource_snapshot
+        )
         self._managed_position_symbols: frozenset[str] = frozenset()
         self._managed_order_symbols: frozenset[str] = frozenset()
         self._known = False
@@ -96,6 +103,7 @@ class LiveRuntimeCacheMaintenance:
             rss_bytes=current_rss_bytes(),
             **cgroup_memory_snapshot(),
             **tracemalloc_memory_snapshot(),
+            **self._resource_snapshot(),
             protected_symbol_count=len(protected_symbols),
             evicted_strategy_symbols=len(evicted_strategy_symbols),
             buffered_symbol_count=self._strategy.buffered_symbol_count,

@@ -80,6 +80,7 @@ from crypto_momentum_lab.live_rollout.exit_processor import (
 )
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
 from crypto_momentum_lab.live_rollout.market_loop import LiveMarketLoop
+from crypto_momentum_lab.live_rollout.market_timing import MarketStateTiming
 from crypto_momentum_lab.live_rollout.pending_entries import (
     LivePendingEntryRegistry,
 )
@@ -175,6 +176,9 @@ class LiveStrategyDaemon:
         | None = None,
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
+        market_timing_provider: (
+            Callable[[MarketState15s], MarketStateTiming | None] | None
+        ) = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         on_checkpoint_saved: Callable[[], None] | None = None,
         request_exit_recovery: Callable[[], None],
@@ -352,6 +356,7 @@ class LiveStrategyDaemon:
             recover_market_state_gap=recover_market_state_gap,
             hub_cursor_provider=hub_cursor_provider,
             commit_market_state_cursor=commit_market_state_cursor,
+            market_timing_provider=market_timing_provider,
             entered_symbol_lookup=entered_symbol_lookup,
             decision_filter=config.decision_filter,
             decision_fact_binder=config.decision_fact_binder,

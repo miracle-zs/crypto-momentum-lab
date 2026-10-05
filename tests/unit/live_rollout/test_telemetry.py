@@ -309,6 +309,36 @@ async def test_market_progress_persists_sampled_delay_and_account_identity() -> 
     assert event["details"]["market_delay_ms"] == 30_000.0
 
 
+async def test_market_state_progress_breaks_down_hub_and_prefetch_delay() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="account-2",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_PROGRESS}),
+    )
+    state = _state()
+    await telemetry.start()
+    telemetry.market_state_progress(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, 15, 500000, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 0, 15, 500000, tzinfo=UTC),
+        published_at=datetime(2026, 7, 4, 0, 0, 15, 400000, tzinfo=UTC),
+        socket_received_at=datetime(2026, 7, 4, 0, 0, 15, 430000, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    details = batches[0][0]["details"]
+    assert details["bucket_to_hub_publish_ms"] == 400.0
+    assert details["hub_publish_to_socket_receive_ms"] == 30.0
+    assert details["socket_receive_to_prefetch_ms"] == 70.0
+
+
 async def test_market_state_progress_ignores_backfilled_and_historical_states() -> None:
     batches: list[tuple[dict[str, object], ...]] = []
 

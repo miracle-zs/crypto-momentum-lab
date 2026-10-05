@@ -1,7 +1,7 @@
 """Low-overhead runtime signals for the market-data process."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import structlog
 
@@ -10,6 +10,7 @@ from crypto_momentum_lab.health.memory import (
     current_rss_bytes,
     tracemalloc_memory_snapshot,
 )
+from crypto_momentum_lab.health.resources import ProcessResourceSampler
 from crypto_momentum_lab.market_data.agg_trade_recovery import AggTradeRecoveryMetrics
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPoolMetricsSnapshot,
@@ -27,6 +28,7 @@ async def monitor_market_data_health(
     connection_metrics: Callable[[], BinanceConnectionPoolMetricsSnapshot],
     runtime_state_metrics: Callable[[], dict[str, object]] | None = None,
     recovery_metrics: Callable[[], AggTradeRecoveryMetrics] | None = None,
+    resource_snapshot: Callable[[], dict[str, int | float | None]] | None = None,
     report_interval_seconds: float = 30.0,
     sample_interval_seconds: float = 1.0,
     queue_warning_utilization: float = 0.75,
@@ -57,6 +59,11 @@ async def monitor_market_data_health(
     previous_processing_count = 0
     previous_unrecovered_gap_count = 0
     previous_backpressure_wait_count = 0
+    observe_resources = (
+        ProcessResourceSampler().snapshot
+        if resource_snapshot is None
+        else resource_snapshot
+    )
     maximum_lag_seconds = 0.0
     lag_samples: list[float] = []
     while True:
@@ -137,6 +144,7 @@ async def monitor_market_data_health(
             rss_bytes=current_rss_bytes(),
             **cgroup_memory_snapshot(),
             **tracemalloc_memory_snapshot(),
+            **observe_resources(),
             event_loop_lag_ms=round(maximum_lag_seconds * 1000, 3),
             event_loop_lag_p50_ms=lag_percentiles["p50"],
             event_loop_lag_p95_ms=lag_percentiles["p95"],
@@ -352,7 +360,7 @@ def _runtime_processing_count(snapshot: dict[str, object] | None) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _connection_ingress_utilization(detail: dict[str, object]) -> float:
+def _connection_ingress_utilization(detail: Mapping[str, object]) -> float:
     events = detail.get("ingress_queue_events")
     maximum = detail.get("ingress_queue_max_events")
     if not isinstance(events, int) or not isinstance(maximum, int) or maximum <= 0:

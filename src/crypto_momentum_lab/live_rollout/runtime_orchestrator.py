@@ -995,6 +995,11 @@ async def run_live_daemon(
             state_machine=execution_coordinator,
             context_provider=context_provider,
             telemetry=telemetry,
+            market_timing_provider=(
+                None
+                if startup_market_assembly.timing_tracker is None
+                else startup_market_assembly.timing_tracker.timing_for
+            ),
             signal_recorder=signal_recorder,
             entry_order_lifecycle=entry_order_lifecycle,
             config=LiveDaemonConfig(
@@ -1342,6 +1347,10 @@ async def run_live_daemon(
                     or account_task.done()
                     or (risk_control_task is not None and risk_control_task.done())
                 ),
+                resource_dimensions={
+                    "account_label": account_label,
+                    "run_id": session_id,
+                },
             )
             local_health_task = asyncio.create_task(
                 health_monitor.run(),

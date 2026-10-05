@@ -41,6 +41,7 @@ from crypto_momentum_lab.live_rollout.context_prefetch import (
 from crypto_momentum_lab.live_rollout.entry_lane import EntryExecutionLane
 from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
 from crypto_momentum_lab.live_rollout.exits import LiveExitManager
+from crypto_momentum_lab.live_rollout.market_timing import MarketStateTiming
 from crypto_momentum_lab.live_rollout.runtime_cache import (
     LiveRuntimeCacheMaintenance,
 )
@@ -79,6 +80,9 @@ class LiveMarketLoop:
         | None = None,
         hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
+        market_timing_provider: (
+            Callable[[MarketState15s], MarketStateTiming | None] | None
+        ) = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         request_order_cleanup: Callable[
             [tuple[OrderExecutionPlan, ...]], None
@@ -112,6 +116,7 @@ class LiveMarketLoop:
         self._recover_market_state_gap = recover_market_state_gap
         self._hub_cursor_provider = hub_cursor_provider
         self._commit_market_state_cursor = commit_market_state_cursor
+        self._market_timing_provider = market_timing_provider
         self._entered_symbol_lookup = entered_symbol_lookup
         self._decision_filter = decision_filter
         self._decision_fact_binder = decision_fact_binder
@@ -238,6 +243,11 @@ class LiveMarketLoop:
             )
             self._scheduled_controller.observe_state(state)
             if self._telemetry is not None:
+                timing = (
+                    None
+                    if self._market_timing_provider is None
+                    else self._market_timing_provider(state)
+                )
                 await self._telemetry.market_state_received(
                     state,
                     occurred_at=prefetched.received_at,
@@ -247,6 +257,10 @@ class LiveMarketLoop:
                     state,
                     occurred_at=prefetched.received_at,
                     received_at=prefetched.received_at,
+                    published_at=(None if timing is None else timing.published_at),
+                    socket_received_at=(
+                        None if timing is None else timing.socket_received_at
+                    ),
                 )
             gap_generation = self._market_gap_generation
             if gap_generation > self._strategy_gap_reset_generation_by_symbol.get(

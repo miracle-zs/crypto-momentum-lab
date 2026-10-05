@@ -67,6 +67,7 @@ from crypto_momentum_lab.execution_account.sync_ports import (
     ReadOnlyAccountClient,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.health.resources import monitor_process_resources
 from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
@@ -593,6 +594,7 @@ async def sync_continuously(
             shared_command_request_pacer_path=shared_command_request_pacer_path,
         )
         retention_task: asyncio.Task[None] | None = None
+        resource_monitor_task: asyncio.Task[None] | None = None
         try:
             sync_client: ReadOnlyAccountClient = client
             sync_repository: AccountSyncRepository = repository
@@ -743,8 +745,18 @@ async def sync_continuously(
                     ),
                 )
             )
+            resource_monitor_task = asyncio.create_task(
+                monitor_process_resources(
+                    service="execution_account",
+                    dimensions={"account_label": account_label},
+                ),
+                name=f"execution-account-resources:{account_label}",
+            )
             await daemon.run(stop_requested=stop_requested)
         finally:
+            if resource_monitor_task is not None:
+                resource_monitor_task.cancel()
+                await asyncio.gather(resource_monitor_task, return_exceptions=True)
             if retention_task is not None:
                 retention_task.cancel()
                 try:
