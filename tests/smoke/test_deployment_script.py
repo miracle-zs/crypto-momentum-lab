@@ -825,7 +825,14 @@ service_is_converged "$1"
         "destructive_schema",
     ),
     [
-        ("src/crypto_momentum_lab/apps/execution_account/main.py", 1, 0, 0, 0),
+        ("src/crypto_momentum_lab/apps/execution_account/main.py", 1, 1, 0, 0),
+        (
+            "src/crypto_momentum_lab/execution_account/binance/rest_parser.py",
+            1,
+            1,
+            0,
+            0,
+        ),
         ("src/crypto_momentum_lab/live_rollout/daemon.py", 0, 1, 0, 0),
         (
             "alembic/versions/20261005_0047_drop_unused_risk_state_age_limits.py",

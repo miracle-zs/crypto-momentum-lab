@@ -500,6 +500,9 @@ while IFS= read -r changed_path; do
       runtime_changed=1
       live_changed=1
       execution_account_changed=1
+      # Strategies import the exchange client to reconcile and cancel orders.
+      # Keep both halves of each live pair on the same runtime image.
+      strategy_changed=1
       ;;
     src/crypto_momentum_lab/operator_dashboard/*|\
     src/crypto_momentum_lab/apps/operator_dashboard/*)
