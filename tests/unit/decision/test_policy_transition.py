@@ -45,10 +45,8 @@ from crypto_momentum_lab.domain.strategy.models import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import (
-    ClosedCandle15m,
-    PositionExitPolicy,
-)
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 
 
 def _make_15s_state(

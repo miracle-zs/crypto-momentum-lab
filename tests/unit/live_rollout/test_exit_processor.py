@@ -14,12 +14,8 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
     LiveDaemonRuntimeContext,

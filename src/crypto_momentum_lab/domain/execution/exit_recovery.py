@@ -1,3 +1,5 @@
+"""Exit-recovery facts and the exchange inspection seam."""
+
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -42,13 +44,5 @@ class ExitRecoveryObservation:
 
 class ExitRecoveryClient(Protocol):
     async def inspect_exit_order(
-        self,
-        plan: OrderExecutionPlan,
+        self, plan: OrderExecutionPlan
     ) -> ExitRecoveryObservation: ...
-
-
-__all__ = [
-    "ExitRecoveryClient",
-    "ExitRecoveryInspectionUnknownError",
-    "ExitRecoveryObservation",
-]

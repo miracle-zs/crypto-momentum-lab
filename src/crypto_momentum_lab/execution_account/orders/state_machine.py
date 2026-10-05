@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.domain.execution.order_submission import (
     PreparedOrderSubmission as _PreparedOrderSubmission,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.market.models import JsonValue
 
 log = structlog.get_logger()
@@ -53,17 +54,6 @@ OrderPreSubmissionCallback = Callable[
     Awaitable[None],
 ]
 ExchangeCallResult = TypeVar("ExchangeCallResult")
-
-
-@dataclass(frozen=True, slots=True)
-class OrderExecutionResult:
-    client_order_id: str
-    state: ExchangeOrderState
-    exchange_order_id: str | None
-    executed_quantity: Decimal = Decimal("0")
-    average_price: Decimal = Decimal("0")
-    plan: OrderExecutionPlan | None = None
-    prepared_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

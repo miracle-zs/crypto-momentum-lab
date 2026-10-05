@@ -15,7 +15,7 @@ from crypto_momentum_lab.execution_account.binance.exit_recovery_rules import (
     exit_position_quantity,
     open_order_matches_exit,
 )
-from crypto_momentum_lab.execution_account.orders.recovery import (
+from crypto_momentum_lab.domain.execution.exit_recovery import (
     ExitRecoveryInspectionUnknownError,
 )
 

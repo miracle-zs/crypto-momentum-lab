@@ -10,12 +10,8 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 
 
 class OpenOrderExchange(Protocol):

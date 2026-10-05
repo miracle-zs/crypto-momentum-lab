@@ -587,9 +587,7 @@ async def test_exit_ack_returns_with_durable_deadline_before_projection(
     from crypto_momentum_lab.execution_account.orders.coordinator import (
         OrderExecutionCoordinator,
     )
-    from crypto_momentum_lab.execution_account.orders.state_machine import (
-        OrderExecutionResult,
-    )
+    from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
     from crypto_momentum_lab.persistence.postgres.order_submission_repository import (
         PostgresOrderSubmissionRepository,
     )

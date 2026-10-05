@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.execution_account.orders.recovery import (
+from crypto_momentum_lab.domain.execution.exit_recovery import (
     ExitRecoveryInspectionUnknownError,
 )
 

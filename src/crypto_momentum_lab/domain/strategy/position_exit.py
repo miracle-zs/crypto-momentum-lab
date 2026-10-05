@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
+import crypto_momentum_lab.domain.market.closed_candle as market_candle
 from crypto_momentum_lab.domain.strategy.models import StrategySide
 
 
@@ -34,34 +35,6 @@ class PositionExitPolicy:
             raise ValueError("minimum_holding_seconds must not be negative")
         if self.candle_confirmation_count <= 0:
             raise ValueError("candle_confirmation_count must be positive")
-
-
-@dataclass(frozen=True, slots=True)
-class ClosedCandle15m:
-    symbol: str
-    candle_start: datetime
-    candle_end: datetime
-    open_price: Decimal
-    close_price: Decimal
-
-    def __post_init__(self) -> None:
-        if not self.symbol.strip():
-            raise ValueError("symbol must not be empty")
-        if self.candle_start.tzinfo is None or self.candle_end.tzinfo is None:
-            raise ValueError("candle timestamps must be timezone-aware (UTC)")
-        if self.candle_end <= self.candle_start:
-            raise ValueError("candle_end must be greater than candle_start")
-        duration = self.candle_end - self.candle_start
-        if duration != timedelta(minutes=15):
-            raise ValueError(
-                f"ClosedCandle15m duration must be exactly 15 minutes, got {duration}"
-            )
-        if self.open_price <= Decimal("0") or self.close_price <= Decimal("0"):
-            raise ValueError("open_price and close_price must be positive")
-
-    @property
-    def duration(self) -> timedelta:
-        return self.candle_end - self.candle_start
 
 
 def first_candle_start_after_entry(opened_at: datetime) -> datetime:
@@ -87,8 +60,8 @@ def position_exit_reason(
     symbol: str,
     side: StrategySide,
     policy: PositionExitPolicy,
-    closed_candle: ClosedCandle15m | None,
-    closed_candles: tuple[ClosedCandle15m, ...] = (),
+    closed_candle: market_candle.ClosedCandle15m | None,
+    closed_candles: tuple[market_candle.ClosedCandle15m, ...] = (),
 ) -> str | None:
     del gross_return
     if policy.mode is PositionExitMode.CANDLE_15M:
@@ -112,8 +85,8 @@ def position_exit_reason(
 
 def _candle_exit_reason(
     *,
-    closed_candle: ClosedCandle15m | None,
-    closed_candles: tuple[ClosedCandle15m, ...],
+    closed_candle: market_candle.ClosedCandle15m | None,
+    closed_candles: tuple[market_candle.ClosedCandle15m, ...],
     held_until: datetime,
     opened_at: datetime,
     symbol: str,
@@ -162,7 +135,9 @@ def _candle_exit_reason(
     return None
 
 
-def _consecutive_candles(candles: tuple[ClosedCandle15m, ...]) -> bool:
+def _consecutive_candles(
+    candles: tuple[market_candle.ClosedCandle15m, ...]
+) -> bool:
     return all(
         current.candle_start == previous.candle_start + timedelta(minutes=15)
         for previous, current in zip(candles, candles[1:], strict=False)

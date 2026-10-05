@@ -9,7 +9,7 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mEvent,

@@ -76,7 +76,7 @@ from crypto_momentum_lab.execution_account.binance.rest_parser import (
     rest_require_string,
 )
 from crypto_momentum_lab.execution_account.fill_progress import fill_scan_load_id
-from crypto_momentum_lab.execution_account.orders.recovery import (
+from crypto_momentum_lab.domain.execution.exit_recovery import (
     ExitRecoveryInspectionUnknownError,
     ExitRecoveryObservation,
 )

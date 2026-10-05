@@ -28,6 +28,10 @@ import structlog
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
 )
+from crypto_momentum_lab.domain.execution.order_execution_port import (
+    CoordinatedOrderExecutionPort,
+)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     FuturesPositionSide,
@@ -47,8 +51,11 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
+from crypto_momentum_lab.domain.execution.trade_command_planner import (
+    plan_order_execution,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.risk import RiskDecision
+from crypto_momentum_lab.domain.risk import RiskContext, RiskDecision, RiskGateway
 from crypto_momentum_lab.domain.risk.limits import (
     LiveLimitContext,
     validate_quantized_notional,
@@ -59,15 +66,6 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
 )
 from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_candidate
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    CoordinatedOrderExecutionPort,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
-from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
-    plan_order_execution,
-)
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.gates import has_entry_order_conflict
 from crypto_momentum_lab.live_rollout.position_lifecycle import (
@@ -79,7 +77,6 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_EXIT,
     LiveTelemetrySink,
 )
-from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 
 log = structlog.get_logger()
 
@@ -358,7 +355,7 @@ class LiveCandidateSubmission:
                 if resize_fraction > self._config.resize_tolerance:
                     return None
 
-            # Re-verify hard risk limits on actual quantized notional for non-reduce_only entries via RiskGateway
+            # Re-verify hard risk limits after quantizing a non-reduce-only entry.
             if not executable_candidate.reduce_only and actual_notional is not None:
                 allowed, ceiling_reason = (
                     validate_quantized_notional(

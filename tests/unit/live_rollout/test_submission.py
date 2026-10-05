@@ -19,12 +19,10 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 )
 from crypto_momentum_lab.domain.risk.limits import FixedLiveLimits
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.execution_account.orders.coordinator import (
+from crypto_momentum_lab.domain.execution.order_execution_port import (
     CoordinatedOrderExecutionPort,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
@@ -34,7 +32,7 @@ from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
     LiveSubmissionConfig,
 )
-from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.domain.risk import RiskGateway
 from tests.fixtures.live_market import _intent, _state
 from tests.unit.live_rollout.test_daemon import _runtime_context
 
@@ -370,7 +368,7 @@ async def test_submission_shadow_trade_command_evaluation(
     state = _state()
 
     shadow_calls: list[object] = []
-    from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+    from crypto_momentum_lab.domain.execution.trade_command_planner import (
         plan_order_execution,
     )
 

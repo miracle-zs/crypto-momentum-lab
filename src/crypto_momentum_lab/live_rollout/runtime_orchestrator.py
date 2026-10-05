@@ -66,9 +66,7 @@ from crypto_momentum_lab.execution_account.hub import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
@@ -243,7 +241,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
-from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.domain.risk import RiskGateway
 from crypto_momentum_lab.strategies.registry import build_runtime_strategy
 
 log = structlog.get_logger()

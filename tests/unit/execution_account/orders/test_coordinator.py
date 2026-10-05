@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
     OrderSubmissionPreparation,
 )
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator as _RealOrderExecutionCoordinator,
@@ -24,9 +25,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionKey,
     _KeyCommandScheduler,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
 )
 from tests.fixtures.async_reservations import (
     InMemoryPositionReservationRepository as MemoryReservations,
@@ -61,15 +59,11 @@ class OrderExecutionCoordinator(_RealOrderExecutionCoordinator):
 
         if not self.execution_book.has_reservation_repository:
             return await prepare(None)
-        request = await self._build_execution_request(
+        request = self._execution_request(
             plan, strategy_name=preparation.intent.strategy_name
         )
         result = await self.execution_book.act(request, prepare_submission=prepare)
-        from crypto_momentum_lab.execution_account.orders.execution_result_mapping import (
-            require_accepted_execution_result,
-        )
-
-        require_accepted_execution_result(plan, result)
+        self._require_accepted_execution_result(plan, result)
         return result.prepared_submission
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
@@ -388,9 +382,7 @@ def _result(
     plan: OrderExecutionPlan,
     state: ExchangeOrderState = ExchangeOrderState.ACKNOWLEDGED,
 ):
-    from crypto_momentum_lab.execution_account.orders.state_machine import (
-        OrderExecutionResult,
-    )
+    from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 
     return OrderExecutionResult(
         client_order_id=plan.client_order_id,
@@ -2847,7 +2839,7 @@ async def test_execution_rejects_missing_projection_without_mutating_plan(
     plan = replace(_plan("BTCUSDT", reduce_only=False), projection_version=version)
     try:
         with pytest.raises(OrderPreSubmissionError, match="no Book projection token"):
-            await coordinator._build_execution_request(
+            coordinator._execution_request(
                 plan, strategy_name="orderflow_impulse"
             )
         assert plan.projection_version == version
@@ -3175,7 +3167,7 @@ async def test_one_way_execution_request_uses_explicit_order_direction(
         execution_book=ExecutionBook(),
     )
     try:
-        request = await coordinator._build_execution_request(
+        request = coordinator._execution_request(
             plan, strategy_name="intent-strategy"
         )
         assert request.scope.position_side is FuturesPositionSide.BOTH

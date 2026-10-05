@@ -25,9 +25,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.exit_channels import LiveExitChannelRuntime
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitOrderRequest,

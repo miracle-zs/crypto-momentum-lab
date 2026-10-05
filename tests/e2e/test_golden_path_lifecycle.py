@@ -76,7 +76,7 @@ from crypto_momentum_lab.persistence.postgres.order_submission_repository import
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
-from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.domain.risk import RiskGateway
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
 from tests.fixtures.order_rows import (
     OrderRows,

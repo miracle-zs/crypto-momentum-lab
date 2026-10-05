@@ -13,8 +13,8 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 )
 
 if TYPE_CHECKING:
-    from crypto_momentum_lab.execution_account.orders.coordinator import (
-        CoordinatedOrderExecutionPort,
+    from crypto_momentum_lab.domain.execution.order_execution_port import (
+        EntrySubmissionGate,
     )
 
 log = structlog.get_logger()
@@ -27,7 +27,7 @@ class LiveEntryControlGate:
         self,
         *,
         run_id: str,
-        state_machine: CoordinatedOrderExecutionPort,
+        state_machine: EntrySubmissionGate,
         scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         is_symbol_warmed: Callable[[str], bool] | None = None,

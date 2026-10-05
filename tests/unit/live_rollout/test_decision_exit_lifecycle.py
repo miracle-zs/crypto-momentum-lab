@@ -24,9 +24,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 
 NOW = datetime(2026, 9, 30, 0, 0, 0, tzinfo=UTC)
 

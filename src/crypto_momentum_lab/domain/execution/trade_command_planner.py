@@ -1,9 +1,4 @@
-"""
-Trade command planning translating domain TradeCommand into exchange execution
-plans.
-"""
-
-from __future__ import annotations
+"""Translate domain trade commands into quantized exchange execution plans."""
 
 from dataclasses import dataclass, replace
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
@@ -17,7 +12,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocation,
     TradeCommand,
 )
-from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+from crypto_momentum_lab.domain.trading import OrderType, TradeSide
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +23,7 @@ class QuantizationRejection:
 
 @dataclass(frozen=True, slots=True)
 class TradeExecutionPlanResult:
-    """Outcome of converting a TradeCommand into an exchange execution plan."""
+    """Outcome of converting a trade command into an exchange execution plan."""
 
     command: TradeCommand
     plan: OrderExecutionPlan | None
@@ -50,13 +45,11 @@ def plan_order_execution(
     if reference_price <= 0:
         raise ValueError("reference price must be positive")
 
-    # Step size downward quantization
     units = (command.requested_quantity / rules.step_size).to_integral_value(
         rounding=ROUND_DOWN
     )
     quantized_quantity = units * rules.step_size
     remainder = command.requested_quantity - quantized_quantity
-
     if quantized_quantity < rules.min_quantity:
         return TradeExecutionPlanResult(
             command=command,
@@ -71,7 +64,6 @@ def plan_order_execution(
             ),
             unexecuted_quantization_remainder=command.requested_quantity,
         )
-
     if quantized_quantity > rules.max_quantity:
         return TradeExecutionPlanResult(
             command=command,
@@ -86,7 +78,6 @@ def plan_order_execution(
             ),
             unexecuted_quantization_remainder=command.requested_quantity,
         )
-
     actual_notional = quantized_quantity * reference_price
     if not command.reduce_only and actual_notional < rules.min_notional:
         return TradeExecutionPlanResult(
@@ -102,28 +93,20 @@ def plan_order_execution(
             unexecuted_quantization_remainder=command.requested_quantity,
         )
 
-    # Exchange side calculation
-    opening_buy = command.side is StrategySide.LONG
+    opening_buy = command.side is TradeSide.LONG
     should_buy = not opening_buy if command.reduce_only else opening_buy
     exchange_side = "BUY" if should_buy else "SELL"
-
-    # Price calculation for limit orders
-    if command.order_type is EntryType.MARKET:
+    if command.order_type is OrderType.MARKET:
         price = None
     else:
         source_price = command.limit_price or reference_price
         price_rounding = ROUND_DOWN if exchange_side == "BUY" else ROUND_UP
-        price_units = (source_price / rules.tick_size).to_integral_value(
+        price = (source_price / rules.tick_size).to_integral_value(
             rounding=price_rounding
-        )
-        price = price_units * rules.tick_size
-
+        ) * rules.tick_size
     position_side = (
         command.position_key.position_side if hedge_mode else FuturesPositionSide.BOTH
     )
-
-    client_order_id = command.client_order_id(run_id)
-
     allocations: tuple[ExitAllocation, ...] = ()
     if command.allocation_plan is not None:
         adjusted: list[ExitAllocation] = []
@@ -140,43 +123,33 @@ def plan_order_execution(
         if len(allocations) == 1
         else (f"batch_multi_{len(allocations)}" if allocations else None)
     )
-
     batch_quantities = (
         command.allocation_plan.batch_quantities
         if command.allocation_plan and command.allocation_plan.batch_quantities
         else None
     )
-
-    plan = OrderExecutionPlan(
-        intent_id=command.command_id,
-        run_id=run_id,
-        client_order_id=client_order_id,
-        symbol=command.position_key.symbol,
-        side=exchange_side,
-        order_type=command.order_type.value.upper(),
-        time_in_force="GTC" if command.order_type is EntryType.LIMIT else None,
-        quantity=quantized_quantity,
-        price=price,
-        reduce_only=command.reduce_only,
-        created_at=command.created_at,
-        position_side=position_side,
-        quantized=True,
-        batch_id=batch_id,
-        allocations=allocations,
-        projection_version=command.expected_projection_version,
-        batch_quantities=batch_quantities,
-        reference_price=reference_price,
-    )
-
     return TradeExecutionPlanResult(
         command=command,
-        plan=plan,
+        plan=OrderExecutionPlan(
+            intent_id=command.command_id,
+            run_id=run_id,
+            client_order_id=command.client_order_id(run_id),
+            symbol=command.position_key.symbol,
+            side=exchange_side,
+            order_type=command.order_type.value.upper(),
+            time_in_force="GTC" if command.order_type is OrderType.LIMIT else None,
+            quantity=quantized_quantity,
+            price=price,
+            reduce_only=command.reduce_only,
+            created_at=command.created_at,
+            position_side=position_side,
+            quantized=True,
+            batch_id=batch_id,
+            allocations=allocations,
+            projection_version=command.expected_projection_version,
+            batch_quantities=batch_quantities,
+            reference_price=reference_price,
+        ),
         rejection=None,
         unexecuted_quantization_remainder=remainder,
     )
-
-
-__all__ = [
-    "plan_order_execution",
-    "TradeExecutionPlanResult",
-]

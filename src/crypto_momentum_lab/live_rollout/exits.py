@@ -25,13 +25,13 @@ from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
 )
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategySide,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
-    ClosedCandle15m,
     PositionExitMode,
     PositionExitPolicy,
     first_candle_start_after_entry,

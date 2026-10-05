@@ -10,7 +10,7 @@ from crypto_momentum_lab.domain.execution.ports import (
     OrderReadRepository,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
-from crypto_momentum_lab.execution_account.orders.coordinator import (
+from crypto_momentum_lab.domain.execution.order_execution_port import (
     CoordinatedOrderExecutionPort,
 )
 

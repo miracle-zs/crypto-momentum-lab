@@ -6,9 +6,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
 )
 from crypto_momentum_lab.domain.strategy import StrategyDecision
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryExecutionLane,

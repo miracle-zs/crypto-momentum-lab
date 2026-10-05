@@ -40,16 +40,12 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
-from crypto_momentum_lab.execution_account.orders.recovery import (
+from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
+from crypto_momentum_lab.domain.execution.exit_recovery import (
     ExitRecoveryClient,
     ExitRecoveryObservation,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )

@@ -44,8 +44,8 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     universe_snapshot_for_symbols,
 )
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.position_exit import (
-    ClosedCandle15m,
     PositionExitMode,
     PositionExitPolicy,
 )
@@ -71,7 +71,7 @@ from crypto_momentum_lab.live_rollout.exits import (
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
-from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.domain.risk import RiskGateway
 from tests.fixtures.live_context_reader import context_reader
 from tests.fixtures.live_market import (
     FakeStrategy,

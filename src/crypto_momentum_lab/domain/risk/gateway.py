@@ -1,19 +1,21 @@
+"""Pure live-risk admission policy."""
+
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.risk import (
+from crypto_momentum_lab.domain.risk.limits import (
+    FixedLiveLimits,
+    LiveLimitContext,
+    evaluate_fixed_live_limits,
+)
+from crypto_momentum_lab.domain.risk.models import (
     RiskConfigSnapshot,
     RiskDecision,
     RiskEvaluation,
     RiskHalt,
     StrategyLiveState,
-)
-from crypto_momentum_lab.domain.risk.limits import (
-    FixedLiveLimits,
-    LiveLimitContext,
-    evaluate_fixed_live_limits,
 )
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
 
@@ -49,7 +51,6 @@ class RiskGateway:
         *,
         limit_context: LiveLimitContext | None = None,
     ) -> CandidateRiskAssessment:
-        """Apply entry limits, then evaluate authority for the resulting candidate."""
         capped_notional: Decimal | None = None
         if self._limits is not None and not intent.reduce_only:
             if limit_context is None:
@@ -78,26 +79,25 @@ class RiskGateway:
                 return CandidateRiskAssessment(
                     candidate=None,
                     evaluation=_evaluation(
-                        intent,
-                        context,
-                        RiskDecision.REJECTED,
-                        decision.reason,
+                        intent, context, RiskDecision.REJECTED, decision.reason
                     ),
-                    approved_notional=None,
                 )
             intent = replace(intent, desired_notional=decision.capped_notional)
             capped_notional = decision.capped_notional
         elif intent.reduce_only:
             capped_notional = intent.desired_notional
 
-        auth_eval = self._evaluate_authority(
+        evaluation = self._evaluate_authority(
             intent, context, position_limit_checked=self._limits is not None
         )
-        is_approved = auth_eval.decision is RiskDecision.APPROVED
         return CandidateRiskAssessment(
             candidate=intent,
-            evaluation=auth_eval,
-            approved_notional=capped_notional if is_approved else None,
+            evaluation=evaluation,
+            approved_notional=(
+                capped_notional
+                if evaluation.decision is RiskDecision.APPROVED
+                else None
+            ),
         )
 
     def _evaluate_authority(
@@ -116,21 +116,20 @@ class RiskGateway:
         if context.strategy_state is StrategyLiveState.HALTED:
             return _evaluation(intent, context, RiskDecision.HALTED, "strategy_halted")
         if context.strategy_state is StrategyLiveState.DRAINING:
-            return _evaluation(intent, context, RiskDecision.REJECTED, "entries_disabled")
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "entries_disabled",
+            )
         desired_notional = intent.desired_notional
         if desired_notional is None:
             return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "missing_desired_notional",
+                intent, context, RiskDecision.REJECTED, "missing_desired_notional"
             )
         if desired_notional <= 0:
             return _evaluation(
-                intent,
-                context,
-                RiskDecision.REJECTED,
-                "invalid_desired_notional",
+                intent, context, RiskDecision.REJECTED, "invalid_desired_notional"
             )
         if (
             context.risk_config.max_order_notional is None
@@ -182,8 +181,10 @@ def _evaluation(
         evaluated_at=context.now,
         details={
             "symbol": intent.symbol,
-            "desired_notional": None
-            if intent.desired_notional is None
-            else str(intent.desired_notional),
+            "desired_notional": (
+                None
+                if intent.desired_notional is None
+                else str(intent.desired_notional)
+            ),
         },
     )

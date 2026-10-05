@@ -34,10 +34,10 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
 from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
-from crypto_momentum_lab.execution_account.orders.coordinator import (
+from crypto_momentum_lab.domain.execution.order_execution_port import (
     CoordinatedOrderExecutionPort,
 )
-from crypto_momentum_lab.execution_account.orders.recovery import (
+from crypto_momentum_lab.domain.execution.exit_recovery import (
     ExitRecoveryClient,
 )
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
@@ -104,7 +104,7 @@ from crypto_momentum_lab.live_rollout.submission import (
     LiveSubmissionConfig,
 )
 from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
-from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.domain.risk import RiskGateway
 
 log = structlog.get_logger()
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0

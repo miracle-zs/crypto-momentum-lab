@@ -30,9 +30,7 @@ from crypto_momentum_lab.domain.strategy.entry_candidate import (
     entry_limit_price,
     prepare_entry_candidate,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.live_rollout.context import (
     LiveDaemonRuntimeContext,
     LiveEntryFilterContext,

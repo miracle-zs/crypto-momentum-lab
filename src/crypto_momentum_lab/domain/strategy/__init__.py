@@ -33,7 +33,6 @@ from crypto_momentum_lab.domain.strategy.models import (
     deterministic_signal_id,
 )
 from crypto_momentum_lab.domain.strategy.position_exit import (
-    ClosedCandle15m,
     PositionExitPolicy,
     position_exit_reason,
 )
@@ -48,7 +47,6 @@ from crypto_momentum_lab.domain.strategy.sizing import (
 )
 
 __all__ = [
-    "ClosedCandle15m",
     "DEFAULT_EMA_MAX_AGE",
     "EmaPolicyState",
     "EmaPolicyStatus",

@@ -17,7 +17,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
-from crypto_momentum_lab.execution_account.orders.trade_command_planner import (
+from crypto_momentum_lab.domain.execution.trade_command_planner import (
     plan_order_execution,
 )
 

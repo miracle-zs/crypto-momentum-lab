@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -33,6 +33,7 @@ from crypto_momentum_lab.domain.execution.command_models import (
     ExecutionScope,
 )
 from crypto_momentum_lab.domain.execution.evidence_models import (
+    ExecutionCumulativeOrderReport,
     ExecutionEvidence,
 )
 from crypto_momentum_lab.domain.execution.exchange_contract import (
@@ -41,7 +42,13 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
 )
 from crypto_momentum_lab.domain.execution.execution_action_models import (
     Accepted,
+    Blocked,
+    CommandConflict,
+    ExecutionActResult,
+    ExecutionRecoveryPending,
     ExecutionRequest,
+    PositionNotReady,
+    StaleView,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.observation_models import (
@@ -52,7 +59,12 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_read_models import PersistedOrderReceipt
+from crypto_momentum_lab.domain.execution.order_execution_port import (
+    OrderExecutionPort as _OrderExecutionPort,
+)
+from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderEvent,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     FuturesPositionSide,
@@ -78,26 +90,18 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
 )
 from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ExecutionReadinessError,
     ReservationRegistry,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitPolicyMode,
     PositionReservation,
+    TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
-from crypto_momentum_lab.execution_account.orders.execution_request_factory import (
-    build_execution_request,
-)
-from crypto_momentum_lab.execution_account.orders.execution_result_mapping import (
-    require_accepted_execution_result,
-)
+from crypto_momentum_lab.domain.trading import TradeSide
 from crypto_momentum_lab.execution_account.orders.fill_scan_evidence import (
     coverage_from_scan,
-)
-from crypto_momentum_lab.execution_account.orders.order_result_projection import (
-    project_order_result,
-)
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
 )
 
 if TYPE_CHECKING:
@@ -108,70 +112,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 
-class OrderExecutionPort(Protocol):
-    async def submit(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        prepared_submission: PreparedOrderSubmission,
-    ) -> OrderExecutionResult: ...
-
-    async def reconcile_order(
-        self,
-        plan: OrderExecutionPlan,
-    ) -> OrderExecutionResult: ...
-
-    async def cancel_order(
-        self,
-        plan: OrderExecutionPlan,
-    ) -> OrderExecutionResult: ...
-
-    async def apply_observed_snapshot(
-        self,
-        plan: OrderExecutionPlan,
-        snapshot: ExchangeOrderSnapshot,
-    ) -> OrderExecutionResult: ...
-
-    async def mark_reconciliation_pending(
-        self,
-        plan: OrderExecutionPlan,
-    ) -> OrderExecutionResult: ...
-
-    async def mark_absent_reconciled(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        details: dict[str, JsonValue],
-    ) -> OrderExecutionResult: ...
-
-
-class CoordinatedOrderExecutionPort(OrderExecutionPort, Protocol):
-    async def wait_for_entry_submissions_idle(self) -> None: ...
-
-    async def observe_recovered_receipt(
-        self, plan: OrderExecutionPlan, receipt: PersistedOrderReceipt
-    ) -> None: ...
-
-    def block_entry_submissions(self) -> None: ...
-
-    def unblock_entry_submissions(self) -> None: ...
-
-    def configure_submission(
-        self,
-        repository: OrderSubmissionRepository,
-        *,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-    ) -> None: ...
-
-    async def prepare_and_execute(
-        self,
-        plan: OrderExecutionPlan,
-        *,
-        preparation: OrderSubmissionPreparation,
-    ) -> OrderExecutionResult | None: ...
-
-
-OrderExecutionBackend = OrderExecutionPort
+OrderExecutionBackend = _OrderExecutionPort
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,7 +422,7 @@ class OrderExecutionCoordinator:
     def __init__(
         self,
         *,
-        backend: OrderExecutionPort,
+        backend: _OrderExecutionPort,
         account_label: str,
         environment: str,
         max_queue_depth: int = 64,
@@ -865,15 +806,120 @@ class OrderExecutionCoordinator:
                 reasons=dict(conflict_reasons),
             )
 
-    async def _build_execution_request(
+    def _execution_request(
         self, plan: OrderExecutionPlan, *, strategy_name: str
     ) -> ExecutionRequest:
-        return build_execution_request(
-            plan,
+        if (
+            plan.reduce_only
+            and plan.batch_id
+            and (
+                str(plan.batch_id).startswith(f"batch_{plan.symbol}_")
+                or str(plan.batch_id) in ("batch_default", "batch_synthetic")
+            )
+        ):
+            raise OrderPreSubmissionError(
+                f"Account {self._account_label}: synthetic batch "
+                f"{plan.batch_id} is prohibited"
+            )
+        projection_version = plan.projection_version
+        if not projection_version or not projection_version.strip():
+            kind = "exit" if plan.reduce_only else "entry"
+            raise OrderPreSubmissionError(
+                f"{kind} {plan.client_order_id} has no Book projection token"
+            )
+        scope = ExecutionScope(
             environment=self._environment,
             account_label=self._account_label,
-            strategy_name=strategy_name,
+            symbol=plan.symbol,
+            position_side=plan.position_side,
         )
+        opening_buy = (plan.side == "BUY") != plan.reduce_only
+        side = TradeSide.LONG if opening_buy else TradeSide.SHORT
+        if not plan.reduce_only:
+            return ExecutionRequest(
+                request_id=plan.client_order_id,
+                scope=scope,
+                strategy_name=strategy_name,
+                run_id=plan.run_id,
+                decision_ref=plan.client_order_id,
+                expected_view_token=projection_version,
+                action=TradeCommandType.ENTRY,
+                requested_quantity=plan.quantity,
+                side=side,
+                order_type=plan.order_type,
+                limit_price=plan.price,
+                created_at=plan.created_at,
+            )
+        allocations = plan.allocations
+        if allocations:
+            target_batch_ids = tuple(item.batch_id for item in allocations)
+            batch_quantities = {
+                item.batch_id: item.allocated_quantity for item in allocations
+            }
+        elif plan.batch_id:
+            target_batch_ids = (str(plan.batch_id),)
+            batch_quantities = {str(plan.batch_id): plan.quantity}
+        else:
+            raise OrderPreSubmissionError(
+                f"Exit order {plan.client_order_id} has no allocated batches or batch_id"
+            )
+        return ExecutionRequest(
+            request_id=plan.client_order_id,
+            scope=scope,
+            strategy_name=strategy_name,
+            run_id=plan.run_id,
+            decision_ref=plan.client_order_id,
+            expected_view_token=projection_version,
+            action=TradeCommandType.EXIT,
+            requested_quantity=plan.quantity,
+            side=side,
+            order_type=plan.order_type,
+            limit_price=plan.price,
+            reduce_only=True,
+            target_batch_ids=target_batch_ids,
+            batch_quantities=batch_quantities,
+            exit_policy_mode=ExitPolicyMode.TARGET_BATCHES_ONLY,
+            created_at=plan.created_at,
+        )
+
+    @staticmethod
+    def _require_accepted_execution_result(
+        plan: OrderExecutionPlan, result: ExecutionActResult
+    ) -> None:
+        if isinstance(result, Blocked):
+            cause = (
+                ExecutionReadinessError(result.reason)
+                if isinstance(result, (PositionNotReady, ExecutionRecoveryPending))
+                else None
+            )
+            error_type = (
+                OrderRecoveryPendingError
+                if isinstance(result, ExecutionRecoveryPending) and not plan.reduce_only
+                else (
+                    OrderProjectionConflictError
+                    if "ReservationConflictError" in result.diagnostics
+                    else OrderPreSubmissionError
+                )
+            )
+            raise error_type(
+                "Failed to create position reservation for "
+                f"{plan.client_order_id}: {result.reason}"
+            ) from cause
+        if isinstance(result, StaleView):
+            error_type = (
+                OrderProjectionConflictError
+                if plan.reduce_only
+                else OrderPreSubmissionError
+            )
+            raise error_type(
+                "Failed to create position reservation (stale view) for "
+                f"{plan.client_order_id}: {result.reason}"
+            )
+        if isinstance(result, CommandConflict):
+            raise OrderPreSubmissionError(
+                "Failed to create position reservation (command conflict) for "
+                f"{plan.client_order_id}: {result.reason}"
+            )
 
     async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
         if not self._execution_book.has_reservation_repository:
@@ -881,9 +927,7 @@ class OrderExecutionCoordinator:
         try:
             if plan.strategy_name is None:
                 raise OrderPreSubmissionError("new order plan requires strategy_name")
-            req = await self._build_execution_request(
-                plan, strategy_name=plan.strategy_name
-            )
+            req = self._execution_request(plan, strategy_name=plan.strategy_name)
             act_res = await self._execution_book.act(req)
         except OrderProjectionConflictError:
             raise
@@ -901,7 +945,7 @@ class OrderExecutionCoordinator:
             raise OrderPreSubmissionError(
                 f"{prefix}{plan.client_order_id}: {err}"
             ) from err
-        require_accepted_execution_result(plan, act_res)
+        self._require_accepted_execution_result(plan, act_res)
 
     async def _atomic_prepare_submission(
         self,
@@ -914,43 +958,42 @@ class OrderExecutionCoordinator:
             raise OrderPreSubmissionError(
                 "order submission requires an execution transaction"
             )
-        submission_values = {
-            "plan": plan,
-            "intent": preparation.intent,
-            "evaluation": preparation.evaluation,
-            "environment": preparation.environment,
-            "account_label": preparation.account_label,
-            "strategy_name": preparation.strategy_name,
-            "max_open_positions": preparation.max_open_positions,
-            "max_daily_loss": preparation.max_daily_loss,
-            "max_gross_exposure": preparation.max_gross_exposure,
-            "current_daily_pnl": preparation.current_daily_pnl,
-            "current_gross_exposure": preparation.current_gross_exposure,
-            "open_position_symbols": preparation.open_position_symbols,
-            "exposure_notional": preparation.exposure_notional,
-            "baseline_observed_at": preparation.baseline_observed_at,
-        }
+        repository = self._submission_repository
+        assert repository is not None
 
         async def in_tx(tx: ExecutionTransactionPort | None) -> PreparedOrderSubmission:
             if tx is None or tx.session is None:
                 raise OrderPreSubmissionError(
                     "order submission requires an execution transaction"
                 )
-            prepared = await self._submission_repository.prepare_submission_in_session(
+            prepared = await repository.prepare_submission_in_session(
                 tx.session,
-                **submission_values,
+                plan=plan,
+                intent=preparation.intent,
+                evaluation=preparation.evaluation,
                 prepared_at=self._submission_clock(),
+                environment=preparation.environment,
+                account_label=preparation.account_label,
+                strategy_name=preparation.strategy_name,
+                max_open_positions=preparation.max_open_positions,
+                max_daily_loss=preparation.max_daily_loss,
+                max_gross_exposure=preparation.max_gross_exposure,
+                current_daily_pnl=preparation.current_daily_pnl,
+                current_gross_exposure=preparation.current_gross_exposure,
+                open_position_symbols=preparation.open_position_symbols,
+                exposure_notional=preparation.exposure_notional,
+                baseline_observed_at=preparation.baseline_observed_at,
             )
             if prepared is None:
                 raise OrderAlreadyPreparedError("submission already prepared")
             return prepared
 
         try:
-            req = await self._build_execution_request(
+            req = self._execution_request(
                 plan, strategy_name=preparation.intent.strategy_name
             )
             act_res = await self._execution_book.act(req, prepare_submission=in_tx)
-            require_accepted_execution_result(plan, act_res)
+            self._require_accepted_execution_result(plan, act_res)
         except OrderProjectionConflictError:
             raise
         except OrderRecoveryPendingError as recovery_rejection:
@@ -996,7 +1039,156 @@ class OrderExecutionCoordinator:
         *,
         settlement_fills: tuple[AccountFillEvent, ...] = (),
     ) -> None:
-        await project_order_result(self, plan, res, settlement_fills=settlement_fills)
+        if res is None:
+            return
+        scope = ExecutionScope(
+            environment=self._environment,
+            account_label=self._account_label,
+            symbol=plan.symbol,
+            position_side=plan.position_side,
+        )
+        now_dt = datetime.now(UTC)
+        cumulative_quantity = res.executed_quantity
+        if cumulative_quantity < Decimal("0"):
+            raise ValueError("exchange cumulative executed quantity cannot be negative")
+        average_price = res.average_price
+        if cumulative_quantity > Decimal("0") and average_price <= Decimal("0"):
+            if res.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                if self._execution_book.get_outbox(res.client_order_id) is not None:
+                    await self._execution_book.mark_unknown(
+                        res.client_order_id,
+                        reason="cumulative_fill_price_pending",
+                    )
+                return
+            raise RuntimeError(
+                "positive cumulative fill has no positive cumulative average price; "
+                "execution facts require recovery"
+            )
+        cumulative_quote = cumulative_quantity * average_price
+        position_side = plan.position_side.value
+        identity = "\x1f".join(
+            (
+                self._account_label,
+                plan.symbol,
+                position_side,
+                res.client_order_id,
+                str(res.exchange_order_id or ""),
+                res.state.value,
+                str(cumulative_quantity),
+                str(cumulative_quote),
+            )
+        )
+        if settlement_fills:
+            from crypto_momentum_lab.domain.execution.evidence_digest import (
+                trade_payload_digest,
+            )
+
+            identity += "\x1f" + "\x1f".join(
+                trade_payload_digest(fill)
+                for fill in sorted(settlement_fills, key=lambda item: item.trade_id)
+            )
+        identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        order_event = ExchangeOrderEvent(
+            event_id=f"order_{identity_hash}",
+            client_order_id=res.client_order_id,
+            state=res.state,
+            occurred_at=now_dt,
+            exchange_order_id=res.exchange_order_id,
+            details={
+                "account_label": self._account_label,
+                "symbol": plan.symbol,
+                **({"side": plan.side} if settlement_fills else {}),
+                "executed_quantity": str(cumulative_quantity),
+                "cumulative_quote_quantity": str(cumulative_quote),
+                "average_price": str(average_price)
+                if average_price is not None
+                else None,
+                "limit_price": str(plan.price) if plan.price is not None else None,
+                "is_reduce_only": plan.reduce_only,
+                "position_side": position_side,
+            },
+        )
+        try:
+            stream_id: str | None = None
+            stream_epoch: str | None = None
+            if self._execution_book.has_execution_unit_of_work:
+                current_view = await self._execution_book.read(scope)
+                stream_scope = current_view.stream_scope
+                if stream_scope is not None:
+                    stream_id = stream_scope.stream_id
+                    stream_epoch = stream_scope.stream_epoch
+                else:
+                    active = self._execution_book.get_active_stream(
+                        self._environment, self._account_label
+                    )
+                    if active is not None:
+                        stream_id, stream_epoch = active
+                    elif self._active_stream is not None:
+                        stream_id, stream_epoch = self._active_stream
+                    else:
+                        raise RuntimeError(
+                            "cumulative order report has no restored Book stream "
+                            "identity and no active stream scope is registered"
+                        )
+            result = await self._execution_book.observe(
+                ExecutionEvidence(
+                    evidence_id=order_event.event_id,
+                    scope=scope,
+                    observed_at=now_dt,
+                    order_event=order_event,
+                    stream_id=stream_id,
+                    stream_epoch=stream_epoch,
+                    cumulative_order=ExecutionCumulativeOrderReport(
+                        order_id=res.client_order_id,
+                        cumulative_quantity=cumulative_quantity,
+                        cumulative_quote=cumulative_quote,
+                        observed_at=now_dt,
+                    ),
+                    settlement_fills=settlement_fills,
+                )
+            )
+            if isinstance(result, WaitingForEvidence):
+                if res.state.terminal:
+                    self._execution_book.require_command_recovery(res.client_order_id)
+                    log.warning(
+                        "order_terminal_evidence_waiting_for_recovery",
+                        client_order_id=res.client_order_id,
+                        state=res.state.value,
+                        reason=result.reason.value,
+                    )
+                    return
+                raise ExecutionReadinessError(
+                    "cumulative order evidence is waiting for recovery: "
+                    + result.reason.value
+                )
+            if isinstance(result, EvidenceConflict):
+                raise RuntimeError(
+                    "cumulative order evidence was rejected: " + result.reason
+                )
+        except Exception as observe_err:
+            if self._execution_book.get_outbox(res.client_order_id) is not None:
+                try:
+                    await self._execution_book.mark_unknown(
+                        res.client_order_id,
+                        reason=(
+                            "exchange result could not be persisted: "
+                            f"{observe_err}"
+                        ),
+                    )
+                except Exception as transition_err:
+                    raise RuntimeError(
+                        "exchange returned a result, fact persistence failed, and "
+                        "the UNKNOWN outbox transition also failed: "
+                        f"{transition_err}"
+                    ) from transition_err
+            raise
+        if isinstance(result, Applied) and result.recovery_required:
+            self._execution_book.require_command_recovery(res.client_order_id)
+            log.warning(
+                "order_facts_applied_reservation_recovery_required",
+                client_order_id=res.client_order_id,
+                diagnostics=result.diagnostics,
+            )
 
     async def _record_submission_failure(
         self,
@@ -1408,9 +1600,7 @@ class OrderExecutionCoordinator:
 
 
 __all__ = [
-    "CoordinatedOrderExecutionPort",
     "OrderExecutionCoordinator",
     "OrderExecutionKey",
     "OrderExecutionBackend",
-    "OrderExecutionPort",
 ]

@@ -1,3 +1,8 @@
+from crypto_momentum_lab.domain.risk.gateway import (
+    CandidateRiskAssessment,
+    RiskContext,
+    RiskGateway,
+)
 from crypto_momentum_lab.domain.risk.models import (
     RiskConfigSnapshot,
     RiskDecision,
@@ -18,4 +23,7 @@ __all__ = [
     "StrategyLiveStateRecord",
     "TradingLease",
     "TradingLeaseState",
+    "CandidateRiskAssessment",
+    "RiskContext",
+    "RiskGateway",
 ]

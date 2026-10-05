@@ -18,7 +18,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategySide,
 )
-from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
+from crypto_momentum_lab.domain.risk import RiskContext, RiskGateway
 from tests.unit.domain.risk.test_models import _risk_config
 
 

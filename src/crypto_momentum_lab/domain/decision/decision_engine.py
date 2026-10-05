@@ -40,6 +40,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
 )
 from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
@@ -55,10 +56,7 @@ from crypto_momentum_lab.domain.strategy.models import (
     StrategyRejection,
     StrategySide,
 )
-from crypto_momentum_lab.domain.strategy.position_exit import (
-    ClosedCandle15m,
-    PositionExitPolicy,
-)
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 from crypto_momentum_lab.domain.strategy.sizing import SizingModel, SymbolLotRules
 
 log = logging.getLogger(__name__)

@@ -4,7 +4,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from crypto_momentum_lab.domain.strategy.position_exit import ClosedCandle15m
+from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.market_data.candle_source import (
     BinanceRestClosedCandle15mSource,
     ClosedCandleEmaProvider,

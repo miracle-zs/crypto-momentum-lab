@@ -192,6 +192,7 @@ def verify_decision_trace(trace: DecisionTrace | None, decision_id: str) -> dict
             PositionView,
         )
         from crypto_momentum_lab.domain.market.revision_models import MarketEnvelope
+        from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
         from crypto_momentum_lab.domain.market.state_codec import (
             market_state_from_payload,
         )
@@ -201,7 +202,6 @@ def verify_decision_trace(trace: DecisionTrace | None, decision_id: str) -> dict
             StrategySide,
         )
         from crypto_momentum_lab.domain.strategy.position_exit import (
-            ClosedCandle15m,
             PositionExitMode,
             PositionExitPolicy,
         )
