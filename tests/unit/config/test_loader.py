@@ -169,7 +169,7 @@ def test_loads_websocket_capture_configuration(
         "markPrice@1s",
         "kline_1m",
     )
-    assert config.capture.max_subscriptions_per_connection == 100
+    assert config.capture.max_subscriptions_per_connection == 40
     assert config.capture.ingress_queue_max_events == 4096
     assert config.capture.book_ticker_max_subscriptions_per_connection is None
     assert config.capture.realtime_closure_delay_seconds == 3.0
@@ -193,6 +193,7 @@ def test_server_paper_universe_enables_tiered_trade_streams(
     assert universe.extended_gainer_count == 70
     assert universe.full_stream_max_gainer_rank == 30
     assert universe.prewarm_retention_minutes == 40
+    assert universe.max_prewarm_symbols == 8
 
 
 def test_research_and_server_capture_configs_keep_shared_defaults_aligned(

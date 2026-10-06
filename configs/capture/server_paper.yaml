@@ -5,7 +5,8 @@ enabled_streams:
   - bookTicker
   - forceOrder
   - markPrice@1s
-max_subscriptions_per_connection: 100
+# Keep an aggTrade/markPrice fault scoped to at most one bounded shard.
+max_subscriptions_per_connection: 40
 ingress_queue_max_events: 4096
 book_ticker_max_subscriptions_per_connection: 25
 book_ticker_use_all_stream: true
@@ -30,6 +31,8 @@ archive:
   zstd_level: 3
   rotation_uncompressed_bytes: 67108864
   max_open_writers: 128
+  # Recover interrupted files in bounded parallelism; avoids serial startup stalls.
+  recovery_max_concurrency: 2
   group_commit_max_events: 250
   group_commit_max_milliseconds: 250
   warning_free_bytes: 10737418240

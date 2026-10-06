@@ -214,6 +214,7 @@ def test_merge_log_signals_keeps_every_field() -> None:
         telemetry_persist_failures=3,
         exit_processing_degraded_symbols=("BTWUSDT",),
         dead_connection_tasks=("grp-b",),
+        avg_price_schema_drifts=(("account-4", "BTCUSDT", "number"),),
         fact_inconsistencies=(("primary", "BTCUSDT", "repair_blocked"),),
         deferred_exits=(("primary", "ETHUSDT", "deferred_until_ready"),),
         expired_candidates=(("primary", "SOLUSDT"),),
@@ -224,6 +225,7 @@ def test_merge_log_signals_keeps_every_field() -> None:
     assert merged.telemetry_persist_failures == 4
     assert merged.exit_processing_degraded_symbols == ("龙虾USDT", "BTWUSDT")
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
+    assert merged.avg_price_schema_drifts == (("account-4", "BTCUSDT", "number"),)
     assert merged.latest_rss_bytes == 100
     assert merged.rss_observed_at is not None
     assert merged.fact_inconsistencies == (("primary", "BTCUSDT", "repair_blocked"),)
@@ -235,6 +237,7 @@ def test_merge_log_signals_keeps_every_field() -> None:
         "telemetry_persist_failures",
         "exit_processing_degraded_symbols",
         "dead_connection_tasks",
+        "avg_price_schema_drifts",
         "latest_rss_bytes",
         "rss_observed_at",
         "fact_inconsistencies",
@@ -299,6 +302,62 @@ def test_console_log_record_coerces_booleans_and_keeps_json_working() -> None:
     assert as_json["value"] == 3
 
 
+def test_log_signals_preserve_each_dead_market_group_from_console_output(
+    tmp_path,
+) -> None:
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            if args[:2] == ["docker", "logs"]:
+                return (
+                    "2026-10-06 08:05:34 [error    ] "
+                    "market_data_connection_task_not_alive "
+                    "group_ids=market:aggTrade:0000,market:markPrice@1s:0000\n"
+                )
+            return ""
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    signals = monitor._log_signals(
+        "market",
+        None,
+        since_seconds=60,
+    )
+
+    assert signals.dead_connection_tasks == (
+        "market:aggTrade:0000",
+        "market:markPrice@1s:0000",
+    )
+
+
+def test_log_signals_collect_avg_price_schema_drift_from_console_output(
+    tmp_path,
+) -> None:
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            if args[:2] == ["docker", "logs"]:
+                return (
+                    "2026-10-06 08:05:34 [warning  ] "
+                    "binance_order_submit_avg_price_schema_drift "
+                    "account_label=account-4 avg_price_json_type=number "
+                    "symbol=BTCUSDT\n"
+                )
+            return ""
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    signals = monitor._log_signals(None, "live-4", since_seconds=60)
+
+    assert signals.avg_price_schema_drifts == (("account-4", "BTCUSDT", "number"),)
+
+
 def test_log_signals_reads_console_output_and_ignores_re_enable(tmp_path) -> None:
     """A stuck exit must alert; a lane coming back up must not."""
 
@@ -348,6 +407,27 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
         "market_task_not_alive",
     }
     assert all(isinstance(alert, Alert) for alert in alerts)
+
+
+def test_log_signals_alert_on_binance_avg_price_schema_drift() -> None:
+    alerts = evaluate_log_signals(
+        LogSignals(
+            avg_price_schema_drifts=(
+                ("account-4", "BTCUSDT", "number"),
+            )
+        )
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.name == "binance_avg_price_schema_drift:account-4:BTCUSDT"
+    assert alert.severity == "warning"
+    assert alert.details == {
+        "account_label": "account-4",
+        "symbol": "BTCUSDT",
+        "avg_price_json_type": "number",
+        "count": 1,
+    }
 
 
 def test_container_alerts_on_oom_and_rss_limit() -> None:

@@ -92,6 +92,8 @@ _DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 _FILL_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 _FILL_SCAN_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
+_MAX_SCHEMA_DRIFT_VALUE_LENGTH = 64
+_MISSING = object()
 
 
 class _EndpointMetric(TypedDict):
@@ -107,6 +109,59 @@ _COMMAND_EXIT_PRIORITY = 0
 _COMMAND_ENTRY_PRIORITY = 10
 _COMMAND_BACKGROUND_PRIORITY = 20
 _ENTRY_LEVERAGE_WARMUP_CONCURRENCY = 3
+
+
+def _json_value_type(value: object) -> str:
+    """Return the JSON token type without coercing the received value."""
+
+    if value is _MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _schema_drift_value(value: object) -> str:
+    """Give incident logs evidence without copying an arbitrary response body."""
+
+    if isinstance(value, str):
+        rendered = value
+    elif isinstance(value, int | float | bool) or value is None:
+        rendered = str(value)
+    else:
+        rendered = f"<{_json_value_type(value)}>"
+    return rendered[:_MAX_SCHEMA_DRIFT_VALUE_LENGTH]
+
+
+def _avg_price_schema_drift_fields(payload: object) -> dict[str, str] | None:
+    """Describe a present, non-string ``avgPrice`` without accepting it."""
+
+    if not isinstance(payload, dict):
+        return None
+    average_price = payload.get("avgPrice", _MISSING)
+    if average_price is _MISSING or isinstance(average_price, str):
+        return None
+    return {
+        "avg_price_json_type": _json_value_type(average_price),
+        "avg_price_value": _schema_drift_value(average_price),
+        "status_json_type": _json_value_type(payload.get("status", _MISSING)),
+        "executed_quantity_json_type": _json_value_type(
+            payload.get("executedQty", _MISSING)
+        ),
+        "cumulative_quote_json_type": _json_value_type(
+            payload.get("cumQuote", _MISSING)
+        ),
+    }
 
 
 class BinanceRateLimitError(httpx.HTTPStatusError):
@@ -1140,6 +1195,15 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 )
             return snapshot
         except (ValueError, TypeError, KeyError) as parse_exc:
+            if schema_drift := _avg_price_schema_drift_fields(payload):
+                log.warning(
+                    "binance_order_submit_avg_price_schema_drift",
+                    endpoint="/fapi/v1/order",
+                    client_order_id=plan.client_order_id,
+                    account_label=self._account_label,
+                    symbol=plan.symbol,
+                    **schema_drift,
+                )
             log.warning(
                 "binance_order_submit_response_parse_error",
                 client_order_id=plan.client_order_id,

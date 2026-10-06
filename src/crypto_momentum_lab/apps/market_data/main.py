@@ -137,7 +137,6 @@ _SYMBOL_LOG_LIMIT = 20
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
-_CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _DATABASE_RETENTION_INTERVAL_SECONDS = 300.0
 _DATABASE_RETENTION_MAX_RUNTIME_SECONDS = 45.0
@@ -460,6 +459,7 @@ class CaptureUniverseObserver:
         streams: tuple[CaptureStream, ...],
         initial_generation: int,
         prewarm_retention_minutes: int = 0,
+        max_prewarm_symbols: int = 0,
         full_stream_max_gainer_rank: int = 0,
         must_warm_max_gainer_rank: int = 0,
         protected_symbol_loader: (
@@ -475,11 +475,14 @@ class CaptureUniverseObserver:
         self._generation = initial_generation
         if prewarm_retention_minutes < 0:
             raise ValueError("prewarm_retention_minutes must be non-negative")
+        if max_prewarm_symbols < 0:
+            raise ValueError("max_prewarm_symbols must be non-negative")
         if full_stream_max_gainer_rank < 0:
             raise ValueError("full_stream_max_gainer_rank must be non-negative")
         if must_warm_max_gainer_rank < 0:
             raise ValueError("must_warm_max_gainer_rank must be non-negative")
         self._prewarm_retention = timedelta(minutes=prewarm_retention_minutes)
+        self._max_prewarm_symbols = max_prewarm_symbols
         self._full_stream_max_gainer_rank = full_stream_max_gainer_rank
         self._must_warm_max_gainer_rank = must_warm_max_gainer_rank
         self._protected_symbol_loader = protected_symbol_loader
@@ -574,6 +577,22 @@ class CaptureUniverseObserver:
             for symbol, expiry in self._prewarm_until_by_symbol.items()
             if expiry > observed_at
         }
+        if self._max_prewarm_symbols == 0:
+            self._prewarm_until_by_symbol.clear()
+        elif len(self._prewarm_until_by_symbol) > self._max_prewarm_symbols:
+            # Prefer symbols closest to the active gainer cutoff. This keeps
+            # prewarming useful while making the stream budget deterministic.
+            retained = sorted(
+                self._prewarm_until_by_symbol,
+                key=lambda symbol: (
+                    self._gainer_rank_by_symbol.get(symbol, 10**9),
+                    symbol,
+                ),
+            )[: self._max_prewarm_symbols]
+            self._prewarm_until_by_symbol = {
+                symbol: self._prewarm_until_by_symbol[symbol]
+                for symbol in retained
+            }
         self._previous_trade_tier = current_trade_tier
 
     def _trade_stream_symbols(
@@ -1064,6 +1083,7 @@ class MarketDataRuntime:
     archive_root: Path
     archive_retention_days: int
     archive_retention_interval_seconds: float
+    capture_shutdown_timeout_seconds: float
     universe: UniverseRefreshService
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
@@ -1278,6 +1298,7 @@ async def build_market_data_runtime(
         archive_config.root,
         environment=runtime.environment,
         capture_version=capture_version,
+        max_concurrency=archive_config.recovery_max_concurrency,
     ):
         await save_manifest(recovery_result.manifest)
         recovered_manifest_count += 1
@@ -1456,6 +1477,7 @@ async def build_market_data_runtime(
                 streams=enabled_streams,
                 initial_generation=1,
                 prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
+                max_prewarm_symbols=runtime.universe.max_prewarm_symbols,
                 full_stream_max_gainer_rank=(
                     runtime.universe.full_stream_max_gainer_rank
                 ),
@@ -1486,6 +1508,9 @@ async def build_market_data_runtime(
                 archive_retention_days=archive_config.retention_days,
                 archive_retention_interval_seconds=(
                     archive_config.retention_check_interval_seconds
+                ),
+                capture_shutdown_timeout_seconds=(
+                    runtime.capture.shutdown_timeout_seconds
                 ),
                 universe=universe,
                 subscription_observer=observer,
@@ -1749,12 +1774,12 @@ async def run_market_data(
                     return_exceptions=True,
                 )
             try:
-                async with asyncio.timeout(_CAPTURE_STOP_TIMEOUT_SECONDS):
+                async with asyncio.timeout(runtime.capture_shutdown_timeout_seconds):
                     await runtime.capture.stop()
             except TimeoutError:
                 log.error(
                     "market_data_capture_stop_timed_out",
-                    timeout_seconds=_CAPTURE_STOP_TIMEOUT_SECONDS,
+                    timeout_seconds=runtime.capture_shutdown_timeout_seconds,
                 )
             if capture_task is not None and not capture_task.done():
                 try:

@@ -553,6 +553,7 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         archive_root=Path("raw"),
         archive_retention_days=7,
         archive_retention_interval_seconds=3600,
+        capture_shutdown_timeout_seconds=30,
     )
 
     @asynccontextmanager
@@ -1118,6 +1119,7 @@ async def test_capture_observer_keeps_recently_removed_symbols_for_prewarm() -> 
         streams=(CaptureStream.AGG_TRADE,),
         initial_generation=1,
         prewarm_retention_minutes=40,
+        max_prewarm_symbols=1,
     )
 
     await observer.snapshot_updated(first)
@@ -1148,6 +1150,7 @@ async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
         initial_generation=1,
         full_stream_max_gainer_rank=30,
         prewarm_retention_minutes=40,
+        max_prewarm_symbols=1,
     )
 
     first = fixture_tiered_snapshot()
@@ -1180,6 +1183,53 @@ async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
     assert "S25USDT" not in capture.calls[-1][0]
 
 
+async def test_capture_observer_bounds_prewarm_to_nearest_ranked_demotions() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        prewarm_retention_minutes=40,
+        max_prewarm_symbols=2,
+    )
+    first = fixture_tiered_snapshot()
+    await observer.snapshot_updated(first)
+
+    replacement_rank = {
+        "S28USDT": 31,
+        "S29USDT": 32,
+        "S30USDT": 33,
+        "S31USDT": 28,
+        "S32USDT": 29,
+        "S33USDT": 30,
+    }
+    second = replace(
+        first,
+        observed_at=first.observed_at + timedelta(minutes=1),
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=replacement_rank.get(entry.symbol, entry.rank))
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(second)
+
+    symbols = capture.calls[-1][0]
+    assert {"S28USDT", "S29USDT"} <= symbols
+    assert "S30USDT" not in symbols
+    assert len(symbols) == 32
+
+
 async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit(
 ) -> None:
     class FakeCapture:
@@ -1196,6 +1246,7 @@ async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_e
         initial_generation=1,
         full_stream_max_gainer_rank=30,
         prewarm_retention_minutes=40,
+        max_prewarm_symbols=1,
     )
 
     first = fixture_tiered_snapshot()

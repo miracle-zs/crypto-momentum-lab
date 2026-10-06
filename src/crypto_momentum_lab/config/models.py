@@ -85,6 +85,9 @@ class UniverseConfig(BaseModel):
     ranking_depth: int = Field(default=30, gt=0)
     extended_gainer_count: int = Field(default=0, ge=0)
     prewarm_retention_minutes: int = Field(default=0, ge=0)
+    # Retention is a latency optimisation, never permission to grow the
+    # per-symbol stream set without a bound.  Zero disables retained symbols.
+    max_prewarm_symbols: int = Field(default=0, ge=0)
     # Gainer ranks at or below this keep per-symbol trade streams (aggTrade /
     # forceOrder).  0 disables tiering and subscribes every monitoring symbol.
     # Symbols above the cutoff stay in the universe for ranking but only see
@@ -120,6 +123,7 @@ class ArchiveConfig(BaseModel):
     zstd_level: int = Field(ge=1, le=19)
     rotation_uncompressed_bytes: int = Field(gt=0)
     max_open_writers: int = Field(gt=0)
+    recovery_max_concurrency: int = Field(default=2, ge=1, le=8)
     group_commit_max_events: int = Field(gt=0)
     group_commit_max_milliseconds: int = Field(gt=0)
     warning_free_bytes: int = Field(gt=0)

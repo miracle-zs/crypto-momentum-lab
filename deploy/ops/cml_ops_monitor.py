@@ -109,6 +109,7 @@ _ALERT_LABELS = {
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_exit_processing_degraded": "平仓处理降级",
     "market_task_not_alive": "行情连接任务无响应",
+    "binance_avg_price_schema_drift": "Binance 下单回包字段类型漂移",
     "live_session_not_ready": "实时会话未就绪",
     "live_checkpoint_stale": "策略检查点过期",
     "live_account_lifecycle_not_ready": "账户生命周期未就绪",
@@ -160,6 +161,9 @@ _ALERT_IMPACTS = {
         "退出流程反复失败，持仓无法按策略平掉，浮亏可能持续扩大。"
     ),
     "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
+    "binance_avg_price_schema_drift": (
+        "交易所下单回包的 avgPrice 不符合既定字符串契约；订单已进入结果未知和对账路径。"
+    ),
     "live_session_not_ready": "该实时账户未处于可安全运行状态。",
     "live_checkpoint_stale": "策略状态可能没有及时持久化，重启恢复风险增加。",
     "live_account_lifecycle_not_ready": "该账户没有处于可安全交易的生命周期状态。",
@@ -236,6 +240,9 @@ _ALERT_ACTIONS = {
         "退出委托受阻；紧急核对交易所实际持仓，必要时在交易所后台手动干预平仓。"
     ),
     "market_task_not_alive": "排查对应币种 WebSocket 任务心跳、宿主机网络延迟及交易所接口连通性。",
+    "binance_avg_price_schema_drift": (
+        "按 client_order_id 查交易所确认订单状态；保留告警中的字段类型证据，并排查交易所接口或网络出口。"
+    ),
     "live_session_not_ready": (
         "暂停交易推进；排查分布式租约有效性、会话初始化状态及检查点完整性。"
     ),
@@ -365,6 +372,7 @@ class LogSignals:
     telemetry_persist_failures: int = 0
     exit_processing_degraded_symbols: tuple[str, ...] = ()
     dead_connection_tasks: tuple[str, ...] = ()
+    avg_price_schema_drifts: tuple[tuple[str, str, str], ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
     fact_inconsistencies: tuple[tuple[str, str, str], ...] = ()
@@ -958,6 +966,10 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
             *left.dead_connection_tasks,
             *right.dead_connection_tasks,
         ),
+        avg_price_schema_drifts=(
+            *left.avg_price_schema_drifts,
+            *right.avg_price_schema_drifts,
+        ),
         latest_rss_bytes=(
             right.latest_rss_bytes
             if right.latest_rss_bytes is not None
@@ -1013,6 +1025,28 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 "critical",
                 "A market-data connection task reported not alive",
                 {"group_ids": signals.dead_connection_tasks},
+            )
+        )
+
+    schema_drift_counts: dict[tuple[str, str, str], int] = {}
+    for account_label, symbol, avg_price_json_type in signals.avg_price_schema_drifts:
+        key = (account_label, symbol, avg_price_json_type)
+        schema_drift_counts[key] = schema_drift_counts.get(key, 0) + 1
+    for (account_label, symbol, avg_price_json_type), count in sorted(
+        schema_drift_counts.items()
+    ):
+        scope_str = f":{account_label}:{symbol}" if account_label else f":{symbol}"
+        alerts.append(
+            Alert(
+                f"binance_avg_price_schema_drift{scope_str}",
+                "warning",
+                "Binance order response avgPrice has an unexpected JSON type",
+                {
+                    "account_label": account_label,
+                    "symbol": symbol,
+                    "avg_price_json_type": avg_price_json_type,
+                    "count": count,
+                },
             )
         )
 
@@ -2512,6 +2546,7 @@ class OpsMonitor:
         telemetry_failures = 0
         degraded_exit_symbols: set[str] = set()
         dead_tasks: list[str] = []
+        avg_price_schema_drifts: list[tuple[str, str, str]] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
         fact_inconsistencies: list[tuple[str, str, str]] = []
@@ -2547,8 +2582,22 @@ class OpsMonitor:
                     values = record.get("group_ids")
                     if isinstance(values, list | tuple):
                         dead_tasks.extend(str(value) for value in values)
+                    elif isinstance(values, str):
+                        dead_tasks.extend(
+                            value for value in values.split(",") if value
+                        )
                     elif values:
                         dead_tasks.append(str(values))
+                elif event == "binance_order_submit_avg_price_schema_drift":
+                    account_label = str(record.get("account_label") or "")
+                    symbol = str(record.get("symbol") or "")
+                    avg_price_json_type = str(
+                        record.get("avg_price_json_type") or "unknown"
+                    )
+                    if symbol:
+                        avg_price_schema_drifts.append(
+                            (account_label, symbol, avg_price_json_type)
+                        )
                 elif event == "market_data_health_snapshot":
                     value = record.get("rss_bytes")
                     if isinstance(value, int) and (
@@ -2586,6 +2635,7 @@ class OpsMonitor:
             telemetry_persist_failures=telemetry_failures,
             exit_processing_degraded_symbols=tuple(sorted(degraded_exit_symbols)),
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
+            avg_price_schema_drifts=tuple(avg_price_schema_drifts),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
             fact_inconsistencies=tuple(fact_inconsistencies),

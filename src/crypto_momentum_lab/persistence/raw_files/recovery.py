@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.market.models import (
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 
 _RECOVERY_BATCH_SIZE = 250
+_DEFAULT_RECOVERY_MAX_CONCURRENCY = 2
 _TEMPORARY_ARCHIVE_SUFFIX = ".tmp"
 _RECOVERY_INTERNAL_DIRECTORIES = frozenset(
     {".recovery-quarantine", ".recovery-working"}
@@ -41,27 +42,36 @@ async def recover_archive_root(
     *,
     environment: str,
     capture_version: str,
+    max_concurrency: int = _DEFAULT_RECOVERY_MAX_CONCURRENCY,
 ) -> tuple[RecoveryResult, ...]:
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be positive")
     await asyncio.to_thread(_cleanup_recovery_working, root)
     temporary_paths = await asyncio.to_thread(_temporary_archive_paths, root)
-    results = []
-    for temporary in temporary_paths:
-        try:
-            results.append(
-                await recover_temporary_archive(
+    concurrency = asyncio.Semaphore(max_concurrency)
+    results: list[RecoveryResult | None] = [None] * len(temporary_paths)
+
+    async def recover_one(index: int, temporary: Path) -> None:
+        async with concurrency:
+            try:
+                results[index] = await recover_temporary_archive(
                     temporary,
                     archive_root=root,
                     environment=environment,
                     capture_version=capture_version,
                 )
-            )
-        except EmptyTemporaryArchiveError:
-            await asyncio.to_thread(
-                _quarantine_temporary,
-                temporary,
-                root,
-            )
-    return tuple(results)
+            except EmptyTemporaryArchiveError:
+                await asyncio.to_thread(
+                    _quarantine_temporary,
+                    temporary,
+                    root,
+                )
+
+    async with asyncio.TaskGroup() as tasks:
+        for index, temporary in enumerate(temporary_paths):
+            tasks.create_task(recover_one(index, temporary))
+
+    return tuple(result for result in results if result is not None)
 
 
 async def recover_temporary_archive(

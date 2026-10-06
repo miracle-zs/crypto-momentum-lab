@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+import crypto_momentum_lab.execution_account.binance.client as binance_client_module
 from crypto_momentum_lab.domain.execution.exchange_contract import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -764,6 +765,62 @@ async def test_order_post_unreadable_response_has_unknown_outcome(body: str) -> 
         assert requests == ["/fapi/v1/order"]
     finally:
         await client.aclose()
+
+
+async def test_submit_order_logs_avg_price_schema_drift_without_raw_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLog:
+        def warning(self, event: str, **fields: object) -> None:
+            warnings.append((event, fields))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": 30000.0,
+                "cumQuote": "90",
+            },
+        )
+
+    monkeypatch.setattr(binance_client_module, "log", FakeLog())
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, tzinfo=UTC),
+    )
+    try:
+        with pytest.raises(ExchangeSubmissionTimeoutError):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    event, fields = warnings[0]
+    assert event == "binance_order_submit_avg_price_schema_drift"
+    assert fields == {
+        "endpoint": "/fapi/v1/order",
+        "client_order_id": _order_plan().client_order_id,
+        "account_label": "primary",
+        "symbol": "BTCUSDT",
+        "avg_price_json_type": "number",
+        "avg_price_value": "30000.0",
+        "status_json_type": "string",
+        "executed_quantity_json_type": "string",
+        "cumulative_quote_json_type": "string",
+    }
 
 
 async def test_trade_client_submits_signed_binance_order() -> None:

@@ -78,6 +78,51 @@ async def test_recovery_quarantines_empty_temporary_and_continues(
     assert tuple((tmp_path / ".recovery-quarantine").rglob("*.quarantined"))
 
 
+async def test_root_recovery_runs_a_bounded_number_of_rebuilds_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for symbol in ("AAAUSDT", "BBBUSDT", "CCCUSDT"):
+        temporary = _temporary_path(tmp_path, symbol=symbol)
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(b"interrupted")
+
+    active_rebuilds = 0
+    maximum_active_rebuilds = 0
+
+    async def rebuild(
+        temporary: Path,
+        **kwargs: object,
+    ) -> recovery_module.RecoveryResult:
+        nonlocal active_rebuilds, maximum_active_rebuilds
+        del kwargs
+        active_rebuilds += 1
+        maximum_active_rebuilds = max(maximum_active_rebuilds, active_rebuilds)
+        await asyncio.sleep(0)
+        active_rebuilds -= 1
+        return recovery_module.RecoveryResult(
+            manifest=None,  # type: ignore[arg-type]
+            quarantined_path=temporary,
+            discarded_bytes=0,
+        )
+
+    monkeypatch.setattr(recovery_module, "recover_temporary_archive", rebuild)
+
+    results = await recover_archive_root(
+        tmp_path,
+        environment="test",
+        capture_version="test",
+        max_concurrency=2,
+    )
+
+    assert maximum_active_rebuilds == 2
+    assert [result.quarantined_path.parent.parent.name for result in results] == [
+        "symbol=AAAUSDT",
+        "symbol=BBBUSDT",
+        "symbol=CCCUSDT",
+    ]
+
+
 async def test_recovery_keeps_source_when_rebuild_fails(
     tmp_path: Path,
     raw_envelope: RawEnvelope,
@@ -114,13 +159,13 @@ def write_truncated_archive(
     return temporary
 
 
-def _temporary_path(tmp_path: Path) -> Path:
+def _temporary_path(tmp_path: Path, *, symbol: str = "BTCUSDT") -> Path:
     return (
         tmp_path
         / "exchange=binance-usdm"
         / "date=2026-06-15"
         / "stream=aggTrade"
-        / "symbol=BTCUSDT"
+        / f"symbol={symbol}"
         / "hour=02"
         / (
             "00000000-0000-0000-0000-000000000001-"

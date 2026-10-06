@@ -243,12 +243,15 @@ async def monitor_market_data_health(
         if dead_dispatchers:
             log.error(
                 "market_data_connection_task_not_alive",
-                group_ids=dead_dispatchers,
+                # Console logs are consumed by the host monitor.  A compact
+                # scalar survives its key=value parser; a tuple is truncated
+                # at whitespace and produces unusable alert identities.
+                group_ids=",".join(dead_dispatchers),
             )
         if pressured_ingress_groups:
             log.warning(
                 "market_data_websocket_ingress_pressure",
-                group_ids=pressured_ingress_groups,
+                group_ids=",".join(pressured_ingress_groups),
             )
         backpressure_wait_count = int(capture.queue_backpressure_wait_count)
         if backpressure_wait_count > previous_backpressure_wait_count:
