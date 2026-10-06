@@ -213,17 +213,9 @@ async def monitor_market_data_health(
                 lag_ms=round(maximum_lag_seconds * 1000, 3),
                 task_diagnostics=_pending_task_diagnostics(),
             )
-        dead_dispatchers = tuple(
-            detail["group_id"]
-            for detail in connection_details
-            if detail["active"]
-            and (
-                detail["reader_task_alive"] is False
-                or detail["dispatch_task_alive"] is False
-            )
-        )
+        dead_dispatchers = _dead_connection_groups(connection_details)
         pressured_ingress_groups = tuple(
-            detail["group_id"]
+            str(detail["group_id"])
             for detail in connection_details
             if _connection_ingress_utilization(detail) >= queue_warning_utilization
         )
@@ -351,6 +343,32 @@ def _queue_utilization(capture: CaptureMetricsSnapshot) -> float:
     event_ratio = 0.0 if max_events <= 0 else capture.queue_events / max_events
     byte_ratio = 0.0 if max_bytes <= 0 else capture.queue_bytes / max_bytes
     return max(event_ratio, byte_ratio)
+
+
+def _dead_connection_groups(
+    connection_details: tuple[Mapping[str, object], ...],
+) -> tuple[str, ...]:
+    """Return failed tasks that are still responsible for desired streams.
+
+    A pool keeps a connection visible while it drains a retired group.  Its
+    socket/task lifecycle is then allowed to finish, but it no longer owns any
+    subscription and cannot make the market-data service unhealthy.
+    """
+    groups: list[str] = []
+    for detail in connection_details:
+        desired_subscriptions = detail.get("desired_subscriptions")
+        if (
+            detail.get("active") is not True
+            or not isinstance(desired_subscriptions, int)
+            or desired_subscriptions <= 0
+        ):
+            continue
+        if (
+            detail.get("reader_task_alive") is False
+            or detail.get("dispatch_task_alive") is False
+        ):
+            groups.append(str(detail["group_id"]))
+    return tuple(groups)
 
 
 def _runtime_processing_count(snapshot: dict[str, object] | None) -> int:

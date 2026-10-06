@@ -185,6 +185,20 @@ def test_calculate_lag_percentiles() -> None:
     assert res["max"] == 100.0
 
 
+def test_retired_connection_is_not_reported_as_a_dead_market_task() -> None:
+    assert observability._dead_connection_groups(
+        (
+            {
+                "group_id": "markPrice@1s:0001",
+                "active": True,
+                "desired_subscriptions": 0,
+                "reader_task_alive": True,
+                "dispatch_task_alive": False,
+            },
+        )
+    ) == ()
+
+
 @pytest.mark.asyncio
 async def test_market_data_health_monitor_alerts_on_pressure_and_dead_dispatcher(
     monkeypatch: pytest.MonkeyPatch,

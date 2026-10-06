@@ -349,6 +349,16 @@ def test_ops_monitor_discovers_live_accounts_from_compose_files() -> None:
     assert "CML_MONITOR_LIVE_ACCOUNTS" in service
 
 
+def test_deployment_restarts_ops_monitor_when_its_runtime_changes() -> None:
+    script = (ROOT / "deploy/ops/update_server.sh").read_text(encoding="utf-8")
+
+    assert "ops_monitor_changed=0" in script
+    assert "deploy/ops/cml_ops_monitor.py|deploy/ops/maintenance_window.py" in script
+    assert "systemctl daemon-reload" in script
+    assert "systemctl restart cml-ops-monitor.service" in script
+    assert "systemctl is-active --quiet cml-ops-monitor.service" in script
+
+
 def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 

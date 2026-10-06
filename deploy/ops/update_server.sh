@@ -470,6 +470,7 @@ dashboard_changed=0
 live_changed=0
 execution_account_changed=0
 strategy_changed=0
+ops_monitor_changed=0
 recovery_run=0
 resume_from_phase=""
 changed_files="$(git diff --name-only "$deployment_base_commit" "$target_commit")"
@@ -560,6 +561,10 @@ while IFS= read -r changed_path; do
       execution_account_changed=1
       strategy_changed=1
       ;;
+    deploy/ops/cml_ops_monitor.py|deploy/ops/maintenance_window.py|\
+    deploy/ops/cml-ops-monitor.service)
+      ops_monitor_changed=1
+      ;;
     *)
       ;;
   esac
@@ -568,6 +573,22 @@ while IFS= read -r changed_path; do
     destructive_schema_changed=1
   fi
 done <<<"$changed_files"
+
+restart_ops_monitor_if_changed() {
+  if [[ "$ops_monitor_changed" != 1 ]]; then
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "ops monitor changed but systemctl is unavailable" >&2
+    return 69
+  fi
+  install -m 0644 deploy/ops/cml-ops-monitor.service \
+    /etc/systemd/system/cml-ops-monitor.service
+  systemctl daemon-reload
+  systemctl restart cml-ops-monitor.service
+  systemctl is-active --quiet cml-ops-monitor.service
+  echo "ops_monitor_restarted=1 started_at=$(systemctl show cml-ops-monitor.service -p ExecMainStartTimestamp --value)"
+}
 
 # If the previous attempt reached the target checkout but failed before all
 # services converged, the next invocation has an empty commit diff. Treat it
@@ -627,6 +648,11 @@ if [[ "${dashboard_only:-0}" == 1 ]]; then
   runtime_commit="$previous_runtime_commit"
   dashboard_image="crypto-momentum-lab-app:${target_commit}"
 fi
+
+# The monitor runs directly from this checkout, outside Compose.  Its process
+# does not observe a Git update until it is restarted, so handle it before any
+# no-runtime-change early return below.
+restart_ops_monitor_if_changed
 
 if [[ "${dashboard_only:-0}" == 1 ]]; then
   if service_is_converged dashboard && image_exists; then

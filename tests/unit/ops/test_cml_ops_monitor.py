@@ -1518,8 +1518,8 @@ def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> No
     assert signals[0].candidate_count == 3
 
 
-def test_order_fingerprint_omits_closing_quantity(tmp_path) -> None:
-    """Closing size follows holdings; only the decision to exit is intent.
+def test_order_intent_comparison_excludes_account_local_closing_orders(tmp_path) -> None:
+    """Closing execution follows account facts, not the common strategy intent.
 
     After the 04:26 partial fill, account-4 held 198 while its peers held 262.
     Their 05:15 exit orders therefore carried different quantities and were
@@ -1545,8 +1545,10 @@ def test_order_fingerprint_omits_closing_quantity(tmp_path) -> None:
     sql = str(runner.last_args[-1])
 
     assert "FROM exchange_orders" in sql
-    # A closing order contributes side/type only -- never its quantity.
-    assert "WHEN reduce_only THEN 'close'" in sql
+    # All closing orders are excluded: their type, price, and quantity derive
+    # from each account's own holdings and recovery state.
+    assert "AND NOT reduce_only" in sql
+    assert "WHEN reduce_only THEN 'close'" not in sql
     # An opening order still contributes the quantity and price it chose.
     assert "quantity::text || ':' || COALESCE(price::text, '')" in sql
     # Orders are read against the signals that should have produced them, so
@@ -2646,6 +2648,17 @@ def test_evaluate_log_signals_fact_inconsistencies() -> None:
     assert alerts[0].severity == "warning"
     assert alerts[0].details["count"] == 2
     assert alerts[0].details["symbol"] == "BTCUSDT"
+
+    repeated = LogSignals(
+        fact_inconsistencies=(
+            ("primary", "BTCUSDT", "position_repair_blocked"),
+            ("primary", "BTCUSDT", "position_repair_blocked"),
+            ("primary", "BTCUSDT", "position_repair_blocked"),
+        )
+    )
+    repeated_alert = evaluate_log_signals(repeated)[0]
+    assert repeated_alert.severity == "warning"
+    assert repeated_alert.details["count"] == 1
 
     signals_crit = LogSignals(
         fact_inconsistencies=(

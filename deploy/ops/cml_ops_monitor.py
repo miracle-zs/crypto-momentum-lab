@@ -715,12 +715,11 @@ def evaluate_position_intent_divergence(
 ) -> tuple[Alert, ...]:
     """Detect divergent *order intent* for one symbol/config group.
 
-    Accounts sharing a strategy config must ask the exchange to do the same
-    thing: same symbol, side, type, quantity and price.  What actually filled
-    is not comparable -- a limit order that only partially fills, or one that
-    expires before it fills, leaves two accounts with identical intent and
-    different positions.  That is execution, and reporting it as a divergence
-    tells the operator to investigate something no one can act on.
+    Accounts sharing a strategy config must have the same *entry* intent.
+    Exit execution is account-local: entry price, residual quantity, and an
+    existing limit order determine whether an individual account exits by
+    market or limit. Treating those safe execution differences as a strategy
+    split creates an unactionable critical alert.
     """
 
     groups: dict[tuple[str, str], dict[str, OrderIntentObservation]] = {}
@@ -1131,7 +1130,12 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
 
     fact_counts: dict[tuple[str, str], list[str]] = {}
     for acc, sym, reason in signals.fact_inconsistencies:
-        fact_counts.setdefault((acc, sym), []).append(reason)
+        # A burst of account updates can schedule the same safe repair more
+        # than once. Count distinct blocked reasons, not repeated log lines,
+        # so one immutable fact mismatch is one incident.
+        reasons = fact_counts.setdefault((acc, sym), [])
+        if reason not in reasons:
+            reasons.append(reason)
     for (acc, sym), reasons in sorted(fact_counts.items()):
         count = len(reasons)
         severity = "critical" if count >= 3 else "warning"
@@ -3170,22 +3174,17 @@ LEFT JOIN (
       E'\\x1e'
       ORDER BY side, order_type, reduce_only, quantity, price
     ) AS intent_summary,
-    -- An opening order states a quantity the strategy chose, so it takes part
-    -- in the fingerprint.  A closing order does not: how much to sell is a
-    -- function of how much is held, and two accounts whose *fills* differed
-    -- hold different amounts.  Comparing those quantities would report the
-    -- fill difference again, through a different column.
+    -- Only entries express the common strategy decision. Exit execution is
+    -- account-local because holdings and recovery state legitimately differ.
     md5(string_agg(
       side || ':' || order_type || ':'
-        || CASE
-             WHEN reduce_only THEN 'close'
-             ELSE quantity::text || ':' || COALESCE(price::text, '')
-           END,
+        || quantity::text || ':' || COALESCE(price::text, ''),
       E'\\x1f'
-      ORDER BY side, order_type, reduce_only, quantity::text, price::text
+      ORDER BY side, order_type, quantity::text, price::text
     )) AS fingerprint
   FROM exchange_orders
   WHERE run_id IN ({run_sql})
+    AND NOT reduce_only
     AND created_at >= now()
       - ({window_seconds} * interval '1 second')
   GROUP BY run_id, symbol

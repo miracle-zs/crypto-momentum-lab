@@ -1204,6 +1204,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     symbol=plan.symbol,
                     **schema_drift,
                 )
+                reconciled = await self._reconcile_submit_parse_failure(
+                    plan=plan,
+                    entry_leverage=entry_leverage,
+                    parse_error=parse_exc,
+                )
+                if reconciled is not None:
+                    return reconciled
             log.warning(
                 "binance_order_submit_response_parse_error",
                 client_order_id=plan.client_order_id,
@@ -1212,6 +1219,56 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             raise ExchangeSubmissionTimeoutError(
                 f"Binance order submitted but response parsing failed: {parse_exc}"
             ) from parse_exc
+
+    async def _reconcile_submit_parse_failure(
+        self,
+        *,
+        plan: OrderExecutionPlan,
+        entry_leverage: int | None,
+        parse_error: Exception,
+    ) -> ExchangeOrderSnapshot | None:
+        """Recover a confirmed POST through the authoritative order-read path.
+
+        The POST has already reached Binance when this runs.  Do not coerce an
+        invalid response or retry the write: a read by the deterministic client
+        id is the only safe way to establish the resulting order state.
+        """
+        try:
+            snapshot = await self.query_order_by_client_id(
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+            )
+        except Exception as query_error:
+            log.warning(
+                "binance_order_submit_parse_reconciliation_failed",
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                parse_error_type=type(parse_error).__name__,
+                query_error_type=type(query_error).__name__,
+            )
+            return None
+        if snapshot is None:
+            log.warning(
+                "binance_order_submit_parse_reconciliation_not_found",
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+                parse_error_type=type(parse_error).__name__,
+            )
+            return None
+        log.info(
+            "binance_order_submit_parse_reconciled",
+            symbol=plan.symbol,
+            client_order_id=plan.client_order_id,
+            state=snapshot.state.value,
+        )
+        return replace(
+            snapshot,
+            entry_leverage=(
+                entry_leverage
+                if snapshot.entry_leverage is None
+                else snapshot.entry_leverage
+            ),
+        )
 
     async def _resolve_filled_order_snapshot_with_retry(
         self,
