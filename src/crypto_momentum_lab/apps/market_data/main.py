@@ -1373,8 +1373,11 @@ async def build_market_data_runtime(
                 environment=runtime.environment,
             )
 
-            async def handle_agg_trade_gap(gap: AggTradeGap) -> None:
-                await runtime_state_publisher.mark_incomplete(gap)
+            async def record_agg_trade_gap(gap: AggTradeGap) -> None:
+                # Decision-time continuity is handled by the websocket path
+                # before state aggregation.  The archival worker records its
+                # own recovery outcome, but must never hold state publication
+                # behind REST recovery or quality persistence.
                 await capture_repository.save_quality_event(
                     agg_trade_gap_quality_event(gap)
                 )
@@ -1385,9 +1388,9 @@ async def build_market_data_runtime(
                 quality=quality,
                 repository=capture_repository,
                 acknowledgement_sink=None,
-                realtime_envelope_sink=runtime_state_publisher.observe,
+                realtime_envelope_sink=None,
                 envelope_recovery=agg_trade_recovery,
-                gap_sink=handle_agg_trade_gap,
+                gap_sink=record_agg_trade_gap,
                 archive_streams=archive_streams,
             )
 
@@ -1431,7 +1434,7 @@ async def build_market_data_runtime(
                     ),
                     ingress_queue_max_events=(runtime.capture.ingress_queue_max_events),
                     symbol_filter=coordinator.accepts_symbol,
-                    on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
+                    on_realtime_envelope=runtime_state_publisher.observe_realtime,
                 )
 
             connection_pool = BinanceConnectionPool(

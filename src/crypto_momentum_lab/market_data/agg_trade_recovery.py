@@ -136,7 +136,9 @@ class AggTradeGapRecoverer:
         normalized = frozenset(symbol.upper() for symbol in symbols)
         self._monitored_symbols = normalized
         self._last_seen = {
-            key: seen for key, seen in self._last_seen.items() if key[1] in normalized
+            key: seen
+            for key, seen in self._last_seen.items()
+            if key[1] in normalized
         }
 
     async def expand(
@@ -248,7 +250,10 @@ class AggTradeGapRecoverer:
         for result in results:
             request = result.request
             if result.failure_reason is None:
-                if request.current.symbol is None or request.current.exchange_event_at is None:
+                if (
+                    request.current.symbol is None
+                    or request.current.exchange_event_at is None
+                ):
                     continue
                 request_current = _SeenTrade(
                     request.current_id,
@@ -268,8 +273,24 @@ class AggTradeGapRecoverer:
                 continue
             self._unrecovered_gap_count += 1
             self._missing_trade_count += request.missing_count
-            if request.current.symbol is None or request.current.exchange_event_at is None:
+            if (
+                request.current.symbol is None
+                or request.current.exchange_event_at is None
+            ):
                 continue
+            # The current trade was observed even when the missing range could
+            # not be recovered.  Advance continuity to it before reporting
+            # the gap: otherwise every following trade is compared with the
+            # same stale predecessor, repeatedly rediscovers an ever-growing
+            # range, and turns one outage into an unbounded quality-event
+            # flood.
+            self._last_seen[
+                (request.current.environment, request.current.symbol)
+            ] = _SeenTrade(
+                request.current_id,
+                request.current.exchange_event_at,
+                request.current.connection_session_id,
+            )
             failure_reason = result.failure_reason
             if (
                 request.previous.connection_session_id

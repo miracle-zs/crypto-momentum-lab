@@ -22,6 +22,9 @@ from crypto_momentum_lab.domain.market.models import (
 from crypto_momentum_lab.domain.market.runtime_state_models import (
     RuntimeStateSequenceRange,
 )
+from crypto_momentum_lab.market_data.agg_trade_continuity import (
+    AggTradeContinuityTracker,
+)
 from crypto_momentum_lab.market_data.aggregation import (
     MarketState15sAccumulator,
     MarketState15sSnapshot,
@@ -258,6 +261,12 @@ class ClosedMarketStatePublisher:
         self._realtime_batch_count = 0
         self._realtime_sink_failure_count = 0
         self._realtime_quote_failure_count = 0
+        # Websocket real-time dispatch is deliberately independent from the
+        # archival queue.  Keep its aggregate-trade cursor here too, so a gap
+        # is reflected in the decision state before the current live trade is
+        # accepted, without waiting for REST recovery or archive I/O.
+        self._realtime_continuity = AggTradeContinuityTracker()
+        self._realtime_observe_lock = asyncio.Lock()
         self._durable_sink_failure_count = 0
         self._aggregation_processing_count = 0
         self._aggregation_processing_seconds = 0.0
@@ -318,6 +327,7 @@ class ClosedMarketStatePublisher:
                 if symbol_key[1] in removed_symbols:
                     self._last_state_by_symbol.pop(symbol_key, None)
         self._expected_symbols = expected_symbols
+        self._realtime_continuity.set_monitored_symbols(expected_symbols)
         self._last_materialized_empty_buckets_through = None
 
     def consume_pending_entry_symbols(self) -> frozenset[str]:
@@ -470,6 +480,23 @@ class ClosedMarketStatePublisher:
             # A quote consumer outage must not stop the primary capture
             # connection. The state and durable paths remain independent.
             self._realtime_quote_failure_count += 1
+
+    async def observe_realtime(self, envelope: RawEnvelope) -> None:
+        """Ingest a websocket envelope on the decision-time path.
+
+        This method must remain free of archival, quality-event, and REST
+        recovery work.  The lock keeps the per-symbol continuity cursor and
+        the state accumulator in one arrival order even if websocket
+        connections dispatch concurrently.
+        """
+        async with self._realtime_observe_lock:
+            accepted, gap = self._realtime_continuity.observe(envelope)
+            if not accepted:
+                return
+            if gap is not None:
+                await self.mark_incomplete(gap)
+            await self.observe_realtime_quote(envelope)
+            await self.observe(envelope)
 
     async def mark_incomplete(self, gap: AggTradeGap) -> None:
         self._raise_if_durable_failed()

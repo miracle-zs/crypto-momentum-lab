@@ -272,6 +272,36 @@ async def test_gap_persistence_is_ordered_after_pending_state_insert() -> None:
     assert repository.operations == ["states", "gap"]
 
 
+async def test_realtime_ingress_marks_aggregate_trade_gap_before_state() -> None:
+    repository = OrderedRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(
+            realtime_closure_delay_seconds=15,
+            durable_closure_delay_seconds=15,
+        ),
+    )
+
+    await publisher.observe_realtime(fixture_trade(0, price="100", sequence=10))
+    await publisher.observe_realtime(fixture_trade(3, price="102", sequence=13))
+
+    assert repository.operations == ["gap", "states"]
+    assert repository.incomplete_gaps[0].reason == "realtime_continuity_gap"
+    assert repository.saved_states[0].data_complete is False
+    assert publisher.metrics.missing_agg_trade_count == 2
+
+
+async def test_realtime_ingress_drops_duplicate_aggregate_trade() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(repository=repository)
+    trade = fixture_trade(0, price="100", sequence=10)
+
+    await publisher.observe_realtime(trade)
+    await publisher.observe_realtime(trade)
+
+    assert publisher.metrics.received_envelope_count == 1
+
+
 async def test_publisher_carries_the_latest_book_quote_into_later_states() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(

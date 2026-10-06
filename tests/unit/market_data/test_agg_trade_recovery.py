@@ -84,21 +84,19 @@ async def test_recoverer_inserts_missing_trades_before_live_event() -> None:
     assert history.calls == [("BTCUSDT", 11, 2)]
 
 
-async def test_failed_recovery_does_not_advance_last_seen_cursor() -> None:
+async def test_failed_recovery_advances_cursor_to_avoid_repeating_one_gap_forever(
+) -> None:
     history = FlakyAggTradeHistory()
     recoverer = AggTradeGapRecoverer(history)
     await recoverer.expand((_envelope(10),))
 
     first = await recoverer.expand((_envelope(13),))
-    second = await recoverer.expand((_envelope(13),))
+    second = await recoverer.expand((_envelope(14),))
 
     assert first.unrecovered_gaps[0].reason == "history_incomplete"
-    assert [item.exchange_sequence for item in second.envelopes] == [
-        "11",
-        "12",
-        "13",
-    ]
-    assert history.calls == 2
+    assert [item.exchange_sequence for item in second.envelopes] == ["14"]
+    assert second.unrecovered_gaps == ()
+    assert history.calls == 1
 
 
 async def test_recoverer_marks_gap_when_history_is_incomplete() -> None:

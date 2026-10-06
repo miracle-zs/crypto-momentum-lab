@@ -33,6 +33,7 @@ from deploy.ops.cml_ops_monitor import (
     _serverchan_title,
     build_config,
     build_deadman_heartbeat_payload,
+    coalesce_shared_market_state_alerts,
     evaluate_container,
     evaluate_container_memory_growth,
     evaluate_database_state,
@@ -1206,6 +1207,62 @@ def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> 
         "live_market_state_delay",
         "live_unknown_orders",
     }
+
+
+def test_coalesce_shared_market_state_alerts_reports_one_root_cause() -> None:
+    alerts = (
+        Alert(
+            "live_market_state_delay:primary",
+            "warning",
+            "delay",
+            {"account_label": "primary", "delay_ms": 31_000},
+        ),
+        Alert(
+            "live_market_state_delay:account-2",
+            "critical",
+            "delay",
+            {"account_label": "account-2", "delay_ms": 121_000},
+        ),
+        Alert(
+            "live_unknown_orders:primary",
+            "warning",
+            "orders",
+            {"account_label": "primary"},
+        ),
+    )
+
+    result = coalesce_shared_market_state_alerts(
+        alerts,
+        account_labels=("primary", "account-2"),
+    )
+
+    assert [alert.name for alert in result] == [
+        "live_market_state_delay",
+        "live_unknown_orders:primary",
+    ]
+    assert result[0].severity == "critical"
+    assert result[0].details == {
+        "delay_ms": 121_000,
+        "account_labels": ("account-2", "primary"),
+        "affected_account_count": 2,
+        "scope": "shared_market_data",
+    }
+
+
+def test_coalesce_shared_market_state_alerts_keeps_partial_failure_scoped() -> None:
+    alerts = (
+        Alert(
+            "live_market_state_stale:primary",
+            "critical",
+            "stale",
+            {"account_label": "primary", "age_seconds": 180},
+        ),
+    )
+
+    assert coalesce_shared_market_state_alerts(
+        alerts,
+        account_labels=("primary", "account-2"),
+    ) == alerts
 
 
 def test_evaluate_database_state_reconciliation_ready_with_large_age() -> None:

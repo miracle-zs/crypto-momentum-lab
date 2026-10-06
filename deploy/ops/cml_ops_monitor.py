@@ -317,6 +317,85 @@ class Alert:
     details: Mapping[str, object] = field(default_factory=dict)
 
 
+_SHARED_MARKET_STATE_ALERTS = frozenset(
+    {"live_market_state_stale", "live_market_state_delay"}
+)
+
+
+def coalesce_shared_market_state_alerts(
+    alerts: Sequence[Alert],
+    *,
+    account_labels: Sequence[str],
+) -> tuple[Alert, ...]:
+    """Collapse a market-wide fault without hiding account-specific faults.
+
+    Each strategy records its own consumed market cursor, so the database
+    query produces one alert per account. When every configured account has
+    the same kind of market-progress failure, the actionable cause is shared
+    market data, not four independent strategy incidents. A subset remains
+    account-scoped and is left untouched.
+    """
+    expected = frozenset(account_labels)
+    if len(expected) < 2:
+        return tuple(alerts)
+
+    grouped: dict[str, list[tuple[int, Alert, str]]] = {}
+    for index, alert in enumerate(alerts):
+        base_name, separator, account_label = alert.name.partition(":")
+        if (
+            base_name in _SHARED_MARKET_STATE_ALERTS
+            and separator
+            and account_label in expected
+            and str(alert.details.get("account_label", "")) == account_label
+        ):
+            grouped.setdefault(base_name, []).append((index, alert, account_label))
+
+    replacements: dict[int, Alert] = {}
+    skipped_indices: set[int] = set()
+    for base_name, members in grouped.items():
+        labels = frozenset(account_label for _index, _alert, account_label in members)
+        if labels != expected:
+            continue
+        first_index, first_alert, _first_account = members[0]
+        metric_key = "age_seconds" if base_name.endswith("_stale") else "delay_ms"
+        numeric_values = [
+            value
+            for _index, alert, _account in members
+            if isinstance((value := alert.details.get(metric_key)), (int, float))
+        ]
+        details = {
+            key: value
+            for key, value in first_alert.details.items()
+            if key != "account_label"
+        }
+        if numeric_values:
+            details[metric_key] = max(numeric_values)
+        details["account_labels"] = tuple(sorted(labels))
+        details["affected_account_count"] = len(labels)
+        details["scope"] = "shared_market_data"
+        replacements[first_index] = Alert(
+            base_name,
+            (
+                "critical"
+                if any(alert.severity == "critical" for _i, alert, _a in members)
+                else "warning"
+            ),
+            "Shared market-state failure affects every live account",
+            details,
+        )
+        skipped_indices.update(index for index, _alert, _account in members)
+
+    if not replacements:
+        return tuple(alerts)
+    return tuple(
+        replacements[index]
+        if index in replacements
+        else alert
+        for index, alert in enumerate(alerts)
+        if index not in skipped_indices or index in replacements
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerSnapshot:
     service: str
@@ -2017,6 +2096,17 @@ class OpsMonitor:
                 # outcome of a partially filled order, not a fault.
                 self._record_position_spread(position_observations)
 
+        alerts = list(
+            coalesce_shared_market_state_alerts(
+                alerts,
+                account_labels=tuple(
+                    account_label
+                    for account_label, _run_id, _lease_owner in (
+                        self._config.live_accounts
+                    )
+                ),
+            )
+        )
         active_keys = {alert.name for alert in alerts}
         for alert in alerts:
             self._emit(alert, now=now)
@@ -4110,6 +4200,17 @@ def _split_alert_name(alert_name: str) -> tuple[str, str | None]:
     return base_name, scope if separator and scope else None
 
 
+def _alert_account_scope(details: Mapping[str, object]) -> str:
+    """Render either one account or a shared account set in notifications."""
+    account_labels = details.get("account_labels")
+    if isinstance(account_labels, Sequence) and not isinstance(
+        account_labels,
+        str | bytes,
+    ):
+        return ", ".join(str(label) for label in account_labels)
+    return str(details.get("account_label", ""))
+
+
 def _service_scope(service: object) -> str | None:
     if not isinstance(service, str) or not service:
         return None
@@ -4547,7 +4648,7 @@ def _format_alert_human_details(
 
     # 7. Market delay & stale
     elif base_name == "live_market_state_delay":
-        acc = details.get("account_label", "")
+        acc = _alert_account_scope(details)
         delay = details.get("delay_ms")
         warn_th = details.get("warning_threshold_ms")
         if acc:
@@ -4622,7 +4723,7 @@ def _format_alert_human_details(
 
     # 11. Market state stale & checkpoint stale
     elif base_name == "live_market_state_stale":
-        acc = details.get("account_label", "")
+        acc = _alert_account_scope(details)
         age_human = details.get("age_human", "")
         thresh_human = details.get("threshold_human", "")
         if acc:
