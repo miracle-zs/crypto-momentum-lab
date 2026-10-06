@@ -273,15 +273,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="irreversibly replace complete normal-hold evidence with summaries",
+    )
     parser.add_argument("--purge-unreferenced-revisions", action="store_true")
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.batch_size > 1_000:
         parser.error("--batch-size must be between 1 and 1000")
-    if not args.dry_run and not args.purge_unreferenced_revisions:
+    if not args.dry_run and not args.apply:
         parser.error(
-            "destructive mode requires --purge-unreferenced-revisions; "
-            "use --dry-run to inspect only"
+            "destructive mode requires --apply; use --dry-run to inspect only"
         )
+    if args.purge_unreferenced_revisions and not args.apply and not args.dry_run:
+        parser.error("--purge-unreferenced-revisions requires --apply")
     return asyncio.run(_run(args))
 
 
