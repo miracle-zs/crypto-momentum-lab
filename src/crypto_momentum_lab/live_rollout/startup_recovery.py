@@ -24,7 +24,10 @@ WARMUP_STATE_LIMIT = 100_000
 WARMUP_BATCH_SIZE = 5_000
 _DURABLE_CUTOVER_WAIT_SECONDS = 5.0
 _DURABLE_CUTOVER_POLL_SECONDS = 0.1
-_MARKET_GAP_RECOVERY_WAIT_SECONDS = 0.5
+# A state Hub can publish a recovered batch slightly before the database writer
+# commits its intermediate buckets.  Keep this bounded: a long per-symbol wait
+# would serially stall the market loop when a real gap cannot be repaired.
+_MARKET_GAP_RECOVERY_WAIT_SECONDS = 5.0
 
 class _WarmupPageArguments(TypedDict):
     environment: str

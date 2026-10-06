@@ -5,6 +5,7 @@ import pytest
 
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.domain.strategy.models import StrategyDataRequirement
+from crypto_momentum_lab.live_rollout import startup_recovery
 from crypto_momentum_lab.live_rollout.hub_cursor import (
     LiveHubCursorState,
     hub_cursor_for_startup,
@@ -45,6 +46,27 @@ class _GapRepository:
         assert kwargs["symbols"] == ("ALCHUSDT",)
         self.calls += 1
         return self.states
+
+
+class _DelayedGapRepository(_GapRepository):
+    def __init__(self, states: tuple[object, ...], *, clock: "_VirtualClock") -> None:
+        super().__init__(states)
+        self._clock = clock
+
+    async def load_after(self, **kwargs: object) -> tuple[object, ...]:
+        result = await super().load_after(**kwargs)
+        return result if self._clock.value >= 1.0 else ()
+
+
+class _VirtualClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def monotonic(self) -> float:
+        return self.value
+
+    async def sleep(self, seconds: float) -> None:
+        self.value += seconds
 
 
 class _RecoveringStrategy:
@@ -110,6 +132,36 @@ async def test_gap_loader_reads_only_canonical_intermediate_buckets() -> None:
 
     assert states == (missing,)
     assert repository.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gap_loader_waits_for_short_durable_persistence_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A just-restarted writer can publish the Hub batch before Postgres commits it."""
+
+    previous = datetime(2026, 9, 13, 5, 53, 0, tzinfo=UTC)
+    current = previous + timedelta(seconds=30)
+    missing = SimpleNamespace(
+        symbol="ALCHUSDT",
+        bucket_start=previous + timedelta(seconds=15),
+    )
+    clock = _VirtualClock()
+    repository = _DelayedGapRepository((missing,), clock=clock)
+    monkeypatch.setattr(startup_recovery, "monotonic", clock.monotonic)
+    monkeypatch.setattr(startup_recovery, "_sleep_for_durable_cutover", clock.sleep)
+
+    states = await load_live_market_state_gap(
+        repository=repository,  # type: ignore[arg-type]
+        environment="research",
+        symbol="ALCHUSDT",
+        previous_at=previous,
+        current_at=current,
+        interval_seconds=15,
+    )
+
+    assert states == (missing,)
+    assert repository.calls >= 11
 
 
 @pytest.mark.asyncio

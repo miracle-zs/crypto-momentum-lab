@@ -58,7 +58,7 @@ _READY_MESSAGE = "account_event_hub_ready"
 _EVENT_MESSAGE = "account_event"
 _REGISTER_EXPECTED_POSITION_MESSAGE = "register_expected_position"
 _EXPECTED_POSITION_READY_MESSAGE = "expected_position_registered"
-_CLIENT_RECEIVE_QUEUE_SIZE = 16
+_DEFAULT_EVENT_QUEUE_SIZE = 256
 _MAX_MESSAGE_SIZE = 1024 * 1024
 _FILL_KEY_CACHE_SIZE = 8192
 _SNAPSHOT_KIND_NOTIFICATION = "notification"
@@ -100,11 +100,19 @@ class AccountEventHubMetrics:
 
 @dataclass(frozen=True, slots=True)
 class AccountEventHubClientMetrics:
-    """Consumer-side recovery counters for the account-event stream."""
+    """Consumer-side backpressure and recovery metrics for the account stream."""
 
     recovery_count: int
     queue_overflow_count: int
     last_recovery_reason: str | None
+    queue_capacity: int
+    queue_depth: int
+    queue_high_watermark: int
+    enqueued_event_count: int
+    dequeued_event_count: int
+    order_trade_update_count: int
+    account_update_count: int
+    max_queue_wait_ms: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,14 +257,29 @@ class _AccountEventQueueOverflow:
     latest_sequence: int
 
 
-_AccountEventQueueItem = AccountEvent | _AccountEventQueueOverflow | Exception
+@dataclass(frozen=True, slots=True)
+class _QueuedAccountEvent:
+    """An account frame plus the local ingress timestamp for lag telemetry."""
+
+    event: AccountEvent
+    enqueued_at: float
+
+
+_AccountEventQueueItem = (
+    _QueuedAccountEvent | _AccountEventQueueOverflow | Exception
+)
 
 
 @dataclass(frozen=True, slots=True)
 class AccountEventHubConfig:
     host: str = "0.0.0.0"
     port: int = 8767
-    subscriber_queue_size: int = 16
+    # A single market order may be split into many fills.  Each fill produces
+    # both an order and an account update, so 16 frames is a normal burst, not
+    # an exceptional one.  Keep both relay buffers large enough to absorb a
+    # full exchange burst while the durable consumer catches up.
+    subscriber_queue_size: int = _DEFAULT_EVENT_QUEUE_SIZE
+    client_receive_queue_size: int = _DEFAULT_EVENT_QUEUE_SIZE
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
     startup_timeout_seconds: float | None = None
@@ -287,6 +310,8 @@ class AccountEventHubConfig:
             raise ValueError("port must be between 0 and 65535")
         if self.subscriber_queue_size <= 0:
             raise ValueError("subscriber_queue_size must be positive")
+        if self.client_receive_queue_size <= 0:
+            raise ValueError("client_receive_queue_size must be positive")
         if self.handshake_timeout_seconds <= 0:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
@@ -851,6 +876,15 @@ class WebSocketAccountEventSource:
         self._recovery_count = 0
         self._queue_overflow_count = 0
         self._last_recovery_reason: str | None = None
+        self._queue_capacity = self._config.client_receive_queue_size
+        self._queue_depth = 0
+        self._queue_high_watermark = 0
+        self._enqueued_event_count = 0
+        self._dequeued_event_count = 0
+        self._order_trade_update_count = 0
+        self._account_update_count = 0
+        self._max_queue_wait_ms = 0.0
+        self._queue_high_watermark_alerted = False
 
     @property
     def availability_clock(self) -> StreamAvailabilityClock:
@@ -862,6 +896,14 @@ class WebSocketAccountEventSource:
             recovery_count=self._recovery_count,
             queue_overflow_count=self._queue_overflow_count,
             last_recovery_reason=self._last_recovery_reason,
+            queue_capacity=self._queue_capacity,
+            queue_depth=self._queue_depth,
+            queue_high_watermark=self._queue_high_watermark,
+            enqueued_event_count=self._enqueued_event_count,
+            dequeued_event_count=self._dequeued_event_count,
+            order_trade_update_count=self._order_trade_update_count,
+            account_update_count=self._account_update_count,
+            max_queue_wait_ms=self._max_queue_wait_ms,
         )
 
     def stop(self) -> None:
@@ -881,7 +923,7 @@ class WebSocketAccountEventSource:
                     ping_interval=20,
                     ping_timeout=20,
                     max_size=_MAX_MESSAGE_SIZE,
-                    max_queue=16,
+                    max_queue=self._config.client_receive_queue_size,
                     proxy=None,
                 ) as connection:
                     require_full_snapshot = self._require_full_snapshot
@@ -949,7 +991,9 @@ class WebSocketAccountEventSource:
                     if not needs_recovery:
                         reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
-                        asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
+                        asyncio.Queue(
+                            maxsize=self._config.client_receive_queue_size
+                        )
                     )
                     reader_task = asyncio.create_task(
                         self._read_account_events(
@@ -968,6 +1012,7 @@ class WebSocketAccountEventSource:
                                 )
                             else:
                                 item = await receive_queue.get()
+                            self._record_queue_dequeue(receive_queue, item)
                             if isinstance(item, Exception):
                                 raise item
                             if isinstance(item, _AccountEventQueueOverflow):
@@ -977,7 +1022,7 @@ class WebSocketAccountEventSource:
                                 raise AccountEventHubSequenceGap(
                                     "account-event hub client queue overflow"
                                 )
-                            materialized = self._materialize_event(item)
+                            materialized = self._materialize_event(item.event)
                             if materialized is not None:
                                 self._availability_clock.mark_ready()
                                 reconnect_attempt = 0
@@ -1116,8 +1161,60 @@ class WebSocketAccountEventSource:
             receive_queue.put_nowait(
                 _AccountEventQueueOverflow(latest_sequence=event.sequence)
             )
+            self._queue_depth = receive_queue.qsize()
             return
-        receive_queue.put_nowait(event)
+        receive_queue.put_nowait(
+            _QueuedAccountEvent(event=event, enqueued_at=time.monotonic())
+        )
+        self._enqueued_event_count += 1
+        if event.event_type == "ORDER_TRADE_UPDATE":
+            self._order_trade_update_count += 1
+        elif event.event_type == "ACCOUNT_UPDATE":
+            self._account_update_count += 1
+        self._record_queue_enqueue(receive_queue, event)
+
+    def _record_queue_enqueue(
+        self,
+        receive_queue: asyncio.Queue[_AccountEventQueueItem],
+        event: AccountEvent,
+    ) -> None:
+        self._queue_capacity = receive_queue.maxsize
+        depth = receive_queue.qsize()
+        self._queue_depth = depth
+        self._queue_high_watermark = max(self._queue_high_watermark, depth)
+        high_watermark = max(1, (self._queue_capacity * 7 + 9) // 10)
+        if depth < high_watermark:
+            self._queue_high_watermark_alerted = False
+            return
+        if self._queue_high_watermark_alerted:
+            return
+        self._queue_high_watermark_alerted = True
+        log.warning(
+            "account_event_hub_client_queue_high_watermark",
+            consumer_id=self._consumer_id,
+            environment=self._environment,
+            account_label=self._account_label,
+            queue_depth=depth,
+            queue_capacity=self._queue_capacity,
+            event_type=event.event_type,
+            client_order_id=event.client_order_id,
+        )
+
+    def _record_queue_dequeue(
+        self,
+        receive_queue: asyncio.Queue[_AccountEventQueueItem],
+        item: _AccountEventQueueItem,
+    ) -> None:
+        self._queue_depth = receive_queue.qsize()
+        if self._queue_capacity:
+            high_watermark = max(1, (self._queue_capacity * 7 + 9) // 10)
+            if self._queue_depth < high_watermark:
+                self._queue_high_watermark_alerted = False
+        if not isinstance(item, _QueuedAccountEvent):
+            return
+        self._dequeued_event_count += 1
+        wait_ms = max(0.0, (time.monotonic() - item.enqueued_at) * 1000)
+        self._max_queue_wait_ms = max(self._max_queue_wait_ms, wait_ms)
 
     @staticmethod
     def _enqueue_account_event_reader_error(

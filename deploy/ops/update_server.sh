@@ -767,9 +767,9 @@ phase_rank() {
     dashboard|research-stop) echo 6 ;;
     dashboard-market-data|market-data) echo 7 ;;
     paper-retired-cleanup|consumers) echo 8 ;;
-    live-restart) echo 10 ;;
-    verify) echo 11 ;;
-    complete) echo 12 ;;
+    live-restart) echo 9 ;;
+    verify) echo 10 ;;
+    complete) echo 11 ;;
     *) echo 0 ;;
   esac
 }
@@ -1251,7 +1251,43 @@ wait_for_dashboard_market_health() {
       failure=1
     fi
   fi
+  if (( failure == 0 )) && [[ "$market_changed" == 1 ]]; then
+    verify_market_data_startup_readiness
+  fi
   return "$failure"
+}
+
+verify_market_data_startup_readiness() {
+  # Docker health is not merely process liveness for market-data: it becomes
+  # healthy only after the callback that durably persisted the first state.
+  # This one-shot assertion keeps that deployment contract explicit without
+  # adding a time-based "stability" delay to every rollout.
+  local container_id
+  failure_service="market-data"
+  container_id="$("${compose[@]}" ps -q market-data 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    echo "market-data startup readiness verification failed: no container" >&2
+    return 1
+  fi
+  run_with_timeout "market-data-startup-readiness" "$deploy_operation_timeout" \
+    docker exec "$container_id" python -S -c '
+import json
+from pathlib import Path
+
+path = Path("/run/cml/health/readiness")
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception as error:
+    raise SystemExit(f"cannot read market-data readiness: {type(error).__name__}") from error
+
+if payload.get("service") != "market-data":
+    raise SystemExit("unexpected readiness service: " + str(payload.get("service")))
+if payload.get("startup_ready") is not True:
+    raise SystemExit("market-data startup_ready is not true")
+if not isinstance(payload.get("durable_state_watermark"), str):
+    raise SystemExit("market-data readiness lacks durable_state_watermark")
+print("market_data_startup_ready watermark=" + payload["durable_state_watermark"])
+'
 }
 
 verify_service_target() {

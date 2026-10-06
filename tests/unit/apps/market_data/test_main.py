@@ -456,6 +456,21 @@ async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
 async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class FakeHealth:
+        def __init__(self) -> None:
+            self.heartbeats: list[bool] = []
+            self.readiness: list[dict[str, object]] = []
+            self.stopped_called = False
+
+        def heartbeat(self, *, database_ok: bool = False) -> None:
+            self.heartbeats.append(database_ok)
+
+        def write_readiness(self, payload: dict[str, object]) -> None:
+            self.readiness.append(payload)
+
+        def stopped(self) -> None:
+            self.stopped_called = True
+
     class FakeCapture:
         def __init__(self) -> None:
             self.run_started = asyncio.Event()
@@ -556,6 +571,8 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         capture_shutdown_timeout_seconds=30,
     )
 
+    durable_state_callbacks = []
+
     @asynccontextmanager
     async def fake_runtime(
         config_path: Path,
@@ -564,9 +581,17 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         startup_timer=None,
     ):
         assert startup_timer is not None
-        del config_path, on_durable_state_persisted
+        del config_path
+        assert on_durable_state_persisted is not None
+        durable_state_callbacks.append(on_durable_state_persisted)
         yield runtime
 
+    health = FakeHealth()
+    monkeypatch.setattr(
+        main.LocalHealthWriter,
+        "from_environment",
+        lambda: health,
+    )
     monkeypatch.setattr(main, "build_market_data_runtime", fake_runtime)
     monkeypatch.setattr(main, "run_scheduler_loop", block_forever)
     monkeypatch.setattr(main, "monitor_market_data_freshness", block_forever)
@@ -582,6 +607,20 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         main.run_market_data(Path("server.yaml"), stop_requested=stop_requested)
     )
     await capture.run_started.wait()
+
+    # Building the runtime and scheduling capture must not make Docker see a
+    # ready market-data process. Only a completed durable state can do that.
+    assert health.heartbeats == []
+    assert health.readiness == []
+    durable_state_callbacks[0](datetime(2026, 10, 6, 1, 2, tzinfo=UTC))
+    assert health.heartbeats == [True]
+    assert health.readiness == [
+        {
+            "service": "market-data",
+            "startup_ready": True,
+            "durable_state_watermark": "2026-10-06T01:02:00+00:00",
+        }
+    ]
 
     stop_requested.set()
     await asyncio.wait_for(task, timeout=1)

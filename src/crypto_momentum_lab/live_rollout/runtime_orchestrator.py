@@ -68,6 +68,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.health.resources import ProcessResourceSampler
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
@@ -1339,6 +1340,37 @@ async def run_live_daemon(
         local_health_task: asyncio.Task[None] | None = None
 
         if health is not None:
+            resource_sampler = ProcessResourceSampler()
+
+            def account_event_resource_snapshot() -> dict[str, int | float | None]:
+                metrics = channel_sources.account_source.metrics
+                return {
+                    **resource_sampler.snapshot(),
+                    "account_event_client_queue_capacity": metrics.queue_capacity,
+                    "account_event_client_queue_depth": metrics.queue_depth,
+                    "account_event_client_queue_high_watermark": (
+                        metrics.queue_high_watermark
+                    ),
+                    "account_event_client_enqueue_count": (
+                        metrics.enqueued_event_count
+                    ),
+                    "account_event_client_dequeue_count": (
+                        metrics.dequeued_event_count
+                    ),
+                    "account_event_client_order_trade_update_count": (
+                        metrics.order_trade_update_count
+                    ),
+                    "account_event_client_account_update_count": (
+                        metrics.account_update_count
+                    ),
+                    "account_event_client_max_queue_wait_ms": (
+                        metrics.max_queue_wait_ms
+                    ),
+                    "account_event_client_queue_overflow_count": (
+                        metrics.queue_overflow_count
+                    ),
+                }
+
             health_monitor = LiveHealthMonitor(
                 health=health,
                 interval_seconds=_LIVE_STATUS_HEARTBEAT_INTERVAL_SECONDS,
@@ -1351,6 +1383,7 @@ async def run_live_daemon(
                     "account_label": account_label,
                     "run_id": session_id,
                 },
+                resource_snapshot=account_event_resource_snapshot,
             )
             local_health_task = asyncio.create_task(
                 health_monitor.run(),

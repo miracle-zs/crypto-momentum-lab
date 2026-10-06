@@ -1597,6 +1597,18 @@ async def run_market_data(
                 watermark=watermark.isoformat(),
             )
             first_durable_state_logged = True
+            if health is not None:
+                # Publish the business-level startup contract before the
+                # health marker. The deployment gate can therefore treat a
+                # healthy container as proof that capture, universe selection,
+                # and at least one state persistence all completed.
+                health.write_readiness(
+                    {
+                        "service": "market-data",
+                        "startup_ready": True,
+                        "durable_state_watermark": watermark.isoformat(),
+                    }
+                )
         if health is not None:
             health.heartbeat(database_ok=True)
 
@@ -1740,12 +1752,6 @@ async def run_market_data(
                 "background_tasks_started",
                 auxiliary_task_count=len(auxiliary_tasks),
             )
-            if health is not None:
-                # Publish readiness as soon as capture is running instead of
-                # waiting for the first 15s state to land. The durable-state
-                # callback keeps refreshing the marker afterwards, so a stalled
-                # persistence path still lets it expire.
-                health.heartbeat(database_ok=True)
             monitored_tasks: tuple[asyncio.Task[object], ...] = (
                 capture_task,
                 *auxiliary_tasks,

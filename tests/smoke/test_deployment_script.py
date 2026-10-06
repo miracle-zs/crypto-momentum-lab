@@ -40,7 +40,7 @@ def test_remote_argument_decoder_preserves_timeouts_and_rollout_scope() -> None:
         "market_data_wait_timeout consumer_wait_timeout live_wait_timeout "
         "live_stop_timeout deploy_operation_timeout deploy_build_timeout "
         "dashboard_required dashboard_proxy_url crash_log_directory "
-        "sync_dashboard execution_accounts_only dashboard_only"
+        "sync_dashboard execution_accounts_only dashboard_only "
     ).split()
     report = "printf '%s\\n' " + " ".join(f'"${name}"' for name in variables)
     result = subprocess.run(
@@ -197,7 +197,8 @@ def test_health_wait_does_not_add_a_five_second_polling_gap() -> None:
 def test_live_readiness_validator_embedded_python_is_valid() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     marker = 'docker exec "$container_id" python -S -c \''
-    start = script.index(marker) + len(marker)
+    live_validator = script.index("  verify_live_readiness()")
+    start = script.index(marker, live_validator) + len(marker)
     end = script.index('\' "$account"', start)
 
     compile(script[start:end], "<live-readiness-validator>", "exec")
@@ -616,6 +617,43 @@ def test_dashboard_and_market_data_share_a_start_wave_with_health_barriers() -> 
     assert 'wait_for_services_healthy "$market_data_wait_timeout" market-data' in health
     assert script.index("if should_run_phase research-stop") < wave_start
     assert wave_start < consumer_start
+
+
+def test_market_data_readiness_is_verified_without_a_timed_stability_gate() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    verification_start = script.index("verify_market_data_startup_readiness()")
+    verification_end = script.index("verify_service_target()", verification_start)
+    verification = script[verification_start:verification_end]
+    health_wait_start = script.index("wait_for_dashboard_market_health()")
+    health_wait_end = script.index(
+        "verify_market_data_startup_readiness()",
+        health_wait_start,
+    )
+    health_wait = script[health_wait_start:health_wait_end]
+    live_restart_marker = (
+        'if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then'
+    )
+    live_restart = script.index(live_restart_marker)
+    canary = script.index("live_up_and_wait_canary", live_restart)
+
+    assert 'Path("/run/cml/health/readiness")' in verification
+    assert 'payload.get("service") != "market-data"' in verification
+    assert 'payload.get("startup_ready") is not True' in verification
+    assert "wait_for_market_state_stability" not in script
+    assert "CML_MARKET_STATE_STABILITY_WAIT_TIMEOUT_SECONDS" not in script
+    assert "verify_market_data_startup_readiness" in health_wait
+    assert verification_start < live_restart < canary
+
+
+def test_market_data_readiness_validator_embedded_python_is_valid() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    marker = """docker exec "$container_id" python -S -c '"""
+    validator_start = script.index("verify_market_data_startup_readiness()")
+    start = script.index(marker, validator_start) + len(marker)
+    end = script.index("\n'\n}", start)
+
+    compile(script[start:end], "<market-data-readiness-validator>", "exec")
 
 
 def test_release_identity_does_not_precede_dependency_layer() -> None:

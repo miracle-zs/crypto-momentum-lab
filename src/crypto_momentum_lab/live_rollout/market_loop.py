@@ -336,22 +336,19 @@ class LiveMarketLoop:
                     run_id=self._run_id,
                     symbols=sorted(context.unmanaged_position_symbols),
                 )
-            # Use the already loaded account facts to request background cleanup.
+            # An unavailable account projection is not proof of a flat
+            # account. Never turn that uncertainty into a reduce-only cancel;
+            # queue-overflow recovery will publish a fresh full snapshot first.
             # No REST cancellation or reconciliation owns this market event.
-            position_symbols = (
-                (context.open_position_symbols or frozenset())
-                | context.pending_position_symbols
-                | context.unmanaged_position_symbols
-            )
-            orphan_plans = tuple(
-                order.plan
-                for order in context.unresolved_orders
-                if order.plan.reduce_only
-                and order.plan.order_type == "LIMIT"
-                and order.plan.symbol not in position_symbols
-            )
-            if orphan_plans:
-                self._request_order_cleanup(orphan_plans)
+            if context.open_position_symbols is not None:
+                orphan_plans = _orphan_reduce_only_limit_plans(context)
+                if orphan_plans:
+                    self._request_order_cleanup(orphan_plans)
+            else:
+                log.warning(
+                    "live_orphan_cleanup_skipped_account_projection_unknown",
+                    run_id=self._run_id,
+                )
             if (
                 self._exit_manager is not None
                 and self._exit_enabled()
@@ -500,6 +497,27 @@ def _strategy_decision_details(
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
         details["hub_sequence"] = sequence
     return details
+
+
+def _orphan_reduce_only_limit_plans(
+    context: LiveDaemonRuntimeContext,
+) -> tuple[OrderExecutionPlan, ...]:
+    """Return cancellable exits only when the account projection is complete."""
+
+    if context.open_position_symbols is None:
+        return ()
+    position_symbols = (
+        context.open_position_symbols
+        | context.pending_position_symbols
+        | context.unmanaged_position_symbols
+    )
+    return tuple(
+        order.plan
+        for order in context.unresolved_orders
+        if order.plan.reduce_only
+        and order.plan.order_type == "LIMIT"
+        and order.plan.symbol not in position_symbols
+    )
 
 
 def _empty_heartbeat_eligible(
