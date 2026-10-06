@@ -1,4 +1,3 @@
-
 """Tests for PostgresDecisionTraceRepository and live trace recording wiring (R2)."""
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     PolicyState,
     create_authoritative_async_decision_filter,
 )
+from crypto_momentum_lab.domain.decision.trace_audit import verify_decision_trace
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
@@ -35,6 +35,9 @@ from crypto_momentum_lab.domain.market.revision_models import (
 from crypto_momentum_lab.domain.strategy.models import StrategyDecision
 from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
+)
+from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
+    compact_trace_for_hot_storage,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     DecisionTraceRow,
@@ -73,6 +76,47 @@ def _make_market_state(symbol: str = "BTCUSDT") -> MarketState15s:
         first_received_at=start,
         last_received_at=start + timedelta(seconds=14),
     )
+
+
+def test_holding_position_trace_is_compacted_to_a_verifiable_hot_summary() -> None:
+    """The high-volume normal hold outcome must not retain replay-sized JSON."""
+    payload = {
+        "trace_schema_version": 1,
+        "input_hash": "input-hash",
+        "frame_digest": "frame-digest",
+        "market_state": {"symbols": ["BTCUSDT"] * 100},
+        "prior_policy_state": {"large": "state"},
+        "next_policy_state": {"large": "next-state"},
+    }
+
+    stored = compact_trace_for_hot_storage(
+        intent_produced=False,
+        rejection_reason="holding_position_no_exit",
+        trace_payload=payload,
+    )
+
+    assert stored == {
+        "evidence_level": "summary",
+        "summary_schema_version": 1,
+        "frame_digest": "frame-digest",
+        "input_hash": "input-hash",
+        "original_payload_sha256": (
+            "101bd09b15ac4e363ce15265fdedd5a76dc3bcce49706bf8c298e8ac401b7287"
+        ),
+        "outcome": "holding_position_no_exit",
+    }
+
+
+def test_nonstandard_rejection_keeps_complete_replay_evidence() -> None:
+    payload = {"market_state": {"symbol": "BTCUSDT"}}
+
+    stored = compact_trace_for_hot_storage(
+        intent_produced=False,
+        rejection_reason="direction_not_permitted_by_position_mode",
+        trace_payload=payload,
+    )
+
+    assert stored == payload
 
 
 class _AsyncContext:
@@ -288,6 +332,69 @@ async def test_postgres_decision_trace_repository_saves_with_non_durable_commit(
         and "ON CONFLICT (decision_id) DO NOTHING" in s
         for s in sql_texts
     )
+
+
+@pytest.mark.asyncio
+async def test_postgres_repository_skips_market_payload_for_normal_hold_summary() -> (
+    None
+):
+    session = _FakeAsyncSession()
+    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))  # type: ignore[arg-type]
+    t0 = datetime(2026, 10, 7, 8, 0, tzinfo=UTC)
+    ref = MarketRevisionRef(
+        scope="live",
+        symbol="BTCUSDT",
+        interval="15s",
+        bucket_start=t0,
+        bucket_end=t0 + timedelta(seconds=15),
+        revision_id="live:BTCUSDT:15s:normal-hold",
+        content_hash="content_hash_normal_hold",
+        published_at=t0,
+        source_epoch="ep_live",
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    trace = DecisionTrace(
+        decision_id="normal-hold-001",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0,
+        evaluated_market_refs=(ref,),
+        intent_produced=False,
+        rejection_reason="holding_position_no_exit",
+        input_hash="input-hash",
+        frame_digest="frame-digest",
+        trace_payload={
+            "input_hash": "input-hash",
+            "frame_digest": "frame-digest",
+            "market_state": {"symbols": ["BTCUSDT"] * 100},
+        },
+    )
+
+    await repo.save_decision_trace(trace)
+
+    stored = session.trace_rows[trace.decision_id]
+    assert stored.trace_payload["evidence_level"] == "summary"
+    assert stored.trace_payload["market_refs"] == [
+        {
+            "scope": "live",
+            "symbol": "BTCUSDT",
+            "interval": "15s",
+            "bucket_start": "2026-10-07T08:00:00+00:00",
+            "bucket_end": "2026-10-07T08:00:15+00:00",
+            "revision_id": "live:BTCUSDT:15s:normal-hold",
+            "content_hash": "content_hash_normal_hold",
+            "published_at": "2026-10-07T08:00:00+00:00",
+            "source_epoch": "ep_live",
+            "visibility_mode": "decision_visible",
+            "observed_at": "",
+        }
+    ]
+    assert session.rev_rows == {}
+
+    loaded = await repo.load_decision_trace(trace.decision_id)
+    assert loaded is not None
+    assert loaded.evaluated_market_refs == (ref,)
+    assert verify_decision_trace(loaded, trace.decision_id)["status"] == "SUMMARY_ONLY"
 
 
 @pytest.mark.asyncio

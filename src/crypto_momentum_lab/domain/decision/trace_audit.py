@@ -8,7 +8,9 @@ from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
 from crypto_momentum_lab.domain.market.revision_models import DecisionTrace
 
 
-def verify_decision_trace(trace: DecisionTrace | None, decision_id: str) -> dict[str, Any]:
+def verify_decision_trace(
+    trace: DecisionTrace | None, decision_id: str
+) -> dict[str, Any]:
     """Verify a trace already loaded by an outer adapter."""
     try:
         if trace is None:
@@ -39,6 +41,18 @@ def verify_decision_trace(trace: DecisionTrace | None, decision_id: str) -> dict
             }
 
         payload = trace.trace_payload
+
+        if payload.get("evidence_level") == "summary":
+            return {
+                "decision_id": trace.decision_id,
+                "status": "SUMMARY_ONLY",
+                "error": (
+                    "Normal hold decisions retain only hot operational evidence; "
+                    "exact replay is unavailable until cold evidence archival "
+                    "is enabled"
+                ),
+                "reproduced": False,
+            }
 
         if payload.get("trace_schema_version") != 1:
             return {

@@ -24,6 +24,12 @@ from crypto_momentum_lab.domain.market.state_codec import (
     market_state_from_payload,
     market_state_to_payload,
 )
+from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
+    compact_trace_for_hot_storage,
+    load_summary_market_refs,
+    retains_complete_replay_evidence,
+    summary_market_refs,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     DatasetManifestRow,
     DecisionTraceRow,
@@ -408,11 +414,22 @@ class PostgresMarketBookRepository:
             }
 
     def save_decision_trace(self, trace: DecisionTrace) -> None:
-        payload = dict(trace.trace_payload)
+        complete_evidence = retains_complete_replay_evidence(
+            intent_produced=trace.intent_produced,
+            rejection_reason=trace.rejection_reason,
+            trace_payload=trace.trace_payload,
+        )
+        payload = compact_trace_for_hot_storage(
+            intent_produced=trace.intent_produced,
+            rejection_reason=trace.rejection_reason,
+            trace_payload=trace.trace_payload,
+        )
         if trace.frame_digest and "frame_digest" not in payload:
             payload["frame_digest"] = trace.frame_digest
         if trace.input_hash and "input_hash" not in payload:
             payload["input_hash"] = trace.input_hash
+        if not complete_evidence:
+            payload["market_refs"] = summary_market_refs(trace.evaluated_market_refs)
         with self._session_factory() as session:
             row = DecisionTraceRow(
                 decision_id=trace.decision_id,
@@ -436,57 +453,60 @@ class PostgresMarketBookRepository:
             row = session.get(DecisionTraceRow, decision_id)
             if row is None:
                 return None
-            rev_ids = row.evaluated_revision_ids
-            rev_rows: dict[str, MarketRevisionRefRow] = {}
-            chunk_size = 5000
-            for i in range(0, len(rev_ids), chunk_size):
-                chunk = rev_ids[i : i + chunk_size]
-                stmt = (
-                    select(MarketRevisionRefRow)
-                    .options(
-                        load_only(
-                            MarketRevisionRefRow.revision_id,
-                            MarketRevisionRefRow.scope,
-                            MarketRevisionRefRow.symbol,
-                            MarketRevisionRefRow.interval,
-                            MarketRevisionRefRow.bucket_start,
-                            MarketRevisionRefRow.bucket_end,
-                            MarketRevisionRefRow.content_hash,
-                            MarketRevisionRefRow.published_at,
-                            MarketRevisionRefRow.source_epoch,
-                            MarketRevisionRefRow.visibility_mode,
-                            MarketRevisionRefRow.lineage,
+            payload = dict(row.trace_payload)
+            if payload.get("evidence_level") == "summary":
+                refs = load_summary_market_refs(payload, decision_id=decision_id)
+            else:
+                rev_ids = row.evaluated_revision_ids
+                rev_rows: dict[str, MarketRevisionRefRow] = {}
+                chunk_size = 5000
+                for i in range(0, len(rev_ids), chunk_size):
+                    chunk = rev_ids[i : i + chunk_size]
+                    stmt = (
+                        select(MarketRevisionRefRow)
+                        .options(
+                            load_only(
+                                MarketRevisionRefRow.revision_id,
+                                MarketRevisionRefRow.scope,
+                                MarketRevisionRefRow.symbol,
+                                MarketRevisionRefRow.interval,
+                                MarketRevisionRefRow.bucket_start,
+                                MarketRevisionRefRow.bucket_end,
+                                MarketRevisionRefRow.content_hash,
+                                MarketRevisionRefRow.published_at,
+                                MarketRevisionRefRow.source_epoch,
+                                MarketRevisionRefRow.visibility_mode,
+                                MarketRevisionRefRow.lineage,
+                            )
+                        )
+                        .where(MarketRevisionRefRow.revision_id.in_(chunk))
+                    )
+                    for r in session.execute(stmt).scalars().all():
+                        rev_rows[r.revision_id] = r
+                refs = []
+                for rid in rev_ids:
+                    rrow = rev_rows.get(str(rid))
+                    if rrow is None:
+                        raise UnreproducibleError(
+                            f"Decision trace {decision_id} is unreproducible: "
+                            f"missing revision {rid}"
+                        )
+                    refs.append(
+                        MarketRevisionRef(
+                            scope=rrow.scope,
+                            symbol=rrow.symbol,
+                            interval=rrow.interval,
+                            bucket_start=rrow.bucket_start,
+                            bucket_end=rrow.bucket_end,
+                            revision_id=rrow.revision_id,
+                            content_hash=rrow.content_hash,
+                            published_at=rrow.published_at,
+                            observed_at=_observed_at_from_lineage(rrow.lineage),
+                            source_epoch=rrow.source_epoch,
+                            visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
                         )
                     )
-                    .where(MarketRevisionRefRow.revision_id.in_(chunk))
-                )
-                for r in session.execute(stmt).scalars().all():
-                    rev_rows[r.revision_id] = r
-            refs = []
-            for rid in rev_ids:
-                rrow = rev_rows.get(str(rid))
-                if rrow is None:
-                    raise UnreproducibleError(
-                        f"Decision trace {decision_id} is unreproducible: "
-                        f"missing revision {rid}"
-                    )
-                refs.append(
-                    MarketRevisionRef(
-                        scope=rrow.scope,
-                        symbol=rrow.symbol,
-                        interval=rrow.interval,
-                        bucket_start=rrow.bucket_start,
-                        bucket_end=rrow.bucket_end,
-                        revision_id=rrow.revision_id,
-                        content_hash=rrow.content_hash,
-                        published_at=rrow.published_at,
-                        observed_at=_observed_at_from_lineage(rrow.lineage),
-                        source_epoch=rrow.source_epoch,
-                        visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
-                    )
-                )
 
-            payload = row.trace_payload
             input_hash = str(payload.get("input_hash", ""))
             frame_digest = str(payload.get("frame_digest", ""))
 

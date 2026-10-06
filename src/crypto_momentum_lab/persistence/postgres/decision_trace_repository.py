@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import select, text
@@ -22,6 +22,12 @@ from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
     MarketRevisionRef,
     MarketVisibilityMode,
+)
+from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
+    compact_trace_for_hot_storage,
+    load_summary_market_refs,
+    retains_complete_replay_evidence,
+    summary_market_refs,
 )
 from crypto_momentum_lab.persistence.postgres.market_book_repository import (
     _observed_at_from_lineage,
@@ -87,11 +93,26 @@ class PostgresDecisionTraceRepository:
         revision_rows_by_id: dict[str, dict[str, Any]] = {}
         embedded_revision_ids: set[str] = set()
         for trace in traces:
-            payload = dict(trace.trace_payload)
+            complete_evidence = retains_complete_replay_evidence(
+                intent_produced=trace.intent_produced,
+                rejection_reason=trace.rejection_reason,
+                trace_payload=trace.trace_payload,
+            )
+            payload = compact_trace_for_hot_storage(
+                intent_produced=trace.intent_produced,
+                rejection_reason=trace.rejection_reason,
+                trace_payload=trace.trace_payload,
+            )
             if trace.frame_digest and "frame_digest" not in payload:
                 payload["frame_digest"] = trace.frame_digest
             if trace.input_hash and "input_hash" not in payload:
                 payload["input_hash"] = trace.input_hash
+            if not complete_evidence:
+                # Summary rows retain reference identity without retaining the
+                # corresponding full market payload in this hot database.
+                payload["market_refs"] = summary_market_refs(
+                    trace.evaluated_market_refs
+                )
             trace_row = {
                 "decision_id": trace.decision_id,
                 "strategy_name": trace.strategy_name,
@@ -117,14 +138,16 @@ class PostgresDecisionTraceRepository:
                 )
             trace_rows_by_id.setdefault(trace.decision_id, trace_row)
 
+            if not complete_evidence:
+                continue
+
             embedded_state = payload.get("market_state")
             for ref in trace.evaluated_market_refs:
                 has_market_payload = isinstance(embedded_state, dict)
-                ref_payload = (
-                    dict(embedded_state)
-                    if has_market_payload
-                    else {"reference_only": True}
-                )
+                if has_market_payload:
+                    ref_payload = dict(cast(dict[str, Any], embedded_state))
+                else:
+                    ref_payload = {"reference_only": True}
                 lineage = {"source_epoch": ref.source_epoch}
                 if ref.observed_at is not None:
                     lineage["observed_at"] = ref.observed_at.isoformat()
@@ -159,10 +182,7 @@ class PostgresDecisionTraceRepository:
                     "is_canonical",
                 )
                 if previous_ref is not None and (
-                    any(
-                        previous_ref[name] != ref_row[name]
-                        for name in identity_fields
-                    )
+                    any(previous_ref[name] != ref_row[name] for name in identity_fields)
                     or (
                         has_market_payload
                         and previous_has_payload
@@ -170,7 +190,8 @@ class PostgresDecisionTraceRepository:
                     )
                 ):
                     raise ValueError(
-                        f"MarketRevisionRef {ref.revision_id} conflicts within one commit"
+                        "MarketRevisionRef "
+                        f"{ref.revision_id} conflicts within one commit"
                     )
                 if previous_ref is None or (
                     has_market_payload and not previous_has_payload
@@ -193,13 +214,17 @@ class PostgresDecisionTraceRepository:
         )
         incoming_by_id = {row["decision_id"]: row for row in trace_rows}
         incoming_revisions = revision_rows_by_id
-        existing_revisions = (
-            await session.execute(
-                select(MarketRevisionRefRow).where(
-                    MarketRevisionRefRow.revision_id.in_(incoming_revisions)
+        existing_revisions: list[MarketRevisionRefRow] = list(
+            (
+                await session.execute(
+                    select(MarketRevisionRefRow).where(
+                        MarketRevisionRefRow.revision_id.in_(incoming_revisions)
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         ref_identity_values = (
             "scope",
             "symbol",
@@ -255,34 +280,46 @@ class PostgresDecisionTraceRepository:
 
         # Re-read after inserts. PostgreSQL waits on a concurrent uniqueness
         # conflict; this statement then observes the winner and validates it.
-        persisted_traces = (
-            await session.execute(
-                select(DecisionTraceRow).where(
-                    DecisionTraceRow.decision_id.in_(incoming_trace_ids)
+        persisted_traces: list[DecisionTraceRow] = list(
+            (
+                await session.execute(
+                    select(DecisionTraceRow).where(
+                        DecisionTraceRow.decision_id.in_(incoming_trace_ids)
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         persisted_trace_ids = {row.decision_id for row in persisted_traces}
         if persisted_trace_ids != set(incoming_trace_ids):
             raise ValueError("DecisionTrace insert did not persist every decision")
-        for existing in persisted_traces:
-            incoming = incoming_by_id[existing.decision_id]
-            if any(getattr(existing, name) != incoming[name] for name in trace_values):
+        for persisted_trace in persisted_traces:
+            incoming = incoming_by_id[persisted_trace.decision_id]
+            if any(
+                getattr(persisted_trace, name) != incoming[name]
+                for name in trace_values
+            ):
                 raise ValueError(
                     "Immutable audit conflict: DecisionTrace "
-                    f"'{existing.decision_id}' already exists with conflicting contents"
+                    f"'{persisted_trace.decision_id}' already exists with "
+                    "conflicting contents"
                 )
 
         if missing_revisions:
             persisted_revisions = (
-                await session.execute(
-                    select(MarketRevisionRefRow).where(
-                        MarketRevisionRefRow.revision_id.in_(
-                            [row["revision_id"] for row in missing_revisions]
+                (
+                    await session.execute(
+                        select(MarketRevisionRefRow).where(
+                            MarketRevisionRefRow.revision_id.in_(
+                                [row["revision_id"] for row in missing_revisions]
+                            )
                         )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             persisted_revision_ids = {row.revision_id for row in persisted_revisions}
             if persisted_revision_ids != {
                 row["revision_id"] for row in missing_revisions
@@ -310,9 +347,12 @@ class PostgresDecisionTraceRepository:
             if row is None:
                 return None
 
-            rev_ids = [str(r) for r in row.evaluated_revision_ids]
-            refs: list[MarketRevisionRef] = []
-            if rev_ids:
+            payload = dict(row.trace_payload)
+            if payload.get("evidence_level") == "summary":
+                refs = load_summary_market_refs(payload, decision_id=row.decision_id)
+            else:
+                rev_ids = [str(r) for r in row.evaluated_revision_ids]
+                refs = []
                 stmt_rev = select(MarketRevisionRefRow).where(
                     MarketRevisionRefRow.revision_id.in_(rev_ids)
                 )
@@ -351,12 +391,10 @@ class PostgresDecisionTraceRepository:
                 intent_produced=row.intent_produced,
                 intent_id=row.intent_id,
                 rejection_reason=row.rejection_reason,
-                input_hash=str(row.trace_payload.get("input_hash", "")),
-                frame_digest=str(row.trace_payload.get("frame_digest", "")),
-                trace_payload=dict(row.trace_payload),
+                input_hash=str(payload.get("input_hash", "")),
+                frame_digest=str(payload.get("frame_digest", "")),
+                trace_payload=payload,
             )
-
-
 
 
 __all__ = ["PostgresDecisionTraceRepository"]
