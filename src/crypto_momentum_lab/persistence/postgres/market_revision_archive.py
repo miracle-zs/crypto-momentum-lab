@@ -22,6 +22,9 @@ from typing import Protocol
 
 import zstandard
 
+_ARCHIVE_DIRECTORY_MODE = 0o755
+_ARCHIVE_FILE_MODE = 0o644
+
 
 class MarketRevisionArchiveError(RuntimeError):
     """An archived market payload is missing or failed integrity checks."""
@@ -109,6 +112,10 @@ def write_market_revision_archive(
     if not output_directory.is_relative_to(archive_root):
         raise ValueError("archive partition escapes the configured archive root")
     output_directory.mkdir(parents=True, exist_ok=True)
+    directory = output_directory
+    while directory != archive_root:
+        os.chmod(directory, _ARCHIVE_DIRECTORY_MODE)
+        directory = directory.parent
 
     temp_path: Path | None = None
     try:
@@ -130,6 +137,7 @@ def write_market_revision_archive(
             output.flush()
             os.fsync(output.fileno())
 
+        os.chmod(temp_path, _ARCHIVE_FILE_MODE)
         digest = _sha256_file(temp_path)
         filename = f"payloads-{digest}.jsonl.zst"
         relative_path = (partition_path / filename).as_posix()
@@ -145,6 +153,7 @@ def write_market_revision_archive(
                 )
             temp_path.unlink()
             temp_path = None
+            os.chmod(destination, _ARCHIVE_FILE_MODE)
         else:
             os.replace(temp_path, destination)
             temp_path = None
@@ -414,6 +423,7 @@ def _write_manifest(path: Path, manifest: Mapping[str, object]) -> None:
             output.write(_json_line(manifest))
             output.flush()
             os.fsync(output.fileno())
+        os.chmod(temp_path, _ARCHIVE_FILE_MODE)
         os.replace(temp_path, path)
         temp_path = None
         _fsync_directory(path.parent)

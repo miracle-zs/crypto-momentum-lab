@@ -80,6 +80,10 @@ hash 规则，不重写 revision ID 或 content hash；两种规则均不匹配�
 20 批、每批最多 10,000 条，只把最近 1 天的 payload 留在 PostgreSQL；更老的 revision
 仍可精确回放，但需从 zstd 文件读取。
 
+Dashboard 以非 root 用户读取归档；归档器将分区目录设为 `0755`、数据和 manifest 文件设为
+`0644`。这些归档只含公开行情状态，不含账户凭证；不要收紧这些权限，否则历史回放会因
+`PermissionError` 失败。
+
 部署带有归档读取器和数据库迁移的版本后，`cml-market-revision-archive.timer` 会自动
 执行有界归档。首次追赶历史积压可能需要多轮；每轮之后核对归档数量和数据库增长告警，
 不要通过增大批次上限绕过数据库负载约束。手动演练和执行仍可使用：

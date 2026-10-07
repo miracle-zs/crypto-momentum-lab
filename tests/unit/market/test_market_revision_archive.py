@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from datetime import UTC, datetime
 
 import pytest
@@ -26,11 +28,15 @@ def test_zstd_market_revision_archive_round_trip_and_manifest(tmp_path) -> None:
             "payload": {"schema_version": 1, "symbol": "BTCUSDT"},
         },
     ]
-    archive = write_market_revision_archive(
-        root=tmp_path,
-        partition="scope=live/date=2026-10-01/hour=00/window=00",
-        records=records,
-    )
+    previous_umask = os.umask(0o077)
+    try:
+        archive = write_market_revision_archive(
+            root=tmp_path,
+            partition="scope=live/date=2026-10-01/hour=00/window=00",
+            records=records,
+        )
+    finally:
+        os.umask(previous_umask)
 
     reader = ZstdMarketRevisionPayloadArchive(tmp_path)
     assert reader.load_payload(
@@ -41,7 +47,25 @@ def test_zstd_market_revision_archive_round_trip_and_manifest(tmp_path) -> None:
     ) == {"schema_version": 1, "symbol": "BTCUSDT"}
     assert archive.record_count == 2
     assert archive.compressed_bytes < archive.uncompressed_bytes
-    assert (tmp_path / f"{archive.relative_path}.manifest.json").is_file()
+    archive_path = tmp_path / archive.relative_path
+    manifest_path = tmp_path / f"{archive.relative_path}.manifest.json"
+    assert manifest_path.is_file()
+    assert stat.S_IMODE(archive_path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o644
+    directory = archive_path.parent
+    while directory != tmp_path:
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+        directory = directory.parent
+
+    archive_path.chmod(0o600)
+    manifest_path.chmod(0o600)
+    write_market_revision_archive(
+        root=tmp_path,
+        partition="scope=live/date=2026-10-01/hour=00/window=00",
+        records=records,
+    )
+    assert stat.S_IMODE(archive_path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o644
 
 
 def test_archive_reader_fails_closed_on_checksum_or_content_hash_mismatch(
