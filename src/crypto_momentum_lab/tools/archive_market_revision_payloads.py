@@ -9,9 +9,11 @@ PostgreSQL.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.state_codec import market_state_from_payload
 from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
     ZstdMarketRevisionPayloadArchive,
@@ -32,6 +35,34 @@ from crypto_momentum_lab.persistence.postgres.session import create_sync_engine
 _ARCHIVE_ADVISORY_LOCK = (601219, 15)
 _DEFAULT_ARCHIVE_ROOT = Path("/app/market-revision-archive")
 _BATCH_SIZE = 1000
+_LEGACY_V1_HASH_FIELDS = (
+    "schema_version",
+    "environment",
+    "exchange",
+    "symbol",
+    "bucket_start",
+    "bucket_end",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "trade_count",
+    "trade_notional",
+    "aggressive_buy_notional",
+    "aggressive_sell_notional",
+    "last_bid_price",
+    "last_ask_price",
+    "spread",
+    "midpoint",
+    "liquidation_count",
+    "liquidation_notional",
+    "mark_price",
+    "closed_kline_count",
+    "source_event_count",
+    "data_complete",
+    "missing_agg_trade_count",
+    "is_backfill",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +78,41 @@ class _Partition:
     @property
     def end(self) -> datetime:
         return self.start + timedelta(minutes=15)
+
+
+def _market_state_hash_scheme(
+    state: MarketState15s,
+    expected_hash: str,
+) -> str:
+    """Match current hashes or the original v1 revision hash contract."""
+    current_hash = compute_market_state_hash(state)
+    if current_hash == expected_hash:
+        return "current"
+
+    legacy_payload: dict[str, object] = {}
+    for name in _LEGACY_V1_HASH_FIELDS:
+        value = getattr(state, name)
+        if isinstance(value, Decimal):
+            legacy_payload[name] = str(value)
+        elif isinstance(value, datetime):
+            legacy_payload[name] = value.isoformat()
+        else:
+            legacy_payload[name] = value
+    legacy_hash = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if legacy_hash == expected_hash:
+        return "legacy_v1"
+
+    raise RuntimeError(
+        "market revision payload hash mismatch: "
+        f"stored={expected_hash}, current={current_hash}, "
+        f"legacy_v1={legacy_hash}"
+    )
 
 
 def _partition_expressions() -> tuple[Any, Any]:
@@ -138,17 +204,14 @@ def _archive_batch(
     rows: list[MarketRevisionRefRow],
 ) -> dict[str, object]:
     records: list[dict[str, object]] = []
+    hash_scheme_counts = {"current": 0, "legacy_v1": 0}
     for row in rows:
         if row.payload is None:
             raise RuntimeError(f"revision {row.revision_id} has no database payload")
         payload = dict(row.payload)
         state = market_state_from_payload(payload)
-        actual_hash = compute_market_state_hash(state)
-        if actual_hash != row.content_hash:
-            raise RuntimeError(
-                f"revision {row.revision_id} payload hash mismatch: "
-                f"database={row.content_hash}, payload={actual_hash}"
-            )
+        hash_scheme = _market_state_hash_scheme(state, row.content_hash)
+        hash_scheme_counts[hash_scheme] += 1
         records.append(
             {
                 "revision_id": row.revision_id,
@@ -223,6 +286,7 @@ def _archive_batch(
         "archive_sha256": archive.sha256,
         "compressed_bytes": archive.compressed_bytes,
         "uncompressed_bytes": archive.uncompressed_bytes,
+        "content_hash_schemes": hash_scheme_counts,
     }
 
 
@@ -357,10 +421,7 @@ def restore_market_revision_payloads(
                 expected_content_hash=row.content_hash,
             )
             state = market_state_from_payload(payload)
-            if compute_market_state_hash(state) != row.content_hash:
-                raise RuntimeError(
-                    f"revision {row.revision_id} payload hash mismatch during restore"
-                )
+            _market_state_hash_scheme(state, row.content_hash)
             payloads[row.revision_id] = payload
             pointers[row.revision_id] = (
                 row.payload_archive_path,

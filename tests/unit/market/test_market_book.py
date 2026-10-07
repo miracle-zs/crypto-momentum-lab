@@ -8,6 +8,8 @@ Tests:
 5. Canonical pointer movement and immutable old revision readability.
 """
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -22,6 +24,9 @@ from crypto_momentum_lab.domain.market.market_book import (
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import MarketVisibilityMode
+from crypto_momentum_lab.tools.archive_market_revision_payloads import (
+    _market_state_hash_scheme,
+)
 
 
 def _create_sample_state(
@@ -77,6 +82,62 @@ def test_deterministic_market_state_hash() -> None:
 
     assert h1 == h2, "Identical states must produce identical hashes"
     assert h1 != h3, "Different close prices must produce different hashes"
+
+
+def test_archive_hash_validation_accepts_historical_revision_hash() -> None:
+    state = _create_sample_state(
+        bucket_start=datetime(2026, 9, 25, 12, 15, tzinfo=UTC)
+    )
+    historical_fields = (
+        "schema_version",
+        "environment",
+        "exchange",
+        "symbol",
+        "bucket_start",
+        "bucket_end",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "trade_count",
+        "trade_notional",
+        "aggressive_buy_notional",
+        "aggressive_sell_notional",
+        "last_bid_price",
+        "last_ask_price",
+        "spread",
+        "midpoint",
+        "liquidation_count",
+        "liquidation_notional",
+        "mark_price",
+        "closed_kline_count",
+        "source_event_count",
+        "data_complete",
+        "missing_agg_trade_count",
+        "is_backfill",
+    )
+    historical_payload = {}
+    for name in historical_fields:
+        value = getattr(state, name)
+        if isinstance(value, Decimal):
+            value = str(value)
+        elif isinstance(value, datetime):
+            value = value.isoformat()
+        historical_payload[name] = value
+    historical_hash = hashlib.sha256(
+        json.dumps(
+            historical_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert _market_state_hash_scheme(state, historical_hash) == "legacy_v1"
+    assert _market_state_hash_scheme(
+        state, compute_market_state_hash(state)
+    ) == "current"
+    with pytest.raises(RuntimeError, match="payload hash mismatch"):
+        _market_state_hash_scheme(state, "0" * 64)
 
 
 def test_market_book_publish_idempotency() -> None:

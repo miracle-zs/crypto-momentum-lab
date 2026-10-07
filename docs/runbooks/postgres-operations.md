@@ -75,7 +75,8 @@ DELETE 后文件不立即缩小：普通 VACUUM 回收可复用页，VACUUM (ANA
 `market_revision_refs` 的市场状态 payload 可单独移入 JSONL + zstd 归档；PostgreSQL
 保留 revision 身份、canonical 标记、时间和哈希，历史回放通过归档读取。归档文件按
 内容寻址，伴随 manifest，并在数据库更新指针前校验压缩文件哈希、解压和行数。默认只
-演练；必须显式传 `--apply` 才会把 payload 替换为归档指针。生产 timer 每小时最多归档
+演练；必须显式传 `--apply` 才会把 payload 替换为归档指针。payload 校验识别当前与历史 v1
+hash 规则，不重写 revision ID 或 content hash；两种规则均不匹配时仍拒绝归档。生产 timer 每小时最多归档
 20 批、每批最多 10,000 条，只把最近 1 天的 payload 留在 PostgreSQL；更老的 revision
 仍可精确回放，但需从 zstd 文件读取。
 
