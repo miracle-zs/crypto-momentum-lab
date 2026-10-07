@@ -127,6 +127,38 @@ manifest 或 `.jsonl.zst`。可以逐次提高 `--max-chunks`，观察数据库�
 和归档增长后再决定是否加定时任务。payload 变为 NULL 后，普通 VACUUM 只能让 PostgreSQL
 复用页面，不会立即把已分配文件空间还给操作系统；不要在实盘运行期间执行 `VACUUM FULL`。
 
+### 加速追赶历史市场版本
+
+`deploy/ops/catch_up_market_revisions.py` 在服务器上连续执行有界归档轮次，默认每轮最多
+20 批、每批 10,000 条，轮次之间暂停 30 秒；复用 Compose 的 0.5 CPU / 512 MiB
+归档器限制。默认只检查，不写入；启用执行时默认最多运行 6 小时、200 轮。
+
+```bash
+python3 deploy/ops/catch_up_market_revisions.py
+python3 deploy/ops/catch_up_market_revisions.py --apply --max-rounds 1
+```
+
+每轮前检查所有当前已部署的核心服务、活动/待确认告警（允许现有数据库增长告警）、
+监控新鲜度、磁盘余量、系统负载、内存/IO PSI、数据库锁等待和长期事务。死行达到
+100,000 条时等待 autovacuum；最低磁盘余量为 8 GiB。检查失败或压力升高时暂停，
+不重启服务、不提高资源上限、不清空告警。运行日志为 JSON，每轮包含条数、耗时和暂停原因。
+
+确认一轮成功后可启动一次性后台任务：
+
+```bash
+systemd-run --unit=cml-market-revision-catchup \
+  --property=Type=exec --property=Nice=10 --property=IOSchedulingClass=idle \
+  --property=KillMode=process --property=TimeoutStopSec=60 \
+  /usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/catch_up_market_revisions.py --apply
+journalctl -u cml-market-revision-catchup.service -f
+systemctl stop cml-market-revision-catchup.service
+```
+
+任务与定时归档/部署共用 Git 目录中的部署锁，每轮后释放；另有独占追赶锁防止重复启动。
+停止时只终止本轮创建的归档容器，已提交归档保持可读。没有待归档数据时输出
+`completed` 并退出；达到时间/轮次上限只表示本轮运行结束，可再次启动，不表示已追赶完成。
+归档单轮失败则退出报错。小时归档 timer 保持原配置。
+
 ### 行情版本回收
 
 `cml-market-revision-purge.timer` 每天 03:35（Asia/Shanghai）执行一次有
