@@ -1528,6 +1528,12 @@ class MarketRevisionRefRow(Base):
             "bucket_start",
             "is_canonical",
         ),
+        Index(
+            "ix_market_revision_refs_noncanonical_published",
+            "published_at",
+            "revision_id",
+            postgresql_where=text("is_canonical = false"),
+        ),
     )
 
 
@@ -1586,6 +1592,15 @@ class DecisionTraceRow(Base):
             "strategy_name",
             "account_label",
             "decision_time",
+        ),
+        Index(
+            "ix_decision_traces_uncompacted_normal_hold",
+            "created_at",
+            "decision_id",
+            postgresql_where=text(
+                "rejection_reason = 'holding_position_no_exit' "
+                "AND coalesce(trace_payload ->> 'evidence_level', '') <> 'summary'"
+            ),
         ),
     )
 

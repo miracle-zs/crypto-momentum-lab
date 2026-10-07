@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from crypto_momentum_lab.tools.compact_normal_hold_evidence import (
+    build_revision_purge_candidate_sql,
     build_summary_payload,
 )
 
@@ -40,3 +41,27 @@ def test_build_summary_payload_preserves_identity_and_digests() -> None:
         "outcome": "holding_position_no_exit",
         "market_refs": refs,
     }
+
+
+def test_revision_purge_query_keeps_live_full_evidence_and_honours_age_cutoff() -> None:
+    sql = build_revision_purge_candidate_sql(
+        batch_size_parameter="$2",
+        older_than_parameter="$1",
+    )
+
+    assert "revisions.published_at < $1" in sql
+    assert "LIMIT $2" in sql
+    assert "protected.revision_id IS NULL" in sql
+    assert "FROM decision_traces AS traces" in sql
+    assert "traces.evaluated_revision_ids ? revisions.revision_id" in sql
+    assert "FROM dataset_manifests AS manifests" in sql
+    assert "manifests.revision_ids ? revisions.revision_id" in sql
+
+
+def test_revision_purge_count_query_can_omit_the_batch_limit() -> None:
+    sql = build_revision_purge_candidate_sql(
+        batch_size_parameter=None,
+        older_than_parameter=None,
+    )
+
+    assert "LIMIT" not in sql

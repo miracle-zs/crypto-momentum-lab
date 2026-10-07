@@ -75,6 +75,7 @@ _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
 # The timer runs daily; 26h leaves room for one missed slot before alerting.
 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
+_DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 # How long after a container starts lifecycle alerts stay quiet.  Every deploy
@@ -1738,6 +1739,14 @@ class MonitorConfig:
     retention_timer_max_age_seconds: float = _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS
     # Empty means "the .service that the .timer activates".
     retention_service_unit: str = ""
+    # Revision purge is deliberately a separate timer from archival retention:
+    # its rows are safe to remove only when no durable full-evidence consumer
+    # still references them.  Empty disables the optional schedule check.
+    market_revision_purge_timer_unit: str = ""
+    market_revision_purge_timer_max_age_seconds: float = (
+        _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS
+    )
+    market_revision_purge_service_unit: str = ""
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     # ``None`` means a persistent sibling of state_path.  This keeps the
     # default durable on both the production host and local test hosts.
@@ -1812,6 +1821,10 @@ class OpsMonitor:
             raise ValueError("flapping_window_seconds must be positive")
         if config.retention_timer_max_age_seconds <= 0:
             raise ValueError("retention_timer_max_age_seconds must be positive")
+        if config.market_revision_purge_timer_max_age_seconds <= 0:
+            raise ValueError(
+                "market_revision_purge_timer_max_age_seconds must be positive"
+            )
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -1854,7 +1867,14 @@ class OpsMonitor:
 
     def _retention_schedule_state(self) -> RetentionScheduleState | None:
         """Observe the cold-data retention schedule, not just its output."""
-        unit = self._config.retention_timer_unit
+        return self._schedule_state(
+            self._config.retention_timer_unit,
+            self._config.retention_service_unit,
+        )
+
+    def _schedule_state(
+        self, unit: str, configured_service_unit: str
+    ) -> RetentionScheduleState | None:
         if not unit.strip():
             return None
         timer = read_systemd_unit_state(
@@ -1864,7 +1884,7 @@ class OpsMonitor:
         )
         if timer is None:
             return None
-        service_unit = self._config.retention_service_unit or _service_unit_for(unit)
+        service_unit = configured_service_unit or _service_unit_for(unit)
         service = (
             read_systemd_unit_state(
                 service_unit,
@@ -1875,6 +1895,12 @@ class OpsMonitor:
             else None
         )
         return RetentionScheduleState(timer=timer, service=service)
+
+    def _market_revision_purge_schedule_state(self) -> RetentionScheduleState | None:
+        return self._schedule_state(
+            self._config.market_revision_purge_timer_unit,
+            self._config.market_revision_purge_service_unit,
+        )
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
@@ -1956,6 +1982,15 @@ class OpsMonitor:
                 self._retention_schedule_state(),
                 now=now,
                 max_age_seconds=self._config.retention_timer_max_age_seconds,
+            )
+        )
+        alerts.extend(
+            evaluate_retention_timer(
+                self._market_revision_purge_schedule_state(),
+                now=now,
+                max_age_seconds=(
+                    self._config.market_revision_purge_timer_max_age_seconds
+                ),
             )
         )
         alerts.extend(evaluate_log_signals(combined_signals))
@@ -5310,6 +5345,18 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             )
         ),
         retention_service_unit=getattr(args, "retention_service_unit", ""),
+        market_revision_purge_timer_unit=os.environ.get(
+            "CML_MARKET_REVISION_PURGE_TIMER_UNIT", ""
+        ),
+        market_revision_purge_timer_max_age_seconds=float(
+            os.environ.get(
+                "CML_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS",
+                _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS,
+            )
+        ),
+        market_revision_purge_service_unit=os.environ.get(
+            "CML_MARKET_REVISION_PURGE_SERVICE_UNIT", ""
+        ),
         rss_critical_fraction=args.rss_critical_fraction,
         rss_growth_bytes=args.rss_growth_bytes,
         rss_growth_window_seconds=args.rss_growth_window_seconds,

@@ -471,6 +471,7 @@ live_changed=0
 execution_account_changed=0
 strategy_changed=0
 ops_monitor_changed=0
+market_revision_purge_changed=0
 recovery_run=0
 resume_from_phase=""
 changed_files="$(git diff --name-only "$deployment_base_commit" "$target_commit")"
@@ -565,6 +566,10 @@ while IFS= read -r changed_path; do
     deploy/ops/cml-ops-monitor.service)
       ops_monitor_changed=1
       ;;
+    deploy/ops/cml-market-revision-purge.service|\
+    deploy/ops/cml-market-revision-purge.timer)
+      market_revision_purge_changed=1
+      ;;
     *)
       ;;
   esac
@@ -588,6 +593,24 @@ restart_ops_monitor_if_changed() {
   systemctl restart cml-ops-monitor.service
   systemctl is-active --quiet cml-ops-monitor.service
   echo "ops_monitor_restarted=1 started_at=$(systemctl show cml-ops-monitor.service -p ExecMainStartTimestamp --value)"
+}
+
+install_market_revision_purge_timer_if_changed() {
+  if [[ "$market_revision_purge_changed" != 1 ]]; then
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "market revision purge timer changed but systemctl is unavailable" >&2
+    return 69
+  fi
+  install -m 0644 deploy/ops/cml-market-revision-purge.service \
+    /etc/systemd/system/cml-market-revision-purge.service
+  install -m 0644 deploy/ops/cml-market-revision-purge.timer \
+    /etc/systemd/system/cml-market-revision-purge.timer
+  systemctl daemon-reload
+  systemctl enable --now cml-market-revision-purge.timer
+  systemctl is-active --quiet cml-market-revision-purge.timer
+  echo "market_revision_purge_timer_enabled=1"
 }
 
 # If the previous attempt reached the target checkout but failed before all
@@ -652,6 +675,7 @@ fi
 # The monitor runs directly from this checkout, outside Compose.  Its process
 # does not observe a Git update until it is restarted, so handle it before any
 # no-runtime-change early return below.
+install_market_revision_purge_timer_if_changed
 restart_ops_monitor_if_changed
 
 if [[ "${dashboard_only:-0}" == 1 ]]; then

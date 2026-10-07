@@ -70,6 +70,25 @@ python3 deploy/ops/archive_and_trim.py --dry-run --retention-days 7
 
 DELETE 后文件不立即缩小：普通 VACUUM 回收可复用页，VACUUM (ANALYZE) 更新统计；VACUUM FULL/重写需要维护窗口和强锁，不在交易繁忙时执行。删数据也不保证 RSS 下降，区分共享缓冲、文件缓存和匿名内存。
 
+### 行情版本回收
+
+`cml-market-revision-purge.timer` 每天 03:35（Asia/Shanghai）执行一次有
+边界的回收。它只处理满足以下全部条件的 revision：
+
+- 非 canonical；
+- 发布时间至少早于 72 小时；
+- 不被任何完整 `decision_traces` 或 `dataset_manifests` 引用。
+
+每次最多删除 10,000 条、每批 500 条；删除前会再次检查实时引用。任务仅回收
+逻辑行，普通 VACUUM 后空间可复用；若需将空间还给文件系统，仍须安排
+`VACUUM FULL` 维护窗口。
+
+```bash
+systemctl status cml-market-revision-purge.timer --no-pager
+systemctl status cml-market-revision-purge.service --no-pager
+journalctl -u cml-market-revision-purge.service -n 100 --no-pager
+```
+
 ## 参数与维护
 
 服务器 Compose 设置 shm_size 256m，避免维护时默认 64 MiB 共享内存不足；已限制并行维护。检查磁盘空间与 /dev/shm，不因 No space left on device 就认定数据盘满。

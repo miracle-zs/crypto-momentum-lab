@@ -1,0 +1,21 @@
+[Unit]
+Description=Crypto Momentum Lab bounded market revision purge
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+# Keep canonical revisions and all revisions still referenced by complete
+# decision evidence or dataset manifests.  The 72-hour grace window prevents
+# a new write from racing its revision's cleanup; the tool rechecks references
+# immediately before every batch delete as a second guard.
+ExecStart=/usr/bin/flock -n -E 0 /run/lock/cml-market-revision-purge.lock /usr/bin/docker exec crypto-momentum-lab-dashboard-1 python -m crypto_momentum_lab.tools.compact_normal_hold_evidence --apply --purge-unreferenced-revisions --purge-only --minimum-revision-age-hours 72 --max-purge-count 10000 --batch-size 500 --lock-timeout-seconds 5
+TimeoutStartSec=20m
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+# No [Install]: the timer drives this unit.

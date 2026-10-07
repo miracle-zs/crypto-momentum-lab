@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
@@ -27,6 +28,49 @@ from crypto_momentum_lab.config import resolve_database_url
 
 _NORMAL_HOLD_OUTCOME = "holding_position_no_exit"
 _SUMMARY_LEVEL = "summary"
+
+
+def build_revision_purge_candidate_sql(
+    *,
+    batch_size_parameter: str | None,
+    older_than_parameter: str | None,
+) -> str:
+    """Select one bounded, still-unreferenced non-canonical revision batch.
+
+    The temporary protected set makes the usual path cheap.  The two live
+    anti-joins are deliberately repeated at deletion time: a new full trace or
+    manifest can arrive after that snapshot was built, and must win over space
+    reclamation.
+    """
+    older_than = (
+        f"AND revisions.published_at < {older_than_parameter}"
+        if older_than_parameter is not None
+        else ""
+    )
+    limit = f"LIMIT {batch_size_parameter}" if batch_size_parameter is not None else ""
+    return f"""
+        SELECT revisions.revision_id
+        FROM market_revision_refs AS revisions
+        LEFT JOIN protected_market_revision_ids AS protected
+          ON protected.revision_id = revisions.revision_id
+        WHERE revisions.is_canonical = false
+          AND protected.revision_id IS NULL
+          {older_than}
+          AND NOT EXISTS (
+              SELECT 1
+              FROM decision_traces AS traces
+              WHERE coalesce(traces.trace_payload ->> 'evidence_level', '')
+                    <> 'summary'
+                AND traces.evaluated_revision_ids ? revisions.revision_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dataset_manifests AS manifests
+              WHERE manifests.revision_ids ? revisions.revision_id
+          )
+        ORDER BY revisions.published_at, revisions.revision_id
+        {limit}
+    """
 
 
 def build_summary_payload(
@@ -165,9 +209,19 @@ def _summary_ref_from_row(row: asyncpg.Record) -> dict[str, str]:
 
 
 async def purge_unreferenced_revisions(
-    connection: asyncpg.Connection[Any], *, batch_size: int, dry_run: bool
+    connection: asyncpg.Connection[Any],
+    *,
+    batch_size: int,
+    dry_run: bool,
+    minimum_revision_age_hours: int | None,
+    max_purge_count: int | None,
 ) -> int:
-    """Remove only non-canonical revisions not needed by full evidence."""
+    """Remove only bounded old revisions not needed by durable full evidence."""
+    purge_before = (
+        datetime.now(UTC) - timedelta(hours=minimum_revision_age_hours)
+        if minimum_revision_age_hours is not None
+        else None
+    )
     await connection.execute(
         """
         CREATE TEMP TABLE protected_market_revision_ids (
@@ -192,39 +246,41 @@ async def purge_unreferenced_revisions(
         """
     )
 
+    candidate_sql = build_revision_purge_candidate_sql(
+        batch_size_parameter="$2" if purge_before is not None else "$1",
+        older_than_parameter="$1" if purge_before is not None else None,
+    )
     if dry_run:
-        return int(
-            await connection.fetchval(
-                """
-                SELECT count(*)
-                FROM market_revision_refs AS revisions
-                LEFT JOIN protected_market_revision_ids AS protected
-                  ON protected.revision_id = revisions.revision_id
-                WHERE revisions.is_canonical = false
-                  AND protected.revision_id IS NULL
-                """
-            )
-            or 0
-        )
+        count_sql = "SELECT count(*) FROM (" + build_revision_purge_candidate_sql(
+            batch_size_parameter=None,
+            older_than_parameter="$1" if purge_before is not None else None,
+        ) + ") AS candidates"
+        count_parameters: list[object] = []
+        if purge_before is not None:
+            count_parameters.append(purge_before)
+        return int(await connection.fetchval(count_sql, *count_parameters) or 0)
 
     deleted = 0
     while True:
+        remaining = (
+            None if max_purge_count is None else max_purge_count - deleted
+        )
+        if remaining is not None and remaining <= 0:
+            break
+        effective_batch_size = min(batch_size, remaining or batch_size)
+        delete_parameters: list[object] = [effective_batch_size]
+        if purge_before is not None:
+            delete_parameters.insert(0, purge_before)
         result = await connection.execute(
-            """
+            f"""
             WITH doomed AS (
-                SELECT revisions.ctid
-                FROM market_revision_refs AS revisions
-                LEFT JOIN protected_market_revision_ids AS protected
-                  ON protected.revision_id = revisions.revision_id
-                WHERE revisions.is_canonical = false
-                  AND protected.revision_id IS NULL
-                LIMIT $1
+                {candidate_sql}
             )
             DELETE FROM market_revision_refs AS revisions
             USING doomed
-            WHERE revisions.ctid = doomed.ctid
+            WHERE revisions.revision_id = doomed.revision_id
             """,
-            batch_size,
+            *delete_parameters,
         )
         batch = int(result.rsplit(" ", 1)[-1])
         deleted += batch
@@ -248,20 +304,40 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError("database URL must be provided or configured")
     connection = await asyncpg.connect(_database_url(database_url))
     try:
-        compacted = await compact_normal_hold_evidence(
-            connection, batch_size=args.batch_size, dry_run=args.dry_run
+        await connection.execute(
+            f"SET lock_timeout = '{args.lock_timeout_seconds}s'"
         )
-        print(
-            f"{'would compact' if args.dry_run else 'compacted'} "
-            f"{compacted} normal-hold traces"
+        acquired = await connection.fetchval(
+            "SELECT pg_try_advisory_lock(hashtext($1))",
+            "cml:compact_normal_hold_evidence",
         )
-        if args.purge_unreferenced_revisions:
-            purged = await purge_unreferenced_revisions(
-                connection, batch_size=args.batch_size, dry_run=args.dry_run
-            )
-            print(
-                f"{'would consider' if args.dry_run else 'purged'} "
-                f"{purged} non-canonical market revisions"
+        if not acquired:
+            raise RuntimeError("another trace compaction or revision purge is running")
+        try:
+            if not args.purge_only:
+                compacted = await compact_normal_hold_evidence(
+                    connection, batch_size=args.batch_size, dry_run=args.dry_run
+                )
+                print(
+                    f"{'would compact' if args.dry_run else 'compacted'} "
+                    f"{compacted} normal-hold traces"
+                )
+            if args.purge_unreferenced_revisions:
+                purged = await purge_unreferenced_revisions(
+                    connection,
+                    batch_size=args.batch_size,
+                    dry_run=args.dry_run,
+                    minimum_revision_age_hours=args.minimum_revision_age_hours,
+                    max_purge_count=args.max_purge_count,
+                )
+                print(
+                    f"{'would consider' if args.dry_run else 'purged'} "
+                    f"{purged} non-canonical market revisions"
+                )
+        finally:
+            await connection.execute(
+                "SELECT pg_advisory_unlock(hashtext($1))",
+                "cml:compact_normal_hold_evidence",
             )
     finally:
         await connection.close()
@@ -272,6 +348,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--batch-size", type=int, default=200)
+    parser.add_argument(
+        "--minimum-revision-age-hours",
+        type=int,
+        default=None,
+        help="only purge revisions published at least this many hours ago",
+    )
+    parser.add_argument(
+        "--max-purge-count",
+        type=int,
+        default=None,
+        help="stop after this many revision deletes (default: no additional cap)",
+    )
+    parser.add_argument(
+        "--lock-timeout-seconds",
+        type=int,
+        default=5,
+        help="fail instead of waiting behind a conflicting database lock",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--apply",
@@ -279,15 +373,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="irreversibly replace complete normal-hold evidence with summaries",
     )
     parser.add_argument("--purge-unreferenced-revisions", action="store_true")
+    parser.add_argument(
+        "--purge-only",
+        action="store_true",
+        help="skip trace compaction; requires --purge-unreferenced-revisions",
+    )
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.batch_size > 1_000:
         parser.error("--batch-size must be between 1 and 1000")
+    if (
+        args.minimum_revision_age_hours is not None
+        and args.minimum_revision_age_hours < 1
+    ):
+        parser.error("--minimum-revision-age-hours must be at least 1")
+    if args.max_purge_count is not None and args.max_purge_count < 1:
+        parser.error("--max-purge-count must be at least 1")
+    if args.lock_timeout_seconds < 1:
+        parser.error("--lock-timeout-seconds must be at least 1")
     if not args.dry_run and not args.apply:
         parser.error(
             "destructive mode requires --apply; use --dry-run to inspect only"
         )
     if args.purge_unreferenced_revisions and not args.apply and not args.dry_run:
         parser.error("--purge-unreferenced-revisions requires --apply")
+    if args.purge_only and not args.purge_unreferenced_revisions:
+        parser.error("--purge-only requires --purge-unreferenced-revisions")
     return asyncio.run(_run(args))
 
 
