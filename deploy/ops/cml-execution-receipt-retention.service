@@ -1,0 +1,18 @@
+[Unit]
+Description=Crypto Momentum Lab fenced execution receipt zstd reclamation
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+# Install only after the controlled 0053 migration and all writers have upgraded.
+# A held deployment lock skips the run; Docker inherits the existing 0.5 CPU/512 MiB budget.
+ExecStart=/usr/bin/flock -n -E 0 /opt/crypto-momentum-lab/.git/cml-deploy.lock /usr/bin/docker compose --env-file .env.server -f compose.server.yaml -f compose.live.accounts.yaml --profile maintenance run -T --rm --no-deps --entrypoint python -v /var/lib/crypto-momentum-lab/table-archive/execution_receipts:/app/execution-receipts market-revision-archiver -m crypto_momentum_lab.tools.archive_execution_receipts --archive-root /app/execution-receipts --minimum-age-hours 72 --batch-size 500 --max-scopes 50 --max-runtime-seconds 45 --apply
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true

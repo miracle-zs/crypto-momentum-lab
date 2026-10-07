@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly bounded retired execution receipt reclamation
+
+[Timer]
+OnCalendar=*-*-* *:35:00
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
