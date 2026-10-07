@@ -309,6 +309,72 @@ def test_order_response_uses_cumulative_quote_for_zero_average(
     assert data["avgPrice"] == average
 
 
+def test_order_response_recovers_missing_average_from_cumulative_quote():
+    result = order_snapshot_from_response(
+        {
+            "clientOrderId": "entry",
+            "orderId": 42,
+            "status": "FILLED",
+            "executedQty": "2",
+            "cumQuote": "10",
+        },
+        observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+
+    assert result.executed_quantity == Decimal("2")
+    assert result.average_price == Decimal("5")
+
+
+@pytest.mark.parametrize("quote", [None, "0", "-1"])
+def test_order_response_rejects_missing_average_without_positive_cumulative_quote(
+    quote,
+):
+    data = {
+        "clientOrderId": "entry",
+        "orderId": 42,
+        "status": "FILLED",
+        "executedQty": "2",
+    }
+    if quote is not None:
+        data["cumQuote"] = quote
+
+    with pytest.raises(ValueError, match="cumQuote"):
+        order_snapshot_from_response(
+            data,
+            observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+
+
+def test_order_response_accepts_missing_average_when_nothing_filled():
+    result = order_snapshot_from_response(
+        {
+            "clientOrderId": "entry",
+            "orderId": 42,
+            "status": "NEW",
+            "executedQty": "0",
+        },
+        observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+
+    assert result.executed_quantity == result.average_price == Decimal("0")
+
+
+@pytest.mark.parametrize("value", [None, 30000.0])
+def test_order_response_keeps_present_average_price_string_strict(value):
+    with pytest.raises(ValueError, match="avgPrice"):
+        order_snapshot_from_response(
+            {
+                "clientOrderId": "entry",
+                "orderId": 42,
+                "status": "FILLED",
+                "executedQty": "2",
+                "avgPrice": value,
+                "cumQuote": "10",
+            },
+            observed_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+
+
 def test_order_response_accepts_zero_fill_cancellation_without_average_price():
     """Binance omits avgPrice when cancelling an unfilled limit order."""
 
@@ -334,7 +400,7 @@ def test_order_response_accepts_zero_fill_cancellation_without_average_price():
 
 @pytest.mark.parametrize(
     "field",
-    ["clientOrderId", "orderId", "status", "executedQty", "avgPrice"],
+    ["clientOrderId", "orderId", "status", "executedQty"],
 )
 def test_order_response_rejects_missing_exchange_facts(field):
     data = {

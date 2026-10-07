@@ -13,7 +13,6 @@ from crypto_momentum_lab.domain.account.models import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
-    ExchangeOrderState,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.order_status import (
@@ -155,17 +154,14 @@ def order_snapshot_from_response(
 ) -> ExchangeOrderSnapshot:
     state = exchange_order_state(rest_require_string(data, "status"))
     executed_quantity = decimal_value(rest_require_string(data, "executedQty"))
-    raw_average_price = data.get("avgPrice")
-    if raw_average_price is None:
-        # Binance's cancel response for an entirely unfilled limit order omits
-        # avgPrice.  There is no execution price to preserve in that terminal
-        # state, so represent it exactly as zero rather than rejecting a valid
-        # response.  Every other response remains schema-strict below.
-        if state is not ExchangeOrderState.CANCELED or executed_quantity != 0:
-            average_price = decimal_value(rest_require_string(data, "avgPrice"))
-        else:
-            average_price = Decimal("0")
+    average_price_missing = "avgPrice" not in data
+    if average_price_missing:
+        # A missing average has no meaning for an order with no executions.
+        # For executed quantity, the cumulative quote below must establish it.
+        average_price = Decimal("0")
     else:
+        # A present null or non-string value is schema drift, not a missing
+        # field; keep the exchange response type strict.
         average_price = decimal_value(rest_require_string(data, "avgPrice"))
     if executed_quantity > Decimal("0") and average_price == Decimal("0"):
         cum_quote = decimal_value(rest_require_string(data, "cumQuote"))
@@ -173,6 +169,11 @@ def order_snapshot_from_response(
             raise ValueError("Binance order response cumQuote must be non-negative")
         if cum_quote > Decimal("0"):
             average_price = cum_quote / executed_quantity
+        elif average_price_missing:
+            raise ValueError(
+                "Binance order response cumQuote must be positive when avgPrice "
+                "is missing for an executed order"
+            )
     return ExchangeOrderSnapshot(
         client_order_id=rest_require_string(data, "clientOrderId"),
         exchange_order_id=str(rest_require_int(data, "orderId")),

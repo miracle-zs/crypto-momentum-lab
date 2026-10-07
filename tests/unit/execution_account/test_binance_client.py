@@ -783,7 +783,10 @@ async def test_submit_order_reconciles_schema_drift_from_authoritative_query(
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
         if request.method == "GET":
-            assert request.url.params["origClientOrderId"] == _order_plan().client_order_id
+            assert (
+                request.url.params["origClientOrderId"]
+                == _order_plan().client_order_id
+            )
             return httpx.Response(
                 200,
                 json={
@@ -880,7 +883,10 @@ async def test_submit_order_keeps_unknown_outcome_when_schema_drift_cannot_query
         clock=lambda: datetime(2026, 7, 4, tzinfo=UTC),
     )
     try:
-        with pytest.raises(ExchangeSubmissionTimeoutError, match="response parsing failed"):
+        with pytest.raises(
+            ExchangeSubmissionTimeoutError,
+            match="response parsing failed",
+        ):
             await client.submit_order(_order_plan())
     finally:
         await client.aclose()
@@ -929,6 +935,45 @@ async def test_trade_client_submits_signed_binance_order() -> None:
     assert "positionSide=" not in captured_body
     assert "signature=" in captured_body
     assert snapshot.state is ExchangeOrderState.FILLED
+
+
+async def test_trade_client_recovers_missing_average_without_reconciliation() -> None:
+    requests: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "cumQuote": "90",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert snapshot.state is ExchangeOrderState.FILLED
+    assert snapshot.executed_quantity == Decimal("0.003")
+    assert snapshot.average_price == Decimal("30000")
+    assert requests == [("POST", "/fapi/v1/order")]
 
 
 async def test_trade_client_inspects_exit_order_and_current_position() -> None:
