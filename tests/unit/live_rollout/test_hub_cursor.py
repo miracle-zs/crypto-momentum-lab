@@ -104,7 +104,8 @@ def test_completed_new_stream_can_replace_old_stream_sequence():
     cursor.restore({"stream_id": "old", "sequence": 90})
     observed, state = batch(1, stream_id="new")
     cursor.observe_batch(observed)
-    assert cursor.snapshot() == {"stream_id": "old", "sequence": 90}
+    # The old cursor is not authoritative after a new epoch is observed.
+    assert cursor.snapshot() is None
     cursor.acknowledge_state(state)
     assert cursor.snapshot() == {"stream_id": "new", "sequence": 1}
 

@@ -10,6 +10,24 @@ from crypto_momentum_lab.live_rollout.control_plane import (
 NOW = datetime(2026, 9, 11, 6, 0, tzinfo=UTC)
 
 
+def test_epoch_reset_keeps_warmup_gate_closed_after_socket_reconnect() -> None:
+    gaps = []
+    runtime = LiveControlPlaneRuntime(
+        session_id="live-reset", context_provider=FakeContextProvider(),
+        market_state_available=True, strategy_warmup_ready=True,
+        notify_market_state_gap=gaps.append, refresh_entry_gate=lambda: None,
+    )
+    runtime.on_market_connection_change(False, "market_state_stream_reset")
+    assert not runtime.market_state_available
+    assert not runtime.strategy_warmup_ready
+    assert gaps == ["market_state_stream_reset"]
+    runtime.on_market_connection_change(True, None)
+    assert runtime.market_state_available
+    assert not runtime.strategy_warmup_ready
+    runtime.set_strategy_warmup_ready(True, reason="strategy_warmup_ready")
+    assert runtime.strategy_warmup_ready
+
+
 class FakeContextProvider:
     def __init__(self) -> None:
         self.account_updates: list[tuple[object, int, object]] = []

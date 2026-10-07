@@ -1,20 +1,18 @@
-
-from crypto_momentum_lab.domain.operational.retention_authority import (
-    InMemoryRetentionRepository,
-    RetentionAuthority,
-)
-
 """Unit tests for market data operational retention loop and consumer requirements."""
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from crypto_momentum_lab.apps.market_data.main import (
     _resolve_market_data_consumer_requirements,
     run_operational_database_retention_loop,
+)
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    InMemoryRetentionRepository,
+    RetentionAuthority,
 )
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
@@ -25,11 +23,11 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
 async def test_resolve_market_data_consumer_requirements_collects_watermarks() -> None:
     session = AsyncMock()
     session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
-    # First scalar call: StrategyRuntimeCheckpointRow.saved_at
-    # Second scalar call: AccountPositionSnapshotRow.observed_at
+    # Checkpoint watermark is read here; current position episodes are owned
+    # by the account repository, not an all-history non-zero snapshot minimum.
     checkpoint_time = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
     position_time = datetime(2026, 9, 20, 9, 30, tzinfo=UTC)
-    session.scalar.side_effect = [checkpoint_time, position_time]
+    session.scalar.return_value = checkpoint_time
 
     session_ctx = AsyncMock()
     session_ctx.__aenter__.return_value = session
@@ -37,7 +35,13 @@ async def test_resolve_market_data_consumer_requirements_collects_watermarks() -
 
     factory = MagicMock(return_value=session_ctx)
 
-    requirements = await _resolve_market_data_consumer_requirements(factory)
+    with patch(
+        "crypto_momentum_lab.apps.market_data.main.PostgresAccountRepository"
+    ) as accounts:
+        accounts.return_value.load_active_position_retention_watermark = AsyncMock(
+            return_value=position_time
+        )
+        requirements = await _resolve_market_data_consumer_requirements(factory)
 
     assert len(requirements) == 2
     assert requirements[0].consumer_id == "active_strategy_checkpoints"
@@ -111,6 +115,7 @@ async def test_market_data_retention_loop_passes_consumer_requirements() -> None
         reason="test requirement",
     )
     provider = AsyncMock(return_value=(req,))
+    storage = InMemoryRetentionRepository()
 
     loop_task = asyncio.create_task(
         run_operational_database_retention_loop(
@@ -118,7 +123,7 @@ async def test_market_data_retention_loop_passes_consumer_requirements() -> None
             interval_seconds=0.01,
             consumer_requirements_provider=provider,
             sleeper=lambda _: asyncio.sleep(0),
-            authority=RetentionAuthority(InMemoryRetentionRepository()),
+            authority=RetentionAuthority(storage),
         )
     )
 
@@ -132,4 +137,9 @@ async def test_market_data_retention_loop_passes_consumer_requirements() -> None
     assert repository.prune_contract_metadata.await_count > 0
     assert repository.prune_runtime_market_states.await_count > 0
     for call in repository.prune_contract_metadata.await_args_list:
-        assert call.kwargs["consumer_requirements"] == (req,)
+        assert call.kwargs["before"] == cutoff
+        assert "consumer_requirements" not in call.kwargs
+    assert all(plan.effective_cutoff == cutoff for plan in storage.plans.values())
+    assert all(
+        receipt.effective_cutoff == cutoff for receipt in storage.receipts.values()
+    )

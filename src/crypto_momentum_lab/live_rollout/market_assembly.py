@@ -246,6 +246,7 @@ def assemble_live_startup_market_buffer(
         on_connection_change=assembly.on_connection_change,
         on_batch=observe_batch,
         fail_on_replay_unavailable=True,
+        rewarm_on_stream_reset=True,
         preserve_sequence_on_overflow=True,
     )
     if hub_cursor_state.has_cursor:

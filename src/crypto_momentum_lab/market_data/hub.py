@@ -153,7 +153,9 @@ class _MarketStateQueueOverflow:
 _MarketStateQueueItem = MarketStateBatch | _MarketStateQueueOverflow | Exception
 
 
-async def _close_async_iterator(iterator: AsyncGenerator[MarketStateBatch, None]) -> None:
+async def _close_async_iterator(
+    iterator: AsyncGenerator[MarketStateBatch, None],
+) -> None:
     """Close an async iterator after a nested cancellation race settles."""
 
     for attempt in range(_ASYNC_GENERATOR_CLOSE_RETRIES):
@@ -577,6 +579,7 @@ class WebSocketMarketStateSource:
         on_batch: Callable[[MarketStateBatch], None] | None = None,
         on_cursor_change: Callable[[str, int], None] | None = None,
         fail_on_replay_unavailable: bool = False,
+        rewarm_on_stream_reset: bool = False,
         preserve_sequence_on_overflow: bool = False,
         client_receive_queue_size: int = _CLIENT_RECEIVE_QUEUE_SIZE,
         availability_clock: StreamAvailabilityClock | None = None,
@@ -589,6 +592,12 @@ class WebSocketMarketStateSource:
             raise ValueError("consumer_id must not be empty")
         if client_receive_queue_size <= 0:
             raise ValueError("client_receive_queue_size must be positive")
+        if rewarm_on_stream_reset and (
+            not fail_on_replay_unavailable or on_connection_change is None
+        ):
+            raise ValueError(
+                "stream reset rewarm requires strict replay and a recovery observer"
+            )
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
@@ -597,6 +606,7 @@ class WebSocketMarketStateSource:
         self._on_batch = on_batch
         self._on_cursor_change = on_cursor_change
         self._fail_on_replay_unavailable = fail_on_replay_unavailable
+        self._rewarm_on_stream_reset = rewarm_on_stream_reset
         self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
         self._client_receive_queue_size = client_receive_queue_size
         self._availability_clock = availability_clock
@@ -726,9 +736,22 @@ class WebSocketMarketStateSource:
                         and ready_stream_id is not None
                         and ready_stream_id != self._stream_id
                     )
-                    # Durable consumers must recover the interval between
-                    # stream epochs before accepting the new sequence origin.
-                    if stream_changed and self._fail_on_replay_unavailable:
+                    # Durable consumers normally require an exact epoch. The
+                    # live worker can instead validate per-symbol continuity,
+                    # recover durable buckets, or reset and rewarm its rolling
+                    # state. Publish unavailability BEFORE handing any new-epoch
+                    # states to that worker. This does not relax missing epochs,
+                    # same-epoch replay failures, or batch sequence validation.
+                    can_rewarm = (
+                        stream_changed
+                        and self._rewarm_on_stream_reset
+                        and ready.get("replay_available") is True
+                    )
+                    if (
+                        stream_changed
+                        and self._fail_on_replay_unavailable
+                        and not can_rewarm
+                    ):
                         raise MarketStateHubReplayUnavailable(
                             "market-state replay is unavailable: Hub stream reset",
                             requested_sequence=self._last_sequence,
@@ -742,6 +765,12 @@ class WebSocketMarketStateSource:
                             ),
                             stream_id=ready_stream_id,
                         )
+                    if can_rewarm:
+                        self._rewarm_required = True
+                        self._notify_connection_change(
+                            False, "market_state_stream_reset"
+                        )
+                        availability_clock.mark_recovering()
                     if (
                         ready_stream_id is not None
                         and ready_stream_id != self._stream_id

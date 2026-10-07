@@ -1,6 +1,7 @@
 """Control-plane callbacks shared by the live execution lanes.
 
-The account-event consumer runs independently from the market loop.  This module owns the small amount of state they publish into
+The account-event consumer runs independently from the market loop. This module
+owns the small amount of state they publish into
 the entry gate and the context providers, so the application composition root
 does not also become the owner of recovery semantics.
 """
@@ -164,6 +165,11 @@ class LiveControlPlaneRuntime:
             self._market_state_unavailable_reason = (
                 reason or "market_state_hub_unavailable"
             )
+            if reason == "market_state_stream_reset":
+                # Socket recovery is not strategy recovery. Do not reuse the
+                # previous epoch's warmup admission when the socket reopens.
+                self._strategy_warmup_ready = False
+                self._strategy_warmup_reason = "market_state_epoch_rewarming"
             # Any transition away from an available stream invalidates the
             # rolling strategy state.  A reconnect is safe only after the
             # source has replayed the exact cursor or the worker has rebuilt

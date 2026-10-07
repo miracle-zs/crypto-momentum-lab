@@ -316,6 +316,26 @@ def test_continuity_check_is_a_noop_without_a_watermark() -> None:
     )
 
 
+def test_hub_epoch_change_cannot_be_acknowledged_by_an_old_buffered_state() -> None:
+    at = datetime(2026, 10, 7, tzinfo=UTC)
+    old = SimpleNamespace(symbol="BTCUSDT", bucket_start=at)
+    new = SimpleNamespace(symbol="BTCUSDT", bucket_start=at)
+    cursor = LiveHubCursorState()
+    cursor.restore({"stream_id": "old", "sequence": 42})
+    for state, epoch, sequence in ((old, "old", 43), (new, "new", 1)):
+        cursor.observe_batch(MarketStateBatch(
+            sequence=sequence, published_at=at, environment="research",
+            states=(state,), stream_id=epoch,
+        ))
+    assert cursor.snapshot() is None
+    cursor.acknowledge_state(old)
+    assert cursor.snapshot() is None
+    cursor.acknowledge_state(new)
+    assert cursor.snapshot() == {"stream_id": "new", "sequence": 1}
+    cursor.acknowledge_state(old)
+    assert cursor.snapshot() == {"stream_id": "new", "sequence": 1}
+
+
 def test_hub_cursor_is_discarded_before_durable_market_rewarm() -> None:
     checkpoint = StrategyCheckpoint(
         last_processed_at_by_symbol={},

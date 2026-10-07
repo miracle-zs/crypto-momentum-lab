@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +20,126 @@ from crypto_momentum_lab.live_rollout.market_assembly import (
     build_live_market_state_stream,
 )
 from crypto_momentum_lab.live_rollout.runtime_session import ResourceOwnershipRegistry
+
+
+@pytest.mark.skipif(
+    os.environ.get("CML_RUN_HUB_NETWORK_TESTS") != "1",
+    reason="opt-in local loopback test",
+)
+@pytest.mark.asyncio
+async def test_live_buffer_survives_real_hub_process_epoch_replacement() -> None:
+    from urllib.parse import urlparse
+
+    from crypto_momentum_lab.market_data.hub import MarketStateHub, MarketStateHubConfig
+    from tests.unit.persistence.postgres.test_runtime_state_repository import (
+        fixture_state,
+    )
+
+    old_hub = MarketStateHub(MarketStateHubConfig(host="127.0.0.1", port=0))
+    await old_hub.start()
+    new_hub = MarketStateHub(
+        MarketStateHubConfig(host="127.0.0.1", port=urlparse(old_hub.url).port)
+    )
+    first, second = fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 2)
+    assembly = assemble_live_startup_market_buffer(
+        market_state_source="hub", market_state_hub_url=old_hub.url,
+        market_environment="research", session_id="network-reset",
+        hub_cursor_state=LiveHubCursorState(), max_states=10,
+    )
+    changes = []
+    connected = asyncio.Event()
+
+    def observe_connection(ready, reason):
+        changes.append((ready, reason))
+        if reason in {"market_state_replaying", "market_state_rewarming"}:
+            connected.set()
+
+    assembly.set_control_plane_listener(observe_connection)
+    iterator = assembly.buffer.stream()
+    producer = assembly.task
+    try:
+        async with asyncio.timeout(5):
+            await connected.wait()
+            await old_hub.publish((first,))
+            assert await anext(iterator) == first
+            connected.clear()
+            await old_hub.stop()
+            await new_hub.start()
+            await connected.wait()
+            await new_hub.publish((second,))
+            assert await anext(iterator) == second
+        assert assembly.task is producer
+        assert not producer.done()
+        assert (False, "market_state_stream_reset") in changes
+    finally:
+        assembly.hub_source.stop()
+        producer.cancel()
+        await asyncio.gather(producer, return_exceptions=True)
+        await iterator.aclose()
+        await old_hub.stop()
+        await new_hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_hub_epoch_reset_hands_states_to_continuity_recovery(monkeypatch):
+    import crypto_momentum_lab.market_data.hub as hub
+    from tests.unit.persistence.postgres.test_runtime_state_repository import (
+        fixture_state,
+    )
+
+    state = fixture_state("BTCUSDT", 0)
+    messages = [
+        json.dumps({
+            "type": "market_state_hub_ready", "environment": "research",
+            "stream_id": "new-epoch", "replay_available": True,
+            "oldest_sequence": 1, "latest_sequence": 1,
+        }),
+        hub.encode_market_state_batch(
+            (state,), sequence=1, published_at=state.bucket_end, stream_id="new-epoch"
+        ),
+    ]
+
+    class Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def send(self, _message):
+            pass
+
+        async def recv(self):
+            if messages:
+                return messages.pop(0)
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(hub, "connect", lambda *_args, **_kwargs: Connection())
+    cursor = LiveHubCursorState()
+    cursor.restore({"stream_id": "old-epoch", "sequence": 42})
+    changes = []
+    assembly = assemble_live_startup_market_buffer(
+        market_state_source="hub", market_state_hub_url="ws://unused",
+        market_environment="research", session_id="reset-test",
+        hub_cursor_state=cursor, max_states=10,
+    )
+    assembly.set_control_plane_listener(
+        lambda ready, reason: changes.append((ready, reason))
+    )
+    iterator = assembly.buffer.stream()
+    try:
+        async with asyncio.timeout(2):
+            assert await anext(iterator) == state
+        assert any(
+            not ready and reason == "market_state_stream_reset"
+            for ready, reason in changes
+        )
+        assert not assembly.task.done()
+    finally:
+        assembly.hub_source.stop()
+        assembly.task.cancel()
+        await asyncio.gather(assembly.task, return_exceptions=True)
+        await iterator.aclose()
 
 
 @pytest.mark.asyncio

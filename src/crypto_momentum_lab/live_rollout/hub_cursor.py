@@ -7,7 +7,6 @@ market consumption, checkpoint writes, database sessions or daemon lifecycle.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -70,8 +69,11 @@ class LiveHubCursorState:
     def __init__(self) -> None:
         self.stream_id: str | None = None
         self.sequence: int | None = None
-        self._batch_by_state: dict[tuple[str, datetime], tuple[str, int]] = {}
+        # A buffered old-epoch state can share a symbol/bucket with a replayed
+        # new-epoch state. Correlate the exact delivered object, not that key.
+        self._batch_by_state: dict[int, tuple[MarketState15s, tuple[str, int]]] = {}
         self._remaining_by_batch: dict[tuple[str, int], int] = {}
+        self._observed_stream_id: str | None = None
         # Symbols the publisher reported as newly entering the monitored pool.
         # Consumed on first report so one entry is announced exactly once.
         self._entered_symbols: frozenset[str] = frozenset()
@@ -97,10 +99,21 @@ class LiveHubCursorState:
             raise ValueError("hub cursor sequence must be a non-negative integer")
         self.stream_id = stream_id
         self.sequence = sequence
+        self._observed_stream_id = stream_id
 
     def observe_batch(self, batch: MarketStateBatch) -> None:
         if batch.stream_id is None:
             return
+        if (
+            self._observed_stream_id is not None
+            and batch.stream_id != self._observed_stream_id
+        ):
+            self.stream_id = None
+            self.sequence = None
+            self._batch_by_state.clear()
+            self._remaining_by_batch.clear()
+            self._entered_symbols = frozenset()
+        self._observed_stream_id = batch.stream_id
         if batch.entered_symbols:
             # Carried across batches so a symbol is still recognised as a fresh
             # entry even if its first bucket is not processed in this batch.
@@ -108,15 +121,13 @@ class LiveHubCursorState:
         batch_key = (batch.stream_id, batch.sequence)
         self._remaining_by_batch[batch_key] = len(batch.states)
         for state in batch.states:
-            self._batch_by_state[(state.symbol, state.bucket_start)] = batch_key
+            self._batch_by_state[id(state)] = (state, batch_key)
 
     def acknowledge_state(self, state: MarketState15s) -> None:
-        batch_key = self._batch_by_state.pop(
-            (state.symbol, state.bucket_start),
-            None,
-        )
-        if batch_key is None:
+        delivery = self._batch_by_state.pop(id(state), None)
+        if delivery is None:
             return
+        _delivered_state, batch_key = delivery
         remaining = self._remaining_by_batch.get(batch_key)
         if remaining is None:
             return

@@ -172,7 +172,10 @@ async def test_market_state_hub_metrics_keep_latest_bucket_start_monotonic() -> 
     assert hub.metrics.latest_bucket_start == newer.bucket_start
 
 
-async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) -> None:
+@pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
+async def test_batch_source_can_fail_closed_with_replay_metadata(
+    monkeypatch, rewarm_on_stream_reset,
+) -> None:
     messages = [
         json.dumps(
             {
@@ -211,6 +214,8 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) ->
         consumer_id="test-collector",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
         fail_on_replay_unavailable=True,
+        rewarm_on_stream_reset=rewarm_on_stream_reset,
+        on_connection_change=lambda *_args: None,
     )
     source.set_resume_cursor(stream_id="stream-a", sequence=5)
 
@@ -226,8 +231,9 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) ->
     assert raised.value.stream_id == "stream-a"
 
 
+@pytest.mark.parametrize("rewarm_on_stream_reset", [False, True])
 async def test_durable_market_state_source_requires_ready_stream_epoch(
-    monkeypatch,
+    monkeypatch, rewarm_on_stream_reset,
 ) -> None:
     messages = [
         json.dumps(
@@ -264,6 +270,8 @@ async def test_durable_market_state_source_requires_ready_stream_epoch(
         consumer_id="test-live",
         config=MarketStateHubConfig(reconnect_delays=(0,)),
         fail_on_replay_unavailable=True,
+        rewarm_on_stream_reset=rewarm_on_stream_reset,
+        on_connection_change=lambda *_args: None,
     )
     iterator = source.batches()
     try:
@@ -827,6 +835,10 @@ async def test_market_state_source_fails_closed_on_sequence_gap(monkeypatch) -> 
         config=MarketStateHubConfig(
             reconnect_delays=(0,),
             unavailable_timeout_seconds=0.000001,
+            # Only the disruption after a sequence gap gets the tiny budget;
+            # scheduler jitter must not fail the initial valid delivery.
+            startup_timeout_seconds=1,
+            recovery_timeout_seconds=1,
         ),
     )
     iterator = source.__aiter__()
