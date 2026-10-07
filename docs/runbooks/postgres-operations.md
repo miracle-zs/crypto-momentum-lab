@@ -54,6 +54,45 @@ CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE=10
 
 ## 归档与裁剪
 
+### 执行回执的安全回收（需单独受控上线）
+
+`archive_execution_receipts` 默认 dry-run，默认最小年龄 72 小时，每轮最多检查
+50 个已退役流、每流最多归档 500 条，硬上限每批 1,000 条、默认运行预算 45 秒，
+使用单连接维护池。这里只处理同一仓位
+已经完成 epoch 切换的旧流：切换事务同时写入永久 `execution_retired_streams`
+标记，旧 epoch 不能再次被采纳；回执被裁剪后，旧输入仍被拒绝。退役标记永不裁剪，
+不根据“不是当前 epoch”猜测历史流已退役，历史无标记的流也不自动补标记。
+
+活动流、无序号回执、真实成交身份、累计成交水位、恢复检查点与退出 outbox 都不删除。
+归档采用同机 JSONL + zstd，数据文件和 manifest 原子落盘并 fsync、读回验证；
+文件 IO 不持有实盘仓位锁。删除前再次以非等待锁核对退役标记、当前状态头和整批
+内容，任何缺失、变化或错误都会保留数据库记录。归档成功但数据库提交失败时可能
+留下未引用归档文件，安全重试即可，不自动删除这些文件。
+
+`durable_policy_commits` 仍永久保留决策 ID、policy key、revision、时间和完整
+`commit_digest`。该摘要已包含前后状态摘要、决策输入、依赖与退出命令，因此删除
+两列重复的状态摘要不会丢失相同决策的重试或冲突检测。它不是按日期删去重身份，
+也不宣称表大小能停止增长。删列不立即释放已分配磁盘空间，不为此在线重写表。
+
+迁移 `20261007_0053` 不兼容旧应用且不能安全直接降级。部署脚本会拒绝在线
+`--live` 切换，也拒绝不带 `--live`、但旧应用容器仍运行的迁移。先确认维护窗口、
+保存可恢复备份，停妥应用消费者，再迁移并统一切换所有写入者；不能混跑旧写入者
+后启动回收。当前不自动安装或启用新的回收 timer。
+
+受控上线后可复用现有维护归档器的 **0.5 CPU / 512 MiB** 上限，只增加本任务的
+归档挂载；同机归档不是异机备份。先演练并核对结果，再单独加 `--apply`：
+
+```bash
+docker compose --env-file .env.server -f compose.server.yaml --profile maintenance \
+  run --rm --no-deps --entrypoint python \
+  -v /var/lib/crypto-momentum-lab/table-archive/execution_receipts:/app/execution-receipts \
+  market-revision-archiver -m crypto_momentum_lab.tools.archive_execution_receipts \
+  --archive-root /app/execution-receipts --minimum-age-hours 72 --batch-size 500
+```
+
+`round_completed` 只表示一轮结束，不表示全部历史回执已回收。`busy`、`protected`、
+`changed` 均未删除该批；`completed` 只表示该退役流已无有序号回执，无序号回执仍保留。
+
 [archive_and_trim.py](../../deploy/ops/archive_and_trim.py) 对将删除的范围归档并核对数量；仍需核对活动批次、未知订单、结算和恢复消费者水位。保留期不等于“交易事实超过一天即可删”。预建未来分区范围也不等于保留期。
 
 2026-09-25 旧 timer 曾删除 51356 条 account_position_snapshots 和 10105 条 exchange_order_events 后失败；随后观测为停止/禁用。该历史状态不证明 timer 此刻仍禁用。本轮未启用 timer 或删除数据。

@@ -158,6 +158,40 @@ def _commit(identity: str, decision: str) -> DecisionCommit:
 
 
 @pytest.mark.asyncio
+async def test_minimal_policy_receipt_preserves_replay_and_content_conflicts(
+    async_database_url: str,
+) -> None:
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+        DurablePolicyCommitRow,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    uow = AsyncPostgresDecisionUnitOfWork(factory)
+    commit = _commit(uuid4().hex, "minimal-receipt")
+    try:
+        original = await uow.commit_decision(commit)
+        replay = await uow.commit_decision(commit)
+        assert replay.is_replay
+        assert replay.policy_revision == original.policy_revision
+        assert replay.prior_state_digest == original.prior_state_digest
+        assert replay.next_state_digest == original.next_state_digest
+        async with factory() as session:
+            row = await session.get(DurablePolicyCommitRow, commit.trace.decision_id)
+            assert row.commit_digest
+            assert not hasattr(row, "prior_state_digest")
+            assert not hasattr(row, "next_state_digest")
+        conflicting = replace(
+            commit, trace=replace(commit.trace, frame_digest="changed")
+        )
+        with pytest.raises(DecisionCommitConflict, match="conflicting policy contents"):
+            await uow.commit_decision(conflicting)
+        assert (await uow.load_policy_state(commit.policy_key)).revision == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_noop_policy_still_rejects_concurrent_stale_decision(
     async_database_url: str,
 ) -> None:

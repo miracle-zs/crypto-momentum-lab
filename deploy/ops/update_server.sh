@@ -748,9 +748,28 @@ elif [[ "$runtime_changed" == 0 ]]; then
   live_changed=1
 fi
 
-if [[ "$destructive_schema_changed" == 1 && "$live_update" == 1 ]]; then
-  echo "Refusing Live deployment: target includes a destructive schema migration. Stage an expand/contract release before retrying --live." >&2
-  exit 1
+if [[ "$destructive_schema_changed" == 1 ]]; then
+  if [[ "$live_update" == 1 ]]; then
+    echo "Refusing online Live deployment: destructive schema requires a quiesced cutover, not a rolling --live update." >&2
+    exit 1
+  fi
+  # Omitting --live must not migrate underneath old consumers either. An
+  # operator must stop them deliberately; this guard never stops trading.
+  if ! schema_consumers="$(timeout --foreground --kill-after=5s 10s docker ps \
+      --filter label=com.docker.compose.project=crypto-momentum-lab \
+      --format '{{.Label "com.docker.compose.service"}}')"; then
+    echo "Refusing destructive schema migration: cannot verify running consumers." >&2
+    exit 69
+  fi
+  while IFS= read -r schema_consumer; do
+    case "$schema_consumer" in
+      postgres|"") ;;
+      *)
+        echo "Refusing destructive schema migration: consumer $schema_consumer is still running. Stop application consumers in a controlled maintenance window first." >&2
+        exit 1
+        ;;
+    esac
+  done <<<"$schema_consumers"
 fi
 
 if [[ ! -f .env.server ]]; then

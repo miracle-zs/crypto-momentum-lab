@@ -322,8 +322,6 @@ class AsyncPostgresDecisionUnitOfWork:
                 if prior_commit is not None:
                     if (
                         prior_commit.policy_key != commit.policy_key
-                        or prior_commit.prior_state_digest != prior_digest
-                        or prior_commit.next_state_digest != next_digest
                         or prior_commit.commit_digest != commit_digest
                     ):
                         raise _DecisionCommitConflict(
@@ -410,8 +408,6 @@ class AsyncPostgresDecisionUnitOfWork:
                     DurablePolicyCommitRow(
                         decision_id=trace.decision_id,
                         policy_key=commit.policy_key,
-                        prior_state_digest=prior_digest,
-                        next_state_digest=next_digest,
                         commit_digest=commit_digest,
                         policy_revision=new_revision,
                         committed_at=now,

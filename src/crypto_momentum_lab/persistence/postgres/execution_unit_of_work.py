@@ -53,6 +53,7 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
     ExecutionBookHeadRow,
     ExecutionEvidenceReceiptRow,
     ExecutionOrderWatermarkRow,
+    ExecutionRetiredStreamRow,
     ExecutionTradeIdentityRow,
 )
 from crypto_momentum_lab.persistence.postgres.journal_store_ports import (
@@ -214,6 +215,9 @@ class ExecutionTransaction:
                     f"attempted_sequence={evidence.sequence})"
                 )
             return False
+        retired = await self.session.get(ExecutionRetiredStreamRow, identity)
+        if retired is not None:
+            raise _DecisionCommitConflict("execution stream is permanently retired")
         self.session.add(
             ExecutionEvidenceReceiptRow(
                 **dict(zip(_EXECUTION_SCOPE_FIELDS, identity, strict=True)),
@@ -392,6 +396,13 @@ class ExecutionTransaction:
         row = await self.session.get(
             ExecutionBookHeadRow, identity, with_for_update=True
         )
+        target_identity = _execution_identity_values(key, stream_id, stream_epoch)
+        if row is None or (row.stream_id, row.stream_epoch) != (
+            stream_id,
+            stream_epoch,
+        ):
+            if await self.session.get(ExecutionRetiredStreamRow, target_identity):
+                raise _DecisionCommitConflict("execution stream is permanently retired")
         if stream_adoption_checkpoint_id is not None:
             checkpoint_scope = AccountFactStreamScope.for_position_key(
                 key, stream_id=stream_id, stream_epoch=stream_epoch
@@ -440,6 +451,23 @@ class ExecutionTransaction:
                 f"current {current_revision}"
             )
         next_revision = current_revision + 1
+        if row is not None and (row.stream_id, row.stream_epoch) != (
+            stream_id,
+            stream_epoch,
+        ):
+            previous_identity = _execution_identity_values(
+                key, row.stream_id, row.stream_epoch
+            )
+            if await self.session.get(ExecutionRetiredStreamRow, previous_identity):
+                raise _DecisionCommitConflict("current execution stream was retired")
+            self.session.add(
+                ExecutionRetiredStreamRow(
+                    **dict(
+                        zip(_EXECUTION_SCOPE_FIELDS, previous_identity, strict=True)
+                    ),
+                    retired_at=updated_at,
+                )
+            )
         if row is None:
             self.session.add(
                 ExecutionBookHeadRow(
