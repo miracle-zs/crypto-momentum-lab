@@ -76,6 +76,16 @@ _DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
 # The timer runs daily; 26h leaves room for one missed slot before alerting.
 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
+_DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
+_DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS = 300.0
+_DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS = 24.0 * 60.0 * 60.0
+_DEFAULT_DISK_WARNING_FRACTION = 0.75
+_DEFAULT_DISK_CRITICAL_FRACTION = 0.85
+_DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY = 512 * 1024 * 1024
+_DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY = 1024 * 1024 * 1024
+_DEFAULT_RELATION_GROWTH_WARNING_BYTES_PER_DAY = 256 * 1024 * 1024
+_DEFAULT_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY = 512 * 1024 * 1024
+_DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS = 60.0 * 60.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 # How long after a container starts lifecycle alerts stay quiet.  Every deploy
@@ -100,6 +110,13 @@ _ALERT_LABELS = {
     "retention_timer_inactive": "冷数据归档定时器未激活",
     "retention_timer_failed": "冷数据归档上次运行失败",
     "retention_timer_stale": "冷数据归档长时间未运行",
+    "position_recovery_retention_timer_inactive": "持仓恢复历史清理定时器未激活",
+    "position_recovery_retention_timer_failed": "持仓恢复历史清理上次运行失败",
+    "position_recovery_retention_timer_stale": "持仓恢复历史清理长时间未运行",
+    "disk_usage_high": "服务器磁盘空间不足",
+    "disk_check_failed": "服务器磁盘空间检查失败",
+    "database_storage_growth": "数据库存储增长过快",
+    "database_storage_check_failed": "数据库存储量检查失败",
     "container_unhealthy": "服务健康检查失败",
     "container_oom_killed": "服务触发 OOM 终止",
     "container_memory_high": "服务内存占用过高",
@@ -147,6 +164,19 @@ _ALERT_IMPACTS = {
     "retention_timer_stale": (
         "归档任务已超过预期周期未启动，通常意味着定时器被停用或主机计划未生效。"
     ),
+    "position_recovery_retention_timer_inactive": (
+        "持仓恢复历史清理已停用，已被检查点覆盖的旧状态副本会持续占用数据库空间。"
+    ),
+    "position_recovery_retention_timer_failed": (
+        "持仓恢复历史清理上次运行失败，恢复事件与检查点可能继续增长。"
+    ),
+    "position_recovery_retention_timer_stale": (
+        "持仓恢复历史清理超过预期周期没有运行，数据库空间增长可能无人处理。"
+    ),
+    "disk_usage_high": "主机数据盘空间接近上限，继续增长可能导致 PostgreSQL 停止写入。",
+    "disk_check_failed": "无法读取主机磁盘容量，不能判断 PostgreSQL 数据盘是否接近写满。",
+    "database_storage_growth": "数据库或重点表增长速度过快，可能在磁盘告警前耗尽剩余空间。",
+    "database_storage_check_failed": "数据库大小观测失败，无法提前发现持续增长的表。",
     "container_unhealthy": "容器健康检查探针持续超时，服务可能处于假死或无法正常响应状态。",
     "container_oom_killed": "对应服务已被系统内核强制终止，相关任务已中断。",
     "container_memory_high": "服务内存占用接近上限，继续增长可能触发 OOM 强杀。",
@@ -219,6 +249,25 @@ _ALERT_ACTIONS = {
     ),
     "retention_timer_stale": (
         "确认 timer 处于 active 且主机时钟正常；若刚恢复，先手动跑一次再观察下一周期。"
+    ),
+    "position_recovery_retention_timer_inactive": (
+        "执行 systemctl enable --now cml-position-recovery-retention.timer，并检查 timer 的下次触发时间。"
+    ),
+    "position_recovery_retention_timer_failed": (
+        "查看 cml-position-recovery-retention.service 日志；确认失败原因后手动 dry-run 并重试。"
+    ),
+    "position_recovery_retention_timer_stale": (
+        "检查 cml-position-recovery-retention.timer 是否激活及主机时钟；确认上次服务退出码为 0。"
+    ),
+    "disk_usage_high": (
+        "先核对 PostgreSQL 与 Docker 数据目录占用，再清理已确认无用的文件或扩容数据盘；不要直接删除数据库目录文件。"
+    ),
+    "disk_check_failed": "检查监控主机上的 df 命令及 CML_STORAGE_PATH 配置。",
+    "database_storage_growth": (
+        "根据告警中的表名核对保留定时器、表增长和 autovacuum；避免在实盘运行时执行 VACUUM FULL。"
+    ),
+    "database_storage_check_failed": (
+        "检查 PostgreSQL 容器、只读统计查询权限及数据库连接状态。"
     ),
     "container_unhealthy": (
         "排查容器 recent logs 与 /health 端点响应耗时，确认服务是否假死或死锁。"
@@ -1627,6 +1676,7 @@ def evaluate_retention_timer(
     *,
     now: float,
     max_age_seconds: float,
+    alert_prefix: str = "retention",
 ) -> tuple[Alert, ...]:
     """Alert when the retention schedule stopped running or stopped succeeding.
 
@@ -1652,7 +1702,7 @@ def evaluate_retention_timer(
     if timer.active_state != "active" or disabled:
         alerts.append(
             Alert(
-                "retention_timer_inactive",
+                f"{alert_prefix}_timer_inactive",
                 "critical",
                 f"Retention timer {timer.unit} is not active",
                 {**details, "reason": "disabled" if disabled else timer.active_state},
@@ -1663,7 +1713,7 @@ def evaluate_retention_timer(
         # anything ran cannot be established.
         alerts.append(
             Alert(
-                "retention_timer_stale",
+                f"{alert_prefix}_timer_stale",
                 "critical",
                 f"Retention service for {timer.unit} has no readable state",
                 details,
@@ -1680,7 +1730,7 @@ def evaluate_retention_timer(
     if service.result and service.result != "success":
         alerts.append(
             Alert(
-                "retention_timer_failed",
+                f"{alert_prefix}_timer_failed",
                 "critical",
                 f"Retention unit {service.unit} last run failed ({service.result})",
                 details,
@@ -1689,7 +1739,7 @@ def evaluate_retention_timer(
     elif age_seconds is None:
         alerts.append(
             Alert(
-                "retention_timer_stale",
+                f"{alert_prefix}_timer_stale",
                 "critical",
                 f"Retention unit {service.unit} has no recorded run",
                 details,
@@ -1698,13 +1748,88 @@ def evaluate_retention_timer(
     elif age_seconds > max_age_seconds:
         alerts.append(
             Alert(
-                "retention_timer_stale",
+                f"{alert_prefix}_timer_stale",
                 "critical",
                 f"Retention unit {service.unit} last ran {age_seconds / 3600.0:.1f}h ago",
                 {**details, "threshold_seconds": max_age_seconds},
             )
         )
     return tuple(alerts)
+
+
+@dataclass(frozen=True, slots=True)
+class DiskUsage:
+    """Filesystem capacity reported by the host's ``df`` command."""
+
+    path: str
+    filesystem: str
+    mount: str
+    total_bytes: int
+    used_bytes: int
+    available_bytes: int
+
+
+def read_disk_usage(
+    path: str,
+    *,
+    runner: CommandRunner,
+    timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> DiskUsage:
+    """Read the filesystem containing ``path`` using locale-stable byte units."""
+    output = runner.run(
+        ["df", "-P", "-B1", path], timeout_seconds=timeout_seconds
+    )
+    rows = [line.split() for line in output.splitlines() if line.strip()]
+    if len(rows) < 2 or len(rows[-1]) < 6:
+        raise ValueError("df returned an incomplete filesystem row")
+    row = rows[-1]
+    try:
+        total_bytes, used_bytes, available_bytes = map(int, row[1:4])
+    except ValueError as error:
+        raise ValueError("df returned non-numeric capacity values") from error
+    if total_bytes <= 0 or min(used_bytes, available_bytes) < 0:
+        raise ValueError("df returned invalid filesystem capacity values")
+    return DiskUsage(
+        path=path,
+        filesystem=row[0],
+        mount=" ".join(row[5:]),
+        total_bytes=total_bytes,
+        used_bytes=used_bytes,
+        available_bytes=available_bytes,
+    )
+
+
+def evaluate_disk_usage(
+    usage: DiskUsage,
+    *,
+    warning_fraction: float = _DEFAULT_DISK_WARNING_FRACTION,
+    critical_fraction: float = _DEFAULT_DISK_CRITICAL_FRACTION,
+) -> tuple[Alert, ...]:
+    """Alert at host filesystem watermarks before PostgreSQL loses write space."""
+    if not 0 < warning_fraction < critical_fraction <= 1:
+        raise ValueError("disk usage thresholds are invalid")
+    used_fraction = usage.used_bytes / usage.total_bytes
+    if used_fraction < warning_fraction:
+        return ()
+    severity = "critical" if used_fraction >= critical_fraction else "warning"
+    return (
+        Alert(
+            "disk_usage_high",
+            severity,
+            "Host filesystem usage is above its configured watermark",
+            {
+                "path": usage.path,
+                "filesystem": usage.filesystem,
+                "mount": usage.mount,
+                "total_bytes": usage.total_bytes,
+                "used_bytes": usage.used_bytes,
+                "available_bytes": usage.available_bytes,
+                "used_fraction": used_fraction,
+                "warning_fraction": warning_fraction,
+                "critical_fraction": critical_fraction,
+            },
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1747,6 +1872,31 @@ class MonitorConfig:
         _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS
     )
     market_revision_purge_service_unit: str = ""
+    position_recovery_retention_timer_unit: str = ""
+    position_recovery_retention_timer_max_age_seconds: float = (
+        _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS
+    )
+    storage_path: str = ""
+    disk_warning_fraction: float = _DEFAULT_DISK_WARNING_FRACTION
+    disk_critical_fraction: float = _DEFAULT_DISK_CRITICAL_FRACTION
+    database_storage_monitoring: bool = False
+    storage_sample_interval_seconds: float = _DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS
+    storage_sample_window_seconds: float = _DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS
+    storage_growth_minimum_window_seconds: float = (
+        _DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS
+    )
+    storage_growth_warning_bytes_per_day: int = (
+        _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY
+    )
+    storage_growth_critical_bytes_per_day: int = (
+        _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY
+    )
+    relation_growth_warning_bytes_per_day: int = (
+        _DEFAULT_RELATION_GROWTH_WARNING_BYTES_PER_DAY
+    )
+    relation_growth_critical_bytes_per_day: int = (
+        _DEFAULT_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY
+    )
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     # ``None`` means a persistent sibling of state_path.  This keeps the
     # default durable on both the production host and local test hosts.
@@ -1825,6 +1975,22 @@ class OpsMonitor:
             raise ValueError(
                 "market_revision_purge_timer_max_age_seconds must be positive"
             )
+        if config.position_recovery_retention_timer_max_age_seconds <= 0:
+            raise ValueError(
+                "position_recovery_retention_timer_max_age_seconds must be positive"
+            )
+        if config.storage_path and not 0 < config.disk_warning_fraction < config.disk_critical_fraction <= 1:
+            raise ValueError("disk usage thresholds are invalid")
+        if config.storage_sample_interval_seconds <= 0:
+            raise ValueError("storage sample interval must be positive")
+        if config.storage_sample_window_seconds <= 0:
+            raise ValueError("storage sample window must be positive")
+        if config.storage_growth_minimum_window_seconds <= 0:
+            raise ValueError("storage growth minimum window must be positive")
+        if not 0 < config.storage_growth_warning_bytes_per_day < config.storage_growth_critical_bytes_per_day:
+            raise ValueError("database storage growth thresholds are invalid")
+        if not 0 < config.relation_growth_warning_bytes_per_day < config.relation_growth_critical_bytes_per_day:
+            raise ValueError("relation storage growth thresholds are invalid")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -1900,6 +2066,245 @@ class OpsMonitor:
         return self._schedule_state(
             self._config.market_revision_purge_timer_unit,
             self._config.market_revision_purge_service_unit,
+        )
+
+    def _position_recovery_retention_schedule_state(
+        self,
+    ) -> RetentionScheduleState | None:
+        return self._schedule_state(
+            self._config.position_recovery_retention_timer_unit,
+            "",
+        )
+
+    def _disk_usage_alerts(self) -> tuple[Alert, ...]:
+        if not self._config.storage_path:
+            return ()
+        try:
+            usage = read_disk_usage(
+                self._config.storage_path,
+                runner=self._runner,
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+        except Exception as error:
+            return (
+                Alert(
+                    "disk_check_failed",
+                    "warning",
+                    "Host filesystem capacity query failed",
+                    {
+                        "path": self._config.storage_path,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    },
+                ),
+            )
+        return evaluate_disk_usage(
+            usage,
+            warning_fraction=self._config.disk_warning_fraction,
+            critical_fraction=self._config.disk_critical_fraction,
+        )
+
+    def _database_storage_footprint(
+        self, container_id: str, *, now: float
+    ) -> dict[str, object]:
+        cached = self._state.get("database_storage_last_query")
+        if isinstance(cached, dict):
+            sampled_at = cached.get("at")
+            age = now - sampled_at if isinstance(sampled_at, int | float) else None
+            if age is not None and 0 <= age < self._config.storage_sample_interval_seconds:
+                footprint = cached.get("footprint")
+                if isinstance(footprint, dict):
+                    return footprint
+                raise RuntimeError("the latest PostgreSQL size sample failed")
+        sql = """
+SELECT json_build_object(
+  'database_bytes', pg_database_size(current_database()),
+  'relations', COALESCE(
+    (
+      SELECT json_object_agg(sized.name, sized.total_bytes)
+      FROM (
+        SELECT tracked.name,
+               pg_total_relation_size(to_regclass('public.' || quote_ident(tracked.name)))
+                 AS total_bytes
+        FROM (VALUES
+          ('decision_traces'),
+          ('market_revision_refs'),
+          ('position_fact_journal_events'),
+          ('position_recovery_checkpoints')
+        ) AS tracked(name)
+        WHERE to_regclass('public.' || quote_ident(tracked.name)) IS NOT NULL
+      ) AS sized
+    ), '{}'::json
+  )
+)::text;
+"""
+        try:
+            output = self._runner.run(
+                [
+                    "docker",
+                    "exec",
+                    container_id,
+                    "psql",
+                    "-U",
+                    "cml",
+                    "-d",
+                    "cml",
+                    "-At",
+                    "-X",
+                    "-q",
+                    "-c",
+                    sql,
+                ],
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+            payload = json.loads(output.strip())
+            if not isinstance(payload, dict):
+                raise ValueError("PostgreSQL storage query returned invalid JSON")
+            database_bytes = payload.get("database_bytes")
+            relations = payload.get("relations")
+            if not isinstance(database_bytes, int) or database_bytes < 0:
+                raise ValueError("PostgreSQL storage query omitted database size")
+            if not isinstance(relations, dict):
+                raise ValueError("PostgreSQL storage query omitted relation sizes")
+            normalized_relations = {
+                str(name): int(size)
+                for name, size in relations.items()
+                if isinstance(size, int) and size >= 0
+            }
+            footprint = {
+                "database_bytes": database_bytes,
+                "relations": normalized_relations,
+            }
+        except Exception as error:
+            self._state["database_storage_last_query"] = {
+                "at": now,
+                "error": type(error).__name__,
+            }
+            raise
+        self._state["database_storage_last_query"] = {
+            "at": now,
+            "footprint": footprint,
+        }
+        return footprint
+
+    def _database_storage_growth_alerts(
+        self, footprint: Mapping[str, object], *, now: float
+    ) -> tuple[Alert, ...]:
+        database_bytes = footprint.get("database_bytes")
+        raw_relations = footprint.get("relations")
+        if not isinstance(database_bytes, int) or not isinstance(raw_relations, Mapping):
+            return ()
+        relations = {
+            str(name): int(size)
+            for name, size in raw_relations.items()
+            if isinstance(size, int) and size >= 0
+        }
+
+        raw_samples = self._state.setdefault("database_storage_samples", [])
+        samples = raw_samples if isinstance(raw_samples, list) else []
+        self._state["database_storage_samples"] = samples
+        cutoff = now - self._config.storage_sample_window_seconds
+        retained: list[dict[str, object]] = []
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            sampled_at = sample.get("at")
+            sampled_database_bytes = sample.get("database_bytes")
+            sampled_relations = sample.get("relations")
+            if (
+                isinstance(sampled_at, int | float)
+                and cutoff <= sampled_at <= now
+                and isinstance(sampled_database_bytes, int)
+                and isinstance(sampled_relations, dict)
+            ):
+                retained.append(sample)
+
+        latest_at = (
+            retained[-1].get("at")
+            if retained
+            else None
+        )
+        if (
+            not isinstance(latest_at, int | float)
+            or now - latest_at >= self._config.storage_sample_interval_seconds
+        ):
+            retained.append(
+                {
+                    "at": now,
+                    "database_bytes": database_bytes,
+                    "relations": relations,
+                }
+            )
+        self._state["database_storage_samples"] = retained
+
+        baseline = next(
+            (
+                sample
+                for sample in retained
+                if isinstance(sample.get("at"), int | float)
+                and now - float(sample["at"])
+                >= self._config.storage_growth_minimum_window_seconds
+            ),
+            None,
+        )
+        if baseline is None:
+            return ()
+        elapsed = now - float(baseline["at"])
+        if elapsed <= 0:
+            return ()
+        baseline_database_bytes = baseline.get("database_bytes")
+        baseline_relations = baseline.get("relations")
+        if not isinstance(baseline_database_bytes, int) or not isinstance(
+            baseline_relations, Mapping
+        ):
+            return ()
+        database_growth_per_day = max(
+            0.0,
+            (database_bytes - baseline_database_bytes)
+            * 86_400.0
+            / elapsed,
+        )
+        relation_growth_per_day = {
+            name: max(0.0, (size - int(baseline_relations.get(name, size))) * 86_400.0 / elapsed)
+            for name, size in relations.items()
+        }
+        fast_relations = {
+            name: int(growth)
+            for name, growth in relation_growth_per_day.items()
+            if growth >= self._config.relation_growth_warning_bytes_per_day
+        }
+        if (
+            database_growth_per_day < self._config.storage_growth_warning_bytes_per_day
+            and not fast_relations
+        ):
+            return ()
+        critical = (
+            database_growth_per_day
+            >= self._config.storage_growth_critical_bytes_per_day
+            or any(
+                growth >= self._config.relation_growth_critical_bytes_per_day
+                for growth in relation_growth_per_day.values()
+            )
+        )
+        return (
+            Alert(
+                "database_storage_growth",
+                "critical" if critical else "warning",
+                "Database storage is growing faster than its configured budget",
+                {
+                    "database_bytes": database_bytes,
+                    "database_growth_bytes_per_day": int(database_growth_per_day),
+                    "growth_window_seconds": elapsed,
+                    "relation_bytes": relations,
+                    "relation_growth_bytes_per_day": fast_relations,
+                    "warning_bytes_per_day": (
+                        self._config.storage_growth_warning_bytes_per_day
+                    ),
+                    "critical_bytes_per_day": (
+                        self._config.storage_growth_critical_bytes_per_day
+                    ),
+                },
+            ),
         )
 
     def _evaluate_once(self) -> tuple[Alert, ...]:
@@ -1993,6 +2398,17 @@ class OpsMonitor:
                 ),
             )
         )
+        alerts.extend(
+            evaluate_retention_timer(
+                self._position_recovery_retention_schedule_state(),
+                now=now,
+                max_age_seconds=(
+                    self._config.position_recovery_retention_timer_max_age_seconds
+                ),
+                alert_prefix="position_recovery_retention",
+            )
+        )
+        alerts.extend(self._disk_usage_alerts())
         alerts.extend(evaluate_log_signals(combined_signals))
         market_snapshot = next(
             (snapshot for snapshot in containers if snapshot.service == "market-data"),
@@ -2015,6 +2431,25 @@ class OpsMonitor:
 
         postgres_id = self._container_id("postgres")
         if postgres_id is not None:
+            if self._config.database_storage_monitoring:
+                try:
+                    footprint = self._database_storage_footprint(postgres_id, now=now)
+                except Exception as error:
+                    alerts.append(
+                        Alert(
+                            "database_storage_check_failed",
+                            "warning",
+                            "PostgreSQL size query failed",
+                            {
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            },
+                        )
+                    )
+                else:
+                    alerts.extend(
+                        self._database_storage_growth_alerts(footprint, now=now)
+                    )
             for account_label, run_id, lease_owner in self._config.live_accounts:
                 try:
                     database_state = self._database_state(
@@ -4257,6 +4692,11 @@ def _service_scope(service: object) -> str | None:
 
 
 def _alert_scope(alert_name: str, details: Mapping[str, object]) -> str | None:
+    base_name, _scope = _split_alert_name(alert_name)
+    if base_name in {"disk_usage_high", "disk_check_failed"}:
+        return str(details.get("mount") or details.get("path") or "主机数据盘")
+    if base_name in {"database_storage_growth", "database_storage_check_failed"}:
+        return "PostgreSQL"
     account_label = details.get("account_label")
     symbol = details.get("symbol")
     if account_label and symbol:
@@ -4895,6 +5335,51 @@ def _format_alert_human_details(
         lines.append("- **持续交易**：其他订单与标的正常执行")
         lines.append("- **人工关注**：核对订单与命令表的最新对账状态")
 
+    elif base_name == "disk_usage_high":
+        fraction = details.get("used_fraction")
+        available = details.get("available_bytes")
+        if isinstance(fraction, (int, float)):
+            lines.append(f"- **磁盘使用率**：**{fraction * 100:.1f}%**")
+        if isinstance(available, int):
+            lines.append(
+                f"- **剩余空间**：**{available / (1024**3):.1f} GiB**"
+            )
+        path = details.get("path")
+        if path:
+            lines.append(f"- **观测路径**：`{path}`")
+
+    elif base_name == "database_storage_growth":
+        total_rate = details.get("database_growth_bytes_per_day")
+        if isinstance(total_rate, int):
+            lines.append(
+                f"- **数据库日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
+            )
+        growths = details.get("relation_growth_bytes_per_day")
+        if isinstance(growths, Mapping) and growths:
+            ranked = sorted(
+                (
+                    (str(name), value)
+                    for name, value in growths.items()
+                    if isinstance(value, int)
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:4]
+            lines.extend(
+                f"- **重点表增长**：`{name}` 约 {growth / (1024**3):.2f} GiB/天"
+                for name, growth in ranked
+            )
+        window = details.get("growth_window_seconds")
+        if isinstance(window, (int, float)):
+            lines.append(
+                f"- **估算窗口**：最近 {_format_duration(window)} 的增速折算"
+            )
+
+    elif base_name in {"disk_check_failed", "database_storage_check_failed"}:
+        error_type = details.get("error_type")
+        if error_type:
+            lines.append(f"- **异常类型**：`{error_type}`")
+
     occ = details.get("occurrence_count")
     dur = details.get("active_duration_human")
     if isinstance(occ, int) and occ > 1:
@@ -4911,6 +5396,28 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
     """Provide a one-line executive takeaway for the alert header."""
 
     base_name, _scope = _split_alert_name(alert_name)
+    if base_name == "disk_usage_high":
+        used = details.get("used_fraction")
+        available = details.get("available_bytes")
+        if isinstance(used, (int, float)):
+            free_text = (
+                f"，剩余 {available / (1024**3):.1f} GiB"
+                if isinstance(available, int)
+                else ""
+            )
+            return (
+                f"服务器数据盘已使用 {used * 100:.1f}%{free_text}，"
+                "**PostgreSQL 剩余空间正在收窄**。"
+            )
+        return "服务器数据盘容量已越过警戒水位，**需尽快确认数据库文件与可用空间**。"
+    if base_name == "database_storage_growth":
+        growth = details.get("database_growth_bytes_per_day")
+        if isinstance(growth, int):
+            return (
+                f"PostgreSQL 近窗折算增长 {growth / (1024**3):.2f} GiB/天，"
+                "**需定位增长表并确认保留任务在运行**。"
+            )
+        return "PostgreSQL 数据量增长超过预算，**需检查重点表和保留任务**。"
     if base_name == "container_memory_pressure":
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
@@ -5356,6 +5863,71 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         ),
         market_revision_purge_service_unit=os.environ.get(
             "CML_MARKET_REVISION_PURGE_SERVICE_UNIT", ""
+        ),
+        position_recovery_retention_timer_unit=os.environ.get(
+            "CML_POSITION_RECOVERY_RETENTION_TIMER_UNIT", ""
+        ),
+        position_recovery_retention_timer_max_age_seconds=float(
+            os.environ.get(
+                "CML_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS",
+                _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS,
+            )
+        ),
+        storage_path=os.environ.get("CML_STORAGE_PATH", ""),
+        disk_warning_fraction=float(
+            os.environ.get(
+                "CML_DISK_WARNING_FRACTION", _DEFAULT_DISK_WARNING_FRACTION
+            )
+        ),
+        disk_critical_fraction=float(
+            os.environ.get(
+                "CML_DISK_CRITICAL_FRACTION", _DEFAULT_DISK_CRITICAL_FRACTION
+            )
+        ),
+        database_storage_monitoring=_parse_env_bool(
+            os.environ.get("CML_DATABASE_STORAGE_MONITORING"), default=False
+        ),
+        storage_sample_interval_seconds=float(
+            os.environ.get(
+                "CML_STORAGE_SAMPLE_INTERVAL_SECONDS",
+                _DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS,
+            )
+        ),
+        storage_sample_window_seconds=float(
+            os.environ.get(
+                "CML_STORAGE_SAMPLE_WINDOW_SECONDS",
+                _DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS,
+            )
+        ),
+        storage_growth_minimum_window_seconds=float(
+            os.environ.get(
+                "CML_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS",
+                _DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS,
+            )
+        ),
+        storage_growth_warning_bytes_per_day=int(
+            os.environ.get(
+                "CML_STORAGE_GROWTH_WARNING_BYTES_PER_DAY",
+                _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY,
+            )
+        ),
+        storage_growth_critical_bytes_per_day=int(
+            os.environ.get(
+                "CML_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY",
+                _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY,
+            )
+        ),
+        relation_growth_warning_bytes_per_day=int(
+            os.environ.get(
+                "CML_RELATION_GROWTH_WARNING_BYTES_PER_DAY",
+                _DEFAULT_RELATION_GROWTH_WARNING_BYTES_PER_DAY,
+            )
+        ),
+        relation_growth_critical_bytes_per_day=int(
+            os.environ.get(
+                "CML_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY",
+                _DEFAULT_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY,
+            )
         ),
         rss_critical_fraction=args.rss_critical_fraction,
         rss_growth_bytes=args.rss_growth_bytes,

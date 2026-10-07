@@ -89,6 +89,38 @@ systemctl status cml-market-revision-purge.service --no-pager
 journalctl -u cml-market-revision-purge.service -n 100 --no-pager
 ```
 
+### 持仓恢复历史回收
+
+`cml-position-recovery-retention.timer` 每天 02:15（Asia/Shanghai）清理超过
+72 小时、且已由保留检查点覆盖的恢复状态副本。每次最多处理 100,000 个旧检查点
+和 500,000 条状态事件，每批最多删除 500 条。最新的每流检查点与执行头当前绑定的
+检查点始终保留；成交、退出边界、冲突和完整性事实不会被这个任务删除。
+
+状态事件清理只涉及 `facts_state`、`snapshot`、`coverage`、
+`fill_load_provenance`。每流每类至少留一条旧事件；只有事件时间和来源修订号都已
+被保留检查点覆盖的记录才会进入候选集。任务每次运行最多 20 分钟，锁等待最多 5
+秒，候选扫描单条语句最多 5 分钟；失败会由运维监控告警。
+
+72 小时以外的精确逐事件重建不再保证；当前持仓仍通过保留检查点恢复，永久成交与
+边界事实仍在。删除只是把表页变成 PostgreSQL 可复用空间，不会立即缩小数据库文件。
+不要为了把空间还给文件系统而在实盘运行时执行 `VACUUM FULL`。
+
+```bash
+docker exec crypto-momentum-lab-dashboard-1 \
+  python -m crypto_momentum_lab.tools.prune_position_recovery_history --dry-run
+systemctl status cml-position-recovery-retention.timer --no-pager
+systemctl status cml-position-recovery-retention.service --no-pager
+journalctl -u cml-position-recovery-retention.service -n 100 --no-pager
+```
+
+### 磁盘水位与数据库增速
+
+运维监控每分钟检查 `/var/lib/docker` 所在文件系统，使用率达到 75% 告警、85% 严重
+告警；PostgreSQL 数据库和四张大表每 5 分钟采样一次，基于至少 1 小时的窗口估算日
+增长。数据库超过 512 MiB/天会告警、1 GiB/天严重告警；单表分别以 256 MiB/天和
+512 MiB/天为告警、严重阈值。样本只写入监控服务自己的 JSON 状态文件，不写入业务
+数据库。
+
 ## 参数与维护
 
 服务器 Compose 设置 shm_size 256m，避免维护时默认 64 MiB 共享内存不足；已限制并行维护。检查磁盘空间与 /dev/shm，不因 No space left on device 就认定数据盘满。

@@ -472,6 +472,7 @@ execution_account_changed=0
 strategy_changed=0
 ops_monitor_changed=0
 market_revision_purge_changed=0
+position_recovery_retention_changed=0
 recovery_run=0
 resume_from_phase=""
 changed_files="$(git diff --name-only "$deployment_base_commit" "$target_commit")"
@@ -570,6 +571,10 @@ while IFS= read -r changed_path; do
     deploy/ops/cml-market-revision-purge.timer)
       market_revision_purge_changed=1
       ;;
+    deploy/ops/cml-position-recovery-retention.service|\
+    deploy/ops/cml-position-recovery-retention.timer)
+      position_recovery_retention_changed=1
+      ;;
     *)
       ;;
   esac
@@ -611,6 +616,24 @@ install_market_revision_purge_timer_if_changed() {
   systemctl enable --now cml-market-revision-purge.timer
   systemctl is-active --quiet cml-market-revision-purge.timer
   echo "market_revision_purge_timer_enabled=1"
+}
+
+install_position_recovery_retention_timer_if_changed() {
+  if [[ "$position_recovery_retention_changed" != 1 ]]; then
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "position recovery retention timer changed but systemctl is unavailable" >&2
+    return 69
+  fi
+  install -m 0644 deploy/ops/cml-position-recovery-retention.service \
+    /etc/systemd/system/cml-position-recovery-retention.service
+  install -m 0644 deploy/ops/cml-position-recovery-retention.timer \
+    /etc/systemd/system/cml-position-recovery-retention.timer
+  systemctl daemon-reload
+  systemctl enable --now cml-position-recovery-retention.timer
+  systemctl is-active --quiet cml-position-recovery-retention.timer
+  echo "position_recovery_retention_timer_enabled=1"
 }
 
 # If the previous attempt reached the target checkout but failed before all
@@ -676,6 +699,7 @@ fi
 # does not observe a Git update until it is restarted, so handle it before any
 # no-runtime-change early return below.
 install_market_revision_purge_timer_if_changed
+install_position_recovery_retention_timer_if_changed
 restart_ops_monitor_if_changed
 
 if [[ "${dashboard_only:-0}" == 1 ]]; then
