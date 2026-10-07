@@ -1664,9 +1664,8 @@ async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
     assert exchange.plans[0].order_type == "MARKET"
 
 
-async def test_scheduled_flatten_targets_exchange_position_before_market_state_arrives() -> (
-    None
-):
+async def test_scheduled_flatten_targets_exchange_position_before_market_state_arrives(
+) -> None:
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
@@ -1983,7 +1982,7 @@ def _daemon(
         ),
         submission_repository=submission_repository,
         persist_checkpoint=checkpoint_repository.save_checkpoint,
-        state_machine=coordinator,
+        execution_coordinator=coordinator,
         context_provider=context_reader(context_provider or default_context),
         signal_recorder=signal_recorder,
         config=LiveDaemonConfig(
@@ -2364,7 +2363,8 @@ def test_schedule_gate_closes_at_boundary_without_waiting_for_timer():
     assert daemon.entry_enabled_reason == "scheduled_positions_unverified"
 
 
-async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capability():
+async def test_market_invalidation_fences_prefetch_and_uses_shared_provider_capability(
+) -> None:
     from crypto_momentum_lab.live_rollout.context_prefetch import PrefetchedContext
 
     calls = []

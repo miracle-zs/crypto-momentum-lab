@@ -59,6 +59,7 @@ class DashboardQueryProtocol(Protocol):
         self,
         equity_range: str = "24h",
         account_label: str | None = None,
+        environment: str | None = None,
     ) -> AccountOverviewResponse: ...
 
     async def live_accounts(self) -> LiveAccountsResponse: ...
@@ -74,7 +75,7 @@ class DashboardQueryProtocol(Protocol):
 
     async def performance(
         self,
-        window: str = "6h",
+        window: str = "24h",
     ) -> SystemPerformanceResponse: ...
 
     async def account_performance(

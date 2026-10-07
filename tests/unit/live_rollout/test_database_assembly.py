@@ -5,9 +5,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.pool import NullPool
 
-from crypto_momentum_lab.live_rollout.database_assembly import assemble_live_persistence
 from crypto_momentum_lab.live_rollout.runtime_session import ResourceOwnershipRegistry
 from crypto_momentum_lab.persistence.postgres import session as session_module
+from crypto_momentum_lab.persistence.postgres.live_runtime_assembly import (
+    assemble_live_persistence,
+)
 
 
 class Engine:
@@ -20,7 +22,10 @@ class Engine:
 
 
 @pytest.mark.parametrize("failing_database", (None, "market", "obs"))
-async def test_teardown_closes_every_created_database_resource(monkeypatch, failing_database):
+async def test_teardown_closes_every_created_database_resource(
+    monkeypatch,
+    failing_database,
+):
     created = []
 
     def create(database_url, **kwargs):

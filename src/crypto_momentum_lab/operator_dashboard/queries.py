@@ -173,6 +173,13 @@ def parse_common_equity_start_at(value: str | None = None) -> datetime:
 
 
 class DashboardQueries:
+    """Stable dashboard read facade over cohesive query families.
+
+    The HTTP app depends on this small, testable surface; specialized query
+    objects remain internal so endpoint wiring does not couple to storage
+    details. Methods with their own assembly logic stay here deliberately.
+    """
+
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],

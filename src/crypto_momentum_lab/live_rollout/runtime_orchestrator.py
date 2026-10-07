@@ -11,7 +11,6 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from time import perf_counter
 from typing import Any
 
 import structlog
@@ -67,7 +66,6 @@ from crypto_momentum_lab.execution_account.hub import (
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
 )
-from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.health.resources import ProcessResourceSampler
 from crypto_momentum_lab.live_rollout.account_channel import LiveAccountEventRuntime
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
@@ -75,9 +73,6 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 )
 from crypto_momentum_lab.live_rollout.control_plane import LiveControlPlaneRuntime
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonConfig, LiveStrategyDaemon
-from crypto_momentum_lab.live_rollout.database_assembly import (
-    assemble_live_persistence,
-)
 from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
@@ -160,6 +155,10 @@ from crypto_momentum_lab.live_rollout.runtime_session import (
     ResourceOwnershipRegistry,
     RuntimeSession,
 )
+from crypto_momentum_lab.live_rollout.runtime_startup import (
+    LiveRuntimeStartupStatus,
+    validate_live_runtime_endpoints,
+)
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
     LiveRuntimeTasks,
@@ -221,6 +220,9 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work import (
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
+from crypto_momentum_lab.persistence.postgres.live_runtime_assembly import (
+    assemble_live_persistence,
+)
 from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
     PostgresLiveSignalRepository,
 )
@@ -252,6 +254,7 @@ async def run_live_daemon(
     *,
     shutdown_requested: asyncio.Event | None = None,
 ) -> LiveDaemonResult:
+    validate_live_runtime_endpoints(config)
     execution_database_url = config.databases.execution_database_url
     market_database_url = config.databases.market_database_url
     observability_database_url = config.databases.observability_database_url
@@ -303,37 +306,10 @@ async def run_live_daemon(
     risk_control_enabled = bool(
         risk_control_hub_url is not None and risk_control_hub_url.strip()
     )
-    if market_state_source not in {"hub", "postgres"}:
-        raise ValueError("market_state_source must be 'hub' or 'postgres'")
-    if market_state_source == "hub" and not market_state_hub_url.strip():
-        raise ValueError("market_state_hub_url must not be empty in hub mode")
-    if market_state_source == "hub" and not market_quote_hub_url.strip():
-        raise ValueError("market_quote_hub_url must not be empty in hub mode")
-    if market_state_source == "hub" and not market_quote_volume_hub_url.strip():
-        raise ValueError("market_quote_volume_hub_url must not be empty in hub mode")
-    if not account_event_hub_url.strip():
-        raise ValueError("account_event_hub_url must not be empty")
-    health = LocalHealthWriter.from_environment()
+    startup_status = LiveRuntimeStartupStatus.from_environment()
+    health = startup_status.health
     live_readiness: LiveReadinessPublisher | None = None
     session: RuntimeSession | None = None
-
-    def mark_live_database_ok() -> None:
-        if health is None:
-            return
-        try:
-            health.database_ok()
-        except Exception:
-            log.exception("live_health_database_marker_failed")
-
-    def mark_live_ready() -> None:
-        if health is None:
-            return
-        try:
-            health.heartbeat(database_ok=True)
-            if live_readiness is not None:
-                live_readiness.publish()
-        except Exception:
-            log.exception("live_health_marker_failed")
 
     now = datetime.now(tz=UTC)
     ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
@@ -368,20 +344,6 @@ async def run_live_daemon(
     shutdown_task: asyncio.Task[bool] | None = None
     risk_config_hash = ""
     startup_phase = True
-    startup_started_at = perf_counter()
-    startup_last_phase_at = startup_started_at
-
-    def log_startup_phase(phase: str) -> None:
-        nonlocal startup_last_phase_at
-        now = perf_counter()
-        log.info(
-            "live_startup_phase",
-            phase=phase,
-            phase_elapsed_ms=round((now - startup_last_phase_at) * 1000, 3),
-            total_elapsed_ms=round((now - startup_started_at) * 1000, 3),
-        )
-        startup_last_phase_at = now
-
     try:
         persistence = assemble_live_persistence(
             execution_database_url=execution_database_url,
@@ -453,7 +415,7 @@ async def run_live_daemon(
         ownership_registry.register("signal_recorder", signal_recorder.stop)
         await signal_recorder.start()
         risk_config = await _latest_risk_config(execution_factory, account_label)
-        log_startup_phase("risk_config_loaded")
+        startup_status.log_phase("risk_config_loaded")
         risk_config_hash = risk_config.config_hash
         session_lifecycle = LiveSessionLifecycle(
             repository=live_repository,
@@ -528,7 +490,7 @@ async def run_live_daemon(
         )
         ownership_registry.register("trade_client", client.aclose)
         account_config = await client.fetch_account_config()
-        log_startup_phase("exchange_account_config_loaded")
+        startup_status.log_phase("exchange_account_config_loaded")
         if account_config.hedge_mode != hedge_mode:
             expected = "hedge" if hedge_mode else "one-way"
             actual = "hedge" if account_config.hedge_mode else "one-way"
@@ -712,7 +674,7 @@ async def run_live_daemon(
         )
         # Restore local facts at startup; remote uncertainty is repaired by the
         # supervised background worker after the trading channels are running.
-        log_startup_phase("local_order_state_restored")
+        startup_status.log_phase("local_order_state_restored")
         draining = await session_state.session_is_draining(live_repository, session_id)
         if not draining:
             await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
@@ -850,7 +812,7 @@ async def run_live_daemon(
                 warmup_symbols=startup_warmup_symbols,
                 on_warmup_status=live_readiness.update_warmup,
             )
-        log_startup_phase("strategy_market_warmup_completed")
+        startup_status.log_phase("strategy_market_warmup_completed")
         if checkpoint is not None and not requires_market_recovery:
             live_readiness.update_warmup_progress(
                 strategy,
@@ -884,7 +846,7 @@ async def run_live_daemon(
         )
         ownership_registry.register("entry_runtime", entry_runtime.stop)
         await entry_runtime.warm_exchange(now)
-        log_startup_phase("entry_exchange_warmup_completed")
+        startup_status.log_phase("entry_exchange_warmup_completed")
         live_readiness.update_entry_gate(
             entry_universe_count=entry_runtime.entry_universe_count(now),
             entry_enabled=False,
@@ -992,8 +954,8 @@ async def run_live_daemon(
             ),
             submission_repository=submission_repository,
             persist_checkpoint=checkpoint_repository.save_checkpoint,
-            on_checkpoint_saved=mark_live_database_ok,
-            state_machine=execution_coordinator,
+            on_checkpoint_saved=startup_status.mark_database_ok,
+            execution_coordinator=execution_coordinator,
             context_provider=context_provider,
             telemetry=telemetry,
             market_timing_provider=(
@@ -1173,8 +1135,9 @@ async def run_live_daemon(
             await session_lifecycle.transition(
                 LiveSessionState.DRAINING if draining else LiveSessionState.LIVE_ENABLED
             )
-        mark_live_ready()
-        log_startup_phase("live_readiness_published")
+        startup_status.readiness = live_readiness
+        startup_status.mark_ready()
+        startup_status.log_phase("live_readiness_published")
         state_stream = build_live_market_state_stream(
             market_state_source=market_state_source,
             startup_market_buffer=startup_market_buffer,

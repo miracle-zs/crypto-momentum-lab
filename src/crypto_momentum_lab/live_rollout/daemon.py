@@ -12,7 +12,6 @@ from typing import Any
 
 import structlog
 
-import crypto_momentum_lab.live_rollout.market_runtime_contracts as market_runtime_contracts
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
@@ -41,6 +40,9 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDecision,
 )
 from crypto_momentum_lab.domain.strategy.runtime import RuntimeStrategy
+from crypto_momentum_lab.live_rollout import (
+    market_runtime_contracts,
+)
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
 )
@@ -156,7 +158,7 @@ class LiveStrategyDaemon:
         risk_gateway: RiskGateway,
         submission_repository: OrderSubmissionRepository,
         persist_checkpoint: PersistCheckpoint,
-        state_machine: CoordinatedOrderExecutionPort,
+        execution_coordinator: CoordinatedOrderExecutionPort,
         context_provider: LiveContextReader,
         config: LiveDaemonConfig,
         exit_manager: LiveExitManager | None = None,
@@ -190,11 +192,11 @@ class LiveStrategyDaemon:
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
-        self._state_machine = state_machine
+        self._execution_coordinator = execution_coordinator
         self._clock = clock
         self._entry_control = LiveEntryControlGate(
             run_id=config.run_id,
-            state_machine=self._state_machine,
+            state_machine=self._execution_coordinator,
             scheduled_risk_window=config.scheduled_risk_window,
             clock=self._clock,
             is_symbol_warmed=is_symbol_warmed,
@@ -257,13 +259,13 @@ class LiveStrategyDaemon:
             context_generation=lambda: self._context_runtime.generation,
             clock=self._clock,
         )
-        self._state_machine.configure_submission(
+        self._execution_coordinator.configure_submission(
             submission_repository,
             clock=self._clock,
         )
         self._submission = LiveCandidateSubmission(
             risk_gateway=self._risk_gateway,
-            state_machine=self._state_machine,
+            state_machine=self._execution_coordinator,
             config=LiveSubmissionConfig(
                 run_id=config.run_id,
                 account_label=config.account_label,
@@ -284,7 +286,7 @@ class LiveStrategyDaemon:
             config=ExitProcessorConfig(run_id=config.run_id),
             exit_manager=self._exit_manager,
             exit_recovery_client=self._exit_recovery_client,
-            state_machine=self._state_machine,
+            state_machine=self._execution_coordinator,
             submission=self._submission,
             telemetry=self._telemetry,
             clock=self._clock,
@@ -316,7 +318,7 @@ class LiveStrategyDaemon:
                 scheduled_risk_window=config.scheduled_risk_window,
             ),
             exit_manager=self._exit_manager,
-            state_machine=self._state_machine,
+            state_machine=self._execution_coordinator,
             context_provider=self._context_provider,
             apply_context=(self._context_runtime.apply_context),
             invalidate_context_cache=self._context_runtime.invalidate,
@@ -326,7 +328,9 @@ class LiveStrategyDaemon:
             cancel_unfilled_entry_orders=self._cancel_unfilled_entry_orders,
             fetch_exchange_positions=self._fetch_exchange_positions,
             clock=self._clock,
-            wait_for_entry_submissions_idle=self._state_machine.wait_for_entry_submissions_idle,
+            wait_for_entry_submissions_idle=(
+                self._execution_coordinator.wait_for_entry_submissions_idle
+            ),
         )
         self._entry_lane = EntryExecutionLane(
             config=config,

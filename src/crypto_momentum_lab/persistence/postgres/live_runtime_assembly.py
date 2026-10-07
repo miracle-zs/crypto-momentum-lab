@@ -1,9 +1,10 @@
-"""Assembly of database engines, sessions, and repositories for live rollout."""
+"""PostgreSQL assembly used by the live runtime composition root."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -38,10 +39,15 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_observability_database_engine,
 )
 
-if TYPE_CHECKING:
-    from crypto_momentum_lab.live_rollout.runtime_session import (
-        ResourceOwnershipRegistry,
-    )
+
+class ResourceRegistrar(Protocol):
+    """Runtime-owned cleanup registry required by this adapter assembly."""
+
+    def register(
+        self,
+        name: str,
+        cleanup: Callable[[], Awaitable[None] | None],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +96,7 @@ def assemble_live_persistence(
     observability_database_url: str,
     account_label: str,
     strategy_name: str,
-    ownership_registry: ResourceOwnershipRegistry,
+    ownership_registry: ResourceRegistrar,
 ) -> LivePersistenceAssembly:
     """Assemble all live database engines, sessions, and repositories.
 
