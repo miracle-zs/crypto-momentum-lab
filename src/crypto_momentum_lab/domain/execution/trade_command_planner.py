@@ -78,21 +78,6 @@ def plan_order_execution(
             ),
             unexecuted_quantization_remainder=command.requested_quantity,
         )
-    actual_notional = quantized_quantity * reference_price
-    if not command.reduce_only and actual_notional < rules.min_notional:
-        return TradeExecutionPlanResult(
-            command=command,
-            plan=None,
-            rejection=QuantizationRejection(
-                reason="min_notional_breached",
-                details={
-                    "actual_notional": str(actual_notional),
-                    "min_notional": str(rules.min_notional),
-                },
-            ),
-            unexecuted_quantization_remainder=command.requested_quantity,
-        )
-
     opening_buy = command.side is TradeSide.LONG
     should_buy = not opening_buy if command.reduce_only else opening_buy
     exchange_side = "BUY" if should_buy else "SELL"
@@ -104,6 +89,21 @@ def plan_order_execution(
         price = (source_price / rules.tick_size).to_integral_value(
             rounding=price_rounding
         ) * rules.tick_size
+    order_price = price if price is not None else reference_price
+    order_notional = quantized_quantity * order_price
+    if not command.reduce_only and order_notional < rules.min_notional:
+        return TradeExecutionPlanResult(
+            command=command,
+            plan=None,
+            rejection=QuantizationRejection(
+                reason="min_notional_breached",
+                details={
+                    "actual_notional": str(order_notional),
+                    "min_notional": str(rules.min_notional),
+                },
+            ),
+            unexecuted_quantization_remainder=command.requested_quantity,
+        )
     position_side = (
         command.position_key.position_side if hedge_mode else FuturesPositionSide.BOTH
     )

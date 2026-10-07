@@ -223,6 +223,75 @@ async def test_submission_preserves_policy_quantity_only_within_budget(
     assert result.plan.quantity * reference_price == Decimal("22.2222")
 
 
+async def test_submission_uses_limit_price_for_order_budget() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        limits=FixedLiveLimits(
+            notional_cap=Decimal("100"),
+            max_open_positions=2,
+            max_daily_loss=Decimal("10"),
+            max_gross_exposure=Decimal("500"),
+        ),
+    )
+    context = _runtime_context()
+    context = replace(
+        context,
+        risk_config=replace(
+            context.risk_config,
+            max_order_notional=Decimal("100"),
+            max_gross_notional=Decimal("500"),
+        ),
+        trading_rules={
+            "MARSCOINUSDT": SymbolTradingRules(
+                symbol="MARSCOINUSDT",
+                tick_size=Decimal("0.000001"),
+                step_size=Decimal("1"),
+                min_quantity=Decimal("1"),
+                max_quantity=Decimal("100000"),
+                min_notional=Decimal("5"),
+            )
+        },
+    )
+    candidate = replace(
+        _intent(),
+        symbol="MARSCOINUSDT",
+        entry_type=EntryType.LIMIT,
+        limit_price=Decimal("0.1075200"),
+        desired_notional=Decimal("99.9936000"),
+        features={"quantized_quantity": "930"},
+    )
+    state = replace(
+        _state(),
+        symbol="MARSCOINUSDT",
+        open_price=Decimal("0.1075200"),
+        high_price=Decimal("0.10776982"),
+        low_price=Decimal("0.1075200"),
+        close_price=Decimal("0.1075200"),
+        last_bid_price=Decimal("0.1075200"),
+        last_ask_price=Decimal("0.1075200"),
+        midpoint=Decimal("0.1075200"),
+        spread=Decimal("0"),
+        mark_price=Decimal("0.10776982"),
+    )
+
+    result = await submission.execute(
+        candidate,
+        requested_quantity=None,
+        state=state,
+        context=context,
+    )
+
+    assert result is not None
+    assert result.plan.quantity == Decimal("930")
+    assert result.plan.price == candidate.limit_price
+    assert result.plan.quantity * result.plan.price == candidate.desired_notional
+    assert result.plan.quantity * state.mark_price > candidate.desired_notional
+    assert coordinator.events == ["prepare", "exchange"]
+
+
 async def test_submission_strictly_obeys_requested_quantity() -> None:
     repository = RecordingPreparedRepository()
     coordinator = RecordingCoordinator()
@@ -690,9 +759,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submission_blocks_when_quantized_notional_exceeds_max_order_notional() -> (
-    None
-):
+async def test_submission_blocks_notional_above_order_cap() -> None:
     cand = replace(_intent(), desired_notional=Decimal("20"))
     repo = RecordingPreparedRepository()
     coord = RecordingCoordinator()

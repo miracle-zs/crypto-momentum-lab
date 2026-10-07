@@ -339,38 +339,43 @@ class LiveCandidateSubmission:
                 strategy_version=executable_candidate.strategy_version,
             )
 
-            actual_notional: Decimal | None = None
+            order_notional: Decimal | None = None
+            risk_notional: Decimal | None = None
             if plan.quantity is not None:
-                actual_notional = plan.quantity * execution_reference_price
+                risk_notional = plan.quantity * execution_reference_price
+                order_notional = plan.quantity * (
+                    plan.price if plan.price is not None else execution_reference_price
+                )
 
             if (
                 requested_quantity is None
                 and executable_candidate.desired_notional is not None
                 and executable_candidate.desired_notional > 0
-                and actual_notional is not None
+                and order_notional is not None
             ):
                 resize_fraction = (
-                    executable_candidate.desired_notional - actual_notional
+                    executable_candidate.desired_notional - order_notional
                 ).copy_abs() / executable_candidate.desired_notional
                 if resize_fraction > self._config.resize_tolerance:
                     return None
 
             # Re-verify hard risk limits after quantizing a non-reduce-only entry.
-            if not executable_candidate.reduce_only and actual_notional is not None:
-                allowed, ceiling_reason = (
-                    validate_quantized_notional(
-                        actual_notional,
-                        gross_exposure=(
-                            limit_context.gross_exposure
-                            if limit_context is not None
-                            else None
-                        ),
-                        approved_notional=executable_candidate.desired_notional,
-                        max_order_notional=risk_context.risk_config.max_order_notional,
-                        max_gross_notional=(
-                            risk_context.risk_config.max_gross_notional
-                        ),
-                    )
+            if (
+                not executable_candidate.reduce_only
+                and order_notional is not None
+                and risk_notional is not None
+            ):
+                allowed, ceiling_reason = validate_quantized_notional(
+                    order_notional,
+                    risk_notional=risk_notional,
+                    gross_exposure=(
+                        limit_context.gross_exposure
+                        if limit_context is not None
+                        else None
+                    ),
+                    approved_notional=executable_candidate.desired_notional,
+                    max_order_notional=risk_context.risk_config.max_order_notional,
+                    max_gross_notional=(risk_context.risk_config.max_gross_notional),
                 )
                 if not allowed:
                     log.info(
@@ -378,7 +383,8 @@ class LiveCandidateSubmission:
                         run_id=self._config.run_id,
                         candidate_id=executable_candidate.candidate_id,
                         symbol=executable_candidate.symbol,
-                        actual_notional=str(actual_notional),
+                        order_notional=str(order_notional),
+                        risk_notional=str(risk_notional),
                         reason=ceiling_reason,
                     )
                     return None
@@ -434,7 +440,7 @@ class LiveCandidateSubmission:
                         else risk_open_position_symbols
                     ),
                     exposure_notional=(
-                        None if executable_candidate.reduce_only else actual_notional
+                        None if executable_candidate.reduce_only else risk_notional
                     ),
                     baseline_observed_at=context.account_observed_at,
                 ),

@@ -104,10 +104,6 @@ def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
     assert evaluation.reason == "reduce_only"
 
 
-
-
-
-
 def test_gateway_blocks_entries_when_strategy_is_halted() -> None:
     evaluation = (
         RiskGateway()
@@ -182,8 +178,6 @@ def test_gateway_rejects_fixed_limit_failures(change, reason) -> None:
     assert result.evaluation.reason == reason
 
 
-
-
 def test_gateway_reduce_only_bypasses_entry_limits() -> None:
     intent = _intent(reduce_only=True, desired_notional=Decimal("500"))
     result = RiskGateway(limits=_fixed_limits()).evaluate(intent, _context())
@@ -216,6 +210,7 @@ def test_gateway_uses_stricter_position_limit_once():
 def test_quantized_notional_cannot_exceed_approved_budget():
     allowed, reason = validate_quantized_notional(
         Decimal("55"),
+        risk_notional=Decimal("55"),
         gross_exposure=Decimal("0"),
         approved_notional=Decimal("50"),
         max_order_notional=_context().risk_config.max_order_notional,
@@ -223,6 +218,30 @@ def test_quantized_notional_cannot_exceed_approved_budget():
     )
     assert not allowed
     assert reason == "quantized_order_notional_exceeds_approved_notional"
+
+
+def test_order_budget_uses_order_price_but_gross_limit_uses_risk_price():
+    allowed, reason = validate_quantized_notional(
+        Decimal("99.9936"),
+        risk_notional=Decimal("100.22593260"),
+        gross_exposure=Decimal("0"),
+        approved_notional=Decimal("99.9936"),
+        max_order_notional=Decimal("100"),
+        max_gross_notional=Decimal("500"),
+    )
+    assert allowed
+    assert reason is None
+
+    allowed, reason = validate_quantized_notional(
+        Decimal("99.9936"),
+        risk_notional=Decimal("100.22593260"),
+        gross_exposure=Decimal("400"),
+        approved_notional=Decimal("99.9936"),
+        max_order_notional=Decimal("100"),
+        max_gross_notional=Decimal("500"),
+    )
+    assert not allowed
+    assert reason == "quantized_order_notional_exceeds_max_gross_notional"
 
 
 def _context(
@@ -237,8 +256,6 @@ def _context(
         risk_config=_risk_config(max_order_notional=Decimal("100")),
         strategy_state=strategy_state,
     )
-
-
 
 
 def _intent(

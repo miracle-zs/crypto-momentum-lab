@@ -220,6 +220,30 @@ def test_trade_command_executor_limit_sell_price_rounding_up() -> None:
     assert result.plan.reference_price == Decimal("50000")
 
 
+def test_limit_order_min_notional_uses_the_quantized_limit_price() -> None:
+    command = TradeCommand(
+        command_id="limit-min-notional",
+        position_key=POS_KEY,
+        command_type=TradeCommandType.ENTRY,
+        side=StrategySide.LONG,
+        order_type=EntryType.LIMIT,
+        requested_quantity=Decimal("1"),
+        limit_price=Decimal("4.91"),
+    )
+
+    result = plan_order_execution(
+        command,
+        RULES,
+        run_id="run-1",
+        reference_price=Decimal("5.10"),
+    )
+
+    assert result.plan is None
+    assert result.rejection is not None
+    assert result.rejection.reason == "min_notional_breached"
+    assert result.rejection.details["actual_notional"] == "4.90"
+
+
 def test_plan_order_execution_preserves_reference_price_for_market_order() -> None:
     cmd = TradeCommand(
         command_id="cmd-market-ref",
