@@ -1538,6 +1538,15 @@ class MarketRevisionRefRow(Base):
             "revision_id",
             postgresql_where=text("is_canonical = false"),
         ),
+        Index(
+            "ix_market_revision_refs_pending_archive",
+            "bucket_start",
+            "scope",
+            "revision_id",
+            postgresql_where=text(
+                "payload IS NOT NULL AND payload_archive_path IS NULL"
+            ),
+        ),
     )
 
 

@@ -84,6 +84,24 @@ Dashboard 以非 root 用户读取归档；归档器将分区目录设为 `0755`
 `0644`。这些归档只含公开行情状态，不含账户凭证；不要收紧这些权限，否则历史回放会因
 `PermissionError` 失败。
 
+待归档部分索引按 `(bucket_start, scope, revision_id)` 排序，批次发现先定位最老待处理
+桶，再列出该 15 分钟窗口内的 scope；避免对整个历史积压分组排序。归档更新显式写入
+SQL `NULL`，不把 JSON `null` 当作清空 payload；回滚检查以归档指针为准。
+
+该表的 autovacuum 使用 1% + 5,000 条死行阈值，插入清理阈值为 2% + 5,000 条，
+cost delay 为 5ms、cost limit 为 200。首次归档后可执行限速普通 vacuum，允许线上读写：
+
+```sql
+SET vacuum_cost_delay = '5ms';
+SET vacuum_cost_limit = 200;
+SET maintenance_work_mem = '32MB';
+VACUUM (ANALYZE, TRUNCATE FALSE, PARALLEL 0) market_revision_refs;
+```
+
+`TRUNCATE FALSE` 避免尾部截断阶段申请强锁；观察 `pg_stat_progress_vacuum` 和死行数量
+下降来验证回收，不以 `df` 立即下降作为普通 vacuum 成功标准。归档产生 MVCC 旧版本，
+首次追赶期间物理文件可能暂时增长；应分别核对积压、清理结果和增长窗口。
+
 部署带有归档读取器和数据库迁移的版本后，`cml-market-revision-archive.timer` 会自动
 执行有界归档。首次追赶历史积压可能需要多轮；每轮之后核对归档数量和数据库增长告警，
 不要通过增大批次上限绕过数据库负载约束。手动演练和执行仍可使用：

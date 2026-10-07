@@ -33,7 +33,7 @@ def downgrade() -> None:
     archived_count = bind.execute(
         sa.text(
             "SELECT count(*) FROM market_revision_refs "
-            "WHERE payload IS NULL AND payload_archive_path IS NOT NULL"
+            "WHERE payload_archive_path IS NOT NULL"
         )
     ).scalar_one()
     if archived_count:

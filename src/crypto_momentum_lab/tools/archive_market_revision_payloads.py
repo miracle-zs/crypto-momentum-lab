@@ -15,9 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
-from sqlalchemy import Integer, cast, func, select, text, update
+from sqlalchemy import func, null, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from crypto_momentum_lab.config import resolve_database_url
@@ -115,36 +114,46 @@ def _market_state_hash_scheme(
     )
 
 
-def _partition_expressions() -> tuple[Any, Any]:
-    hour_start = func.date_trunc("hour", MarketRevisionRefRow.bucket_start)
-    minute = cast(func.extract("minute", MarketRevisionRefRow.bucket_start), Integer)
-    quarter = cast(func.floor(minute / 15), Integer)
-    return hour_start, quarter
-
-
 def _eligible_partitions(
     session: Session, *, cutoff: datetime, limit: int
 ) -> list[_Partition]:
-    hour_start, quarter = _partition_expressions()
-    statement = (
-        select(
-            MarketRevisionRefRow.scope,
-            hour_start.label("hour_start"),
-            quarter.label("quarter"),
-        )
-        .where(
-            MarketRevisionRefRow.bucket_start < cutoff,
-            MarketRevisionRefRow.payload.is_not(None),
-            MarketRevisionRefRow.payload_archive_path.is_(None),
-        )
-        .group_by(MarketRevisionRefRow.scope, hour_start, quarter)
-        .order_by(hour_start.asc(), quarter.asc(), MarketRevisionRefRow.scope.asc())
-        .limit(limit)
+    # Seek the oldest pending bucket through the partial index, then inspect
+    # only that 15-minute window. A global GROUP BY scans the entire backlog
+    # even when LIMIT asks for just a handful of windows.
+    pending = (
+        MarketRevisionRefRow.payload.is_not(None),
+        MarketRevisionRefRow.payload_archive_path.is_(None),
+        MarketRevisionRefRow.bucket_start < cutoff,
     )
-    return [
-        _Partition(str(scope), hour, int(qtr))
-        for scope, hour, qtr in session.execute(statement).all()
-    ]
+    partitions: list[_Partition] = []
+    window_end: datetime | None = None
+    while len(partitions) < limit:
+        oldest = select(MarketRevisionRefRow.bucket_start).where(*pending)
+        if window_end is not None:
+            oldest = oldest.where(MarketRevisionRefRow.bucket_start >= window_end)
+        bucket_start = session.execute(
+            oldest.order_by(MarketRevisionRefRow.bucket_start).limit(1)
+        ).scalar_one_or_none()
+        if bucket_start is None:
+            break
+        bucket_start = bucket_start.astimezone(UTC)
+        hour_start = bucket_start.replace(minute=0, second=0, microsecond=0)
+        quarter = bucket_start.minute // 15
+        window_start = hour_start + timedelta(minutes=quarter * 15)
+        window_end = window_start + timedelta(minutes=15)
+        scopes = session.execute(
+            select(MarketRevisionRefRow.scope)
+            .where(
+                *pending,
+                MarketRevisionRefRow.bucket_start >= window_start,
+                MarketRevisionRefRow.bucket_start < window_end,
+            )
+            .distinct()
+            .order_by(MarketRevisionRefRow.scope)
+            .limit(limit - len(partitions))
+        ).scalars()
+        partitions.extend(_Partition(scope, hour_start, quarter) for scope in scopes)
+    return partitions
 
 
 def _partition_stats(
@@ -262,7 +271,7 @@ def _archive_batch(
                     MarketRevisionRefRow.payload_archive_path.is_(None),
                 )
                 .values(
-                    payload=None,
+                    payload=null(),
                     payload_archive_path=archive.relative_path,
                     payload_archive_sha256=archive.sha256,
                 )
