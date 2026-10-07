@@ -2259,6 +2259,7 @@ SELECT json_build_object(
         self._state["database_storage_samples"] = samples
         cutoff = now - self._config.storage_sample_window_seconds
         retained: list[dict[str, object]] = []
+        boundary_sample: dict[str, object] | None = None
         for sample in samples:
             if not isinstance(sample, dict):
                 continue
@@ -2267,12 +2268,28 @@ SELECT json_build_object(
             sampled_relations = sample.get("relations")
             if (
                 isinstance(sampled_at, int | float)
-                and cutoff <= sampled_at <= now
+                and sampled_at <= now
                 and isinstance(sampled_database_bytes, int)
                 and isinstance(sampled_relations, dict)
             ):
-                retained.append(sample)
+                if sampled_at >= cutoff:
+                    retained.append(sample)
+                elif (
+                    cutoff - self._config.storage_sample_interval_seconds
+                    <= sampled_at
+                    and (
+                        boundary_sample is None
+                        or sampled_at > float(boundary_sample["at"])
+                    )
+                ):
+                    # Keep one boundary anchor so a full day is measurable
+                    # even when collection timestamps do not align exactly.
+                    boundary_sample = sample
 
+        if boundary_sample is not None:
+            retained.append(boundary_sample)
+
+        retained.sort(key=lambda sample: float(sample["at"]))
         latest_at = (
             retained[-1].get("at")
             if retained
@@ -2291,36 +2308,70 @@ SELECT json_build_object(
             )
         self._state["database_storage_samples"] = retained
 
-        baseline = next(
-            (
-                sample
-                for sample in retained
-                if isinstance(sample.get("at"), int | float)
-                and now - float(sample["at"])
-                >= self._config.storage_growth_minimum_window_seconds
-            ),
-            None,
+        minimum_window = self._config.storage_growth_minimum_window_seconds
+        eligible = [
+            sample
+            for sample in retained
+            if now - float(sample["at"]) >= minimum_window
+        ]
+        baseline = eligible[-1] if eligible else None
+
+        def window_observation(sample: Mapping[str, object]) -> dict[str, object]:
+            elapsed = now - float(sample["at"])
+            delta = database_bytes - int(sample["database_bytes"])
+            previous_relations = sample["relations"]
+            relation_deltas = {
+                name: size - previous_relations[name]
+                for name, size in relations.items()
+                if isinstance(previous_relations.get(name), int)
+            }
+            return {
+                "window_seconds": elapsed,
+                "database_delta_bytes": delta,
+                "database_bytes_per_day": int(delta * 86_400 / elapsed),
+                "relation_bytes_per_day": {
+                    name: int(change * 86_400 / elapsed)
+                    for name, change in relation_deltas.items()
+                },
+                "complete_window": (
+                    elapsed >= self._config.storage_sample_window_seconds
+                ),
+            }
+
+        historical = (
+            window_observation(retained[0])
+            if retained and now > float(retained[0]["at"])
+            else None
         )
-        if baseline is None:
-            return ()
-        elapsed = now - float(baseline["at"])
-        if elapsed <= 0:
-            return ()
-        baseline_database_bytes = baseline.get("database_bytes")
-        baseline_relations = baseline.get("relations")
-        if not isinstance(baseline_database_bytes, int) or not isinstance(
-            baseline_relations, Mapping
-        ):
-            return ()
-        database_growth_per_day = max(
-            0.0,
-            (database_bytes - baseline_database_bytes)
-            * 86_400.0
-            / elapsed,
+        recent = (
+            window_observation(baseline)
+            if baseline is not None
+            and now - float(baseline["at"]) <= (
+                minimum_window + 2 * self._config.storage_sample_interval_seconds
+            )
+            else None
         )
+        self._state["database_storage_growth_observation"] = {
+            "at": now,
+            "recent": recent,
+            "historical": historical,
+        }
+        if recent is None:
+            if baseline is not None:
+                return (
+                    Alert(
+                        "database_storage_check_failed",
+                        "warning",
+                        "Insufficient recent storage samples to estimate growth",
+                        {"error_type": "insufficient_recent_samples"},
+                    ),
+                )
+            return ()
+        elapsed = float(recent["window_seconds"])
+        database_growth_per_day = max(0, recent["database_bytes_per_day"])
         relation_growth_per_day = {
-            name: max(0.0, (size - int(baseline_relations.get(name, size))) * 86_400.0 / elapsed)
-            for name, size in relations.items()
+            name: max(0, rate)
+            for name, rate in recent["relation_bytes_per_day"].items()
         }
         fast_relations = {
             name: int(growth)
@@ -2349,6 +2400,11 @@ SELECT json_build_object(
                     "database_bytes": database_bytes,
                     "database_growth_bytes_per_day": int(database_growth_per_day),
                     "growth_window_seconds": elapsed,
+                    "historical_window_seconds": historical["window_seconds"],
+                    "historical_database_delta_bytes": (
+                        historical["database_delta_bytes"]
+                    ),
+                    "historical_complete_window": historical["complete_window"],
                     "relation_bytes": relations,
                     "relation_growth_bytes_per_day": fast_relations,
                     "warning_bytes_per_day": (
@@ -5416,7 +5472,7 @@ def _format_alert_human_details(
         total_rate = details.get("database_growth_bytes_per_day")
         if isinstance(total_rate, int):
             lines.append(
-                f"- **数据库日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
+                f"- **近期折算日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
             )
         growths = details.get("relation_growth_bytes_per_day")
         if isinstance(growths, Mapping) and growths:
@@ -5437,6 +5493,20 @@ def _format_alert_human_details(
         if isinstance(window, (int, float)):
             lines.append(
                 f"- **估算窗口**：最近 {_format_duration(window)} 的增速折算"
+            )
+        historical_window = details.get("historical_window_seconds")
+        historical_delta = details.get("historical_database_delta_bytes")
+        if isinstance(historical_window, (int, float)) and isinstance(
+            historical_delta, int
+        ):
+            coverage = (
+                "完整日窗口"
+                if details.get("historical_complete_window")
+                else "未满日窗口"
+            )
+            lines.append(
+                f"- **历史净变化**：最近 {_format_duration(historical_window)} "
+                f"{historical_delta / (1024**3):+.2f} GiB（{coverage}）"
             )
 
     elif base_name in {"disk_check_failed", "database_storage_check_failed"}:
@@ -5476,6 +5546,19 @@ def _alert_conclusion(alert_name: str, details: Mapping[str, object]) -> str | N
         return "服务器数据盘容量已越过警戒水位，**需尽快确认数据库文件与可用空间**。"
     if base_name == "database_storage_growth":
         growth = details.get("database_growth_bytes_per_day")
+        warning_budget = details.get("warning_bytes_per_day")
+        relations = details.get("relation_growth_bytes_per_day")
+        if (
+            isinstance(growth, int)
+            and isinstance(warning_budget, int)
+            and growth < warning_budget
+            and isinstance(relations, Mapping)
+            and relations
+        ):
+            return (
+                "PostgreSQL 总量近期增长未超预算，但重点表增长超预算，"
+                "**需核对表级回收与空间复用**。"
+            )
         if isinstance(growth, int):
             return (
                 f"PostgreSQL 近窗折算增长 {growth / (1024**3):.2f} GiB/天，"
