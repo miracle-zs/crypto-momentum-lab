@@ -14,6 +14,24 @@ from crypto_momentum_lab.strategies.order_flow_impulse import (
 )
 
 
+@pytest.mark.parametrize("invalid_price", ["NaN", "sNaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("invalid_index", [4, 6], ids=["impulse_start", "impulse_end"])
+def test_candidate_skips_non_finite_impulse_endpoint_prices(
+    invalid_price: str,
+    invalid_index: int,
+) -> None:
+    states = [_state(i, Decimal("100"), notional=Decimal("100")) for i in range(4)] + [
+        _state(i, Decimal(100 + i - 4), notional=Decimal("300"), buy=Decimal("250"))
+        for i in range(4, 7)
+    ]
+    # Build a valid state first: fixture bid/ask arithmetic on sNaN would fail
+    # before exercising the production metrics call site.
+    states[invalid_index] = replace(
+        states[invalid_index], close_price=Decimal(invalid_price)
+    )
+    assert event_study._candidate_at(tuple(states), 6, _config()) is None
+
+
 def test_finds_upward_impulse_with_aligned_aggression_and_intensity() -> None:
     states = (
         _state(0, Decimal("100.00"), notional=Decimal("100")),

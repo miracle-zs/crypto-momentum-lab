@@ -458,7 +458,13 @@ def _impulse_metrics(
 ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
     start_price = _state_price(impulse[0])
     end_price = _state_price(impulse[-1])
-    if start_price is None or end_price is None or start_price <= 0:
+    if (
+        start_price is None
+        or end_price is None
+        or not start_price.is_finite()
+        or not end_price.is_finite()
+        or start_price <= 0
+    ):
         return None
     baseline_total = sum(
         (state.trade_notional for state in baseline),
