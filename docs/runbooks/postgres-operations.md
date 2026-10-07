@@ -70,6 +70,40 @@ python3 deploy/ops/archive_and_trim.py --dry-run --retention-days 7
 
 DELETE 后文件不立即缩小：普通 VACUUM 回收可复用页，VACUUM (ANALYZE) 更新统计；VACUUM FULL/重写需要维护窗口和强锁，不在交易繁忙时执行。删数据也不保证 RSS 下降，区分共享缓冲、文件缓存和匿名内存。
 
+### 市场版本 payload 的 zstd 归档
+
+`market_revision_refs` 的市场状态 payload 可单独移入 JSONL + zstd 归档；PostgreSQL
+保留 revision 身份、canonical 标记、时间和哈希，历史回放通过归档读取。归档文件按
+内容寻址，伴随 manifest，并在数据库更新指针前校验压缩文件哈希、解压和行数。默认只
+演练；必须显式传 `--apply` 才会把 payload 替换为归档指针。生产 timer 每小时最多归档
+20 批、每批最多 10,000 条，只把最近 1 天的 payload 留在 PostgreSQL；更老的 revision
+仍可精确回放，但需从 zstd 文件读取。
+
+部署带有归档读取器和数据库迁移的版本后，`cml-market-revision-archive.timer` 会自动
+执行有界归档。首次追赶历史积压可能需要多轮；每轮之后核对归档数量和数据库增长告警，
+不要通过增大批次上限绕过数据库负载约束。手动演练和执行仍可使用：
+
+```bash
+docker compose --profile maintenance run --rm market-revision-archiver
+docker compose --profile maintenance run --rm market-revision-archiver \
+  --retention-days 1 --max-chunks 20 --batch-size 10000 --apply
+```
+
+如需迁移回滚或把 payload 放回 PostgreSQL，可分批执行到输出
+`restored_rows: 0`；归档文件不会被删除：
+
+```bash
+docker compose --profile maintenance run --rm market-revision-archiver \
+  --restore --max-chunks 1000
+```
+
+归档位于 `/var/lib/crypto-momentum-lab/table-archive/market_revision_refs`，与数据库
+在同一服务器和文件系统上；它是压缩冷数据，不是异机备份。备份/恢复时必须同时保留
+该目录及其 manifest，不要手动删除
+manifest 或 `.jsonl.zst`。可以逐次提高 `--max-chunks`，观察数据库写入延迟、磁盘 I/O
+和归档增长后再决定是否加定时任务。payload 变为 NULL 后，普通 VACUUM 只能让 PostgreSQL
+复用页面，不会立即把已分配文件空间还给操作系统；不要在实盘运行期间执行 `VACUUM FULL`。
+
 ### 行情版本回收
 
 `cml-market-revision-purge.timer` 每天 03:35（Asia/Shanghai）执行一次有

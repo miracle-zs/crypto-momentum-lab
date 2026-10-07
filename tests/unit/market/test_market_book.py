@@ -293,6 +293,71 @@ def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> N
         repo.load_manifest("mf_missing_rev_1")
 
 
+def test_postgres_market_book_repository_reads_archived_payload() -> None:
+    from unittest.mock import MagicMock
+
+    from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
+    from crypto_momentum_lab.domain.market.state_codec import market_state_to_payload
+    from crypto_momentum_lab.persistence.postgres.market_book_repository import (
+        PostgresMarketBookRepository,
+    )
+    from crypto_momentum_lab.persistence.postgres.models import MarketRevisionRefRow
+
+    bucket_start = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    state = _create_sample_state(bucket_start=bucket_start)
+    content_hash = compute_market_state_hash(state)
+    revision_id = "rev_archived_payload"
+    archived_payload = market_state_to_payload(state)
+
+    class PayloadArchive:
+        def load_payload(
+            self,
+            *,
+            relative_path: str,
+            expected_sha256: str,
+            revision_id: str,
+            expected_content_hash: str,
+        ) -> dict[str, object]:
+            assert relative_path == "scope=live/revisions.jsonl.zst"
+            assert expected_sha256 == "a" * 64
+            assert revision_id == "rev_archived_payload"
+            assert expected_content_hash == content_hash
+            return archived_payload
+
+    mock_session = MagicMock()
+    mock_session.__enter__.return_value = mock_session
+    mock_session_factory = MagicMock(return_value=mock_session)
+    mock_session.get.return_value = MarketRevisionRefRow(
+        revision_id=revision_id,
+        scope="live",
+        symbol=state.symbol,
+        interval="15s",
+        bucket_start=state.bucket_start,
+        bucket_end=state.bucket_end,
+        content_hash=content_hash,
+        published_at=bucket_start,
+        source_epoch="epoch-1",
+        visibility_mode="canonical",
+        is_canonical=True,
+        payload=None,
+        payload_archive_path="scope=live/revisions.jsonl.zst",
+        payload_archive_sha256="a" * 64,
+        lineage={},
+    )
+
+    repo = PostgresMarketBookRepository(
+        mock_session_factory,
+        payload_archive=PayloadArchive(),
+    )
+    envelope = repo.load_envelope(revision_id)
+    assert envelope is not None
+    assert envelope.state == state
+
+    repo_without_archive = PostgresMarketBookRepository(mock_session_factory)
+    with pytest.raises(UnreproducibleError, match="no archive reader is configured"):
+        repo_without_archive.load_envelope(revision_id)
+
+
 def test_market_state_hash_includes_1m_candle_and_received_timestamps() -> None:
     """Verifies that 1m candle fields and timestamps alter hash (E2/R2)."""
     from dataclasses import replace

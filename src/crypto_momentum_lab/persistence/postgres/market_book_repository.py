@@ -30,6 +30,10 @@ from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     retains_complete_replay_evidence,
     summary_market_refs,
 )
+from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
+    MarketRevisionArchiveError,
+    MarketRevisionPayloadArchive,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     DatasetManifestRow,
     DecisionTraceRow,
@@ -48,8 +52,14 @@ def _observed_at_from_lineage(lineage: dict[str, object] | None) -> datetime | N
 class PostgresMarketBookRepository:
     """Postgres-backed storage for market revisions, pointers, and manifests."""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        payload_archive: MarketRevisionPayloadArchive | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._payload_archive = payload_archive
 
     def save_envelope(self, envelope: MarketEnvelope) -> None:
         with self._session_factory() as session:
@@ -82,7 +92,34 @@ class PostgresMarketBookRepository:
             row = session.get(MarketRevisionRefRow, revision_id)
             if row is None:
                 return None
-            state = market_state_from_payload(row.payload)
+            payload = row.payload
+            if payload is None:
+                if (
+                    row.payload_archive_path is None
+                    or row.payload_archive_sha256 is None
+                ):
+                    raise UnreproducibleError(
+                        f"Market revision {revision_id} has no payload "
+                        "or archive pointer"
+                    )
+                if self._payload_archive is None:
+                    raise UnreproducibleError(
+                        f"Market revision {revision_id} is archived but no archive "
+                        "reader is configured"
+                    )
+                try:
+                    payload = self._payload_archive.load_payload(
+                        relative_path=row.payload_archive_path,
+                        expected_sha256=row.payload_archive_sha256,
+                        revision_id=row.revision_id,
+                        expected_content_hash=row.content_hash,
+                    )
+                except MarketRevisionArchiveError as error:
+                    raise UnreproducibleError(
+                        f"Market revision {revision_id} archive is unavailable or "
+                        f"invalid: {error}"
+                    ) from error
+            state = market_state_from_payload(payload)
             ref = MarketRevisionRef(
                 scope=row.scope,
                 symbol=row.symbol,

@@ -33,6 +33,7 @@ TIMER_OUTPUT = (
     "Result=success\n"
     "ExecMainStatus=0\n"
     f"ExecMainStartTimestamp=@{NOW_EPOCH}\n"
+    f"NextElapseUSecRealtime=@{NOW_EPOCH + 3600}\n"
 )
 SERVICE_OUTPUT = (
     "ActiveState=inactive\n"
@@ -114,6 +115,8 @@ def test_parse_reads_unix_timestamps_and_failure_fields() -> None:
     assert parsed.result == "success"
     assert parsed.last_start is not None
     assert parsed.last_start.timestamp() == pytest.approx(NOW_EPOCH)
+    assert parsed.next_elapse is not None
+    assert parsed.next_elapse.timestamp() == pytest.approx(NOW_EPOCH + 3600)
 
     rendered = _parse_systemd_show(
         SERVICE,
@@ -160,6 +163,7 @@ def test_read_asks_for_unix_timestamps() -> None:
     assert runner.calls[0][:3] == ("systemctl", "show", TIMER)
     assert "--timestamp=unix" in runner.calls[0]
     assert "ExecMainStartTimestamp" in runner.calls[0]
+    assert "NextElapseUSecRealtime" in runner.calls[0]
 
 
 def test_healthy_schedule_is_silent() -> None:
@@ -220,6 +224,39 @@ def test_never_run_service_alerts() -> None:
         now=NOW,
         max_age_seconds=26 * 3600,
     )
+    assert [alert.name for alert in alerts] == ["retention_timer_stale"]
+
+
+def test_never_run_service_is_not_stale_before_its_first_due_time() -> None:
+    next_elapse = NOW_EPOCH + 3600
+    timer = _parse_systemd_show(
+        TIMER,
+        "ActiveState=active\nUnitFileState=enabled\n"
+        f"NextElapseUSecRealtime=@{next_elapse}\n",
+    )
+
+    alerts = evaluate_retention_timer(
+        _schedule(timer=timer, service=_service(last_start=None)),
+        now=NOW,
+        max_age_seconds=26 * 3600,
+    )
+
+    assert alerts == ()
+
+
+def test_never_run_service_is_stale_after_its_first_due_time() -> None:
+    timer = _parse_systemd_show(
+        TIMER,
+        "ActiveState=active\nUnitFileState=enabled\n"
+        f"NextElapseUSecRealtime=@{NOW_EPOCH - 1}\n",
+    )
+
+    alerts = evaluate_retention_timer(
+        _schedule(timer=timer, service=_service(last_start=None)),
+        now=NOW,
+        max_age_seconds=26 * 3600,
+    )
+
     assert [alert.name for alert in alerts] == ["retention_timer_stale"]
 
 

@@ -431,6 +431,7 @@ services:
       CML_PAPER_ACCOUNT_RUN_IDS: *paper-account-run-ids
       CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
       CML_DASHBOARD_COMMON_EQUITY_START_AT: "2026-08-21T02:45:00Z"
+      CML_MARKET_REVISION_ARCHIVE_DIR: /app/market-revision-archive
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:
@@ -440,6 +441,7 @@ services:
       - "127.0.0.1:8765:8765"
     volumes:
       - research-data:/app/research-data:ro
+      - /var/lib/crypto-momentum-lab/table-archive/market_revision_refs:/app/market-revision-archive:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -455,6 +457,26 @@ services:
     # 192m: peak measured at 109 MiB.
     mem_limit: 192m
     memswap_limit: 512m
+
+  market-revision-archiver:
+    <<: *app
+    profiles: ["maintenance"]
+    user: "0:0"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 512m
+    memswap_limit: 768m
+    entrypoint: ["cml-archive-market-revisions"]
+    environment:
+      <<: *app-environment
+      CML_MARKET_REVISION_ARCHIVE_DIR: /app/market-revision-archive
+    volumes:
+      - /var/lib/crypto-momentum-lab/table-archive/market_revision_refs:/app/market-revision-archive
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   postgres-data:

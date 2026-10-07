@@ -76,6 +76,7 @@ _DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
 # The timer runs daily; 26h leaves room for one missed slot before alerting.
 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
+_DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS = 3.0 * 60.0 * 60.0
 _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS = 300.0
 _DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS = 24.0 * 60.0 * 60.0
@@ -113,6 +114,9 @@ _ALERT_LABELS = {
     "position_recovery_retention_timer_inactive": "持仓恢复历史清理定时器未激活",
     "position_recovery_retention_timer_failed": "持仓恢复历史清理上次运行失败",
     "position_recovery_retention_timer_stale": "持仓恢复历史清理长时间未运行",
+    "market_revision_archive_timer_inactive": "市场版本压缩归档定时器未激活",
+    "market_revision_archive_timer_failed": "市场版本压缩归档上次运行失败",
+    "market_revision_archive_timer_stale": "市场版本压缩归档长时间未运行",
     "disk_usage_high": "服务器磁盘空间不足",
     "disk_check_failed": "服务器磁盘空间检查失败",
     "database_storage_growth": "数据库存储增长过快",
@@ -172,6 +176,15 @@ _ALERT_IMPACTS = {
     ),
     "position_recovery_retention_timer_stale": (
         "持仓恢复历史清理超过预期周期没有运行，数据库空间增长可能无人处理。"
+    ),
+    "market_revision_archive_timer_inactive": (
+        "市场版本压缩归档已停用，market_revision_refs 会继续在 PostgreSQL 内增长。"
+    ),
+    "market_revision_archive_timer_failed": (
+        "市场版本压缩归档失败，历史 payload 未能移入可校验的 zstd 文件。"
+    ),
+    "market_revision_archive_timer_stale": (
+        "市场版本压缩归档超过预期周期没有运行，PostgreSQL 增长可能持续。"
     ),
     "disk_usage_high": "主机数据盘空间接近上限，继续增长可能导致 PostgreSQL 停止写入。",
     "disk_check_failed": "无法读取主机磁盘容量，不能判断 PostgreSQL 数据盘是否接近写满。",
@@ -258,6 +271,15 @@ _ALERT_ACTIONS = {
     ),
     "position_recovery_retention_timer_stale": (
         "检查 cml-position-recovery-retention.timer 是否激活及主机时钟；确认上次服务退出码为 0。"
+    ),
+    "market_revision_archive_timer_inactive": (
+        "执行 systemctl enable --now cml-market-revision-archive.timer，并确认下次触发时间。"
+    ),
+    "market_revision_archive_timer_failed": (
+        "查看 cml-market-revision-archive.service 日志；确认归档校验或数据库更新失败原因。"
+    ),
+    "market_revision_archive_timer_stale": (
+        "检查 cml-market-revision-archive.timer 与 service 的最近运行结果和部署锁状态。"
     ),
     "disk_usage_high": (
         "先核对 PostgreSQL 与 Docker 数据目录占用，再清理已确认无用的文件或扩容数据盘；不要直接删除数据库目录文件。"
@@ -1552,7 +1574,7 @@ class SubprocessRunner:
 
 @dataclass(frozen=True, slots=True)
 class SystemdUnitState:
-    """Activation and last-run state of one systemd unit."""
+    """Activation, schedule, and last-run state of one systemd unit."""
 
     unit: str
     active_state: str
@@ -1560,6 +1582,7 @@ class SystemdUnitState:
     result: str
     exec_main_status: int | None
     last_start: datetime | None
+    next_elapse: datetime | None = None
 
 
 _SYSTEMD_SHOW_FIELDS = (
@@ -1568,6 +1591,7 @@ _SYSTEMD_SHOW_FIELDS = (
     "Result",
     "ExecMainStatus",
     "ExecMainStartTimestamp",
+    "NextElapseUSecRealtime",
 )
 
 
@@ -1587,6 +1611,15 @@ def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
             )
         except ValueError:
             last_start = None
+    next_elapse = None
+    next_timestamp = values.get("NextElapseUSecRealtime", "")
+    if next_timestamp:
+        try:
+            next_elapse = datetime.fromtimestamp(
+                float(next_timestamp.lstrip("@")), tz=_BEIJING_TIMEZONE
+            )
+        except ValueError:
+            next_elapse = None
     status_text = values.get("ExecMainStatus", "")
     exec_main_status = int(status_text) if status_text.lstrip("-").isdigit() else None
     return SystemdUnitState(
@@ -1596,6 +1629,7 @@ def _parse_systemd_show(unit: str, output: str) -> SystemdUnitState:
         result=values.get("Result", "") or "",
         exec_main_status=exec_main_status,
         last_start=last_start,
+        next_elapse=next_elapse,
     )
 
 
@@ -1737,6 +1771,12 @@ def evaluate_retention_timer(
             )
         )
     elif age_seconds is None:
+        if (
+            timer.active_state == "active"
+            and timer.next_elapse is not None
+            and timer.next_elapse.timestamp() > now
+        ):
+            return tuple(alerts)
         alerts.append(
             Alert(
                 f"{alert_prefix}_timer_stale",
@@ -1872,6 +1912,10 @@ class MonitorConfig:
         _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS
     )
     market_revision_purge_service_unit: str = ""
+    market_revision_archive_timer_unit: str = ""
+    market_revision_archive_timer_max_age_seconds: float = (
+        _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS
+    )
     position_recovery_retention_timer_unit: str = ""
     position_recovery_retention_timer_max_age_seconds: float = (
         _DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS
@@ -1975,6 +2019,10 @@ class OpsMonitor:
             raise ValueError(
                 "market_revision_purge_timer_max_age_seconds must be positive"
             )
+        if config.market_revision_archive_timer_max_age_seconds <= 0:
+            raise ValueError(
+                "market_revision_archive_timer_max_age_seconds must be positive"
+            )
         if config.position_recovery_retention_timer_max_age_seconds <= 0:
             raise ValueError(
                 "position_recovery_retention_timer_max_age_seconds must be positive"
@@ -2066,6 +2114,12 @@ class OpsMonitor:
         return self._schedule_state(
             self._config.market_revision_purge_timer_unit,
             self._config.market_revision_purge_service_unit,
+        )
+
+    def _market_revision_archive_schedule_state(self) -> RetentionScheduleState | None:
+        return self._schedule_state(
+            self._config.market_revision_archive_timer_unit,
+            "",
         )
 
     def _position_recovery_retention_schedule_state(
@@ -2396,6 +2450,16 @@ SELECT json_build_object(
                 max_age_seconds=(
                     self._config.market_revision_purge_timer_max_age_seconds
                 ),
+            )
+        )
+        alerts.extend(
+            evaluate_retention_timer(
+                self._market_revision_archive_schedule_state(),
+                now=now,
+                max_age_seconds=(
+                    self._config.market_revision_archive_timer_max_age_seconds
+                ),
+                alert_prefix="market_revision_archive",
             )
         )
         alerts.extend(
@@ -5863,6 +5927,15 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         ),
         market_revision_purge_service_unit=os.environ.get(
             "CML_MARKET_REVISION_PURGE_SERVICE_UNIT", ""
+        ),
+        market_revision_archive_timer_unit=os.environ.get(
+            "CML_MARKET_REVISION_ARCHIVE_TIMER_UNIT", ""
+        ),
+        market_revision_archive_timer_max_age_seconds=float(
+            os.environ.get(
+                "CML_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS",
+                _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS,
+            )
         ),
         position_recovery_retention_timer_unit=os.environ.get(
             "CML_POSITION_RECOVERY_RETENTION_TIMER_UNIT", ""

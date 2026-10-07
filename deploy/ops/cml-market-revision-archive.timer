@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly bounded market revision zstd archive
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

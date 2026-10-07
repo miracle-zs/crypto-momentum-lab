@@ -1507,7 +1507,11 @@ class MarketRevisionRefRow(Base):
     source_epoch: Mapped[str] = mapped_column(String(64), nullable=False)
     visibility_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     is_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    payload_archive_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_archive_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     lineage: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=dict
     )

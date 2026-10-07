@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -27,6 +29,9 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 from crypto_momentum_lab.persistence.postgres.market_book_repository import (
     PostgresMarketBookRepository,
+)
+from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
+    ZstdMarketRevisionPayloadArchive,
 )
 from crypto_momentum_lab.persistence.postgres.session import create_sync_engine
 
@@ -52,7 +57,14 @@ def get_catalog_and_repo(
     session_factory: sessionmaker[Session] = sessionmaker(
         engine, expire_on_commit=False
     )
-    repo = PostgresMarketBookRepository(session_factory)
+    archive_dir = os.environ.get("CML_MARKET_REVISION_ARCHIVE_DIR")
+    payload_archive = (
+        ZstdMarketRevisionPayloadArchive(Path(archive_dir)) if archive_dir else None
+    )
+    repo = PostgresMarketBookRepository(
+        session_factory,
+        payload_archive=payload_archive,
+    )
     book = MarketBook(repo)
     catalog = DatasetCatalog(book, repo)
     return catalog, repo

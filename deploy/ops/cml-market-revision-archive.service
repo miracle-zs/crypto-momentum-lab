@@ -1,0 +1,18 @@
+[Unit]
+Description=Crypto Momentum Lab bounded market revision zstd archive
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/postgres-operations.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+# Share the deployment lock so a scheduled run cannot race a schema rollout.
+# -E 0 treats a held deployment lock as a successful skipped maintenance run.
+ExecStart=/usr/bin/flock -n -E 0 /opt/crypto-momentum-lab/.git/cml-deploy.lock /usr/bin/docker compose --env-file .env.server -f compose.server.yaml --profile maintenance run --rm market-revision-archiver --retention-days 1 --max-chunks 20 --batch-size 10000 --apply
+TimeoutStartSec=60m
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
