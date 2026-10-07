@@ -32,10 +32,13 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 )
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
+    RetentionWatermarkEvaluator,
 )
 from crypto_momentum_lab.domain.operational.retention_models import (
     PruneOutcome,
     PrunePlan,
+    PruneReceiptStatus,
+    RecoverySpec,
 )
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
@@ -92,7 +95,6 @@ from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
-    AccountPositionSnapshotRow,
     ConsumerDependencyRow,
     StrategyRuntimeCheckpointRow,
 )
@@ -208,6 +210,19 @@ def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
     return frozenset(
         run_id for item in raw_value.split(",") if (run_id := item.strip())
     )
+
+
+def parse_retired_strategy_run_ids(value: str | None = None) -> frozenset[str]:
+    """Exact operator-retired checkpoint owners; never infer retirement by age."""
+    raw = os.environ.get("CML_RETIRED_STRATEGY_RUN_IDS", "") if value is None else value
+    if not raw.strip():
+        return frozenset()
+    run_ids = tuple(item.strip() for item in raw.split(","))
+    if any(not item or any(char in item for char in "*?[]") for item in run_ids):
+        raise ValueError(
+            "CML_RETIRED_STRATEGY_RUN_IDS requires exact non-empty run IDs"
+        )
+    return frozenset(run_ids)
 
 
 def parse_live_position_account_labels(
@@ -914,15 +929,35 @@ async def prune_operational_database_once(
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
 
+    # Publish the local protection floor before planning.  Previously these
+    # requirements were applied only inside the repositories, so persisted
+    # plans and receipts claimed a newer cutoff than the one actually used.
+    # Refresh one owned projection rather than leaving a stale dependency for
+    # every disappeared requirement.  An empty set advances this projection to
+    # the requested horizon; it never retires another consumer's dependency.
+    gating = RetentionWatermarkEvaluator.evaluate_cutoff(
+        requested_cutoff=runtime_cutoff,
+        requirements=consumer_requirements,
+        current_time=observed_at,
+    )
+    binding = gating.binding_constraint
+    await authority.register_dependency_async(
+        consumer_id="market_data_operational_retention",
+        generation=0,
+        recovery_spec=RecoverySpec(
+            source_dataset="market_data",
+            earliest_needed_watermark=gating.effective_cutoff,
+            reason=(
+                f"{binding.consumer_id}: {binding.reason}"
+                if binding is not None
+                else "operational retention horizon; no older local dependency"
+            ),
+        ),
+    )
+
     plan = await authority.plan_prune_async(
         dataset_name="market_data",
         requested_cutoff=runtime_cutoff,
-    )
-
-    req_kwargs = (
-        {"consumer_requirements": consumer_requirements}
-        if consumer_requirements
-        else {}
     )
 
     effective_contract_cutoff = min(contract_cutoff, plan.effective_cutoff)
@@ -937,12 +972,10 @@ async def prune_operational_database_once(
         deleted_contracts = await repository.prune_contract_metadata(
             before=eff_contract_cutoff,
             batch_size=contract_metadata_batch_size,
-            **req_kwargs,
         )
         deleted_states = await repository.prune_runtime_market_states(
             before=p.effective_cutoff,
             batch_size=runtime_state_batch_size,
-            **req_kwargs,
         )
         return PruneOutcome(
             rows_archived=0,
@@ -956,6 +989,11 @@ async def prune_operational_database_once(
         expected_dependency_version=plan.expected_dependency_version,
         executor_fn=executor,
     )
+    if receipt.status is not PruneReceiptStatus.SUCCESS:
+        raise RuntimeError(
+            f"Operational retention did not complete: {receipt.status.value}: "
+            f"{receipt.details}"
+        )
     # Keep tomorrow's event partitions present so live-strategy writers never
     # miss a day boundary.  Deletion stays on the daily archive-and-trim job.
     event_partitions_ensured = (
@@ -1047,10 +1085,15 @@ async def _resolve_market_data_consumer_requirements(
                 )
             )
 
-        # 2. In-flight active checkpoints and position states
-        earliest_checkpoint = await session.scalar(
-            select(func.min(StrategyRuntimeCheckpointRow.saved_at))
-        )
+        # A stopped process can still need recovery. Only an explicit operator
+        # retirement removes its checkpoint from protection; no heartbeat TTL.
+        retired_run_ids = parse_retired_strategy_run_ids()
+        checkpoint_statement = select(func.min(StrategyRuntimeCheckpointRow.saved_at))
+        if retired_run_ids:
+            checkpoint_statement = checkpoint_statement.where(
+                StrategyRuntimeCheckpointRow.run_id.not_in(sorted(retired_run_ids))
+            )
+        earliest_checkpoint = await session.scalar(checkpoint_statement)
         if earliest_checkpoint is not None:
             requirements.append(
                 RetentionConsumerRequirement(
@@ -1059,19 +1102,19 @@ async def _resolve_market_data_consumer_requirements(
                     reason="protect active strategy replay and checkpoint baseline",
                 )
             )
-        earliest_position = await session.scalar(
-            select(func.min(AccountPositionSnapshotRow.observed_at)).where(
-                AccountPositionSnapshotRow.position_amt != 0
+    earliest_position = await PostgresAccountRepository(
+        session_factory
+    ).load_active_position_retention_watermark(
+        expected_account_labels=parse_live_position_account_labels(),
+    )
+    if earliest_position is not None:
+        requirements.append(
+            RetentionConsumerRequirement(
+                consumer_id="active_position_market_states",
+                min_required_watermark=earliest_position,
+                reason="protect market states for currently open position episodes",
             )
         )
-        if earliest_position is not None:
-            requirements.append(
-                RetentionConsumerRequirement(
-                    consumer_id="active_position_market_states",
-                    min_required_watermark=earliest_position,
-                    reason="protect market states for open positions",
-                )
-            )
     return tuple(requirements)
 
 

@@ -523,6 +523,77 @@ class PostgresAccountRepository:
                 return None
             return _position_state_from_run(latest_run)
 
+    async def load_active_position_retention_watermark(
+        self,
+        *,
+        environment: str = "live",
+        expected_account_labels: frozenset[str] = frozenset(),
+    ) -> datetime | None:
+        """Protect the recorded history of current, not historical, position legs.
+
+        Heads enumerate current legs without scanning the snapshot journal.
+        Two bounded index seeks per leg find its latest flat marker and first
+        subsequent non-zero snapshot. Without a flat marker we conservatively
+        retain its entire known history. Missing or unready evidence fails
+        closed instead of treating an unknown account as flat.
+        """
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        watermarks: list[datetime] = []
+        async with self._session_factory() as session:
+            heads = (
+                await session.scalars(
+                    select(AccountReconciliationHeadRow).where(
+                        AccountReconciliationHeadRow.environment == environment
+                    )
+                )
+            ).all()
+            missing = expected_account_labels - {head.account_label for head in heads}
+            if missing:
+                raise ValueError(
+                    f"Missing position reconciliation heads: {sorted(missing)}"
+                )
+            for head in heads:
+                if head.status != "ready":
+                    raise ValueError(
+                        "Position reconciliation head is not ready: "
+                        f"{head.account_label}"
+                    )
+                state = _position_state_from_run(head)
+                for symbol, side in state.position_keys:
+                    scope = (
+                        AccountPositionSnapshotRow.environment == environment,
+                        AccountPositionSnapshotRow.account_label == head.account_label,
+                        AccountPositionSnapshotRow.symbol == symbol,
+                        AccountPositionSnapshotRow.position_side == side,
+                        AccountPositionSnapshotRow.observed_at <= head.observed_at,
+                    )
+                    flat_at = await session.scalar(
+                        select(AccountPositionSnapshotRow.observed_at)
+                        .where(*scope, AccountPositionSnapshotRow.position_amt == 0)
+                        .order_by(AccountPositionSnapshotRow.observed_at.desc())
+                        .limit(1)
+                    )
+                    opening_statement = select(
+                        AccountPositionSnapshotRow.observed_at
+                    ).where(*scope, AccountPositionSnapshotRow.position_amt != 0)
+                    if flat_at is not None:
+                        opening_statement = opening_statement.where(
+                            AccountPositionSnapshotRow.observed_at > flat_at
+                        )
+                    opened_at = await session.scalar(
+                        opening_statement.order_by(
+                            AccountPositionSnapshotRow.observed_at
+                        ).limit(1)
+                    )
+                    if opened_at is None:
+                        raise ValueError(
+                            f"Missing snapshot for active position: "
+                            f"{head.account_label}/{symbol}/{side}"
+                        )
+                    watermarks.append(opened_at)
+        return min(watermarks) if watermarks else None
+
     async def load_active_position_account_labels(
         self,
         *,

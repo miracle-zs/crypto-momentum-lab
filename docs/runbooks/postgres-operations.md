@@ -212,6 +212,25 @@ journalctl -u cml-position-recovery-retention.service -n 100 --no-pager
 
 ## 参数与维护
 
+### 行情状态的恢复保护与策略退役
+
+行情状态正常保留 12 小时，按 6 小时分区回收。检查点和当前未平仓腿所需的
+历史可以把边界向前限缩。不要把计划 `COMPLETED` 等同于已经删除历史：还要核对
+`effective_cutoff`、依赖原因及实际删除分区数。
+
+`market-data` 的 `CML_RETIRED_STRATEGY_RUN_IDS` 是操作员明确退役的完整 run ID
+列表，不支持通配符，不按检查点年龄或心跳自动退役。服务器 Compose 的名单记录了
+2026-10-07 已确认永久停用的 10 个旧 Paper 策略；它们的检查点保留用于审计，但不再
+阻塞行情清理。恢复这些 run ID 运行前必须先移除退役声明，不能承诺已回收行情仍可续跑。
+该名单不取消其他显式注册的恢复依赖，也不删除 Paper 历史持仓或订阅保护。
+
+当前持仓保护从账户 reconciliation head 获取持仓腿，再按账户、symbol 和
+position side 查本轮持仓的历史：最后一条零持仓记录之后的首条非零快照；没有零持仓
+标记时保守保留该腿全部已知历史。已平仓腿不再用旧非零快照永久阻塞回收。
+账户头未就绪、配置账户缺少头记录、当前腿缺少快照时中止清理，不推断为空仓。
+本地保护先注册为 `market_data_operational_retention` 依赖，再生成并执行计划，
+保证计划与执行边界一致。检查失败回执和 `operational_database_retention_failed`。
+
 服务器 Compose 设置 shm_size 256m，避免维护时默认 64 MiB 共享内存不足；已限制并行维护。检查磁盘空间与 /dev/shm，不因 No space left on device 就认定数据盘满。
 
 先减少应用写放大、无界扫描和重复检查点构建，再单变量试验 checkpointer/bgwriter/WAL 设置；记录实际版本和完整检查点周期。不要关闭 fsync/full_page_writes，也不要用扩大交易超时代替性能修复。历史数值只保留在 Git，不复制为新实例标准。

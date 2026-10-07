@@ -33,6 +33,65 @@ from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 runner = CliRunner()
 
 
+def test_retired_checkpoint_run_ids_are_explicit(monkeypatch) -> None:
+    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "paper-retired, paper-retired-2")
+    assert main.parse_retired_strategy_run_ids() == frozenset(
+        {"paper-retired", "paper-retired-2"}
+    )
+    with pytest.raises(ValueError):
+        main.parse_retired_strategy_run_ids("paper-*")
+    with pytest.raises(ValueError):
+        main.parse_retired_strategy_run_ids("paper-retired,")
+
+
+async def test_market_retention_excludes_only_explicitly_retired_checkpoints(
+    monkeypatch,
+) -> None:
+    old = datetime(2026, 9, 2, tzinfo=UTC)
+    live = datetime(2026, 10, 7, tzinfo=UTC)
+    position = datetime(2026, 10, 6, tzinfo=UTC)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [])
+
+        async def scalar(self, statement):
+            # Model the SQL predicate over two persisted checkpoints, not age.
+            params = statement.compile().params
+            retired = next(
+                (set(v) for k, v in params.items() if k.startswith("run_id")), set()
+            )
+            return min(
+                at
+                for run, at in (("paper-retired", old), ("live-current", live))
+                if run not in retired
+            )
+
+    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "paper-retired")
+    monkeypatch.setattr(
+        main.PostgresAccountRepository,
+        "load_active_position_retention_watermark",
+        AsyncMock(return_value=position),
+        raising=False,
+    )
+    requirements = await main._resolve_market_data_consumer_requirements(Session)
+    assert {r.consumer_id: r.min_required_watermark for r in requirements} == {
+        "active_strategy_checkpoints": live,
+        "active_position_market_states": position,
+    }
+    # An unclassified old run remains protected; absence of a heartbeat is not
+    # an operator decision to retire it.
+    monkeypatch.setenv("CML_RETIRED_STRATEGY_RUN_IDS", "")
+    requirements = await main._resolve_market_data_consumer_requirements(Session)
+    assert requirements[0].min_required_watermark == old
+
+
 def test_market_database_url_prefers_the_market_plane(monkeypatch) -> None:
     monkeypatch.setenv(
         "CML_MARKET_DATABASE_URL",
@@ -393,6 +452,114 @@ async def test_retention_emits_prune_outcome_with_partitions() -> None:
     assert receipts[0].status == PruneReceiptStatus.SUCCESS
     assert receipts[0].rows_deleted == 5
     assert receipts[0].partitions_dropped == 2
+
+
+@pytest.mark.parametrize("external_days", [0, 45])
+async def test_operational_retention_records_consumer_cutoff_before_execution(
+    external_days: int,
+) -> None:
+    from crypto_momentum_lab.domain.operational.retention_contract import (
+        RetentionConsumerRequirement,
+    )
+    from crypto_momentum_lab.domain.operational.retention_models import RecoverySpec
+
+    now = datetime(2026, 10, 7, 11, tzinfo=UTC)
+    watermark = datetime(2026, 9, 2, 13, tzinfo=UTC)
+    requirement = RetentionConsumerRequirement(
+        consumer_id="active_strategy_checkpoints",
+        min_required_watermark=watermark,
+        reason="checkpoint recovery baseline",
+    )
+    storage = InMemoryRetentionRepository()
+    authority = main.RetentionAuthority(storage)
+    if external_days:
+        await authority.register_dependency_async(
+            consumer_id="external_recovery",
+            generation=1,
+            recovery_spec=RecoverySpec(
+                source_dataset="runtime_market_states_15s",
+                earliest_needed_watermark=now - timedelta(days=external_days),
+            ),
+        )
+    effective = min(watermark, now - timedelta(days=external_days))
+    repository = SimpleNamespace(
+        prune_contract_metadata=AsyncMock(return_value=0),
+        prune_runtime_market_states=AsyncMock(return_value=0),
+        ensure_strategy_runtime_event_partitions=AsyncMock(return_value=0),
+    )
+    await main.prune_operational_database_once(
+        repository,
+        authority=authority,
+        now=now,
+        consumer_requirements=(requirement,),
+    )
+
+    plan = next(iter(storage.plans.values()))
+    receipt = next(iter(storage.receipts.values()))
+    assert plan.requested_cutoff == now - timedelta(hours=12)
+    assert plan.effective_cutoff == effective
+    assert plan.is_constrained
+    assert plan.binding_consumer_id is not None
+    assert receipt.effective_cutoff == effective
+    assert repository.prune_runtime_market_states.await_args.kwargs == {
+        "before": effective,
+        "batch_size": 250,
+    }
+    assert repository.prune_contract_metadata.await_args.kwargs == {
+        "before": effective,
+        "batch_size": 250,
+    }
+
+
+async def test_operational_retention_refreshes_its_own_protection_floor() -> None:
+    from crypto_momentum_lab.domain.operational.retention_contract import (
+        RetentionConsumerRequirement,
+    )
+
+    now = datetime(2026, 10, 7, 11, tzinfo=UTC)
+    storage = InMemoryRetentionRepository()
+    authority = main.RetentionAuthority(storage)
+    repository = SimpleNamespace(
+        prune_contract_metadata=AsyncMock(return_value=0),
+        prune_runtime_market_states=AsyncMock(return_value=0),
+        ensure_strategy_runtime_event_partitions=AsyncMock(return_value=0),
+    )
+    await main.prune_operational_database_once(
+        repository,
+        authority=authority,
+        now=now,
+        consumer_requirements=(
+            RetentionConsumerRequirement(
+                consumer_id="checkpoint",
+                min_required_watermark=now - timedelta(days=30),
+                reason="recovery",
+            ),
+        ),
+    )
+    await main.prune_operational_database_once(
+        repository, authority=authority, now=now + timedelta(minutes=5)
+    )
+    assert len(storage.dependencies) == 1
+    expected = now + timedelta(minutes=5) - timedelta(hours=12)
+    assert (
+        repository.prune_runtime_market_states.await_args.kwargs["before"] == expected
+    )
+    assert list(storage.receipts.values())[-1].effective_cutoff == expected
+
+
+async def test_operational_retention_surfaces_failed_receipt() -> None:
+    storage = InMemoryRetentionRepository()
+    repository = SimpleNamespace(
+        prune_contract_metadata=AsyncMock(side_effect=RuntimeError("database timeout")),
+        prune_runtime_market_states=AsyncMock(return_value=0),
+        ensure_strategy_runtime_event_partitions=AsyncMock(return_value=0),
+    )
+    with pytest.raises(RuntimeError, match="EXECUTION_FAILED.*database timeout"):
+        await main.prune_operational_database_once(
+            repository, authority=main.RetentionAuthority(storage)
+        )
+    repository.prune_runtime_market_states.assert_not_awaited()
+    repository.ensure_strategy_runtime_event_partitions.assert_not_awaited()
 
 
 def test_run_market_data_uses_combined_service(

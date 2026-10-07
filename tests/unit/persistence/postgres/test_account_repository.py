@@ -20,6 +20,141 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
+@pytest.mark.parametrize("position_count", [0, 1])
+@pytest.mark.parametrize("has_flat_marker", [False, True])
+async def test_retention_watermark_uses_only_current_position_episode(
+    position_count: int,
+    has_flat_marker: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    head_at = datetime(2026, 10, 7, tzinfo=UTC)
+    flat_at = datetime(2026, 10, 5, tzinfo=UTC)
+    opened_at = datetime(2026, 10, 6, tzinfo=UTC)
+    head = AccountReconciliationHeadRow(
+        environment="live",
+        account_label="primary",
+        status="ready",
+        reconciliation_id="current",
+        observed_at=head_at,
+        position_count=position_count,
+        details={
+            "position_state_schema_version": 1,
+            "position_keys": (
+                [{"symbol": "BTCUSDT", "position_side": "LONG"}]
+                if position_count
+                else []
+            ),
+        },
+    )
+    statements = []
+    answers = iter((flat_at if has_flat_marker else None, opened_at))
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def scalars(self, statement):
+            return SimpleNamespace(all=lambda: [head])
+
+        async def scalar(self, statement):
+            statements.append(statement)
+            return next(answers)
+
+    repository = PostgresAccountRepository(Session)
+    actual = await repository.load_active_position_retention_watermark()
+    assert actual == (opened_at if position_count else None)
+    assert len(statements) == (2 if position_count else 0)
+    if position_count:
+        sql = str(statements[1])
+        assert ("observed_at >" in sql) == has_flat_marker
+        assert "position_side =" in sql
+        assert "account_label =" in sql
+        assert "LIMIT" in sql
+        if has_flat_marker:
+            assert flat_at in statements[1].compile().params.values()
+
+
+async def test_position_retention_missing_open_snapshot_fails_closed() -> None:
+    from types import SimpleNamespace
+
+    head = AccountReconciliationHeadRow(
+        environment="live",
+        account_label="primary",
+        status="ready",
+        reconciliation_id="current",
+        observed_at=datetime(2026, 10, 7, tzinfo=UTC),
+        position_count=1,
+        details={
+            "position_state_schema_version": 1,
+            "position_keys": [{"symbol": "BTCUSDT", "position_side": "LONG"}],
+        },
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [head])
+
+        async def scalar(self, _statement):
+            return None
+
+    with pytest.raises(ValueError, match="snapshot"):
+        await PostgresAccountRepository(
+            Session
+        ).load_active_position_retention_watermark()
+
+
+@pytest.mark.parametrize("status", ["catching_up", "failed"])
+async def test_position_retention_unready_head_fails_closed(status: str) -> None:
+    from types import SimpleNamespace
+
+    head = AccountReconciliationHeadRow(account_label="primary", status=status)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [head])
+
+    with pytest.raises(ValueError, match="not ready"):
+        await PostgresAccountRepository(
+            Session
+        ).load_active_position_retention_watermark()
+
+
+async def test_position_retention_missing_configured_account_fails_closed() -> None:
+    from types import SimpleNamespace
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [])
+
+    with pytest.raises(ValueError, match="Missing position reconciliation heads"):
+        repository = PostgresAccountRepository(Session)
+        await repository.load_active_position_retention_watermark(
+            expected_account_labels=frozenset({"primary"})
+        )
+
+
 def test_balance_snapshot_row_preserves_numeric_values() -> None:
     snapshot = AccountBalanceSnapshot(
         environment="live",
