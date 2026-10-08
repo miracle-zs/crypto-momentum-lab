@@ -491,6 +491,26 @@ services:
         condition: service_healthy
     restart: "no"
 
+  market-revision-metadata-archiver:
+    <<: *app
+    profiles: ["maintenance"]
+    user: "0:0"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 384m
+    memswap_limit: 512m
+    entrypoint: ["python", "-m", "crypto_momentum_lab.tools.archive_market_revision_metadata"]
+    environment:
+      <<: *app-environment
+      CML_MARKET_REVISION_ARCHIVE_DIR: /app/market-revision-archive
+    volumes:
+      - /var/lib/crypto-momentum-lab/table-archive/market_revision_refs:/app/market-revision-archive
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   market-revision-archiver:
     <<: *app
     profiles: ["maintenance"]

@@ -241,9 +241,9 @@ class PostgresDecisionTraceRepository:
         existing_revisions: list[MarketRevisionRefRow] = list(
             (
                 await session.execute(
-                    select(MarketRevisionRefRow).where(
-                        MarketRevisionRefRow.revision_id.in_(incoming_revisions)
-                    )
+                    select(MarketRevisionRefRow)
+                    .where(MarketRevisionRefRow.revision_id.in_(incoming_revisions))
+                    .with_for_update(read=True, key_share=True)
                 )
             )
             .scalars()
@@ -345,11 +345,13 @@ class PostgresDecisionTraceRepository:
             persisted_revisions = (
                 (
                     await session.execute(
-                        select(MarketRevisionRefRow).where(
+                        select(MarketRevisionRefRow)
+                        .where(
                             MarketRevisionRefRow.revision_id.in_(
                                 [row["revision_id"] for row in missing_revisions]
                             )
                         )
+                        .with_for_update(read=True, key_share=True)
                     )
                 )
                 .scalars()

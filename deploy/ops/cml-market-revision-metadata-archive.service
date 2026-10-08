@@ -1,0 +1,16 @@
+[Unit]
+Description=Bounded cold market revision metadata retention
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+ExecStart=/usr/bin/flock -n -E 0 /opt/crypto-momentum-lab/.git/cml-deploy.lock /usr/bin/docker compose --env-file .env.server -f compose.server.yaml --profile maintenance run --rm --no-deps market-revision-metadata-archiver --retention-days 7 --batch-size 500 --max-batches 40 --apply
+TimeoutStartSec=45m
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+

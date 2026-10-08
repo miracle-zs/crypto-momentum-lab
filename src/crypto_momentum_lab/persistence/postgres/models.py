@@ -1547,6 +1547,14 @@ class MarketRevisionRefRow(Base):
                 "payload IS NOT NULL AND payload_archive_path IS NULL"
             ),
         ),
+        Index(
+            "ix_market_revision_refs_cold_metadata",
+            "bucket_start",
+            "revision_id",
+            postgresql_where=text(
+                "payload IS NULL AND payload_archive_path IS NOT NULL AND payload_archive_sha256 IS NOT NULL"
+            ),
+        ),
     )
 
 
@@ -1635,6 +1643,14 @@ class DecisionTraceRow(Base):
             postgresql_where=text(
                 "rejection_reason = 'holding_position_no_exit' "
                 "AND coalesce(trace_payload ->> 'evidence_level', '') <> 'summary'"
+            ),
+        ),
+        Index(
+            "ix_decision_traces_full_revision_ids",
+            "evaluated_revision_ids",
+            postgresql_using="gin",
+            postgresql_where=text(
+                "coalesce(trace_payload ->> 'evidence_level', '') <> 'summary'"
             ),
         ),
     )

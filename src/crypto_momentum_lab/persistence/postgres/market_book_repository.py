@@ -9,7 +9,7 @@ import hashlib
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, null, select, update
 from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
@@ -36,6 +36,9 @@ from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
     MarketRevisionArchiveError,
     MarketRevisionPayloadArchive,
 )
+from crypto_momentum_lab.persistence.postgres.market_revision_metadata_archive import (
+    SqliteMarketRevisionMetadataArchive,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     DatasetManifestRow,
     DecisionPolicyEvidenceRow,
@@ -52,6 +55,22 @@ def _observed_at_from_lineage(lineage: dict[str, object] | None) -> datetime | N
     return None
 
 
+def _ref_from_row(row):
+    return MarketRevisionRef(
+        scope=row.scope,
+        symbol=row.symbol,
+        interval=row.interval,
+        bucket_start=row.bucket_start,
+        bucket_end=row.bucket_end,
+        revision_id=row.revision_id,
+        content_hash=row.content_hash,
+        published_at=row.published_at,
+        observed_at=_observed_at_from_lineage(row.lineage),
+        source_epoch=row.source_epoch,
+        visibility_mode=MarketVisibilityMode(row.visibility_mode),
+    )
+
+
 class PostgresMarketBookRepository:
     """Postgres-backed storage for market revisions, pointers, and manifests."""
 
@@ -60,9 +79,22 @@ class PostgresMarketBookRepository:
         session_factory: sessionmaker[Session],
         *,
         payload_archive: MarketRevisionPayloadArchive | None = None,
+        metadata_archive: SqliteMarketRevisionMetadataArchive | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._payload_archive = payload_archive
+        self._metadata_archive = metadata_archive
+
+    def _cold_revisions(self, identities):
+        if self._metadata_archive is None:
+            return {}
+        try:
+            return self._metadata_archive.get_many(identities)
+        except MarketRevisionArchiveError as error:
+            raise UnreproducibleError(str(error)) from error
+
+    def _cold_revision(self, revision_id: str):
+        return self._cold_revisions([revision_id]).get(revision_id)
 
     def save_envelope(self, envelope: MarketEnvelope) -> None:
         with self._session_factory() as session:
@@ -92,7 +124,9 @@ class PostgresMarketBookRepository:
 
     def load_envelope(self, revision_id: str) -> MarketEnvelope | None:
         with self._session_factory() as session:
-            row = session.get(MarketRevisionRefRow, revision_id)
+            row = session.get(MarketRevisionRefRow, revision_id) or self._cold_revision(
+                revision_id
+            )
             if row is None:
                 return None
             payload = row.payload
@@ -161,6 +195,14 @@ class PostgresMarketBookRepository:
                 .limit(1)
             )
             row = session.execute(stmt).scalar_one_or_none()
+            if row is None and self._metadata_archive is not None:
+                for cold in self._metadata_archive.for_bucket(
+                    scope, symbol, interval, bucket_start, canonical=True
+                ):
+                    hot = session.get(MarketRevisionRefRow, cold.revision_id)
+                    if hot is None:
+                        row = cold
+                        break
             if row is None:
                 return None
             return MarketRevisionRef(
@@ -186,6 +228,23 @@ class PostgresMarketBookRepository:
         ref: MarketRevisionRef,
     ) -> None:
         with self._session_factory() as session:
+            if (
+                self._metadata_archive is not None
+                and session.get(MarketRevisionRefRow, ref.revision_id) is None
+            ):
+                cold = self._cold_revision(ref.revision_id)
+                if cold is None or (
+                    cold.scope,
+                    cold.symbol,
+                    cold.interval,
+                    cold.bucket_start,
+                ) != (scope, symbol, interval, bucket_start):
+                    raise UnreproducibleError(
+                        "Canonical target revision is unavailable"
+                    )
+                cold.payload = null()
+                session.add(cold)
+                session.flush()
             # Clear previous canonical flags for this bucket
             session.execute(
                 update(MarketRevisionRefRow)
@@ -219,7 +278,17 @@ class PostgresMarketBookRepository:
                 )
                 .order_by(MarketRevisionRefRow.published_at.asc())
             )
-            rows = session.execute(stmt).scalars().all()
+            rows = list(session.execute(stmt).scalars().all())
+            if self._metadata_archive is not None:
+                hot_ids = {row.revision_id for row in rows}
+                rows.extend(
+                    row
+                    for row in self._metadata_archive.for_bucket(
+                        scope, symbol, interval, bucket_start
+                    )
+                    if row.revision_id not in hot_ids
+                )
+                rows.sort(key=lambda row: row.published_at)
             return tuple(
                 MarketRevisionRef(
                     scope=row.scope,
@@ -266,11 +335,10 @@ class PostgresMarketBookRepository:
             rev_ids = row.revision_ids
             # Batch load revision rows in chunks to prevent exceeding
             # PostgreSQL parameter limit (65535) and load_only to exclude payload
-            rev_rows: dict[str, MarketRevisionRefRow] = {}
-            chunk_size = 5000
-            for i in range(0, len(rev_ids), chunk_size):
-                chunk = rev_ids[i : i + chunk_size]
-                stmt = (
+            refs = []
+            for offset in range(0, len(rev_ids), 5000):
+                chunk = rev_ids[offset : offset + 5000]
+                hot = session.scalars(
                     select(MarketRevisionRefRow)
                     .options(
                         load_only(
@@ -288,38 +356,21 @@ class PostgresMarketBookRepository:
                         )
                     )
                     .where(MarketRevisionRefRow.revision_id.in_(chunk))
-                )
-                for r in session.execute(stmt).scalars().all():
-                    rev_rows[r.revision_id] = r
-
-            refs = []
-            for rid in rev_ids:
-                rrow = rev_rows.get(str(rid))
-                if rrow is None:
-                    raise UnreproducibleError(
-                        f"Manifest {manifest_id} is unreproducible: "
-                        f"missing revision {rid}"
-                    )
-                refs.append(
-                    MarketRevisionRef(
-                        scope=rrow.scope,
-                        symbol=rrow.symbol,
-                        interval=rrow.interval,
-                        bucket_start=rrow.bucket_start,
-                        bucket_end=rrow.bucket_end,
-                        revision_id=rrow.revision_id,
-                        content_hash=rrow.content_hash,
-                        published_at=rrow.published_at,
-                        observed_at=_observed_at_from_lineage(rrow.lineage),
-                        source_epoch=rrow.source_epoch,
-                        visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
+                ).all()
+                revisions = {item.revision_id: item for item in hot}
+                revisions.update(
+                    self._cold_revisions(
+                        [identity for identity in chunk if identity not in revisions]
                     )
                 )
-
-            hole_pairs: list[tuple[str, str]] = [
-                (str(hole[0]), str(hole[1]))  # type: ignore[index]
-                for hole in row.holes
-            ]
+                for identity in chunk:
+                    revision = revisions.get(identity)
+                    if revision is None:
+                        raise UnreproducibleError(
+                            f"Manifest {manifest_id} is unreproducible: missing revision {identity}"
+                        )
+                    refs.append(_ref_from_row(revision))
+            hole_pairs = [(str(hole[0]), str(hole[1])) for hole in row.holes]
             holes = tuple(
                 (
                     datetime.fromisoformat(a),
@@ -412,8 +463,14 @@ class PostgresMarketBookRepository:
                     ).where(MarketRevisionRefRow.revision_id.in_(chunk))
                 ).all()
                 chunk_map = {r[0]: r[1] for r in hash_rows}
+                cold = self._cold_revisions(
+                    [rid for rid in chunk if str(rid) not in chunk_map]
+                )
                 for rid in chunk:
                     h = chunk_map.get(str(rid))
+                    if h is None:
+                        revision = cold.get(str(rid))
+                        h = revision.content_hash if revision is not None else None
                     if h is None:
                         return {
                             "manifest_id": manifest_id,
@@ -471,6 +528,48 @@ class PostgresMarketBookRepository:
         if not complete_evidence:
             payload["market_refs"] = summary_market_refs(trace.evaluated_market_refs)
         with self._session_factory() as session:
+            if complete_evidence:
+                for ref in trace.evaluated_market_refs:
+                    revision = session.get(
+                        MarketRevisionRefRow,
+                        ref.revision_id,
+                        with_for_update={"read": True, "key_share": True},
+                    )
+                    if revision is None:
+                        revision = self._cold_revision(ref.revision_id)
+                        if revision is None:
+                            raise UnreproducibleError(
+                                "Full decision lacks market revision identity"
+                            )
+                        hot_canonical = session.scalar(
+                            select(MarketRevisionRefRow.revision_id)
+                            .where(
+                                MarketRevisionRefRow.scope == revision.scope,
+                                MarketRevisionRefRow.symbol == revision.symbol,
+                                MarketRevisionRefRow.interval == revision.interval,
+                                MarketRevisionRefRow.bucket_start
+                                == revision.bucket_start,
+                                MarketRevisionRefRow.is_canonical.is_(True),
+                            )
+                            .limit(1)
+                        )
+                        revision.is_canonical = hot_canonical is None and any(
+                            cold.revision_id == revision.revision_id
+                            for cold in self._metadata_archive.for_bucket(
+                                revision.scope,
+                                revision.symbol,
+                                revision.interval,
+                                revision.bucket_start,
+                                canonical=True,
+                            )
+                        )
+                        revision.payload = null()
+                        session.add(revision)
+                        session.flush()
+                    if revision.content_hash != ref.content_hash:
+                        raise UnreproducibleError(
+                            "Full decision market revision hash conflict"
+                        )
             row = DecisionTraceRow(
                 decision_id=trace.decision_id,
                 strategy_name=trace.strategy_name,
@@ -540,7 +639,7 @@ class PostgresMarketBookRepository:
                         rev_rows[r.revision_id] = r
                 refs = []
                 for rid in rev_ids:
-                    rrow = rev_rows.get(str(rid))
+                    rrow = rev_rows.get(str(rid)) or self._cold_revision(str(rid))
                     if rrow is None:
                         raise UnreproducibleError(
                             f"Decision trace {decision_id} is unreproducible: "
@@ -636,6 +735,37 @@ class PostgresMarketBookRepository:
                         source_epoch=row.source_epoch,
                         visibility_mode=MarketVisibilityMode(row.visibility_mode),
                     )
+            if self._metadata_archive is not None:
+                suppressed = set(
+                    session.scalars(
+                        select(MarketRevisionRefRow.revision_id).where(
+                            MarketRevisionRefRow.scope == scope,
+                            MarketRevisionRefRow.symbol.in_(symbols),
+                            MarketRevisionRefRow.interval == interval,
+                            MarketRevisionRefRow.bucket_start >= start_time,
+                            MarketRevisionRefRow.bucket_start < end_time,
+                            MarketRevisionRefRow.is_canonical.is_(False),
+                        )
+                    ).all()
+                )
+                for cold in self._metadata_archive.in_range(
+                    scope, symbols, interval, start_time, end_time
+                ):
+                    key = (cold.symbol, cold.bucket_start)
+                    if key not in result and cold.revision_id not in suppressed:
+                        result[key] = MarketRevisionRef(
+                            scope=cold.scope,
+                            symbol=cold.symbol,
+                            interval=cold.interval,
+                            bucket_start=cold.bucket_start,
+                            bucket_end=cold.bucket_end,
+                            revision_id=cold.revision_id,
+                            content_hash=cold.content_hash,
+                            published_at=cold.published_at,
+                            observed_at=_observed_at_from_lineage(cold.lineage),
+                            source_epoch=cold.source_epoch,
+                            visibility_mode=MarketVisibilityMode(cold.visibility_mode),
+                        )
             return result
 
     def list_manifests(
@@ -692,6 +822,10 @@ class PostgresMarketBookRepository:
             )
             rows = session.execute(stmt).all()
             date_to_symbols: dict[date, set[str]] = {}
+            if self._metadata_archive is not None:
+                rows = list(rows) + list(
+                    self._metadata_archive.dates_and_symbols(scope, interval)
+                )
             for d_val, sym in rows:
                 if isinstance(d_val, str):
                     d = date.fromisoformat(d_val)

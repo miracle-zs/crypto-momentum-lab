@@ -272,6 +272,37 @@ class ZstdMarketRevisionPayloadArchive:
                 f"cannot read market revision archive {relative_path}: {error}"
             ) from error
 
+    def verify_members(
+        self, *, relative_path: str, expected_sha256: str, members: Mapping[str, str]
+    ) -> None:
+        """Verify a bounded set in one streaming pass, independent of cache size."""
+        path = self._resolve_path(relative_path)
+        self._verify_file(path, relative_path, expected_sha256)
+        seen: set[str] = set()
+        with path.open("rb") as compressed:
+            with zstandard.ZstdDecompressor().stream_reader(compressed) as stream:
+                for line in io.TextIOWrapper(stream, encoding="utf-8"):
+                    record = _parse_record(json.loads(line), relative_path)
+                    identity = str(record["revision_id"])
+                    if identity in members:
+                        if identity in seen:
+                            raise MarketRevisionArchiveError("Duplicate archive member")
+                        _validated_payload(record, identity, members[identity])
+                        seen.add(identity)
+        if seen != set(members):
+            raise MarketRevisionArchiveError("Metadata archive lacks payload members")
+        self._verify_file(path, relative_path, expected_sha256)
+
+    def iter_records(self, *, relative_path: str, expected_sha256: str):
+        """Stream verified archive records for bounded cold-index recovery."""
+        path = self._resolve_path(relative_path)
+        self._verify_file(path, relative_path, expected_sha256)
+        with path.open("rb") as compressed:
+            with zstandard.ZstdDecompressor().stream_reader(compressed) as stream:
+                for line in io.TextIOWrapper(stream, encoding="utf-8"):
+                    yield _parse_record(json.loads(line), relative_path)
+        self._verify_file(path, relative_path, expected_sha256)
+
     def _resolve_path(self, relative_path: str) -> Path:
         relative = _safe_relative_path(relative_path)
         path = (self._root / Path(*relative.parts)).resolve(strict=True)

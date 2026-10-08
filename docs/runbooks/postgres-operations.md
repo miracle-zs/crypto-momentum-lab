@@ -351,3 +351,34 @@ New business facts, stream adoption, first seeds and ordered late-event repair
 retain immediate checkpoint generation. All observation snapshots, coverage and
 scan provenance are committed even when seed creation is deferred. If no scan
 proves complete coverage, no checkpoint is manufactured to satisfy a timer.
+
+
+### Cold market revision metadata
+
+Payloads older than one day are archived first. The hourly
+`cml-market-revision-metadata-archive.timer` subsequently moves metadata whose
+bucket and publication are both older than seven days, in at most forty batches
+of 500 rows. Full hot decision references remain in PostgreSQL; dataset manifests
+resolve identities from either tier and retain their original hashes. Writers take
+key-share locks before committing full decision references; maintenance locks
+candidates, verifies all referenced payload files, commits and rereads cold metadata,
+then rechecks references before deleting the hot copy. Migration `20261009_0056`
+adds concurrent partial indexes for this bounded selection and reference check.
+
+The archive root contains payload files, immutable metadata snapshots under
+`metadata/batches`, and the derived checksummed `metadata.sqlite3` lookup index.
+Back up the complete root. A lost index with existing snapshots is an explicit
+error, not an empty history. Rebuild it with:
+
+```bash
+docker compose --env-file .env.server -f compose.server.yaml --profile maintenance \
+  run --rm --no-deps market-revision-metadata-archiver --rebuild-index
+```
+
+Rebuild validates every snapshot and atomically replaces the index. Maintenance
+and rebuild share a file lock. Historical readers need the archive root mounted
+and `CML_MARKET_REVISION_ARCHIVE_DIR` configured; use the deployed cold-aware
+reader when restoring or rolling back application versions. Deleting hot rows
+creates reusable PostgreSQL pages, not immediate filesystem shrinkage. Cold files
+still occupy this server's disk: this stage bounds hot retention, and is not an
+offsite backup or an unlimited cold-storage policy.

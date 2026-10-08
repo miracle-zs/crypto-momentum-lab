@@ -33,6 +33,9 @@ from crypto_momentum_lab.persistence.postgres.market_book_repository import (
 from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
     ZstdMarketRevisionPayloadArchive,
 )
+from crypto_momentum_lab.persistence.postgres.market_revision_metadata_archive import (
+    SqliteMarketRevisionMetadataArchive,
+)
 from crypto_momentum_lab.persistence.postgres.session import create_sync_engine
 
 
@@ -64,6 +67,9 @@ def get_catalog_and_repo(
     repo = PostgresMarketBookRepository(
         session_factory,
         payload_archive=payload_archive,
+        metadata_archive=SqliteMarketRevisionMetadataArchive(Path(archive_dir))
+        if archive_dir
+        else None,
     )
     book = MarketBook(repo)
     catalog = DatasetCatalog(book, repo)

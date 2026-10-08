@@ -160,3 +160,26 @@ def test_archive_writer_is_content_addressed_and_partition_is_utc(tmp_path) -> N
 def test_market_revision_archive_partition_requires_timezone() -> None:
     with pytest.raises(ValueError, match="timezone"):
         market_revision_archive_partition("live", datetime(2026, 10, 1))
+
+
+def test_streaming_member_verification_does_not_require_payload_cache(tmp_path):
+    archive = write_market_revision_archive(
+        root=tmp_path,
+        partition="verification",
+        records=[
+            {"revision_id": "one", "content_hash": "a" * 64, "payload": {"v": 1}},
+            {"revision_id": "two", "content_hash": "b" * 64, "payload": {"v": 2}},
+        ],
+    )
+    reader = ZstdMarketRevisionPayloadArchive(tmp_path, cache_max_bytes=0)
+    reader.verify_members(
+        relative_path=archive.relative_path,
+        expected_sha256=archive.sha256,
+        members={"one": "a" * 64, "two": "b" * 64},
+    )
+    with pytest.raises(MarketRevisionArchiveError, match="lacks payload"):
+        reader.verify_members(
+            relative_path=archive.relative_path,
+            expected_sha256=archive.sha256,
+            members={"missing": "a" * 64},
+        )
