@@ -228,3 +228,27 @@ def test_capacity_sample_uses_monitor_cycle_time_despite_slow_checks(
     )
     assert alerts[0].severity == "warning"
     assert alerts[0].details["available_bytes"] == 26 * GIB
+
+
+def test_storage_severity_downgrade_updates_notification_once_inside_cooldown(
+    tmp_path, monkeypatch
+):
+    from deploy.ops.cml_ops_monitor import Alert
+
+    delivered = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(payload),
+    )
+    instance = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "monitor.json",
+            consecutive_alerts_required=1,
+            alert_cooldown_seconds=900,
+        )
+    )
+    instance._emit(Alert("database_storage_growth", "critical", "growth"), now=100)
+    instance._emit(Alert("database_storage_growth", "warning", "growth"), now=110)
+    instance._emit(Alert("database_storage_growth", "warning", "growth"), now=120)
+    assert [payload["severity"] for payload in delivered] == ["critical", "warning"]
+    assert delivered[-1]["details"]["deescalated_from"] == "critical"

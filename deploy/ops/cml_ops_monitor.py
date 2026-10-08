@@ -4254,11 +4254,17 @@ LEFT JOIN (
             and severity_rank.get(alert.severity, 0)
             > severity_rank.get(str(previous_severity), 0)
         )
+        is_storage_downgrade = bool(
+            alert.name == "database_storage_growth"
+            and previous_severity
+            and severity_rank.get(alert.severity, 0)
+            < severity_rank.get(str(previous_severity), 0)
+        )
 
         previous_emitted = (
             cooldowns.get(alert.name) if isinstance(cooldowns, dict) else None
         )
-        if not is_escalation:
+        if not (is_escalation or is_storage_downgrade):
             if isinstance(previous_emitted, (int, float)) and (
                 now - previous_emitted < self._config.alert_cooldown_seconds
             ):
@@ -4290,6 +4296,8 @@ LEFT JOIN (
         if is_escalation:
             details["escalated"] = True
             details["escalated_from"] = previous_severity
+        if is_storage_downgrade:
+            details["deescalated_from"] = previous_severity
 
         summary = alert.summary
         if is_escalation:
@@ -5595,6 +5603,11 @@ def _format_alert_human_details(
     if details.get("escalated"):
         prev = details.get("escalated_from")
         lines.append(f"- **级别升级**：告警级别已由 `{prev}` 升级至当前级别")
+    if details.get("deescalated_from"):
+        lines.append(
+            f"- **级别降低**：已由 `{details['deescalated_from']}` "
+            "降至当前级别；增长告警仍在持续"
+        )
 
     return lines
 
