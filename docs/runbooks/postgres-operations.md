@@ -325,3 +325,15 @@ docker compose --env-file .env.server -f compose.server.yaml --profile maintenan
 `20261008_0055` 为共享引用增加局部索引，并将两张恢复状态表的 autovacuum
 触发阈值设为 0.5% + 500 行，使小时裁剪后的空页及时复用；72 小时恢复窗口
 和永久成交/边界事实的保护规则保持原样。容量充足不会降低增速告警。
+
+
+### Checkpoint-covered journal state
+
+A `facts_state` journal copy is omitted only when the checkpoint saved in the
+same transaction has the exact stream scope and source revision, covers the
+latest fact observation time, and carries identical synthetic/late flags and
+integrity issues. Older checkpoints and changed state still append the event.
+Orders, fills, snapshots, coverage and scan provenance are unaffected.
+Recovery uses the checkpoint as its flag baseline, including when prefix history
+is requested; only later state events supersede it. The optimization also avoids
+rehashing the full fact history merely to identify a redundant state event.

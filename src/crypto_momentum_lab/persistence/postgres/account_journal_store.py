@@ -90,7 +90,7 @@ class PostgresAccountJournalStore:
                 provenance=facts.fill_load_provenance,
             )
 
-        specs = _fact_event_specs(facts, delta=delta)
+        specs = _fact_event_specs(facts, delta=delta, revision=revision)
         inserted = 0
         scope_values = _scope_values(scope)
         chunk_size = 500
@@ -488,6 +488,7 @@ def _fact_event_specs(
     facts: AccountFacts,
     *,
     delta: JournalFactDelta | None = None,
+    revision: int | None = None,
 ) -> list[tuple[str, str, datetime | None, dict[str, object]]]:
     codec = PositionRecoveryCodec
     specs: list[tuple[str, str, datetime | None, dict[str, object]]] = []
@@ -585,14 +586,27 @@ def _fact_event_specs(
         "has_late_events": facts.has_late_events,
         "integrity_issues": list(facts.integrity_issues),
     }
-    specs.append(
-        (
-            "facts_state",
-            _json_digest([state_payload, facts.compute_facts_hash()]),
-            _max_fact_time(facts),
-            state_payload,
-        )
+    checkpoint = facts.recovery_checkpoint
+    state_time = _max_fact_time(facts)
+    checkpoint_covers_state = (
+        checkpoint is not None
+        and checkpoint.source_revision == revision
+        and checkpoint.stream_scope == facts.stream_scope
+        and checkpoint.has_synthetic_fills == facts.has_synthetic_fills
+        and checkpoint.has_late_events == facts.has_late_events
+        and checkpoint.integrity_issues == facts.integrity_issues
+        and state_time is not None
+        and state_time <= checkpoint.event_cut
     )
+    if not checkpoint_covers_state:
+        specs.append(
+            (
+                "facts_state",
+                _json_digest([state_payload, facts.compute_facts_hash()]),
+                state_time,
+                state_payload,
+            )
+        )
     return specs
 
 
@@ -744,10 +758,23 @@ def _facts_from_rows(
         for row in rows_for("integrity_issue")
         if isinstance(row.payload.get("issue"), str)
     )
-    state_row = latest_recorded("facts_state")
+    # The checkpoint remains the flag baseline when prefix history is loaded.
+    state_row = max(
+        (
+            row
+            for row in rows_for("facts_state")
+            if checkpoint is None
+            or row.source_revision > checkpoint.source_revision
+            or row.occurred_at > checkpoint.event_cut
+        ),
+        key=lambda row: (row.source_revision, row.recorded_at, row.event_id),
+        default=None,
+    )
     synthetic_flag = bool(checkpoint and checkpoint.has_synthetic_fills)
     late_flag = bool(checkpoint and checkpoint.has_late_events)
     state: dict[str, object] = {}
+    if checkpoint is not None:
+        issues.extend(checkpoint.integrity_issues)
     if state_row is not None:
         state = state_row.payload
         if type(state.get("schema_version")) is not int or state["schema_version"] != 1:
