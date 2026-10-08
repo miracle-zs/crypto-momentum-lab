@@ -31,8 +31,14 @@ from tests.unit.persistence.postgres.test_checkpoint_snapshot_recovery import (
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize(
+    "scan_count,scan_seconds,max_checkpoints", [(35, 10, 5), (4, 354, 2)]
+)
 async def test_repeated_scans_bound_checkpoints_and_restore_every_observation(
     evidence_sessions,  # noqa: F811 - imported pytest fixture
+    scan_count,
+    scan_seconds,
+    max_checkpoints,
 ):
     store = PostgresAccountJournalStore()
     initial = _checkpoint()
@@ -41,14 +47,14 @@ async def test_repeated_scans_bound_checkpoints_and_restore_every_observation(
         await store.save_checkpoint_in_session(session, initial)
     # Restart from PostgreSQL on every step, preventing an in-memory timer or
     # cache from hiding missing durable evidence or resetting the budget.
-    for index in range(1, 36):
+    for index in range(1, scan_count + 1):
         async with evidence_sessions() as session, session.begin():
             cut = await store.load_recovery_in_session(
                 session, scope=scope, as_of=datetime.now(UTC) + timedelta(seconds=1)
             )
             journal = AccountJournal.from_durable_cut(cut)
             parent = cut.checkpoint
-            end = initial.event_cut + timedelta(seconds=10 * index)
+            end = initial.event_cut + timedelta(seconds=scan_seconds * index)
             provenance = AccountFillLoadProvenance(
                 stream_scope=scope,
                 load_id=f"scan-{index}",
@@ -119,7 +125,7 @@ async def test_repeated_scans_bound_checkpoints_and_restore_every_observation(
         checkpoint_count = await session.scalar(
             select(func.count()).select_from(PositionRecoveryCheckpointRow)
         )
-        assert 2 <= checkpoint_count <= 5
+        assert 2 <= checkpoint_count <= max_checkpoints
         for kind in ("snapshot", "coverage", "fill_load_provenance"):
             assert (
                 await session.scalar(
@@ -127,5 +133,5 @@ async def test_repeated_scans_bound_checkpoints_and_restore_every_observation(
                     .select_from(PositionFactJournalEventRow)
                     .where(PositionFactJournalEventRow.event_kind == kind)
                 )
-                == 35
+                == scan_count
             )

@@ -37,7 +37,7 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
 )
 
 # Bound the durable suffix independently of poll frequency and process restarts.
-RECOVERY_CHECKPOINT_MAX_AGE_SECONDS = 300
+RECOVERY_CHECKPOINT_MAX_AGE_SECONDS = 900
 RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS = 64
 
 

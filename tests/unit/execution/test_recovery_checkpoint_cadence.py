@@ -100,7 +100,7 @@ def test_unchanged_scan_reuses_parent_and_preserves_fresh_projection():
 
 
 def test_elapsed_recovery_budget_creates_checkpoint():
-    journal, proof, provenance = next_scan(seconds=300)
+    journal, proof, provenance = next_scan(seconds=900)
     checkpoint = create(journal, proof, provenance)
     assert checkpoint is not None
     assert checkpoint.event_cut == proof.checkpoint_event_cut
@@ -201,3 +201,8 @@ def test_epoch_adoption_forces_a_fresh_verified_checkpoint():
         adopting_epoch=True,
     )
     assert checkpoint is not None
+
+
+def test_normal_six_minute_poll_reuses_recent_checkpoint():
+    journal, proof, provenance = next_scan(seconds=354)
+    assert create(journal, proof, provenance) is None

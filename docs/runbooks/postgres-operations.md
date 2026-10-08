@@ -344,7 +344,7 @@ rehashing the full fact history merely to identify a redundant state event.
 Every complete fill scan still undergoes the existing checkpoint verification.
 For the same stream, a verified scan with no new fills/exit boundaries and an
 unchanged position projection can reuse its durable seed while the suffix is
-below 64 journal revisions/snapshots and the event-cut advance is below 300s.
+below 64 journal revisions/snapshots and the event-cut advance is below 900s.
 The budget is measured against the persisted checkpoint, so process restarts do
 not reset it. The next eligible scan at either limit creates a checkpoint.
 New business facts, stream adoption, first seeds and ordered late-event repair
