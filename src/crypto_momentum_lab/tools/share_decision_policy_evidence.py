@@ -5,7 +5,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -25,21 +25,21 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 
 
-async def backfill_batch(session, batch_size: int) -> tuple[int, int]:
-    """Rewrite only storage encoding; frozen logical decisions remain identical."""
+async def backfill_batch(session, batch_size: int, after=None) -> tuple[int, int]:
+    """Scan a bounded indexed page and rewrite only its storage encoding."""
     await session.execute(text("SET LOCAL lock_timeout='5s'"))
     await session.execute(text("SET LOCAL statement_timeout='30s'"))
+    query = select(DecisionTraceRow)
+    if after is not None:
+        query = query.where(
+            tuple_(DecisionTraceRow.created_at, DecisionTraceRow.decision_id) > after
+        )
     rows = (
         (
             await session.execute(
-                select(DecisionTraceRow)
-                .where(
-                    text("""trace_payload ? 'compressed_policy_states' OR
-          (trace_payload ? 'prior_policy_state' AND
-           octet_length((trace_payload->'prior_policy_state')::text) +
-           octet_length((trace_payload->'next_policy_state')::text) >= 8192)""")
+                query.order_by(
+                    DecisionTraceRow.created_at, DecisionTraceRow.decision_id
                 )
-                .order_by(DecisionTraceRow.created_at)
                 .limit(batch_size)
                 .with_for_update(skip_locked=True)
             )
@@ -47,11 +47,16 @@ async def backfill_batch(session, batch_size: int) -> tuple[int, int]:
         .scalars()
         .all()
     )
-    converted = 0
+    if rows:
+        session.info["backfill_cursor"] = (rows[-1].created_at, rows[-1].decision_id)
+    updates = []
+    states = {}
     for row in rows:
-        payload, states = share_policy_states(row.trace_payload)
-        if not states:
-            raise ValueError("Compressed evidence cannot be externalized")
+        payload, shared = share_policy_states(row.trace_payload)
+        if shared:
+            updates.append((row, payload))
+            states.update(shared)
+    if states:
         existing = await _load_policy_evidence(session, set(states))
         missing = [
             {
@@ -71,9 +76,9 @@ async def backfill_batch(session, batch_size: int) -> tuple[int, int]:
             existing = await _load_policy_evidence(session, set(states))
         if existing != states:
             raise ValueError("Immutable shared state conflict")
-        row.trace_payload = payload
-        converted += 1
-    return len(rows), converted
+        for row, payload in updates:
+            row.trace_payload = payload
+    return len(rows), len(updates)
 
 
 async def collect_batch(session, batch_size: int, retention_days: int = 7) -> int:
@@ -119,17 +124,29 @@ async def run(args) -> None:
     engine = create_async_database_engine(url, pool_size=1, max_overflow=0)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        cursor = None
         for sequence in range(args.max_batches):
             async with factory() as session, session.begin():
                 if args.collect:
                     count = await collect_batch(session, args.batch_size)
+                    scanned = count
                 else:
-                    _, count = await backfill_batch(session, args.batch_size)
+                    scanned, count = await backfill_batch(
+                        session, args.batch_size, cursor
+                    )
+                    cursor = session.info.get("backfill_cursor", cursor)
             print(
-                json.dumps({"batch": sequence, "rows": count, "collect": args.collect}),
+                json.dumps(
+                    {
+                        "batch": sequence,
+                        "scanned": scanned,
+                        "rows": count,
+                        "collect": args.collect,
+                    }
+                ),
                 flush=True,
             )
-            if count == 0:
+            if scanned == 0:
                 break
             await asyncio.sleep(0.2)
     finally:

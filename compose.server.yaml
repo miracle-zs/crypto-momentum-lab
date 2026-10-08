@@ -482,7 +482,9 @@ services:
     cpus: 0.5
     mem_limit: 256m
     memswap_limit: 384m
-    entrypoint: ["python", "-m", "crypto_momentum_lab.tools.share_decision_policy_evidence"]
+    entrypoint: ["python", "/app/maintenance/share_decision_policy_evidence.py"]
+    volumes:
+      - ./src/crypto_momentum_lab/tools/share_decision_policy_evidence.py:/app/maintenance/share_decision_policy_evidence.py:ro
     command: ["--collect", "--batch-size", "500", "--max-batches", "20"]
     depends_on:
       postgres:
