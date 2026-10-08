@@ -200,12 +200,10 @@ def managed_live_positions_from_views(
                     recovery_order_plan=plan,
                     recovery_order_remaining_quantity=remaining,
                     closing_order_filled=False,
-                    entry_order_count=1,
-                    entry_client_order_ids=(
-                        frozenset({batch.client_order_id})
-                        if batch.client_order_id
-                        else frozenset()
-                    ),
+                    entry_order_count=max(1, len(batch.entry_order_ids)),
+                    entry_order_count_proven=bool(batch.entry_order_ids),
+                    entry_client_order_ids=frozenset(batch.entry_client_order_ids),
+                    entry_exchange_order_ids=frozenset(batch.entry_order_ids),
                     projection_version=view.projection_version,
                 )
             )

@@ -11,9 +11,11 @@ from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    AccountFactStreamScope,
     ExitOrderSubmissionFact,
     PositionKey,
 )
+from crypto_momentum_lab.domain.execution.recovery_codec import PositionRecoveryCodec
 from crypto_momentum_lab.domain.execution.recovery_models import (
     AccountFacts,
 )
@@ -111,6 +113,65 @@ def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch(
     assert batch.entry_price == Decimal("60600")
     # Anchor updated to the latest add-on entry
     assert batch.opened_at == t0 + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_two_opening_orders_share_price_anchor_and_survive_checkpoint(
+    side: str,
+) -> None:
+    key = _key()
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="e1"
+    )
+    ledger = PositionLedger(key)
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    first = replace(
+        _fill("a1", side, "2", "100", t0, order_id="a"),
+        raw_payload={"is_system": True, "client_order_id": "ca"},
+    )
+    second = replace(
+        _fill("b1", side, "3", "110", t0 + timedelta(seconds=10), order_id="b"),
+        raw_payload={"is_system": True, "client_order_id": "cb"},
+    )
+    prefix = AccountFacts(position_key=key, stream_scope=scope, fills=(first, second))
+    projection = ledger.project(prefix)
+    assert len(projection.active_batches) == 1
+    batch = projection.active_batches[0]
+    assert batch.entry_price == Decimal("106")
+    assert batch.opened_at == second.trade_at
+    assert batch.entry_order_ids == ("a", "b")
+    assert batch.entry_client_order_ids == ("ca", "cb")
+
+    checkpoint = ledger.create_recovery_checkpoint(
+        prefix, source_revision=2, event_cut=second.trade_at
+    )
+    checkpoint = PositionRecoveryCodec.decode_checkpoint(
+        PositionRecoveryCodec.encode_checkpoint(checkpoint)
+    )
+    late_partial = replace(
+        _fill("a2", side, "1", "120", t0 + timedelta(seconds=20), order_id="a"),
+        raw_payload={"is_system": True, "client_order_id": "ca"},
+    )
+    recovered = ledger.project(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            recovery_checkpoint=checkpoint,
+            prefix_facts_complete=False,
+            fills=(late_partial,),
+        )
+    )
+    complete = ledger.project(
+        AccountFacts(
+            position_key=key, stream_scope=scope, fills=(first, second, late_partial)
+        )
+    )
+    assert recovered.active_batches == complete.active_batches
+    batch = recovered.active_batches[0]
+    assert batch.quantity == Decimal("6")
+    assert batch.entry_price == Decimal("650") / Decimal("6")
+    assert batch.opened_at == second.trade_at
+    assert batch.entry_order_ids == ("a", "b")
 
 
 def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:

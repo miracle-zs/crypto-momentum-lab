@@ -1,5 +1,7 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from crypto_momentum_lab.domain.execution.order_read_models import (
     PersistedExchangeOrder,
@@ -39,7 +41,9 @@ def _market_plan(
 
 def test_market_pending_entries_reserve_symbol_and_notional() -> None:
     registry = LivePendingEntryRegistry(clock=lambda: NOW)
-    plan = _market_plan("BTCUSDT", quantity=Decimal("2.0"), reference_price=Decimal("50000"))
+    plan = _market_plan(
+        "BTCUSDT", quantity=Decimal("2.0"), reference_price=Decimal("50000")
+    )
 
     # Remember in-flight market entry
     registry.remember(
@@ -60,9 +64,31 @@ def test_market_pending_entries_reserve_symbol_and_notional() -> None:
     assert notional == Decimal("100000")
 
 
+def test_unknown_entry_retains_slot_after_local_expiry() -> None:
+    registry = LivePendingEntryRegistry(clock=lambda: NOW + timedelta(hours=1))
+    plan = replace(_market_plan(), expires_at=NOW + timedelta(minutes=15))
+    registry.remember(
+        plan,
+        OrderExecutionResult(
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+            exchange_order_id=None,
+            executed_quantity=Decimal(0),
+            plan=plan,
+        ),
+    )
+    from tests.unit.live_rollout.test_daemon import _runtime_context
+
+    registry.sync(_runtime_context())
+    assert registry.has_uncertain_entry("BTCUSDT")
+    assert len(registry.snapshot()) == 1
+
+
 def test_persisted_market_pending_orders_reserve_symbol_and_notional() -> None:
     registry = LivePendingEntryRegistry(clock=lambda: NOW)
-    plan = _market_plan("ETHUSDT", quantity=Decimal("10.0"), reference_price=Decimal("3000"))
+    plan = _market_plan(
+        "ETHUSDT", quantity=Decimal("10.0"), reference_price=Decimal("3000")
+    )
 
     persisted = (
         PersistedExchangeOrder(
@@ -78,3 +104,41 @@ def test_persisted_market_pending_orders_reserve_symbol_and_notional() -> None:
     assert symbols == frozenset({"ETHUSDT"})
     # 8.0 remaining * 3000 = 24,000
     assert notional == Decimal("24000")
+
+
+def test_filled_slot_waits_for_exchange_identity_and_is_never_cancelled() -> None:
+    from tests.unit.live_rollout.test_daemon import _runtime_context
+
+    registry = LivePendingEntryRegistry(clock=lambda: NOW)
+    plan = _market_plan()
+    registry.remember(
+        plan,
+        OrderExecutionResult(
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            exchange_order_id="ex1",
+            executed_quantity=plan.quantity,
+            plan=plan,
+        ),
+    )
+    assert registry.snapshot() == ()
+    assert len(registry.admission_snapshot()) == 1
+    assert registry.reservation(()) == (Decimal("100000"), frozenset({"BTCUSDT"}))
+    context = replace(
+        _runtime_context(),
+        managed_positions=(
+            SimpleNamespace(
+                symbol="BTCUSDT",
+                batches=(
+                    SimpleNamespace(
+                        entry_client_order_ids=frozenset(),
+                        entry_exchange_order_ids=frozenset({"ex1"}),
+                    ),
+                ),
+            ),
+        ),
+    )
+    registry.sync(context)
+    assert registry.admission_snapshot() == ()
+    assert registry.reservation(()) == (Decimal(0), frozenset())
+    assert registry._exchange_ids == {}

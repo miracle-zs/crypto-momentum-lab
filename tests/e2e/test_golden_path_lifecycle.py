@@ -308,6 +308,8 @@ async def _build_submission_service(
         clock=lambda: NOW,
         pending_entry_reservation=lambda orders: (Decimal("0"), frozenset()),
         remember_pending_entry=lambda plan, result: None,
+        pending_entry_plans=lambda: (),
+        pending_entry_uncertainty=lambda symbol: False,
         record_signal_candidate=lambda **kwargs: None,
     )
 

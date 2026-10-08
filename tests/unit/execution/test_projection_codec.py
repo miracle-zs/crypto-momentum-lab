@@ -1,4 +1,4 @@
-"""Compatibility against a projection captured before the codec extraction."""
+"""Strict projection encoding with persisted opening-order identities."""
 
 import json
 from dataclasses import replace
@@ -18,11 +18,11 @@ from crypto_momentum_lab.domain.execution.recovery_codec import (
 @pytest.fixture
 def baseline():
     return json.loads(
-        (Path(__file__).parent / "fixtures" / "projection_v3.json").read_text()
+        (Path(__file__).parent / "fixtures" / "projection_v4.json").read_text()
     )
 
 
-def test_existing_projection_encoding_and_digest_are_unchanged(baseline):
+def test_projection_encoding_and_digest_match_order_identity_baseline(baseline):
     projection = PositionRecoveryCodec.decode_projection(baseline["payload"])
     assert projection_codec.encode_projection(projection) == baseline["payload"]
     assert projection_codec.compute_projection_digest(projection) == baseline["digest"]
@@ -33,6 +33,14 @@ def test_existing_projection_encoding_and_digest_are_unchanged(baseline):
     assert projection.active_batches
     assert projection.archived_episodes[0].reductions
     assert projection.active_episode.reductions
+
+
+def test_legacy_projection_without_order_count_evidence_is_rejected():
+    old = json.loads(
+        (Path(__file__).parent / "fixtures" / "projection_v3.json").read_text()
+    )
+    with pytest.raises(RecoverySchemaError, match="entry_order_ids"):
+        PositionRecoveryCodec.decode_projection(old["payload"])
 
 
 def test_fact_token_is_excluded_from_digest_without_mutating_projection(baseline):

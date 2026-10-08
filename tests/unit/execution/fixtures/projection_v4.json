@@ -1,0 +1,151 @@
+{
+  "payload": {
+    "position_key": {
+      "environment": "live",
+      "account_label": "primary",
+      "symbol": "BTCUSDT",
+      "position_side": "BOTH"
+    },
+    "active_episode": {
+      "episode_id": "ep_BTCUSDT_20260927120300_2",
+      "position_key": {
+        "environment": "live",
+        "account_label": "primary",
+        "symbol": "BTCUSDT",
+        "position_side": "BOTH"
+      },
+      "side": "long",
+      "opened_at": "2026-09-27T12:03:00+00:00",
+      "closed_at": null,
+      "is_active": true,
+      "cumulative_bought": "2.50",
+      "cumulative_sold": "0.50",
+      "peak_quantity": "2.50",
+      "batches": [
+        {
+          "batch_id": "ep_BTCUSDT_20260927120300_2_b1",
+          "episode_id": "ep_BTCUSDT_20260927120300_2",
+          "quantity": "2.00",
+          "original_quantity": "2.50",
+          "entry_price": "14.00",
+          "opened_at": "2026-09-27T12:03:00+00:00",
+          "order_id": "order-open-2",
+          "client_order_id": null,
+          "is_external": true,
+          "exit_order_submitted_at": null,
+          "entry_order_ids": [
+            "order-open-2"
+          ],
+          "entry_client_order_ids": []
+        }
+      ],
+      "reductions": [
+        {
+          "trade_id": "reduce-2",
+          "order_id": "order-reduce-2",
+          "quantity": "0.50",
+          "price": "15.00",
+          "reduced_at": "2026-09-27T12:04:00+00:00",
+          "is_system": false,
+          "attributions": [
+            {
+              "batch_id": "ep_BTCUSDT_20260927120300_2_b1",
+              "quantity": "0.50"
+            }
+          ]
+        }
+      ]
+    },
+    "active_batches": [
+      {
+        "batch_id": "ep_BTCUSDT_20260927120300_2_b1",
+        "episode_id": "ep_BTCUSDT_20260927120300_2",
+        "quantity": "2.00",
+        "original_quantity": "2.50",
+        "entry_price": "14.00",
+        "opened_at": "2026-09-27T12:03:00+00:00",
+        "order_id": "order-open-2",
+        "client_order_id": null,
+        "is_external": true,
+        "exit_order_submitted_at": null,
+        "entry_order_ids": [
+          "order-open-2"
+        ],
+        "entry_client_order_ids": []
+      }
+    ],
+    "total_active_quantity": "2.00",
+    "unallocated_quantity": "0",
+    "reconciliation_gap": "0",
+    "high_watermark_trade_at": "2026-09-27T12:04:00+00:00",
+    "archived_episodes": [
+      {
+        "episode_id": "ep_BTCUSDT_20260927120100_1",
+        "position_key": {
+          "environment": "live",
+          "account_label": "primary",
+          "symbol": "BTCUSDT",
+          "position_side": "BOTH"
+        },
+        "side": "long",
+        "opened_at": "2026-09-27T12:01:00+00:00",
+        "closed_at": "2026-09-27T12:02:00+00:00",
+        "is_active": false,
+        "cumulative_bought": "2.00",
+        "cumulative_sold": "2.00",
+        "peak_quantity": "2.00",
+        "batches": [
+          {
+            "batch_id": "ep_BTCUSDT_20260927120100_1_b1",
+            "episode_id": "ep_BTCUSDT_20260927120100_1",
+            "quantity": "0.00",
+            "original_quantity": "2.00",
+            "entry_price": "10.00",
+            "opened_at": "2026-09-27T12:01:00+00:00",
+            "order_id": "order-open-1",
+            "client_order_id": null,
+            "is_external": true,
+            "exit_order_submitted_at": null,
+            "entry_order_ids": [
+              "order-open-1"
+            ],
+            "entry_client_order_ids": []
+          }
+        ],
+        "reductions": [
+          {
+            "trade_id": "close-1",
+            "order_id": "order-close-1",
+            "quantity": "2.00",
+            "price": "12.00",
+            "reduced_at": "2026-09-27T12:02:00+00:00",
+            "is_system": false,
+            "attributions": [
+              {
+                "batch_id": "ep_BTCUSDT_20260927120100_1_b1",
+                "quantity": "2.00"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "diagnostics": [
+      "恢复校验"
+    ],
+    "health_status": "CATCHING_UP",
+    "event_cut": "2026-09-27T12:04:00+00:00",
+    "discrepancy": null,
+    "is_comparable": false,
+    "projection_version": "pv_d24286cb75b774f9e858e6ed23ad4fb73701205572ab931bce0fcc5623dc",
+    "stream_scope": {
+      "environment": "live",
+      "account_label": "primary",
+      "symbol": "BTCUSDT",
+      "position_side": "BOTH",
+      "stream_id": "execution-book",
+      "stream_epoch": "epoch-7"
+    }
+  },
+  "digest": "edd32c5c242f3e6cebb888e80450018317363689351a53f41d67de600ceff72c"
+}

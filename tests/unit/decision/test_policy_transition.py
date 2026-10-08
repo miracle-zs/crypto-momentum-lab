@@ -10,6 +10,7 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 7. PolicyState versioning and immutability.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -463,6 +464,86 @@ def test_clock_driven_holding_timer_when_not_exiting() -> None:
     assert hold_timer.timer_type == "max_holding_expiry"
     assert hold_timer.symbol == "BTCUSDT"
     assert hold_timer.due_at == opened_at + timedelta(seconds=3600)
+
+
+@pytest.mark.parametrize(
+    "batch_count,accepted", [(0, True), (1, True), (2, False), (3, False)]
+)
+def test_two_opening_orders_in_one_exit_batch_are_bounded(
+    batch_count: int, accepted: bool
+) -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000"))
+    original = _make_position_view("BTCUSDT", Decimal("1"), opened_at=t0)
+    view = replace(
+        original,
+        batches=(
+            (
+                replace(
+                    original.batches[0],
+                    entry_order_ids=tuple(f"o{i}" for i in range(batch_count)),
+                ),
+            )
+            if batch_count
+            else ()
+        ),
+    )
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+        market_refs=(mref,),
+        position_view_token=view.projection_version,
+        universe_version="u1",
+    )
+    result = execute_policy_transition(
+        frame,
+        PolicyState(),
+        EffectivePolicy(
+            policy_id="two",
+            strategy_name="breakout",
+            entry_threshold=Decimal("65000"),
+            max_concurrency_per_symbol=2,
+            exit_policy=PositionExitPolicy(max_holding_seconds=3600),
+        ),
+        market_envelope=menv,
+        position_view=view,
+    )
+    assert (result.entry_candidate is not None) == accepted
+    if batch_count:
+        assert any(t.timer_type == "max_holding_expiry" for t in result.timer_requests)
+        assert result.next_state.holding_deadline_by_symbol[
+            "BTCUSDT"
+        ] == t0 + timedelta(hours=1)
+    assert result.exit_command is None
+
+
+def test_second_entry_never_overrides_exit() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000"))
+    view = _make_position_view(
+        "BTCUSDT", Decimal("1"), opened_at=t0 - timedelta(hours=2)
+    )
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+        market_refs=(mref,),
+        position_view_token=view.projection_version,
+        universe_version="u1",
+    )
+    policy = EffectivePolicy(
+        policy_id="two",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000"),
+        max_concurrency_per_symbol=2,
+        exit_policy=PositionExitPolicy(max_holding_seconds=3600),
+    )
+    result = execute_policy_transition(
+        frame, PolicyState(), policy, market_envelope=menv, position_view=view
+    )
+    assert result.exit_command is not None
+    assert result.entry_candidate is None
 
 
 def test_grace_period_timer_emission_on_entry() -> None:

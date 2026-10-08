@@ -363,6 +363,8 @@ def execute_policy_transition(
     )
     decision_id = f"dec_{symbol}_{input_hash[:16]}"
     state_15s = market_envelope.state
+    entry_state = prior_state
+    holding_timers: list[TimerRequest] = []
 
     # 1. Evaluate Position Holding & Exit (even when no entry signal exists)
     if position_view.total_quantity > Decimal("0"):
@@ -467,7 +469,6 @@ def execute_policy_transition(
         else:
             # Position is held and not exiting; schedule max holding expiration timer
             max_holding = exit_policy.max_holding_seconds
-            holding_timers: list[TimerRequest] = []
             next_state = prior_state
             if max_holding is not None and max_holding > 0:
                 holding_deadline = earliest_open + timedelta(seconds=max_holding)
@@ -485,16 +486,38 @@ def execute_policy_transition(
                     next_state = prior_state.with_holding_deadline(
                         symbol, holding_deadline
                     )
-            return PolicyTransition(
-                decision_id=decision_id,
-                frame_digest=frame.frame_digest,
-                input_hash=input_hash,
-                prior_state_version=prior_state.policy_version,
-                next_state=next_state,
-                timer_requests=tuple(holding_timers),
-                rejection_reason="holding_position_no_exit",
-                transition_time=clock_time,
+            active_batches = tuple(b for b in position_view.batches if b.quantity > 0)
+            limit = policy_artifact.max_concurrency_per_symbol
+            count_proven = all(b.entry_order_ids for b in active_batches)
+            opening_order_count = sum(len(b.entry_order_ids) for b in active_batches)
+            exit_pending = any(
+                b.exit_order_submitted_at is not None for b in active_batches
             )
+            # A one-order policy never permits adds; multi-order admission needs
+            # identities, not the number of merged exit batches.
+            if exit_pending or (
+                limit is not None
+                and (limit == 1 or not count_proven or opening_order_count >= limit)
+            ):
+                return PolicyTransition(
+                    decision_id=decision_id,
+                    frame_digest=frame.frame_digest,
+                    input_hash=input_hash,
+                    prior_state_version=prior_state.policy_version,
+                    next_state=next_state,
+                    timer_requests=tuple(holding_timers),
+                    rejection_reason=(
+                        "position_exit_in_progress"
+                        if exit_pending
+                        else (
+                            "entry_concurrency_unproven"
+                            if limit != 1 and not count_proven
+                            else "holding_position_no_exit"
+                        )
+                    ),
+                    transition_time=clock_time,
+                )
+            entry_state = next_state
 
     # 2. Check Cooldown
     if prior_state.is_in_cooldown(symbol, clock_time):
@@ -503,19 +526,32 @@ def execute_policy_transition(
             frame_digest=frame.frame_digest,
             input_hash=input_hash,
             prior_state_version=prior_state.policy_version,
-            next_state=prior_state,
+            next_state=entry_state,
+            timer_requests=tuple(holding_timers),
             rejection_reason="cooldown_active",
             transition_time=clock_time,
         )
 
-    # 3. Check Position Mode and Entry Evaluation (when position is flat)
+    # 3. Entry evaluation when flat or holding a free entry slot. Submission
+    # re-checks pending orders under the position lock before admitting a batch.
     pos_mode = policy_artifact.position_mode
-    if position_view.total_quantity == Decimal("0"):
+    if position_view.total_quantity >= Decimal("0"):
         generator = policy_artifact.candidate_generator
         if generator is not None:
             arg0 = decision_input if decision_input is not None else market_envelope
             cand = generator(arg0, prior_state)
             if cand is not None:
+                if position_view.total_quantity > 0 and cand.side != pos_side:
+                    return PolicyTransition(
+                        decision_id=decision_id,
+                        frame_digest=frame.frame_digest,
+                        input_hash=input_hash,
+                        prior_state_version=prior_state.policy_version,
+                        next_state=entry_state,
+                        timer_requests=tuple(holding_timers),
+                        rejection_reason="entry_direction_conflicts_with_position",
+                        transition_time=clock_time,
+                    )
                 # Enforce position mode
                 if (
                     cand.side == StrategySide.LONG
@@ -585,7 +621,7 @@ def execute_policy_transition(
                         )
                     )
 
-                next_state = prior_state.with_anchor_and_intent(
+                next_state = entry_state.with_anchor_and_intent(
                     symbol=symbol,
                     anchor_price=state_15s.close_price or Decimal("0"),
                     intent_id=cand.candidate_id,
@@ -603,7 +639,7 @@ def execute_policy_transition(
                     prior_state_version=prior_state.policy_version,
                     next_state=next_state,
                     entry_candidate=cand,
-                    timer_requests=tuple(grace_timers),
+                    timer_requests=tuple(holding_timers + grace_timers),
                     transition_time=clock_time,
                 )
             else:
@@ -612,8 +648,9 @@ def execute_policy_transition(
                     frame_digest=frame.frame_digest,
                     input_hash=input_hash,
                     prior_state_version=prior_state.policy_version,
-                    next_state=prior_state,
+                    next_state=entry_state,
                     rejection_reason="no_candidate",
+                    timer_requests=tuple(holding_timers),
                     transition_time=clock_time,
                 )
 
@@ -703,8 +740,9 @@ def execute_policy_transition(
                 frame_digest=frame.frame_digest,
                 input_hash=input_hash,
                 prior_state_version=prior_state.policy_version,
-                next_state=prior_state,
+                next_state=entry_state,
                 rejection_reason=reason,
+                timer_requests=tuple(holding_timers),
                 transition_time=clock_time,
             )
 
@@ -749,7 +787,18 @@ def execute_policy_transition(
                 )
             )
 
-        next_state = prior_state.with_anchor_and_intent(
+        if position_view.total_quantity > 0 and cand.side != pos_side:
+            return PolicyTransition(
+                decision_id=decision_id,
+                frame_digest=frame.frame_digest,
+                input_hash=input_hash,
+                prior_state_version=prior_state.policy_version,
+                next_state=entry_state,
+                timer_requests=tuple(holding_timers),
+                rejection_reason="entry_direction_conflicts_with_position",
+                transition_time=clock_time,
+            )
+        next_state = entry_state.with_anchor_and_intent(
             symbol=symbol,
             anchor_price=close_px,
             intent_id=cand.candidate_id,
@@ -767,7 +816,7 @@ def execute_policy_transition(
             prior_state_version=prior_state.policy_version,
             next_state=next_state,
             entry_candidate=cand,
-            timer_requests=tuple(grace_timers),
+            timer_requests=tuple(holding_timers + grace_timers),
             transition_time=clock_time,
         )
 

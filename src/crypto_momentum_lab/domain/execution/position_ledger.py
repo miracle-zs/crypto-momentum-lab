@@ -514,6 +514,10 @@ class PositionLedger:
                     opened_at=fill.trade_at,
                     order_id=fill.order_id,
                     client_order_id=fill_client_order_id,
+                    entry_order_ids=(fill.order_id,),
+                    entry_client_order_ids=(
+                        (fill_client_order_id,) if fill_client_order_id else ()
+                    ),
                     is_external=not is_system,
                     exit_order_submitted_at=None,
                 )
@@ -542,7 +546,14 @@ class PositionLedger:
                             latest_batch.quantity * latest_batch.entry_price
                             + fill.quantity * fill.price
                         ) / new_qty
-                        new_opened_at = max(latest_batch.opened_at, fill.trade_at)
+                        entry_ids = latest_batch.entry_order_ids
+                        new_opened_at = (
+                            max(latest_batch.opened_at, fill.trade_at)
+                            if not entry_ids
+                            or fill.order_id not in entry_ids
+                            or fill.order_id == entry_ids[-1]
+                            else latest_batch.opened_at
+                        )
                         new_is_external = latest_batch.is_external or (not is_system)
                         current_batches[-1] = replace(
                             latest_batch,
@@ -551,6 +562,23 @@ class PositionLedger:
                             entry_price=new_entry_price,
                             opened_at=new_opened_at,
                             is_external=new_is_external,
+                            entry_order_ids=(
+                                tuple(dict.fromkeys((*entry_ids, fill.order_id)))
+                                if entry_ids
+                                else ()
+                            ),
+                            entry_client_order_ids=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *latest_batch.entry_client_order_ids,
+                                        *(
+                                            (fill_client_order_id,)
+                                            if fill_client_order_id
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            ),
                         )
                     else:
                         batch_counter += 1
@@ -564,6 +592,10 @@ class PositionLedger:
                             opened_at=fill.trade_at,
                             order_id=fill.order_id,
                             client_order_id=fill_client_order_id,
+                            entry_order_ids=(fill.order_id,),
+                            entry_client_order_ids=(
+                                (fill_client_order_id,) if fill_client_order_id else ()
+                            ),
                             is_external=not is_system,
                             exit_order_submitted_at=None,
                         )
@@ -666,6 +698,12 @@ class PositionLedger:
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
                                 client_order_id=fill_client_order_id,
+                                entry_order_ids=(fill.order_id,),
+                                entry_client_order_ids=(
+                                    (fill_client_order_id,)
+                                    if fill_client_order_id
+                                    else ()
+                                ),
                                 is_external=not is_system,
                                 exit_order_submitted_at=None,
                             )
@@ -685,7 +723,14 @@ class PositionLedger:
                             latest_batch.quantity * latest_batch.entry_price
                             + fill.quantity * fill.price
                         ) / new_qty
-                        new_opened_at = max(latest_batch.opened_at, fill.trade_at)
+                        entry_ids = latest_batch.entry_order_ids
+                        new_opened_at = (
+                            max(latest_batch.opened_at, fill.trade_at)
+                            if not entry_ids
+                            or fill.order_id not in entry_ids
+                            or fill.order_id == entry_ids[-1]
+                            else latest_batch.opened_at
+                        )
                         new_is_external = latest_batch.is_external or (not is_system)
                         current_batches[-1] = replace(
                             latest_batch,
@@ -694,6 +739,23 @@ class PositionLedger:
                             entry_price=new_entry_price,
                             opened_at=new_opened_at,
                             is_external=new_is_external,
+                            entry_order_ids=(
+                                tuple(dict.fromkeys((*entry_ids, fill.order_id)))
+                                if entry_ids
+                                else ()
+                            ),
+                            entry_client_order_ids=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *latest_batch.entry_client_order_ids,
+                                        *(
+                                            (fill_client_order_id,)
+                                            if fill_client_order_id
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            ),
                         )
                     else:
                         batch_counter += 1
@@ -707,6 +769,10 @@ class PositionLedger:
                             opened_at=fill.trade_at,
                             order_id=fill.order_id,
                             client_order_id=fill_client_order_id,
+                            entry_order_ids=(fill.order_id,),
+                            entry_client_order_ids=(
+                                (fill_client_order_id,) if fill_client_order_id else ()
+                            ),
                             is_external=not is_system,
                             exit_order_submitted_at=None,
                         )
@@ -802,6 +868,12 @@ class PositionLedger:
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
                                 client_order_id=fill_client_order_id,
+                                entry_order_ids=(fill.order_id,),
+                                entry_client_order_ids=(
+                                    (fill_client_order_id,)
+                                    if fill_client_order_id
+                                    else ()
+                                ),
                                 is_external=not is_system,
                                 exit_order_submitted_at=None,
                             )

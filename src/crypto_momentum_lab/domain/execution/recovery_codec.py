@@ -501,6 +501,8 @@ class PositionRecoveryCodec:
                 "opened_at",
                 "order_id",
                 "client_order_id",
+                "entry_order_ids",
+                "entry_client_order_ids",
                 "is_external",
                 "exit_order_submitted_at",
             },
@@ -529,6 +531,8 @@ class PositionRecoveryCodec:
             opened_at=_datetime_value(data, "opened_at"),
             order_id=parsed_ids["order_id"],
             client_order_id=parsed_ids["client_order_id"],
+            entry_order_ids=_string_array(data, "entry_order_ids"),
+            entry_client_order_ids=_string_array(data, "entry_client_order_ids"),
             is_external=is_external,
             exit_order_submitted_at=(
                 _datetime_value({"value": exit_at}, "value")
@@ -988,13 +992,12 @@ class PositionRecoveryCodec:
             "checkpoint",
         )
         if version != POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION:
-            if version != 2:
-                raise RecoverySchemaError(
-                    f"unsupported position recovery checkpoint schema {version}"
-                )
+            raise RecoverySchemaError(
+                f"unsupported position recovery checkpoint schema {version}"
+            )
         elif "parent_stream_scope" not in data:
             raise RecoverySchemaError(
-                "checkpoint schema 3 requires parent_stream_scope"
+                "checkpoint schema 4 requires parent_stream_scope"
             )
         coverage = data.get("coverage")
         parent_checkpoint_id = data.get("parent_checkpoint_id")

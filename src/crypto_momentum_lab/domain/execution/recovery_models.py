@@ -214,7 +214,7 @@ class AccountFacts:
         return computed
 
 
-POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = 3
+POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = 4
 
 
 class RecoverySchemaError(ValueError):

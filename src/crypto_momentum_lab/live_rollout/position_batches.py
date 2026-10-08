@@ -171,12 +171,10 @@ def _build_position_batches(
                         ),
                         recovery_order_remaining_quantity=recovery_remaining,
                         closing_order_filled=active_market_orders,
-                        entry_order_count=1,
-                        entry_client_order_ids=(
-                            frozenset({ab.client_order_id})
-                            if ab.client_order_id
-                            else frozenset()
-                        ),
+                        entry_order_count=max(1, len(ab.entry_order_ids)),
+                        entry_order_count_proven=bool(ab.entry_order_ids),
+                        entry_client_order_ids=frozenset(ab.entry_client_order_ids),
+                        entry_exchange_order_ids=frozenset(ab.entry_order_ids),
                         projection_version=projection.projection_version,
                     )
                 )

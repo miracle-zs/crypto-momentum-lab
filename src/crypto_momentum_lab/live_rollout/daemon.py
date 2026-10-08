@@ -276,6 +276,8 @@ class LiveStrategyDaemon:
             ),
             clock=self._clock,
             pending_entry_reservation=self._pending_entries.reservation,
+            pending_entry_plans=self._pending_entries.admission_snapshot,
+            pending_entry_uncertainty=self._pending_entries.has_uncertain_entry,
             remember_pending_entry=self._pending_entries.remember,
             record_signal_candidate=self._record_signal_candidate,
             telemetry=self._telemetry,

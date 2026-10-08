@@ -328,6 +328,7 @@ class EffectivePolicy:
     order_type: EntryType = EntryType.MARKET
     target_notional: Decimal = Decimal("100.00")
     max_open_positions: int | None = None
+    max_concurrency_per_symbol: int | None = 1
     exit_policy: PositionExitPolicy = field(default_factory=PositionExitPolicy)
     cooldown_duration: timedelta = timedelta(minutes=15)
     position_mode: StrategyPositionMode = StrategyPositionMode.LONG_ONLY
@@ -340,6 +341,13 @@ class EffectivePolicy:
         ]
         | None
     ) = None
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency_per_symbol is not None and (
+            type(self.max_concurrency_per_symbol) is not int
+            or self.max_concurrency_per_symbol <= 0
+        ):
+            raise ValueError("max_concurrency_per_symbol must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +387,8 @@ def compute_decision_input_hash(
                 str(batch.quantity),
                 str(batch.entry_price),
                 batch.opened_at.isoformat(),
+                batch.entry_order_ids,
+                batch.entry_client_order_ids,
             )
         )
     payload: dict[str, Any] = {
@@ -653,6 +663,8 @@ def decision_trace_from_result(
                 "original_quantity": str(batch.original_quantity),
                 "entry_price": str(batch.entry_price),
                 "opened_at": batch.opened_at.isoformat(),
+                "entry_order_ids": list(batch.entry_order_ids),
+                "entry_client_order_ids": list(batch.entry_client_order_ids),
                 "exit_order_submitted_at": (
                     batch.exit_order_submitted_at.isoformat()
                     if batch.exit_order_submitted_at is not None

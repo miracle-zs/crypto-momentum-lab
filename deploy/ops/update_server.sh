@@ -589,6 +589,23 @@ while IFS= read -r changed_path; do
   fi
 done <<<"$changed_files"
 
+# Recovery checkpoint semantics are a persisted contract even without an
+# Alembic column change. A version bump must never roll over live consumers.
+recovery_schema_path=src/crypto_momentum_lab/domain/execution/recovery_models.py
+if [[ -n "$deployment_base_commit" ]]; then
+  previous_recovery_schema="$(git show "$deployment_base_commit:$recovery_schema_path" \
+    | sed -n 's/^POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = //p')"
+  target_recovery_schema="$(sed -n 's/^POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = //p' "$recovery_schema_path")"
+  if [[ -z "$previous_recovery_schema" || -z "$target_recovery_schema" ]]; then
+    echo "Refusing deployment: cannot verify recovery checkpoint schema versions." >&2
+    exit 1
+  fi
+  if [[ "$previous_recovery_schema" != "$target_recovery_schema" ]]; then
+    destructive_schema_changed=1
+    echo "recovery_checkpoint_schema_changed=1 old=$previous_recovery_schema new=$target_recovery_schema rebuild_required=1"
+  fi
+fi
+
 restart_ops_monitor_if_changed() {
   if [[ "$ops_monitor_changed" != 1 ]]; then
     return 0

@@ -145,6 +145,7 @@ def build_live_policy(
         order_type=order_type,
         target_notional=target_notional,
         max_open_positions=risk_config.max_open_positions,
+        max_concurrency_per_symbol=config.execution.max_concurrency_per_symbol,
         sizing_model=FixedNotionalSizingModel(
             target_notional=target_notional,
             max_leverage=Decimal("5.0"),

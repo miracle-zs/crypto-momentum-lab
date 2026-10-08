@@ -52,6 +52,8 @@ def encode_batch(batch: PositionLedgerBatch) -> dict[str, object]:
         "opened_at": _datetime(batch.opened_at),
         "order_id": batch.order_id,
         "client_order_id": batch.client_order_id,
+        "entry_order_ids": list(batch.entry_order_ids),
+        "entry_client_order_ids": list(batch.entry_client_order_ids),
         "is_external": batch.is_external,
         "exit_order_submitted_at": (
             _datetime(batch.exit_order_submitted_at)

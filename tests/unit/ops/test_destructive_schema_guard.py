@@ -52,3 +52,35 @@ def test_online_live_rollout_still_refuses_destructive_schema():
 
 def test_ordinary_rollout_is_not_blocked_by_consumer_guard():
     assert run_guard(running="live-strategy", changed="0").returncode == 0
+
+
+@pytest.mark.parametrize("previous,target,expected", [(3, 4, "1"), (4, 4, "0")])
+def test_checkpoint_schema_change_marks_cutover_destructive(
+    tmp_path, previous, target, expected
+):
+    source = SCRIPT.read_text()
+    start = source.index("recovery_schema_path=src/")
+    end = source.index("restart_ops_monitor_if_changed()", start)
+    path = tmp_path / "src/crypto_momentum_lab/domain/execution/recovery_models.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = {target}\n")
+    harness = f"""
+set -euo pipefail
+deployment_base_commit=previous
+destructive_schema_changed=0
+git() {{ printf 'POSITION_RECOVERY_CHECKPOINT_SCHEMA_VERSION = {previous}\\n'; }}
+"""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness
+            + source[start:end]
+            + 'printf "changed=%s\\n" "$destructive_schema_changed"',
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"changed={expected}" in result.stdout

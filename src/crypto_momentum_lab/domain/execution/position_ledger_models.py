@@ -606,6 +606,9 @@ class PositionLedgerBatch:
     client_order_id: str | None = None
     is_external: bool = False
     exit_order_submitted_at: datetime | None = None
+    # Ordered distinct opening identities; empty means count evidence is absent.
+    entry_order_ids: tuple[str, ...] = ()
+    entry_client_order_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.batch_id.strip():
@@ -620,6 +623,11 @@ class PositionLedgerBatch:
             raise ValueError("quantity must not exceed original_quantity")
         if self.entry_price <= 0:
             raise ValueError("entry_price must be positive")
+        for identities in (self.entry_order_ids, self.entry_client_order_ids):
+            if len(set(identities)) != len(identities) or any(
+                not v.strip() for v in identities
+            ):
+                raise ValueError("entry order identities must be unique and nonempty")
         if self.opened_at.tzinfo is None:
             raise ValueError("opened_at must be timezone-aware")
         if (

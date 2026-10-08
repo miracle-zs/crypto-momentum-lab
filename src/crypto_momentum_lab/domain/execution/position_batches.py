@@ -26,7 +26,9 @@ class ManagedLivePositionBatch:
     recovery_order_remaining_quantity: Decimal | None = None
     closing_order_filled: bool = False
     entry_order_count: int = 1
+    entry_order_count_proven: bool = True
     entry_client_order_ids: frozenset[str] = frozenset()
+    entry_exchange_order_ids: frozenset[str] = frozenset()
     projection_version: str | None = None
 
     def __post_init__(self) -> None:

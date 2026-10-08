@@ -79,7 +79,8 @@ def test_live_policy_uses_entry_configuration_and_only_candle_exits(order_type):
 
     policy = runtime.build_live_policy(
         config=SimpleNamespace(
-            strategy=SimpleNamespace(entry_order_type=EntryType(order_type))
+            strategy=SimpleNamespace(entry_order_type=EntryType(order_type)),
+            execution=SimpleNamespace(max_concurrency_per_symbol=2),
         ),
         target_notional=Decimal("100"),
         risk_config=SimpleNamespace(max_open_positions=500),
@@ -90,6 +91,7 @@ def test_live_policy_uses_entry_configuration_and_only_candle_exits(order_type):
         policy.target_notional == policy.sizing_model.target_notional == Decimal("100")
     )
     assert policy.max_open_positions == 500
+    assert policy.max_concurrency_per_symbol == 2
     opened = datetime(2026, 10, 2, 3, 15, 3, tzinfo=UTC)
     assert (
         position_exit_reason(

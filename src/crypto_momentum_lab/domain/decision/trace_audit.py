@@ -285,6 +285,7 @@ def verify_decision_trace(
             "order_type",
             "target_notional",
             "max_open_positions",
+            "max_concurrency_per_symbol",
             "exit_policy",
             "cooldown_duration",
             "cooldown_duration_seconds",
@@ -309,6 +310,7 @@ def verify_decision_trace(
             "order_type",
             "target_notional",
             "max_open_positions",
+            "max_concurrency_per_symbol",
             "exit_policy",
             "cooldown_duration_seconds",
             "position_mode",
@@ -479,6 +481,7 @@ def verify_decision_trace(
                 if pol_params["max_open_positions"] is not None
                 else None
             ),
+            max_concurrency_per_symbol=pol_params["max_concurrency_per_symbol"],
             exit_policy=exit_policy,
             cooldown_duration=_duration(pol_params["cooldown_duration_seconds"]),
             position_mode=position_mode,
@@ -528,6 +531,8 @@ def verify_decision_trace(
                     original_quantity=Decimal(str(batch_data["original_quantity"])),
                     entry_price=Decimal(str(batch_data["entry_price"])),
                     opened_at=datetime.fromisoformat(batch_data["opened_at"]),
+                    entry_order_ids=tuple(batch_data["entry_order_ids"]),
+                    entry_client_order_ids=tuple(batch_data["entry_client_order_ids"]),
                     exit_order_submitted_at=(
                         datetime.fromisoformat(batch_data["exit_order_submitted_at"])
                         if batch_data.get("exit_order_submitted_at")

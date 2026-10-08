@@ -28,6 +28,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
+from crypto_momentum_lab.live_rollout.pending_entries import LivePendingEntryRegistry
 from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
@@ -98,6 +99,7 @@ def _submission(
     repository,
     state_machine,
     limits: FixedLiveLimits | None = None,
+    pending: LivePendingEntryRegistry | None = None,
 ) -> LiveCandidateSubmission:
     state_machine.configure_submission(
         repository,
@@ -124,13 +126,76 @@ def _submission(
             entry_limit_ttl_seconds=900,
         ),
         clock=lambda: NOW,
-        pending_entry_reservation=lambda orders: (
+        pending_entry_reservation=pending.reservation
+        if pending
+        else lambda orders: (
             Decimal("0"),
             frozenset(),
         ),
-        remember_pending_entry=lambda plan, result: None,
+        remember_pending_entry=(
+            pending.remember if pending else lambda plan, result: None
+        ),
+        pending_entry_plans=(pending.admission_snapshot if pending else lambda: ()),
+        pending_entry_uncertainty=(
+            pending.has_uncertain_entry if pending else lambda symbol: False
+        ),
         record_signal_candidate=lambda **kwargs: None,
     )
+
+
+@pytest.mark.parametrize(
+    "state", [ExchangeOrderState.ACKNOWLEDGED, ExchangeOrderState.FILLED]
+)
+async def test_pending_two_entries_block_third_before_context_catches_up(state) -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    original_prepare = coordinator.prepare_and_execute
+
+    async def prepare(plan, *, preparation):
+        result = await original_prepare(plan, preparation=preparation)
+        return replace(
+            result,
+            state=state,
+            executed_quantity=(
+                plan.quantity if state is ExchangeOrderState.FILLED else Decimal(0)
+            ),
+        )
+
+    coordinator.prepare_and_execute = prepare
+    pending = LivePendingEntryRegistry(clock=lambda: NOW)
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        pending=pending,
+        limits=FixedLiveLimits(
+            notional_cap=Decimal("25"),
+            max_open_positions=5,
+            max_daily_loss=Decimal("10"),
+            max_gross_exposure=Decimal("500"),
+            max_concurrency_per_symbol=2,
+        ),
+    )
+    context = _runtime_context()
+    context = replace(
+        context,
+        risk_config=replace(context.risk_config, max_gross_notional=Decimal("500")),
+    )
+    results = []
+    for i in range(3):
+        results.append(
+            await submission.execute(
+                replace(_intent(), candidate_id=f"candidate-{i}"),
+                requested_quantity=None,
+                state=_state(),
+                context=context,
+            )
+        )
+    assert results[0] is not None and results[1] is not None
+    assert results[2] is None
+    assert len(repository.prepare_calls) == 2
+    assert len(pending.admission_snapshot()) == 2
+    if state is ExchangeOrderState.FILLED:
+        assert pending.snapshot() == ()  # Already filled orders are never cancelled.
 
 
 async def test_submission_prepares_without_static_fencing_before_exchange() -> None:
@@ -679,6 +744,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
     sub2 = _submission(repository=repo2, state_machine=coord2)
 
     unresolved_btc = SimpleNamespace(
+        exchange_order_id=None,
         plan=SimpleNamespace(
             symbol="BTCUSDT",
             price=Decimal("50000"),
@@ -713,6 +779,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
     # 3. Uncertain order on BTCUSDT with unbounded risk (missing price/quantity):
     # Blocks ETHUSDT candidate because worst-case gross risk is unbounded
     unresolved_unbounded = SimpleNamespace(
+        exchange_order_id=None,
         plan=SimpleNamespace(
             symbol="BTCUSDT",
             price=None,
@@ -735,6 +802,7 @@ async def test_symbol_entry_isolation_and_uncertain_order_scope() -> None:
     # 4. Confirmed resting order on BTCUSDT (ACKNOWLEDGED) is known, not uncertain:
     # Does NOT block BTCUSDT candidate as uncertain order
     resting_btc = SimpleNamespace(
+        exchange_order_id=None,
         plan=SimpleNamespace(
             symbol="BTCUSDT",
             price=Decimal("50000"),

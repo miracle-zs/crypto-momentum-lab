@@ -167,6 +167,10 @@ class LiveCandidateSubmission:
         config: LiveSubmissionConfig,
         clock: Callable[[], datetime],
         pending_entry_reservation: PendingEntryReservation,
+        pending_entry_plans: Callable[
+            [], tuple[tuple[OrderExecutionPlan, Decimal], ...]
+        ],
+        pending_entry_uncertainty: Callable[[str], bool],
         remember_pending_entry: Callable[
             [OrderExecutionPlan, OrderExecutionResult], None
         ],
@@ -184,6 +188,8 @@ class LiveCandidateSubmission:
         self._config = config
         self._clock = clock
         self._pending_entry_reservation = pending_entry_reservation
+        self._pending_entry_plans = pending_entry_plans
+        self._pending_entry_uncertainty = pending_entry_uncertainty
         self._remember_pending_entry = remember_pending_entry
         self._record_signal_candidate = record_signal_candidate
         self._telemetry = telemetry
@@ -235,11 +241,28 @@ class LiveCandidateSubmission:
                 risk_open_position_symbols |= pending_symbols
                 managed_positions = context.managed_positions
                 unresolved_orders = context.unresolved_orders
+                local_pending = self._pending_entry_plans()
+                known_entry_exchange_ids = {
+                    order_id
+                    for position in managed_positions
+                    if position.symbol == candidate.symbol
+                    for batch in position.batches
+                    if batch.exit_order_submitted_at is None
+                    for order_id in batch.entry_exchange_order_ids
+                }
                 symbol_concurrency = count_active_symbol_batch_concurrency(
                     symbol=candidate.symbol,
                     managed_positions=managed_positions,
                     pending_entry_plans=tuple(
-                        order.plan for order in unresolved_orders
+                        {
+                            **{
+                                order.plan.client_order_id: order.plan
+                                for order in unresolved_orders
+                                if order.exchange_order_id
+                                not in known_entry_exchange_ids
+                            },
+                            **{plan.client_order_id: plan for plan, _ in local_pending},
+                        }.values()
                     ),
                 )
                 limit_context = LiveLimitContext(
@@ -260,6 +283,13 @@ class LiveCandidateSubmission:
                         candidate.symbol,
                         context.unresolved_orders,
                         context.unresolved_order_states,
+                    )
+                    or self._pending_entry_uncertainty(candidate.symbol)
+                    or any(
+                        not batch.entry_order_count_proven
+                        for position in managed_positions
+                        if position.symbol == candidate.symbol
+                        for batch in position.batches
                     ),
                     symbol_concurrency=symbol_concurrency,
                 )
