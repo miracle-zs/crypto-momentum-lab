@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
@@ -40,6 +40,10 @@ if TYPE_CHECKING:
     )
 
 log = structlog.get_logger()
+
+# asyncio sleeps use a monotonic clock; periodically recheck wall time so an
+# operating-system clock correction cannot postpone the risk window for hours.
+_IDLE_CLOCK_RECHECK_SECONDS = 60.0
 
 
 class ScheduledFlattenPlanner(Protocol):
@@ -198,8 +202,8 @@ class ScheduledRiskWindowController:
         """Apply the daily 07:45--09:00 entry and flattening controls.
 
         This method is public so a supervisor can invoke it independently in
-        tests or during a controlled recovery.  The normal live run starts a
-        one-second wall-clock task that calls it continuously; it does not
+        tests or during a controlled recovery.  The normal live run waits toward
+        the next boundary outside the window and polls inside it; it does not
         depend on a market-state bucket arriving at the exact boundary.
         """
 
@@ -315,9 +319,11 @@ class ScheduledRiskWindowController:
         if schedule is None:
             return
         while True:
+            action_failed = False
             try:
                 failure = await self.process()
             except Exception as error:
+                action_failed = True
                 # A schedule read or cancellation failure must not terminate
                 # the market/exit daemon.  The entry gate remains closed and
                 # the next poll retries the control operation.
@@ -328,6 +334,7 @@ class ScheduledRiskWindowController:
                 )
             else:
                 if failure is not None:
+                    action_failed = True
                     if failure.endswith("_pending") or ":pending" in failure:
                         log.info(
                             "live_scheduled_risk_window_action_pending",
@@ -340,7 +347,39 @@ class ScheduledRiskWindowController:
                             run_id=self._config.run_id,
                             reason=failure,
                         )
-            await asyncio.sleep(schedule.poll_interval_seconds)
+            # Read the clock again after potentially slow exchange operations.
+            # Errors keep the original retry cadence even outside the window.
+            delay = (
+                schedule.poll_interval_seconds
+                if action_failed
+                else self._next_poll_delay(self._clock())
+            )
+            await asyncio.sleep(delay)
+
+    def _next_poll_delay(self, now: datetime) -> float:
+        schedule = self._config.scheduled_risk_window
+        if schedule is None:
+            raise RuntimeError("scheduled polling requires a configured window")
+        local_now = schedule.localize(now)
+        phase = schedule.phase(now)
+        if phase is ScheduledRiskWindowPhase.PRE_WINDOW:
+            boundary = datetime.combine(
+                local_now.date(), schedule.entry_stop_at, tzinfo=schedule.zone
+            )
+        elif (
+            phase is ScheduledRiskWindowPhase.REOPENED
+            and self._scheduled_positions_verified
+            and self._scheduled_window_day == local_now.date()
+        ):
+            # Do not skip the daily state reset, even for a midnight entry stop.
+            boundary = datetime.combine(
+                local_now.date() + timedelta(days=1), time(), tzinfo=schedule.zone
+            )
+        else:
+            # Includes overdue/unverified positions after the reopening time.
+            return schedule.poll_interval_seconds
+        remaining = (boundary.astimezone(UTC) - now.astimezone(UTC)).total_seconds()
+        return min(_IDLE_CLOCK_RECHECK_SECONDS, remaining)
 
     def _reset_scheduled_window_day(self, local_day: date) -> None:
         if self._scheduled_window_day == local_day:
@@ -457,7 +496,11 @@ class ScheduledRiskWindowController:
         ):
             return None
         states, state_failure = await self._scheduled_flatten_states(now)
-        if not states and state_failure is None and self._fetch_exchange_positions is not None:
+        if (
+            not states
+            and state_failure is None
+            and self._fetch_exchange_positions is not None
+        ):
             return None
         if not states:
             if (
@@ -687,7 +730,6 @@ class ScheduledRiskWindowController:
                 if not cached_states
                 else None,
             )
-
 
         active_positions = {
             position.symbol: position
