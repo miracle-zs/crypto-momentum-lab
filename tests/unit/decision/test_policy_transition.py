@@ -518,6 +518,64 @@ def test_two_opening_orders_in_one_exit_batch_are_bounded(
     assert result.exit_command is None
 
 
+@pytest.mark.parametrize("new_order_count,accepted", [(0, True), (1, True), (2, False)])
+def test_sealed_batch_does_not_block_next_batch(
+    new_order_count: int, accepted: bool
+) -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000"))
+    original = _make_position_view("BTCUSDT", Decimal("1"), opened_at=t0)
+    sealed = replace(
+        original.batches[0],
+        opened_at=t0 - timedelta(hours=2),
+        exit_order_submitted_at=t0 - timedelta(minutes=1),
+        entry_order_ids=(),  # Closed admission does not need historical counts.
+    )
+    batches = (sealed,)
+    if new_order_count:
+        batches += (
+            replace(
+                original.batches[0],
+                batch_id="new-batch",
+                entry_order_ids=tuple(f"new-{i}" for i in range(new_order_count)),
+            ),
+        )
+    view = replace(original, batches=batches)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+        market_refs=(mref,),
+        position_view_token=view.projection_version,
+        universe_version="u1",
+    )
+    result = execute_policy_transition(
+        frame,
+        PolicyState(),
+        EffectivePolicy(
+            policy_id="two",
+            strategy_name="breakout",
+            entry_threshold=Decimal("65000"),
+            max_concurrency_per_symbol=2,
+            exit_policy=PositionExitPolicy(max_holding_seconds=3600),
+        ),
+        market_envelope=menv,
+        position_view=view,
+    )
+    assert result.exit_command is None  # Do not re-exit the expired sealed batch.
+    assert (result.entry_candidate is not None) == accepted
+    if new_order_count:
+        holding = [
+            t for t in result.timer_requests if t.timer_type == "max_holding_expiry"
+        ]
+        assert len(holding) == 1
+        assert holding[0].due_at == t0 + timedelta(hours=1)
+    else:
+        assert not any(
+            t.timer_type == "max_holding_expiry" for t in result.timer_requests
+        )
+
+
 def test_second_entry_never_overrides_exit() -> None:
     t0 = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
     mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000"))
@@ -544,6 +602,58 @@ def test_second_entry_never_overrides_exit() -> None:
     )
     assert result.exit_command is not None
     assert result.entry_candidate is None
+
+
+def test_new_batch_exit_targets_only_unsealed_quantity() -> None:
+    t0 = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("66000"))
+    original = _make_position_view("BTCUSDT", Decimal("3"), opened_at=t0)
+    old = replace(
+        original.batches[0],
+        batch_id="sealed",
+        quantity=Decimal("2"),
+        original_quantity=Decimal("2"),
+        opened_at=t0 - timedelta(hours=3),
+        exit_order_submitted_at=t0 - timedelta(minutes=5),
+    )
+    new = replace(
+        original.batches[0],
+        batch_id="new",
+        quantity=Decimal("1"),
+        original_quantity=Decimal("1"),
+        opened_at=t0 - timedelta(hours=2),
+        entry_order_ids=("new-order",),
+    )
+    view = replace(original, batches=(old, new))
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+        market_refs=(mref,),
+        position_view_token=view.projection_version,
+        universe_version="u1",
+    )
+    result = execute_policy_transition(
+        frame,
+        PolicyState(),
+        EffectivePolicy(
+            policy_id="two",
+            strategy_name="breakout",
+            entry_threshold=Decimal("65000"),
+            max_concurrency_per_symbol=2,
+            exit_policy=PositionExitPolicy(max_holding_seconds=3600),
+        ),
+        market_envelope=menv,
+        position_view=view,
+    )
+    assert result.entry_candidate is None
+    command = result.exit_command
+    assert command is not None
+    assert command.requested_quantity == Decimal("1")
+    assert [
+        (a.batch_id, a.allocated_quantity) for a in command.allocation_plan.allocations
+    ] == [("new", Decimal("1"))]
+    assert command.allocation_plan.policy.value == "target_batches_only"
 
 
 def test_grace_period_timer_emission_on_entry() -> None:

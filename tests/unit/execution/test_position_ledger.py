@@ -541,6 +541,129 @@ def test_payload_client_order_id_is_optional_text_without_changing_quantity(clie
     assert projection.active_batches[0].client_order_id == expected
 
 
+@pytest.mark.parametrize("entry_side,exit_side", [("BUY", "SELL"), ("SELL", "BUY")])
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("match_client_id", [False, True])
+def test_new_batch_exit_filling_first_does_not_reduce_old_batch(
+    entry_side: str, exit_side: str, restart: bool, match_client_id: bool
+) -> None:
+    key = _key()
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="targeted-exit"
+    )
+    ledger = PositionLedger(key)
+    t0 = datetime(2026, 10, 8, tzinfo=UTC)
+    first = _fill("open-old", entry_side, "10", "100", t0, order_id="open-old")
+    old_id = (
+        ledger.project(AccountFacts(position_key=key, fills=(first,)))
+        .active_batches[0]
+        .batch_id
+    )
+    old_exit = ExitOrderSubmissionFact(
+        order_id="exit-old",
+        submitted_at=t0 + timedelta(seconds=1),
+        symbol=key.symbol,
+        position_side=key.position_side,
+        target_batch_id=old_id,
+    )
+    second = _fill(
+        "open-new",
+        entry_side,
+        "5",
+        "110",
+        t0 + timedelta(seconds=2),
+        order_id="open-new",
+    )
+    initial = ledger.project(
+        AccountFacts(
+            position_key=key, fills=(first, second), exit_boundaries=(old_exit,)
+        )
+    )
+    new_id = initial.active_batches[1].batch_id
+    new_exit = replace(
+        old_exit,
+        order_id="exit-new",
+        submitted_at=t0 + timedelta(seconds=3),
+        target_batch_id=new_id,
+        client_order_id="client-exit-new",
+    )
+    new_fill = _fill(
+        "close-new",
+        exit_side,
+        "5",
+        "120",
+        t0 + timedelta(seconds=4),
+        order_id="exit-new",
+    )
+    if match_client_id:
+        new_fill = replace(
+            new_fill,
+            order_id="exchange-exit-new",
+            raw_payload={"is_system": True, "client_order_id": "client-exit-new"},
+        )
+    prefix = AccountFacts(
+        position_key=key,
+        stream_scope=scope,
+        fills=(first, second),
+        exit_boundaries=(old_exit, new_exit),
+    )
+    checkpoint = None
+    if restart:
+        checkpoint = ledger.create_recovery_checkpoint(
+            prefix, source_revision=4, event_cut=new_exit.submitted_at
+        )
+        checkpoint = PositionRecoveryCodec.decode_checkpoint(
+            PositionRecoveryCodec.encode_checkpoint(checkpoint)
+        )
+    projection = ledger.project(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            fills=(new_fill,) if restart else (first, second, new_fill),
+            exit_boundaries=(old_exit, new_exit),
+            recovery_checkpoint=checkpoint,
+            prefix_facts_complete=not restart,
+        )
+    )
+    assert [(b.batch_id, b.quantity) for b in projection.active_batches] == [
+        (old_id, Decimal("10"))
+    ]
+    old_fill = _fill(
+        "close-old",
+        exit_side,
+        "3",
+        "120",
+        t0 + timedelta(seconds=5),
+        order_id="exit-old",
+    )
+    later = ledger.project(
+        AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            fills=(new_fill, old_fill)
+            if restart
+            else (first, second, new_fill, old_fill),
+            exit_boundaries=(old_exit, new_exit),
+            recovery_checkpoint=checkpoint,
+            prefix_facts_complete=not restart,
+        )
+    )
+    assert [(b.batch_id, b.quantity) for b in later.active_batches] == [
+        (old_id, Decimal("7"))
+    ]
+    oversize = ledger.project(
+        replace(
+            prefix,
+            fills=(first, second, replace(new_fill, quantity=Decimal("6"))),
+        )
+    )
+    assert not oversize.is_comparable
+    assert [(b.batch_id, b.quantity) for b in oversize.active_batches] == [
+        (old_id, Decimal("10"))
+    ]
+    assert any("exceeds its target" in message for message in oversize.diagnostics)
+
+
 def test_repeated_targeted_exit_boundary_never_starts_another_batch() -> None:
     key = _key()
     opened_at = datetime(2026, 10, 4, 0, 0, tzinfo=UTC)

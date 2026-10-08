@@ -373,15 +373,21 @@ class PostgresAccountJournalStore:
                 and row.occurred_at <= checkpoint.event_cut
                 and row.source_revision > checkpoint.source_revision
             }
+            active_batch_ids = {
+                batch.batch_id
+                for batch in checkpoint.projection.active_batches
+                if batch.quantity > 0
+            }
             rows = [
                 row
                 for row in rows
                 if row.occurred_at > checkpoint.event_cut
                 or row.source_revision > checkpoint.source_revision
                 or (
-                    row.event_kind == "snapshot"
-                    and row.event_id in late_snapshot_ids
+                    row.event_kind == "boundary"
+                    and row.payload.get("target_batch_id") in active_batch_ids
                 )
+                or (row.event_kind == "snapshot" and row.event_id in late_snapshot_ids)
             ]
         for row in rows:
             if _json_digest(row.payload) != row.payload_hash:

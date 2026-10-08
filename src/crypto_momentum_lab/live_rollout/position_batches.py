@@ -115,6 +115,8 @@ def _build_position_batches(
         )
         ledger = PositionLedger(position_key)
         projection = ledger.project(facts)
+        if projection.unallocated_quantity > 0:
+            return ()
 
         active_limit_orders = [
             order

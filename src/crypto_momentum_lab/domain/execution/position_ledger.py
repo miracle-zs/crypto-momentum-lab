@@ -4,7 +4,7 @@ Derives position batches and lifecycle episodes strictly from immutable facts
 (AccountFillEvent and AccountPositionSnapshot), obeying:
 1. Exact quantity conservation;
 2. Zero-crossing episode bounding (pre-zero batches never taint post-zero state);
-3. Explicit FIFO attribution for lot reductions (both system and external);
+3. Targeted exit attribution; FIFO for reductions without an explicit target;
 4. Zero heuristics: no silent quantity clipping or artificial lookback boundaries.
 """
 
@@ -401,6 +401,16 @@ class PositionLedger:
                 )
                 continue
             scoped_boundaries.append(boundary)
+        exit_bindings: dict[tuple[str, str], list[ExitOrderSubmissionFact]] = {}
+        for boundary in scoped_boundaries:
+            if boundary.target_batch_id is not None:
+                exit_bindings.setdefault(("order", boundary.order_id), []).append(
+                    boundary
+                )
+                if boundary.client_order_id:
+                    exit_bindings.setdefault(
+                        ("client", boundary.client_order_id), []
+                    ).append(boundary)
         sorted_boundaries = sorted(
             scoped_boundaries,
             key=lambda fact: (fact.submitted_at, fact.order_id),
@@ -412,6 +422,44 @@ class PositionLedger:
                 if boundary.submitted_at > checkpoint.event_cut
             ]
         boundary_idx = 0
+        unallocated_exit_quantity = Decimal("0")
+
+        def reduce_batches(
+            fill: AccountFillEvent,
+        ) -> tuple[list[PositionLedgerBatch], list[BatchReductionAttribution]]:
+            nonlocal unallocated_exit_quantity
+            client_id = fill.raw_payload.get("client_order_id")
+            bindings = list(exit_bindings.get(("order", fill.order_id), ()))
+            if isinstance(client_id, str) and client_id:
+                bindings.extend(exit_bindings.get(("client", client_id), ()))
+            targets = {
+                boundary.target_batch_id
+                for boundary in bindings
+                if boundary.submitted_at <= fill.trade_at
+            }
+            remaining = fill.quantity
+            batches = []
+            attributions = []
+            for lot in current_batches:
+                deduct = (
+                    min(lot.quantity, remaining)
+                    if lot.quantity > 0 and (not targets or lot.batch_id in targets)
+                    else Decimal("0")
+                )
+                remaining -= deduct
+                batches.append(replace(lot, quantity=lot.quantity - deduct))
+                if deduct > 0:
+                    attributions.append(
+                        BatchReductionAttribution(
+                            batch_id=lot.batch_id, quantity=deduct
+                        )
+                    )
+            if targets and remaining > 0:
+                unallocated_exit_quantity += remaining
+                identity_issues.append(
+                    f"Exit fill {fill.trade_id} exceeds its target batch quantity"
+                )
+            return batches, attributions
 
         def apply_exit_boundary(boundary: ExitOrderSubmissionFact) -> None:
             if not current_batches:
@@ -607,35 +655,7 @@ class PositionLedger:
                         peak_qty = current_net
 
                 elif fill_side == "SELL":
-                    # Exit / Reduction
-                    to_reduce = fill.quantity
-                    attributions: list[BatchReductionAttribution] = []
-
-                    # FIFO reduction across active batches
-                    new_batches: list[PositionLedgerBatch] = []
-                    for lot in current_batches:
-                        if lot.quantity > 0 and to_reduce > 0:
-                            deduct = min(lot.quantity, to_reduce)
-                            remaining_b_qty = lot.quantity - deduct
-                            to_reduce -= deduct
-                            attributions.append(
-                                BatchReductionAttribution(
-                                    batch_id=lot.batch_id,
-                                    quantity=deduct,
-                                )
-                            )
-                            exit_sub_at = lot.exit_order_submitted_at
-                            new_batches.append(
-                                replace(
-                                    lot,
-                                    quantity=remaining_b_qty,
-                                    exit_order_submitted_at=exit_sub_at,
-                                )
-                            )
-                        else:
-                            new_batches.append(lot)
-
-                    current_batches = new_batches
+                    current_batches, attributions = reduce_batches(fill)
                     cum_sold += fill.quantity
 
                     reduction_fact = ExternalReductionFact(
@@ -784,32 +804,7 @@ class PositionLedger:
                         peak_qty = current_net
 
                 elif fill_side == "BUY":
-                    to_reduce = fill.quantity
-                    attributions = []
-                    new_batches = []
-                    for lot in current_batches:
-                        if lot.quantity > 0 and to_reduce > 0:
-                            deduct = min(lot.quantity, to_reduce)
-                            remaining_b_qty = lot.quantity - deduct
-                            to_reduce -= deduct
-                            attributions.append(
-                                BatchReductionAttribution(
-                                    batch_id=lot.batch_id,
-                                    quantity=deduct,
-                                )
-                            )
-                            exit_sub_at = lot.exit_order_submitted_at
-                            new_batches.append(
-                                replace(
-                                    lot,
-                                    quantity=remaining_b_qty,
-                                    exit_order_submitted_at=exit_sub_at,
-                                )
-                            )
-                        else:
-                            new_batches.append(lot)
-
-                    current_batches = new_batches
+                    current_batches, attributions = reduce_batches(fill)
                     cum_bought += fill.quantity
 
                     reduction_fact = ExternalReductionFact(
@@ -911,7 +906,7 @@ class PositionLedger:
             seed_projection.unallocated_quantity
             if seed_projection is not None
             else Decimal("0")
-        )
+        ) + unallocated_exit_quantity
         reconciliation_gap = (
             seed_projection.reconciliation_gap
             if seed_projection is not None

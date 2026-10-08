@@ -179,6 +179,45 @@ async def test_late_exit_boundary_still_requires_recovery():
     assert not PositionLedger(_key()).project(cut.facts).is_comparable
 
 
+async def test_checkpoint_prefix_keeps_exit_binding_for_held_batch():
+    checkpoint = _checkpoint()
+    batch_id = checkpoint.projection.active_batches[0].batch_id
+    at = checkpoint.event_cut - timedelta(seconds=1)
+    boundary = ExitOrderSubmissionFact(
+        order_id="exit",
+        submitted_at=at,
+        symbol=_key().symbol,
+        position_side=_key().position_side,
+        target_batch_id=batch_id,
+    )
+    row = _row(
+        checkpoint,
+        "boundary",
+        f"exit:{at.isoformat()}",
+        at,
+        PositionRecoveryCodec.encode_boundary(boundary),
+    )
+    row.source_revision = checkpoint.source_revision - 1
+    row.recorded_at = checkpoint.event_cut - timedelta(seconds=1)
+    cut = await _restore(checkpoint, [row])
+    assert cut.facts.exit_boundaries == (boundary,)
+    assert not cut.facts.fact_conflicts
+    assert not cut.integrity_issues
+
+    unrelated = replace(boundary, target_batch_id="already-closed")
+    other_row = _row(
+        checkpoint,
+        "boundary",
+        "unrelated",
+        at,
+        PositionRecoveryCodec.encode_boundary(unrelated),
+    )
+    other_row.source_revision = row.source_revision
+    other_row.recorded_at = row.recorded_at
+    cut = await _restore(checkpoint, [row, other_row])
+    assert cut.facts.exit_boundaries == (boundary,)
+
+
 async def test_late_fill_still_requires_checkpoint_rebuild():
     checkpoint = _checkpoint()
     at = checkpoint.event_cut - timedelta(seconds=1)

@@ -365,9 +365,22 @@ def execute_policy_transition(
     state_15s = market_envelope.state
     entry_state = prior_state
     holding_timers: list[TimerRequest] = []
+    pos_side = StrategySide.LONG
+    if position_view.active_episode is not None:
+        pos_side = position_view.active_episode.side
+    elif position_view.key.position_side == FuturesPositionSide.SHORT:
+        pos_side = StrategySide.SHORT
 
-    # 1. Evaluate Position Holding & Exit (even when no entry signal exists)
-    if position_view.total_quantity > Decimal("0"):
+    # A submitted exit seals admission to that batch. Its remaining quantity is
+    # still real exposure, but its exit lifecycle must not consume the next
+    # batch's entry slots, holding timer or allocation.
+    admission_batches = tuple(
+        b
+        for b in position_view.batches
+        if b.quantity > 0 and b.exit_order_submitted_at is None
+    )
+    # 1. Evaluate unsealed holding & exit (even without an entry signal).
+    if position_view.total_quantity > Decimal("0") and admission_batches:
         closed_candle: ClosedCandle15m | None = (
             closed_candles[-1] if closed_candles else None
         )
@@ -388,17 +401,9 @@ def execute_policy_transition(
             )
 
         earliest_open = min(
-            (b.opened_at for b in position_view.batches),
+            (b.opened_at for b in admission_batches),
             default=clock_time,
         )
-
-        pos_side = StrategySide.LONG
-        if position_view.active_episode is not None:
-            pos_side = position_view.active_episode.side
-        elif position_view.key.position_side == FuturesPositionSide.SHORT:
-            pos_side = StrategySide.SHORT
-        elif position_view.key.position_side == FuturesPositionSide.LONG:
-            pos_side = StrategySide.LONG
 
         exit_policy: PositionExitPolicy = policy_artifact.exit_policy
         exit_reason = position_exit_reason(
@@ -418,7 +423,7 @@ def execute_policy_transition(
                     allocated_quantity=b.quantity,
                     entry_price=b.entry_price,
                 )
-                for b in position_view.batches
+                for b in admission_batches
                 if b.quantity > Decimal("0")
             )
             total_qty = sum(
@@ -429,7 +434,7 @@ def execute_policy_transition(
                     position_key=position_view.key,
                     allocations=allocations,
                     total_allocated_quantity=total_qty,
-                    policy=ExitPolicyMode.FULL_POSITION_CLOSE,
+                    policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
                     reason=exit_reason,
                     projection_version=position_view.projection_version,
                 )
@@ -486,18 +491,14 @@ def execute_policy_transition(
                     next_state = prior_state.with_holding_deadline(
                         symbol, holding_deadline
                     )
-            active_batches = tuple(b for b in position_view.batches if b.quantity > 0)
+            active_batches = admission_batches
             limit = policy_artifact.max_concurrency_per_symbol
             count_proven = all(b.entry_order_ids for b in active_batches)
             opening_order_count = sum(len(b.entry_order_ids) for b in active_batches)
-            exit_pending = any(
-                b.exit_order_submitted_at is not None for b in active_batches
-            )
             # A one-order policy never permits adds; multi-order admission needs
             # identities, not the number of merged exit batches.
-            if exit_pending or (
-                limit is not None
-                and (limit == 1 or not count_proven or opening_order_count >= limit)
+            if limit is not None and (
+                limit == 1 or not count_proven or opening_order_count >= limit
             ):
                 return PolicyTransition(
                     decision_id=decision_id,
@@ -507,13 +508,9 @@ def execute_policy_transition(
                     next_state=next_state,
                     timer_requests=tuple(holding_timers),
                     rejection_reason=(
-                        "position_exit_in_progress"
-                        if exit_pending
-                        else (
-                            "entry_concurrency_unproven"
-                            if limit != 1 and not count_proven
-                            else "holding_position_no_exit"
-                        )
+                        "entry_concurrency_unproven"
+                        if limit != 1 and not count_proven
+                        else "holding_position_no_exit"
                     ),
                     transition_time=clock_time,
                 )

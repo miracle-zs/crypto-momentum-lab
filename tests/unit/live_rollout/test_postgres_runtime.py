@@ -551,7 +551,7 @@ def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
     assert unmanaged == frozenset({"BTCUSDT"})
 
 
-def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() -> None:
+def test_misbound_exit_is_not_reassigned_to_another_batch() -> None:
     old_at = NOW
     current_at = NOW + timedelta(hours=1)
     reopened_at = NOW + timedelta(hours=2)
@@ -627,22 +627,17 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
         [_position(position_amt=Decimal("386"))],
         orders,
         exit_batch_ids={
-            "old-close": "BTCUSDT:LONG:old-entry",
-            "misbound-close": "BTCUSDT:LONG:old-entry",
-            "current-close": "BTCUSDT:LONG:current-entry",
-            "reopened-close": "BTCUSDT:LONG:reopened-entry",
+            "old-close": "ep_BTCUSDT_20260804000000_1_b1",
+            "misbound-close": "ep_BTCUSDT_20260804000000_1_b1",
+            "current-close": "ep_BTCUSDT_20260804010000_2_b1",
+            "reopened-close": "ep_BTCUSDT_20260804020000_3_b1",
         },
         environment="live",
         account_label="primary",
     )
 
-    assert unmanaged == frozenset()
-    assert len(managed) == 1
-    assert len(managed[0].batches) == 1
-    batch = managed[0].batches[0]
-    assert batch.batch_id.startswith("ep_BTCUSDT_")
-    assert batch.quantity == Decimal("386")
-    assert batch.opened_at == reopened_at
+    assert unmanaged == frozenset({"BTCUSDT"})
+    assert managed == ()
 
 
 def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
@@ -698,7 +693,7 @@ def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
     managed, _pending, unmanaged = _classify_with_trade_fixtures(
         [_position(position_amt=Decimal("266"))],
         orders,
-        exit_batch_ids={"old-close-4542": "BTCUSDT:LONG:old-entry-a"},
+        exit_batch_ids={"old-close-4542": f"ep_BTCUSDT_{old_at:%Y%m%d%H%M%S}_1_b1"},
         environment="live",
         account_label="primary",
     )
@@ -763,7 +758,7 @@ def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
         [_position(position_amt=Decimal("4595"))],
         orders,
         exit_batch_ids={
-            "reused-exit": "BTCUSDT:LONG:old-entry",
+            "reused-exit": "ep_BTCUSDT_20260804000000_1_b1",
         },
         environment="live",
         account_label="primary",

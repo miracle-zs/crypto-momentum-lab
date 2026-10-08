@@ -290,6 +290,7 @@ class LiveCandidateSubmission:
                         for position in managed_positions
                         if position.symbol == candidate.symbol
                         for batch in position.batches
+                        if batch.exit_order_submitted_at is None
                     ),
                     symbol_concurrency=symbol_concurrency,
                 )

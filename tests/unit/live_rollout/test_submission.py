@@ -640,7 +640,11 @@ async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> Non
 
     # 4. Batch 1 submits exit order (exit_order_submitted_at set)
     # -> batch ended, new batch 1st order ALLOWED!
-    b1_exited = replace(b1_full, exit_order_submitted_at=NOW + timedelta(minutes=5))
+    b1_exited = replace(
+        b1_full,
+        exit_order_submitted_at=NOW + timedelta(minutes=5),
+        entry_order_count_proven=False,
+    )
     pos_btc_exited = replace(pos_btc_2, batches=(b1_exited,))
     context3 = replace(context0, managed_positions=(pos_btc_exited,))
     res4 = await submission.execute(
