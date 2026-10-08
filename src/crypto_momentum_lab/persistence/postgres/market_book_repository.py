@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.market.state_codec import (
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     compact_trace_for_hot_storage,
+    expand_trace_payload,
     load_summary_market_refs,
     retains_complete_replay_evidence,
     summary_market_refs,
@@ -490,7 +491,7 @@ class PostgresMarketBookRepository:
             row = session.get(DecisionTraceRow, decision_id)
             if row is None:
                 return None
-            payload = dict(row.trace_payload)
+            payload = expand_trace_payload(row.trace_payload)
             if payload.get("evidence_level") == "summary":
                 refs = load_summary_market_refs(payload, decision_id=decision_id)
             else:

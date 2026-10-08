@@ -1600,6 +1600,7 @@ class DecisionTraceRow(Base):
     )
 
     __table_args__ = (
+        Index("ix_decision_traces_created", "created_at", "decision_id"),
         Index(
             "ix_decision_traces_strategy_account_time",
             "strategy_name",

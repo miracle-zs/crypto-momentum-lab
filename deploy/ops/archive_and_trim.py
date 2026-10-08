@@ -33,6 +33,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from archive_table import retention_row_predicate  # noqa: E402
 from stream_digest import StreamingContentDigest  # noqa: E402
 
 from crypto_momentum_lab.domain.operational.retention_authority import (  # noqa: E402
@@ -60,6 +61,7 @@ _MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
 # universe_entries, so those child tables must be archived first when they
 # need their own copy (universe_entries already is).
 TABLES: tuple[tuple[str, str], ...] = (
+    ("decision_traces", "created_at"),
     ("strategy_runtime_events", "occurred_at"),
     ("universe_entries", "price_time"),
     ("account_balance_snapshots", "observed_at"),
@@ -261,6 +263,8 @@ def _table_is_partitioned(table: str, **kw: str) -> bool:
         **kw,
     )
     return value == "t"
+
+
 class PsqlRetentionRepository:
     """RetentionRepository adapter communicating with Postgres via docker exec psql."""
 
@@ -460,9 +464,7 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            raise RuntimeError(
-                "Table 'prune_plans' does not exist; failing closed"
-            )
+            raise RuntimeError("Table 'prune_plans' does not exist; failing closed")
         manifest_str = f"'{plan.manifest_hash}'" if plan.manifest_hash else "NULL"
         sql = (
             f"UPDATE prune_plans SET status = '{plan.status.value}', "
@@ -478,9 +480,7 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            raise RuntimeError(
-                "Table 'prune_plans' does not exist; failing closed"
-            )
+            raise RuntimeError("Table 'prune_plans' does not exist; failing closed")
         status_val = (
             PrunePlanStatus.COMPLETED.value
             if receipt.status == PruneReceiptStatus.SUCCESS
@@ -548,7 +548,8 @@ def build_freeze_targets_sql(
         "CREATE TEMP TABLE prune_targets AS\n"
         f"SELECT ctid AS id FROM {table}\n"
         f"WHERE \"{column}\" >= '{from_dt}+00'\n"
-        f"AND \"{column}\" < '{to_dt}+00';"
+        f"AND \"{column}\" < '{to_dt}+00'"
+        f"{retention_row_predicate(table)};"
     )
 
 
@@ -568,7 +569,7 @@ def build_batch_delete_sql(table: str, batch_limit: int) -> str:
         "), del AS (\n"
         f"  DELETE FROM {table} WHERE ctid IN (\n"
         "    SELECT id FROM picked\n"
-        "  ) RETURNING 1\n"
+        f"  ){retention_row_predicate(table)} RETURNING 1\n"
         "), cleaned AS (\n"
         "  DELETE FROM prune_targets WHERE id IN (\n"
         "    SELECT id FROM picked\n"
@@ -618,12 +619,8 @@ def run_locked_prune(
             rows_deleted = recorded if dropped > 0 else 0
             return (recorded, rows_deleted)
 
-        session.run(
-            build_freeze_targets_sql(table, column, from_dt, to_dt)
-        )
-        frozen = int(
-            session.run("SELECT count(*) FROM prune_targets;").strip() or "0"
-        )
+        session.run(build_freeze_targets_sql(table, column, from_dt, to_dt))
+        frozen = int(session.run("SELECT count(*) FROM prune_targets;").strip() or "0")
         if frozen != recorded:
             raise RuntimeError(
                 f"Frozen prune targets ({frozen}) do not match archived "
@@ -647,10 +644,7 @@ def run_locked_prune(
                 f"({expected_fingerprint})! "
                 "Aborting prune to prevent deleting unarchived or modified data."
             )
-        print(
-            f"  verified content fingerprint matches archive: "
-            f"{content_fingerprint}"
-        )
+        print(f"  verified content fingerprint matches archive: {content_fingerprint}")
 
         deleted = 0
         while deleted < recorded:
@@ -659,9 +653,7 @@ def run_locked_prune(
                 break
             authority.verify_fence(plan)
             removed = int(
-                session.run(build_batch_delete_sql(table, batch_limit))
-                .strip()
-                or "0"
+                session.run(build_batch_delete_sql(table, batch_limit)).strip() or "0"
             )
             if removed == 0:
                 break
@@ -676,15 +668,10 @@ def run_locked_prune(
                 "unarchived data loss."
             )
         leftover = int(
-            session.run(
-                "SELECT count(*) FROM prune_targets;"
-            ).strip()
-            or "0"
+            session.run("SELECT count(*) FROM prune_targets;").strip() or "0"
         )
         if leftover != 0:
-            raise RuntimeError(
-                f"{leftover} frozen targets remain undeleted; aborting."
-            )
+            raise RuntimeError(f"{leftover} frozen targets remain undeleted; aborting.")
         print(f"  deleted {deleted} rows (fingerprint {content_fingerprint})")
         return (recorded, deleted)
     finally:
@@ -767,8 +754,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.table is not None and table != args.table:
             continue
 
+        table_days = (
+            max(args.retention_days, 7)
+            if table == "decision_traces"
+            else args.retention_days
+        )
+        cutoff = (datetime.now(tz=UTC) - timedelta(days=table_days)).date()
+        cutoff_dt = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC)
+        if table == "decision_traces":
+            print(f"{table}: hot retention {table_days}d   requested cutoff: {cutoff}")
+
         oldest_raw = _scalar(
-            f"SELECT coalesce(min(\"{column}\")::date::text, '') FROM {table}", **db
+            f"SELECT coalesce(min(\"{column}\")::date::text, '') FROM {table} "
+            f"WHERE true {retention_row_predicate(table)}",
+            **db,
         )
         if not oldest_raw:
             print(f"{table}: empty, skipping")
@@ -784,9 +783,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             if earliest_pos_raw:
                 try:
-                    earliest_pos_dt = (
-                        datetime.fromisoformat(earliest_pos_raw).astimezone(UTC)
-                    )
+                    earliest_pos_dt = datetime.fromisoformat(
+                        earliest_pos_raw
+                    ).astimezone(UTC)
                     authority.register_dependency(
                         consumer_id="live_active_positions",
                         generation=1,
@@ -834,7 +833,8 @@ def main(argv: list[str] | None = None) -> int:
         pending = int(
             _scalar(
                 f'SELECT count(*) FROM {table} WHERE "{column}" < '
-                f"'{effective_cutoff}+00'",
+                f"'{effective_cutoff}+00'{retention_row_predicate(table)}",
+                # Same row set as the exporter and frozen prune targets.
                 **db,
             )
         )
@@ -872,6 +872,25 @@ def main(argv: list[str] | None = None) -> int:
             / table
             / f"{table}_{oldest:%Y%m%d}_{effective_cutoff:%Y%m%d}.manifest.json"
         )
+        if table == "decision_traces":
+            paths = [
+                line.removeprefix("manifest: ")
+                for line in archived.stdout.splitlines()
+                if line.startswith("manifest: ")
+            ]
+            if len(paths) != 1:
+                print(
+                    "  archive did not return one manifest -- refusing to delete",
+                    file=sys.stderr,
+                )
+                return 1
+            manifest = Path(paths[0]).resolve()
+            if manifest.parent != (_ARCHIVE_ROOT / table).resolve():
+                print(
+                    "  archive manifest escaped its directory -- refusing to delete",
+                    file=sys.stderr,
+                )
+                return 1
         if not manifest.exists():
             print(f"  no manifest at {manifest} -- refusing to delete", file=sys.stderr)
             return 1
@@ -945,9 +964,8 @@ def main(argv: list[str] | None = None) -> int:
             to_dt: str = to_str,
             fp: str | None = manifest_fp,
         ) -> PruneOutcome:
-            is_part = (
-                tbl == "strategy_runtime_events"
-                and _table_is_partitioned(tbl, **db)
+            is_part = tbl == "strategy_runtime_events" and _table_is_partitioned(
+                tbl, **db
             )
             with PsqlSession(**db) as session:
                 rows_arch, rows_del = run_locked_prune(

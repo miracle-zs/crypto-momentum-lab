@@ -25,6 +25,7 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     compact_trace_for_hot_storage,
+    expand_trace_payload,
     load_summary_market_refs,
     retains_complete_replay_evidence,
     summary_market_refs,
@@ -297,7 +298,12 @@ class PostgresDecisionTraceRepository:
         for persisted_trace in persisted_traces:
             incoming = incoming_by_id[persisted_trace.decision_id]
             if any(
-                getattr(persisted_trace, name) != incoming[name]
+                (
+                    expand_trace_payload(getattr(persisted_trace, name))
+                    != expand_trace_payload(incoming[name])
+                    if name == "trace_payload"
+                    else getattr(persisted_trace, name) != incoming[name]
+                )
                 for name in trace_values
             ):
                 raise ValueError(
@@ -347,7 +353,7 @@ class PostgresDecisionTraceRepository:
             if row is None:
                 return None
 
-            payload = dict(row.trace_payload)
+            payload = expand_trace_payload(row.trace_payload)
             if payload.get("evidence_level") == "summary":
                 refs = load_summary_market_refs(payload, decision_id=row.decision_id)
             else:

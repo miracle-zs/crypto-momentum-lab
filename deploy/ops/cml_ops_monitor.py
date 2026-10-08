@@ -460,9 +460,7 @@ def coalesce_shared_market_state_alerts(
     if not replacements:
         return tuple(alerts)
     return tuple(
-        replacements[index]
-        if index in replacements
-        else alert
+        replacements[index] if index in replacements else alert
         for index, alert in enumerate(alerts)
         if index not in skipped_indices or index in replacements
     )
@@ -1820,9 +1818,7 @@ def read_disk_usage(
     timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
 ) -> DiskUsage:
     """Read the filesystem containing ``path`` using locale-stable byte units."""
-    output = runner.run(
-        ["df", "-P", "-B1", path], timeout_seconds=timeout_seconds
-    )
+    output = runner.run(["df", "-P", "-B1", path], timeout_seconds=timeout_seconds)
     rows = [line.split() for line in output.splitlines() if line.strip()]
     if len(rows) < 2 or len(rows[-1]) < 6:
         raise ValueError("df returned an incomplete filesystem row")
@@ -1939,6 +1935,7 @@ class MonitorConfig:
     storage_growth_critical_bytes_per_day: int = (
         _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY
     )
+    storage_growth_capacity_horizon_days: float = 7.0
     relation_growth_warning_bytes_per_day: int = (
         _DEFAULT_RELATION_GROWTH_WARNING_BYTES_PER_DAY
     )
@@ -2031,7 +2028,13 @@ class OpsMonitor:
             raise ValueError(
                 "position_recovery_retention_timer_max_age_seconds must be positive"
             )
-        if config.storage_path and not 0 < config.disk_warning_fraction < config.disk_critical_fraction <= 1:
+        if (
+            config.storage_path
+            and not 0
+            < config.disk_warning_fraction
+            < config.disk_critical_fraction
+            <= 1
+        ):
             raise ValueError("disk usage thresholds are invalid")
         if config.storage_sample_interval_seconds <= 0:
             raise ValueError("storage sample interval must be positive")
@@ -2039,9 +2042,19 @@ class OpsMonitor:
             raise ValueError("storage sample window must be positive")
         if config.storage_growth_minimum_window_seconds <= 0:
             raise ValueError("storage growth minimum window must be positive")
-        if not 0 < config.storage_growth_warning_bytes_per_day < config.storage_growth_critical_bytes_per_day:
+        if config.storage_growth_capacity_horizon_days <= 0:
+            raise ValueError("storage growth capacity horizon must be positive")
+        if (
+            not 0
+            < config.storage_growth_warning_bytes_per_day
+            < config.storage_growth_critical_bytes_per_day
+        ):
             raise ValueError("database storage growth thresholds are invalid")
-        if not 0 < config.relation_growth_warning_bytes_per_day < config.relation_growth_critical_bytes_per_day:
+        if (
+            not 0
+            < config.relation_growth_warning_bytes_per_day
+            < config.relation_growth_critical_bytes_per_day
+        ):
             raise ValueError("relation storage growth thresholds are invalid")
         self._config = config
         self._runner = runner or SubprocessRunner()
@@ -2135,6 +2148,11 @@ class OpsMonitor:
                 runner=self._runner,
                 timeout_seconds=self._config.command_timeout_seconds,
             )
+            self._state["storage_disk_capacity"] = {
+                "at": self._clock(),
+                "available_bytes": usage.available_bytes,
+                "used_fraction": usage.used_bytes / usage.total_bytes,
+            }
         except Exception as error:
             return (
                 Alert(
@@ -2161,7 +2179,10 @@ class OpsMonitor:
         if isinstance(cached, dict):
             sampled_at = cached.get("at")
             age = now - sampled_at if isinstance(sampled_at, int | float) else None
-            if age is not None and 0 <= age < self._config.storage_sample_interval_seconds:
+            if (
+                age is not None
+                and 0 <= age < self._config.storage_sample_interval_seconds
+            ):
                 footprint = cached.get("footprint")
                 if isinstance(footprint, dict):
                     return footprint
@@ -2242,7 +2263,9 @@ SELECT json_build_object(
     ) -> tuple[Alert, ...]:
         database_bytes = footprint.get("database_bytes")
         raw_relations = footprint.get("relations")
-        if not isinstance(database_bytes, int) or not isinstance(raw_relations, Mapping):
+        if not isinstance(database_bytes, int) or not isinstance(
+            raw_relations, Mapping
+        ):
             return ()
         relations = {
             str(name): int(size)
@@ -2271,8 +2294,7 @@ SELECT json_build_object(
                 if sampled_at >= cutoff:
                     retained.append(sample)
                 elif (
-                    cutoff - self._config.storage_sample_interval_seconds
-                    <= sampled_at
+                    cutoff - self._config.storage_sample_interval_seconds <= sampled_at
                     and (
                         boundary_sample is None
                         or sampled_at > float(boundary_sample["at"])
@@ -2286,11 +2308,7 @@ SELECT json_build_object(
             retained.append(boundary_sample)
 
         retained.sort(key=lambda sample: float(sample["at"]))
-        latest_at = (
-            retained[-1].get("at")
-            if retained
-            else None
-        )
+        latest_at = retained[-1].get("at") if retained else None
         if (
             not isinstance(latest_at, int | float)
             or now - latest_at >= self._config.storage_sample_interval_seconds
@@ -2306,9 +2324,7 @@ SELECT json_build_object(
 
         minimum_window = self._config.storage_growth_minimum_window_seconds
         eligible = [
-            sample
-            for sample in retained
-            if now - float(sample["at"]) >= minimum_window
+            sample for sample in retained if now - float(sample["at"]) >= minimum_window
         ]
         baseline = eligible[-1] if eligible else None
 
@@ -2342,9 +2358,8 @@ SELECT json_build_object(
         recent = (
             window_observation(baseline)
             if baseline is not None
-            and now - float(baseline["at"]) <= (
-                minimum_window + 2 * self._config.storage_sample_interval_seconds
-            )
+            and now - float(baseline["at"])
+            <= (minimum_window + 2 * self._config.storage_sample_interval_seconds)
             else None
         )
         self._state["database_storage_growth_observation"] = {
@@ -2387,12 +2402,51 @@ SELECT json_build_object(
                 for growth in relation_growth_per_day.values()
             )
         )
+        capacity = self._state.get("storage_disk_capacity")
+        capacity_details: dict[str, object] = {}
+        if (
+            isinstance(capacity, dict)
+            and isinstance(capacity.get("at"), (int, float))
+            and 0 <= now - capacity["at"] <= 2 * self._config.interval_seconds
+            and isinstance(capacity.get("available_bytes"), int)
+        ):
+            available = capacity["available_bytes"]
+            exhaustion_days = (
+                available / database_growth_per_day
+                if database_growth_per_day > 0
+                else None
+            )
+            historical_rate = max(0, int(historical["database_bytes_per_day"]))
+            sustained_critical = historical["complete_window"] and (
+                historical_rate >= self._config.storage_growth_critical_bytes_per_day
+                or any(
+                    rate >= self._config.relation_growth_critical_bytes_per_day
+                    for rate in historical["relation_bytes_per_day"].values()
+                )
+            )
+            capacity_urgent = (
+                exhaustion_days is not None
+                and exhaustion_days <= self._config.storage_growth_capacity_horizon_days
+            ) or capacity.get("used_fraction", 0) >= self._config.disk_critical_fraction
+            critical = bool(critical and (sustained_critical or capacity_urgent))
+            capacity_details = {
+                "available_bytes": available,
+                "estimated_days_to_exhaustion": exhaustion_days,
+                "capacity_horizon_days": (
+                    self._config.storage_growth_capacity_horizon_days
+                ),
+                "historical_database_bytes_per_day": historical_rate,
+                "growth_classification": "sustained"
+                if sustained_critical
+                else "recent_acceleration",
+            }
         return (
             Alert(
                 "database_storage_growth",
                 "critical" if critical else "warning",
                 "Database storage is growing faster than its configured budget",
                 {
+                    **capacity_details,
                     "database_bytes": database_bytes,
                     "database_growth_bytes_per_day": int(database_growth_per_day),
                     "growth_window_seconds": elapsed,
@@ -2703,7 +2757,8 @@ SELECT json_build_object(
             # Filter BEFORE any notification/state/deadman publication, not
             # after _evaluate_once has already emitted the alerts.
             alerts = [
-                alert for alert in alerts
+                alert
+                for alert in alerts
                 if alert.details.get("service") == "postgres"
                 or not _is_maintenance_noise(alert.name)
             ]
@@ -2711,7 +2766,8 @@ SELECT json_build_object(
         if maintenance_active:
             # Silence does not prove recovery of an incident predating deploy.
             active_keys.update(
-                name for name in self._state.get("active_alerts", {})
+                name
+                for name in self._state.get("active_alerts", {})
                 if _is_maintenance_noise(name)
             )
         for alert in alerts:
@@ -3194,7 +3250,7 @@ SELECT json_build_object(
                         "while read -r key value _; do "
                         'case "$key" in '
                         "anon|file|shmem|slab|file_dirty|file_writeback) "
-                        "printf 'memory.stat.%s=%s\\n' \"$key\" \"$value\"; "
+                        'printf \'memory.stat.%s=%s\\n\' "$key" "$value"; '
                         ";; esac; "
                         "fi; done < /sys/fs/cgroup/memory.stat; fi"
                     ),
@@ -3279,9 +3335,7 @@ SELECT json_build_object(
                     if isinstance(values, list | tuple):
                         dead_tasks.extend(str(value) for value in values)
                     elif isinstance(values, str):
-                        dead_tasks.extend(
-                            value for value in values.split(",") if value
-                        )
+                        dead_tasks.extend(value for value in values.split(",") if value)
                     elif values:
                         dead_tasks.append(str(values))
                 elif event == "binance_order_submit_avg_price_schema_drift":
@@ -5473,14 +5527,23 @@ def _format_alert_human_details(
         if isinstance(fraction, (int, float)):
             lines.append(f"- **磁盘使用率**：**{fraction * 100:.1f}%**")
         if isinstance(available, int):
-            lines.append(
-                f"- **剩余空间**：**{available / (1024**3):.1f} GiB**"
-            )
+            lines.append(f"- **剩余空间**：**{available / (1024**3):.1f} GiB**")
         path = details.get("path")
         if path:
             lines.append(f"- **观测路径**：`{path}`")
 
     elif base_name == "database_storage_growth":
+        available = details.get("available_bytes")
+        exhaustion = details.get("estimated_days_to_exhaustion")
+        if isinstance(available, int):
+            lines.append(f"- **磁盘可用空间**：{available / (1024**3):.2f} GiB")
+        if isinstance(exhaustion, (int, float)):
+            lines.append(
+                "- **容量情景**：若近期数据库增速持续且没有回收，"
+                f"约 {exhaustion:.1f} 天耗尽；未计其他文件增长"
+            )
+        if details.get("growth_classification") == "recent_acceleration":
+            lines.append("- **判断**：近期写入加速；尚未确认跨完整清理周期的持续高增长")
         total_rate = details.get("database_growth_bytes_per_day")
         if isinstance(total_rate, int):
             lines.append(
@@ -5503,9 +5566,7 @@ def _format_alert_human_details(
             )
         window = details.get("growth_window_seconds")
         if isinstance(window, (int, float)):
-            lines.append(
-                f"- **估算窗口**：最近 {_format_duration(window)} 的增速折算"
-            )
+            lines.append(f"- **估算窗口**：最近 {_format_duration(window)} 的增速折算")
         historical_window = details.get("historical_window_seconds")
         historical_delta = details.get("historical_database_delta_bytes")
         if isinstance(historical_window, (int, float)) and isinstance(
@@ -6043,9 +6104,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         ),
         storage_path=os.environ.get("CML_STORAGE_PATH", ""),
         disk_warning_fraction=float(
-            os.environ.get(
-                "CML_DISK_WARNING_FRACTION", _DEFAULT_DISK_WARNING_FRACTION
-            )
+            os.environ.get("CML_DISK_WARNING_FRACTION", _DEFAULT_DISK_WARNING_FRACTION)
         ),
         disk_critical_fraction=float(
             os.environ.get(

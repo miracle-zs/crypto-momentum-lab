@@ -33,6 +33,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -45,6 +46,19 @@ _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
 _DEFAULT_DATABASE = "cml"
 _DEFAULT_USER = "cml"
 _MAINTENANCE_PGOPTIONS = "-c work_mem=4MB -c temp_file_limit=256MB"
+
+
+def retention_row_predicate(table: str, *, alias: str | None = None) -> str:
+    """Protect individual current checkpoints and unfinished exits."""
+    if table != "decision_traces":
+        return ""
+    relation = alias or table
+    return (
+        " AND NOT EXISTS (SELECT 1 FROM durable_policy_states s "
+        f"WHERE s.last_decision_id = {relation}.decision_id) "
+        "AND NOT EXISTS (SELECT 1 FROM durable_decision_exits e "
+        f"WHERE e.decision_id = {relation}.decision_id AND e.status <> 'DISPATCHED')"
+    )
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
@@ -122,10 +136,9 @@ def count_rows(
     sql = (
         f'SELECT count(*) FROM "{table}" '
         f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
+        + retention_row_predicate(table)
     )
-    result = _run(
-        [*_psql(prefix, container, user, database), "-At", "-c", sql]
-    )
+    result = _run([*_psql(prefix, container, user, database), "-At", "-c", sql])
     if result.returncode != 0:
         raise SystemExit(
             f"count failed: {result.stderr.decode(errors='replace').strip()}"
@@ -154,6 +167,7 @@ def compute_range_fingerprint(
         "SELECT row_to_json(t)::text "
         f'FROM "{table}" t '
         f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00'"
+        + retention_row_predicate(table, alias="t")
     )
     process = subprocess.Popen(  # noqa: S603 - argv and SQL are built here
         [*_psql(prefix, container, user, database), "-At", "-c", sql],
@@ -197,23 +211,43 @@ def export_range(
     structure instead of a quoted string.
     """
     if as_jsonl:
-        copy = (
-            "COPY (SELECT row_to_json(t) FROM ("
-            f'SELECT * FROM "{table}" '
+        # Cold decision replay must not depend on revision metadata remaining
+        # hot after a later revision purge. Include immutable identities in the
+        # same archive snapshot; full market input is already in trace_payload.
+        projection = "*"
+        if table == "decision_traces":
+            projection = (
+                "decision_traces.*, (SELECT coalesce("
+                "json_agg(row_to_json(r)), '[]'::json) "
+                "FROM (SELECT revision_id,scope,symbol,interval,"
+                "bucket_start,bucket_end,"
+                "content_hash,published_at,source_epoch,visibility_mode,lineage "
+                "FROM market_revision_refs WHERE revision_id IN "
+                "(SELECT jsonb_array_elements_text("
+                "decision_traces.evaluated_revision_ids)) "
+                "ORDER BY revision_id) r) AS archived_market_refs"
+            )
+        select = (
+            "SELECT row_to_json(t)::text FROM ("
+            f'SELECT {projection} FROM "{table}" '
             f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
-            f'ORDER BY "{column}") t) TO STDOUT'
+            f"{retention_row_predicate(table)} "
+            f'ORDER BY "{column}") t'
         )
+        # COPY text escapes JSON backslashes again. Decision archives are read
+        # directly as JSONL, so emit unescaped text with psql's tuples-only mode.
+        copy = select if table == "decision_traces" else f"COPY ({select}) TO STDOUT"
     else:
         copy = (
             f'COPY (SELECT * FROM "{table}" '
             f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
-            f"ORDER BY \"{column}\") TO STDOUT WITH (FORMAT csv, HEADER)"
+            f'ORDER BY "{column}") TO STDOUT WITH (FORMAT csv, HEADER)'
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     with destination.open("wb") as sink:
         psql = subprocess.Popen(  # noqa: S603
-            [*_psql(prefix, container, user, database), "-c", copy],
+            [*_psql(prefix, container, user, database), "-At", "-c", copy],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -230,9 +264,7 @@ def export_range(
         psql.wait()
 
     if psql.returncode != 0:
-        raise SystemExit(
-            f"copy failed: {psql_err.decode(errors='replace').strip()}"
-        )
+        raise SystemExit(f"copy failed: {psql_err.decode(errors='replace').strip()}")
     if compress.returncode != 0:
         raise SystemExit(
             f"zstd failed: {compress_err.decode(errors='replace').strip()}"
@@ -287,6 +319,10 @@ def main(argv: list[str] | None = None) -> int:
     start_tag = args.from_date.replace("-", "")
     end_tag = args.to_date.replace("-", "")
     stem = f"{args.table}_{start_tag}_{end_tag}"
+    if args.table == "decision_traces":
+        # An old decision can be reinserted by an exact commit retry after
+        # pruning. Never overwrite the earlier archive of the same date range.
+        stem += f"_{uuid4().hex}"
     directory = Path(args.out) / args.table
     destination = directory / f"{stem}.{suffix}"
     manifest_path = directory / f"{stem}.manifest.json"

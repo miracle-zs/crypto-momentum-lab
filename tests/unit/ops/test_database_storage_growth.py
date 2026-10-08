@@ -145,3 +145,62 @@ def test_checking_between_sample_intervals_does_not_duplicate_samples(tmp_path):
     instance = monitor(tmp_path, [sample(0, GIB), sample(HOUR, GIB)])
     instance._database_storage_growth_alerts(footprint(GIB), now=HOUR + 60)
     assert len(instance._state["database_storage_samples"]) == 2
+
+
+def test_short_spike_with_quiet_full_day_and_headroom_is_warning(tmp_path):
+    instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
+    instance._state["storage_disk_capacity"] = {
+        "at": 24 * HOUR,
+        "available_bytes": 26 * GIB,
+        "used_fraction": 0.56,
+    }
+    alerts = instance._database_storage_growth_alerts(
+        footprint(GIB + 100 * MIB), now=24 * HOUR
+    )
+    assert alerts[0].severity == "warning"
+    assert alerts[0].details["estimated_days_to_exhaustion"] > 7
+    assert alerts[0].details["growth_classification"] == "recent_acceleration"
+    assert any(
+        "若近期数据库增速持续" in line
+        for line in _format_alert_human_details(alerts[0].name, alerts[0].details)
+    )
+
+
+def test_capacity_exhaustion_within_week_escalates_short_growth(tmp_path):
+    instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
+    instance._state["storage_disk_capacity"] = {
+        "at": 24 * HOUR,
+        "available_bytes": 2 * GIB,
+        "used_fraction": 0.56,
+    }
+    alerts = instance._database_storage_growth_alerts(
+        footprint(GIB + 100 * MIB), now=24 * HOUR
+    )
+    assert alerts[0].severity == "critical"
+
+
+def test_complete_day_sustained_growth_remains_critical(tmp_path):
+    instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, 3 * GIB)])
+    instance._state["storage_disk_capacity"] = {
+        "at": 24 * HOUR,
+        "available_bytes": 26 * GIB,
+        "used_fraction": 0.56,
+    }
+    alerts = instance._database_storage_growth_alerts(
+        footprint(3 * GIB + 100 * MIB), now=24 * HOUR
+    )
+    assert alerts[0].severity == "critical"
+    assert alerts[0].details["growth_classification"] == "sustained"
+
+
+def test_stale_capacity_does_not_downgrade_growth(tmp_path):
+    instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
+    instance._state["storage_disk_capacity"] = {
+        "at": 0,
+        "available_bytes": 26 * GIB,
+        "used_fraction": 0.56,
+    }
+    alerts = instance._database_storage_growth_alerts(
+        footprint(GIB + 100 * MIB), now=24 * HOUR
+    )
+    assert alerts[0].severity == "critical"

@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionView,
 )
+from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     DecisionTrace,
@@ -446,6 +447,43 @@ async def test_postgres_decision_trace_repository_load() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compressed_state_retry_accepts_legacy_encoding_but_rejects_changed_evidence():
+    from tests.unit.decision.test_decision_engine import _make_market_envelope
+    from tests.unit.decision.test_decision_state_storage import large_payload
+
+    session = _FakeAsyncSession()
+    repo = PostgresDecisionTraceRepository(_FakeSessionFactory(session))
+    t0 = datetime(2026, 10, 8, tzinfo=UTC)
+    ref, _ = _make_market_envelope("BTCUSDT", t0, Decimal("100"))
+    payload = large_payload()
+    payload["market_state"] = {"symbol": "BTCUSDT"}
+    trace = DecisionTrace(
+        decision_id="compressed-retry",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0,
+        evaluated_market_refs=(ref,),
+        intent_produced=False,
+        rejection_reason="no_candidate",
+        input_hash="input",
+        frame_digest="frame",
+        trace_payload=payload,
+    )
+    await repo.save_decision_trace(trace)
+    assert (
+        "compressed_policy_states"
+        in session.trace_rows[trace.decision_id].trace_payload
+    )
+    await repo.save_decision_trace(trace)
+    session.trace_rows[trace.decision_id].trace_payload = dict(payload)
+    await repo.save_decision_trace(trace)
+    with pytest.raises(ValueError, match="Immutable audit conflict"):
+        await repo.save_decision_trace(
+            replace(trace, trace_payload={**payload, "extra": "changed"})
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("is_replay", [False, True])
 async def test_async_decision_filter_awaits_durable_commit_callback(
     is_replay: bool,
@@ -576,10 +614,11 @@ async def test_async_decision_filter_awaits_durable_commit_callback(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sizing_kind", [None, "fixed", "equity"])
+@pytest.mark.parametrize("sizing_kind", [None, "fixed", "equity", "large-state"])
 async def test_audit_decision_trace_reproducibility(
     monkeypatch: pytest.MonkeyPatch,
     sizing_kind: str | None,
+    tmp_path,
 ) -> None:
     session = _FakeAsyncSession()
     t0 = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
@@ -636,7 +675,7 @@ async def test_audit_decision_trace_reproducibility(
         entry_threshold=Decimal("65000.00"),
         target_notional=Decimal("1000.00"),
     )
-    if sizing_kind is not None:
+    if sizing_kind not in (None, "large-state"):
         from crypto_momentum_lab.domain.strategy.sizing import (
             EquityFractionSizingModel,
             FixedNotionalSizingModel,
@@ -664,6 +703,15 @@ async def test_audit_decision_trace_reproducibility(
             symbol_lot_rules=btc_lot_rules(),
         )
     prior_state = PolicyState(policy_version=1)
+    if sizing_kind == "large-state":
+        from tests.unit.decision.test_decision_state_storage import large_payload
+
+        prior_state = replace(
+            prior_state,
+            sizing_state_by_symbol=large_payload()["prior_policy_state"][
+                "sizing_state"
+            ],
+        )
     ref2 = replace(ref, revision_id=f"{ref.revision_id}:derived")
     inp = replace(
         inp,
@@ -702,7 +750,11 @@ async def test_audit_decision_trace_reproducibility(
         intent_id=real_trace.intent_id,
         rejection_reason=real_trace.rejection_reason,
         evaluated_revision_ids=[ref.revision_id, ref2.revision_id],
-        trace_payload=real_trace.trace_payload,
+        trace_payload=compact_trace_for_hot_storage(
+            intent_produced=real_trace.intent_produced,
+            rejection_reason=real_trace.rejection_reason,
+            trace_payload=real_trace.trace_payload,
+        ),
         created_at=t0,
     )
     rev_row = MarketRevisionRefRow(
@@ -765,6 +817,65 @@ async def test_audit_decision_trace_reproducibility(
     assert audit_res["evaluated_revisions_count"] == 2
     assert audit_res["evaluated_revisions"][0]["revision_id"] == ref.revision_id
     assert audit_res["evaluated_revisions"][1]["revision_id"] == ref2.revision_id
+
+    # Replay remains available after both the hot trace and revision metadata
+    # have been removed: the verified archive carries its own exact identities.
+    import hashlib
+    import json
+
+    import zstandard
+
+    from crypto_momentum_lab.tools.reproduce_decision import (
+        load_archived_decision_trace,
+    )
+
+    cold_row = {
+        "decision_id": trace_id,
+        "strategy_name": real_trace.strategy_name,
+        "account_label": real_trace.account_label,
+        "decision_time": t0.isoformat(),
+        "intent_produced": real_trace.intent_produced,
+        "intent_id": real_trace.intent_id,
+        "rejection_reason": real_trace.rejection_reason,
+        "evaluated_revision_ids": [ref.revision_id, ref2.revision_id],
+        "trace_payload": trace_row.trace_payload,
+        "archived_market_refs": [
+            {
+                "scope": r.scope,
+                "symbol": r.symbol,
+                "interval": r.interval,
+                "bucket_start": r.bucket_start.isoformat(),
+                "bucket_end": r.bucket_end.isoformat(),
+                "revision_id": r.revision_id,
+                "content_hash": r.content_hash,
+                "published_at": r.published_at.isoformat(),
+                "source_epoch": r.source_epoch,
+                "visibility_mode": r.visibility_mode.value,
+                "lineage": {},
+            }
+            for r in (ref, ref2)
+        ],
+    }
+    archive = tmp_path / "traces.jsonl.zst"
+    archive.write_bytes(
+        zstandard.ZstdCompressor().compress(json.dumps(cold_row).encode() + b"\n")
+    )
+    manifest = tmp_path / "traces.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "table": "decision_traces",
+                "format": "jsonl",
+                "file": archive.name,
+                "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
+        )
+    )
+    cold = load_archived_decision_trace(manifest, trace_id)
+    assert verify_decision_trace(cold, trace_id)["status"] == "VERIFIED_REPRODUCIBLE"
+    archive.write_bytes(archive.read_bytes() + b"corrupted")
+    with pytest.raises(UnreproducibleError, match="SHA-256"):
+        load_archived_decision_trace(manifest, trace_id)
 
     # Reconstructed policy/state must match the digests frozen in the frame.
     tampered_policy_payload = dict(real_trace.trace_payload)

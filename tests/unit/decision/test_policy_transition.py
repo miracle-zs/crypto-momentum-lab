@@ -988,6 +988,14 @@ def test_walk_forward_split_state_reset_and_carry() -> None:
     assert s_carry.signal_memory == {}
 
 
+def test_sizing_state_overwrites_each_symbol_without_accumulating_history() -> None:
+    state = PolicyState()
+    for sequence in range(1000):
+        state = state.with_sizing_state("BTCUSDT", {"quantity": str(sequence)})
+    assert state.sizing_state_by_symbol == {"BTCUSDT": {"quantity": "999"}}
+    assert state.with_cleared_symbol("BTCUSDT").sizing_state_by_symbol == {}
+
+
 def test_policy_state_with_exit_atomic_purge() -> None:
     """with_exit atomically sets cooldown and purges symbol state
     while preserving other symbols.

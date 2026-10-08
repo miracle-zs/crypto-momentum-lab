@@ -8,14 +8,20 @@ bucket.  Until a cold evidence archive is configured, retain a tamper-evident
 summary for that one high-volume outcome and keep complete evidence for every
 other result.
 
+Large full-evidence policy states use a lossless, verified storage codec. Equal
+prior/next states share one encoded copy; adapters expand them before returning
+domain traces. This does not turn no-candidate decisions into summary-only rows.
+
 This module owns that policy so Postgres adapters do not each need to know
 which decision outcomes are safe to compact.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import zlib
 from datetime import datetime
 from typing import Any
 
@@ -64,7 +70,7 @@ def compact_trace_for_hot_storage(
         rejection_reason=rejection_reason,
         trace_payload=trace_payload,
     ):
-        return dict(trace_payload)
+        return _compress_policy_states(trace_payload)
 
     return {
         "evidence_level": "summary",
@@ -74,6 +80,70 @@ def compact_trace_for_hot_storage(
         "original_payload_sha256": _payload_digest(trace_payload),
         "outcome": _NORMAL_HOLD_OUTCOME,
     }
+
+
+def _compress_policy_states(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep exact replay inputs while storing repeated states only once."""
+    result = dict(payload)
+    prior = payload.get("prior_policy_state")
+    following = payload.get("next_policy_state")
+    if not isinstance(prior, dict) or not isinstance(following, dict):
+        return result
+    states = {"prior": prior}
+    if following != prior:
+        states["next"] = following
+    raw = json.dumps(
+        states, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    # Small inputs already fit efficiently into PostgreSQL's normal storage.
+    if len(raw) < 8192 or len(raw) >= 16 * 1024**2:
+        return result
+    compressed = base64.b64encode(zlib.compress(raw, level=6)).decode("ascii")
+    if len(compressed) + 256 >= len(raw):
+        return result
+    result.pop("prior_policy_state")
+    result.pop("next_policy_state")
+    result["compressed_policy_states"] = {
+        "codec": "zlib-base64-v1",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "data": compressed,
+    }
+    return result
+
+
+def expand_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Decode exact policy evidence; malformed or altered evidence fails closed."""
+    result = dict(payload)
+    packed = result.pop("compressed_policy_states", None)
+    if packed is None:
+        return result
+    try:
+        if not isinstance(packed, dict) or packed.get("codec") != "zlib-base64-v1":
+            raise ValueError("unsupported policy state codec")
+        if "prior_policy_state" in result or "next_policy_state" in result:
+            raise ValueError("ambiguous policy evidence")
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(
+            base64.b64decode(packed["data"], validate=True), 16 * 1024**2
+        )
+        if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise ValueError("incomplete or oversized policy evidence")
+        if hashlib.sha256(raw).hexdigest() != packed["sha256"]:
+            raise ValueError("policy evidence digest mismatch")
+        states = json.loads(raw)
+        if not isinstance(states, dict):
+            raise ValueError("policy evidence is not an object")
+        prior = states["prior"]
+        following = states.get("next", prior)
+        if not isinstance(prior, dict) or not isinstance(following, dict):
+            raise ValueError("policy state is not an object")
+        result["prior_policy_state"] = prior
+        result["next_policy_state"] = following
+    except (KeyError, TypeError, ValueError, zlib.error) as exc:
+        raise UnreproducibleError(
+            "Invalid compressed decision policy evidence"
+        ) from exc
+    return result
 
 
 def summary_market_refs(
@@ -152,6 +222,7 @@ def _payload_digest(payload: dict[str, Any]) -> str:
 
 __all__ = [
     "compact_trace_for_hot_storage",
+    "expand_trace_payload",
     "load_summary_market_refs",
     "retains_complete_replay_evidence",
     "summary_market_refs",

@@ -252,6 +252,39 @@ journalctl -u cml-position-recovery-retention.service -n 100 --no-pager
 512 MiB/天为告警、严重阈值。样本只写入监控服务自己的 JSON 状态文件，不写入业务
 数据库。
 
+有新鲜磁盘容量观测时，短窗口超严重增长预算仍会告警，但仅在完整日窗口也超严重
+预算、按近期数据库增速预计 7 天内耗尽可用空间，或磁盘达到严重水位时升级严重。
+容量观测缺失或过期时保留原有保守升级行为。容量情景是假设近期增速持续且没有
+回收的推算，未包含其他文件增长；磁盘水位告警独立生效。
+
+### 决策证据热保留与冷重放
+
+完整决策的大份策略状态使用带 SHA-256 的无损压缩；相同的前后状态只存一份，
+仓库读取时还原。小状态和既有普通持仓摘要保持原格式。新格式无需修改交易准入、
+策略状态或下单规则。定仓状态按 symbol 覆盖，退出/清除 symbol 时移除，不按任意
+条数删除当前策略状态。
+
+每日 `cml-archive-trim.timer` 归档并裁剪 `decision_traces`，热窗口至少 7 天，
+不受其他诊断表 1 天窗口影响。当前 durable policy head 与未完成的 durable exit
+逐行排除，停止账户的旧检查点也受保护，不阻塞其他历史行裁剪。保留原有计划/依赖版本围栏、归档
+文件 SHA-256、行数与内容指纹校验；校验失败不删行。
+
+决策 JSONL.zst 归档附带有序行情修订身份，完整 market state 仍在 trace payload
+中，避免后续行情 revision purge 破坏冷重放。归档永久保留于
+`/var/lib/crypto-momentum-lab/table-archive/decision_traces`；这里只约束热数据库，
+不宣称总磁盘增长归零。冷归档容量仍由独立磁盘水位告警覆盖。
+
+```bash
+python3 deploy/ops/archive_and_trim.py --table decision_traces --dry-run
+python -m crypto_momentum_lab.tools.reproduce_decision <decision-id> \
+  --archive-manifest /path/to/decision_traces_<from>_<to>.manifest.json
+```
+
+冷重放只读本地压缩文件并验证文件 SHA-256，不要求把历史写回线上数据库。
+既有普通持仓摘要仍返回 `SUMMARY_ONLY`，不会因归档宣称能够精确重放。
+裁剪释放的是 PostgreSQL 可复用页，通常不会立即缩小文件；实盘期间不运行
+`VACUUM FULL`。
+
 ## 参数与维护
 
 ### 行情状态的恢复保护与策略退役

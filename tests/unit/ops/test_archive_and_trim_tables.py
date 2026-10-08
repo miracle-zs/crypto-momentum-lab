@@ -31,6 +31,7 @@ def test_archive_and_trim_covers_unbounded_growth_tables() -> None:
     assert "execution_account_process_states" in names
     assert "market_data_quality_events" in names
     assert "universe_snapshots" in names
+    assert ("decision_traces", "created_at") in tables
 
     # Must keep archiving the high-churn operational set.
     for required in (
