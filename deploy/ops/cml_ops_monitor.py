@@ -77,7 +77,7 @@ _DEFAULT_RETENTION_TIMER_UNIT = "cml-archive-trim.timer"
 _DEFAULT_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_PURGE_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
 _DEFAULT_MARKET_REVISION_ARCHIVE_TIMER_MAX_AGE_SECONDS = 3.0 * 60.0 * 60.0
-_DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS = 26.0 * 60.0 * 60.0
+_DEFAULT_POSITION_RECOVERY_RETENTION_TIMER_MAX_AGE_SECONDS = 3.0 * 60.0 * 60.0
 _DEFAULT_STORAGE_SAMPLE_INTERVAL_SECONDS = 300.0
 _DEFAULT_STORAGE_SAMPLE_WINDOW_SECONDS = 24.0 * 60.0 * 60.0
 _DEFAULT_DISK_WARNING_FRACTION = 0.75
@@ -2199,6 +2199,7 @@ SELECT json_build_object(
                  AS total_bytes
         FROM (VALUES
           ('decision_traces'),
+          ('decision_policy_evidence'),
           ('market_revision_refs'),
           ('position_fact_journal_events'),
           ('position_recovery_checkpoints')

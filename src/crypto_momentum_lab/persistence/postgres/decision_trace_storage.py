@@ -111,6 +111,59 @@ def _compress_policy_states(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def share_policy_states(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Replace large policy states with verified identities, keeping other evidence inline."""
+    decoded = expand_trace_payload(payload)
+    prior = decoded.get("prior_policy_state")
+    following = decoded.get("next_policy_state")
+    if not isinstance(prior, dict) or not isinstance(following, dict):
+        return dict(payload), {}
+    if len(json.dumps(prior)) + len(json.dumps(following)) < 8192:
+        return dict(payload), {}
+    prior_digest = _payload_digest(prior)
+    next_digest = prior_digest if following == prior else _payload_digest(following)
+    states = {prior_digest: prior, next_digest: following}
+    decoded.pop("prior_policy_state")
+    decoded.pop("next_policy_state")
+    decoded["policy_state_refs"] = {
+        "prior": prior_digest,
+        "next": next_digest,
+    }
+    return decoded, states
+
+
+def policy_state_reference_ids(payload: dict[str, Any]) -> set[str]:
+    refs = payload.get("policy_state_refs")
+    if refs is None:
+        return set()
+    if not isinstance(refs, dict) or set(refs) != {"prior", "next"}:
+        raise UnreproducibleError("Invalid shared policy state references")
+    if any(not isinstance(value, str) or len(value) != 64 for value in refs.values()):
+        raise UnreproducibleError("Invalid shared policy state digest")
+    return set(refs.values())
+
+
+def resolve_policy_states(
+    payload: dict[str, Any], states: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Resolve exact state evidence and reject missing, corrupt or ambiguous inputs."""
+    result = expand_trace_payload(payload)
+    ids = policy_state_reference_ids(result)
+    if not ids:
+        return result
+    if "prior_policy_state" in result or "next_policy_state" in result:
+        raise UnreproducibleError("Ambiguous shared policy evidence")
+    for digest in ids:
+        if digest not in states or _payload_digest(states[digest]) != digest:
+            raise UnreproducibleError("Shared policy evidence is missing or corrupt")
+    refs = result.pop("policy_state_refs")
+    result["prior_policy_state"] = states[refs["prior"]]
+    result["next_policy_state"] = states[refs["next"]]
+    return result
+
+
 def expand_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Decode exact policy evidence; malformed or altered evidence fails closed."""
     result = dict(payload)

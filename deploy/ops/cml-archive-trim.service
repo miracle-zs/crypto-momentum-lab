@@ -17,6 +17,7 @@ WorkingDirectory=/opt/crypto-momentum-lab
 # order-lifecycle types (not the empty heartbeats).  Longer history lives in
 # /var/lib/crypto-momentum-lab/table-archive.
 ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/archive_and_trim.py --retention-days 1
+ExecStartPost=/usr/bin/docker compose --env-file .env.server -f compose.server.yaml --profile maintenance run --rm --no-deps decision-evidence-maintenance --collect --batch-size 500 --max-batches 20
 NoNewPrivileges=true
 PrivateTmp=true
 

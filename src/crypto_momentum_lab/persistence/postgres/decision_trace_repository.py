@@ -25,15 +25,18 @@ from crypto_momentum_lab.domain.market.revision_models import (
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     compact_trace_for_hot_storage,
-    expand_trace_payload,
     load_summary_market_refs,
+    policy_state_reference_ids,
+    resolve_policy_states,
     retains_complete_replay_evidence,
+    share_policy_states,
     summary_market_refs,
 )
 from crypto_momentum_lab.persistence.postgres.market_book_repository import (
     _observed_at_from_lineage,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    DecisionPolicyEvidenceRow,
     DecisionTraceRow,
     MarketRevisionRefRow,
 )
@@ -93,16 +96,21 @@ class PostgresDecisionTraceRepository:
         trace_rows_by_id: dict[str, dict[str, Any]] = {}
         revision_rows_by_id: dict[str, dict[str, Any]] = {}
         embedded_revision_ids: set[str] = set()
+        policy_evidence: dict[str, dict[str, Any]] = {}
         for trace in traces:
             complete_evidence = retains_complete_replay_evidence(
                 intent_produced=trace.intent_produced,
                 rejection_reason=trace.rejection_reason,
                 trace_payload=trace.trace_payload,
             )
+            source_payload = trace.trace_payload
+            if complete_evidence:
+                source_payload, shared = share_policy_states(source_payload)
+                policy_evidence.update(shared)
             payload = compact_trace_for_hot_storage(
                 intent_produced=trace.intent_produced,
                 rejection_reason=trace.rejection_reason,
-                trace_payload=trace.trace_payload,
+                trace_payload=source_payload,
             )
             if trace.frame_digest and "frame_digest" not in payload:
                 payload["frame_digest"] = trace.frame_digest
@@ -202,6 +210,21 @@ class PostgresDecisionTraceRepository:
                     embedded_revision_ids.add(ref.revision_id)
 
         trace_rows = list(trace_rows_by_id.values())
+        stored_states = await _load_policy_evidence(session, set(policy_evidence))
+        missing_states = [
+            {"state_digest": digest, "state_payload": state, "created_at": now_utc}
+            for digest, state in policy_evidence.items()
+            if digest not in stored_states
+        ]
+        if missing_states:
+            await session.execute(
+                insert(DecisionPolicyEvidenceRow)
+                .values(missing_states)
+                .on_conflict_do_nothing(index_elements=["state_digest"])
+            )
+            stored_states = await _load_policy_evidence(session, set(policy_evidence))
+        if stored_states != policy_evidence:
+            raise ValueError("Immutable audit conflict: shared policy evidence")
         incoming_trace_ids = list(trace_rows_by_id)
         trace_values = (
             "strategy_name",
@@ -293,14 +316,20 @@ class PostgresDecisionTraceRepository:
             .all()
         )
         persisted_trace_ids = {row.decision_id for row in persisted_traces}
+        required_states = set().union(
+            *(policy_state_reference_ids(row.trace_payload) for row in persisted_traces)
+        )
+        stored_states.update(
+            await _load_policy_evidence(session, required_states - set(stored_states))
+        )
         if persisted_trace_ids != set(incoming_trace_ids):
             raise ValueError("DecisionTrace insert did not persist every decision")
         for persisted_trace in persisted_traces:
             incoming = incoming_by_id[persisted_trace.decision_id]
             if any(
                 (
-                    expand_trace_payload(getattr(persisted_trace, name))
-                    != expand_trace_payload(incoming[name])
+                    resolve_policy_states(getattr(persisted_trace, name), stored_states)
+                    != resolve_policy_states(incoming[name], stored_states)
                     if name == "trace_payload"
                     else getattr(persisted_trace, name) != incoming[name]
                 )
@@ -353,7 +382,10 @@ class PostgresDecisionTraceRepository:
             if row is None:
                 return None
 
-            payload = expand_trace_payload(row.trace_payload)
+            states = await _load_policy_evidence(
+                session, policy_state_reference_ids(row.trace_payload)
+            )
+            payload = resolve_policy_states(row.trace_payload, states)
             if payload.get("evidence_level") == "summary":
                 refs = load_summary_market_refs(payload, decision_id=row.decision_id)
             else:
@@ -404,3 +436,22 @@ class PostgresDecisionTraceRepository:
 
 
 __all__ = ["PostgresDecisionTraceRepository"]
+
+
+async def _load_policy_evidence(
+    session: AsyncSession, digests: set[str]
+) -> dict[str, dict[str, Any]]:
+    if not digests:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(DecisionPolicyEvidenceRow)
+                .where(DecisionPolicyEvidenceRow.state_digest.in_(sorted(digests)))
+                .with_for_update(read=True, key_share=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {row.state_digest: dict(row.state_payload) for row in rows}

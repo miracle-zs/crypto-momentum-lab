@@ -10,7 +10,7 @@ User=root
 WorkingDirectory=/opt/crypto-momentum-lab
 # Keep the newest per-scope checkpoint and all current execution-head
 # bindings. Only covered state copies older than 72 hours are candidates.
-ExecStart=/usr/bin/flock -n -E 0 /run/lock/cml-position-recovery-retention.lock /usr/bin/docker exec crypto-momentum-lab-dashboard-1 python -m crypto_momentum_lab.tools.prune_position_recovery_history --apply --minimum-age-hours 72 --max-checkpoints 100000 --max-events 500000 --batch-size 500 --lock-timeout-seconds 5
+ExecStart=/usr/bin/flock -n -E 0 /run/lock/cml-position-recovery-retention.lock /usr/bin/docker exec crypto-momentum-lab-dashboard-1 python -m crypto_momentum_lab.tools.prune_position_recovery_history --apply --minimum-age-hours 72 --max-checkpoints 10000 --max-events 50000 --batch-size 500 --lock-timeout-seconds 5
 TimeoutStartSec=20m
 Nice=10
 NoNewPrivileges=true

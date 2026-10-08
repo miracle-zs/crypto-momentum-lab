@@ -222,9 +222,9 @@ journalctl -u cml-market-revision-purge.service -n 100 --no-pager
 
 ### 持仓恢复历史回收
 
-`cml-position-recovery-retention.timer` 每天 02:15（Asia/Shanghai）清理超过
-72 小时、且已由保留检查点覆盖的恢复状态副本。每次最多处理 100,000 个旧检查点
-和 500,000 条状态事件，每批最多删除 500 条。最新的每流检查点与执行头当前绑定的
+`cml-position-recovery-retention.timer` 每小时清理超过
+72 小时、且已由保留检查点覆盖的恢复状态副本。每次最多处理 10,000 个旧检查点
+和 50,000 条状态事件，每批最多删除 500 条。最新的每流检查点与执行头当前绑定的
 检查点始终保留；成交、退出边界、冲突和完整性事实不会被这个任务删除。
 
 状态事件清理只涉及 `facts_state`、`snapshot`、`coverage`、
@@ -259,8 +259,9 @@ journalctl -u cml-position-recovery-retention.service -n 100 --no-pager
 
 ### 决策证据热保留与冷重放
 
-完整决策的大份策略状态使用带 SHA-256 的无损压缩；相同的前后状态只存一份，
-仓库读取时还原。小状态和既有普通持仓摘要保持原格式。新格式无需修改交易准入、
+完整决策的大份策略状态按 SHA-256 存入 `decision_policy_evidence` 共享表；
+连续决策引用同一份不可变状态，状态实际变化时才增加证据。仓库读取时校验并还原，
+兼容旧的行内压缩格式。小状态和既有普通持仓摘要保持原格式。新格式无需修改交易准入、
 策略状态或下单规则。定仓状态按 symbol 覆盖，退出/清除 symbol 时移除，不按任意
 条数删除当前策略状态。
 
@@ -309,3 +310,18 @@ position side 查本轮持仓的历史：最后一条零持仓记录之后的首
 服务器 Compose 设置 shm_size 256m，避免维护时默认 64 MiB 共享内存不足；已限制并行维护。检查磁盘空间与 /dev/shm，不因 No space left on device 就认定数据盘满。
 
 先减少应用写放大、无界扫描和重复检查点构建，再单变量试验 checkpointer/bgwriter/WAL 设置；记录实际版本和完整检查点周期。不要关闭 fsync/full_page_writes，也不要用扩大交易超时代替性能修复。历史数值只保留在 Git，不复制为新实例标准。
+
+共享状态和 trace 在同一事务中提交，重试按还原后的逻辑内容比较。冷归档携带引用
+的状态，并逐条校验状态哈希及行情身份；缺失或损坏时不裁剪。归档后每日回收
+超过 7 天、无热 trace 引用的共享状态，写入使用 key-share 锁，回收先锁候选
+再在新快照中复查引用，避免新写入与回收竞争。
+
+```bash
+docker compose --env-file .env.server -f compose.server.yaml --profile maintenance \
+  run --rm --no-deps decision-evidence-maintenance --batch-size 100 --max-batches 20
+```
+
+这是有界、无损的旧证据编码回填，不更改策略状态、决策内容或订单。迁移
+`20261008_0055` 为共享引用增加局部索引，并将两张恢复状态表的 autovacuum
+触发阈值设为 0.5% + 500 行，使小时裁剪后的空页及时复用；72 小时恢复窗口
+和永久成交/边界事实的保护规则保持原样。容量充足不会降低增速告警。

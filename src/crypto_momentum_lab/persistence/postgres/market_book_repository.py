@@ -26,8 +26,9 @@ from crypto_momentum_lab.domain.market.state_codec import (
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     compact_trace_for_hot_storage,
-    expand_trace_payload,
     load_summary_market_refs,
+    policy_state_reference_ids,
+    resolve_policy_states,
     retains_complete_replay_evidence,
     summary_market_refs,
 )
@@ -37,6 +38,7 @@ from crypto_momentum_lab.persistence.postgres.market_revision_archive import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     DatasetManifestRow,
+    DecisionPolicyEvidenceRow,
     DecisionTraceRow,
     MarketRevisionRefRow,
 )
@@ -491,7 +493,22 @@ class PostgresMarketBookRepository:
             row = session.get(DecisionTraceRow, decision_id)
             if row is None:
                 return None
-            payload = expand_trace_payload(row.trace_payload)
+            ids = policy_state_reference_ids(row.trace_payload)
+            states = (
+                {
+                    state.state_digest: dict(state.state_payload)
+                    for state in session.execute(
+                        select(DecisionPolicyEvidenceRow).where(
+                            DecisionPolicyEvidenceRow.state_digest.in_(ids)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                }
+                if ids
+                else {}
+            )
+            payload = resolve_policy_states(row.trace_payload, states)
             if payload.get("evidence_level") == "summary":
                 refs = load_summary_market_refs(payload, decision_id=decision_id)
             else:

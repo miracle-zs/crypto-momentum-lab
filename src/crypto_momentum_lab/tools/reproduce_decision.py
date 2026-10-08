@@ -29,8 +29,8 @@ from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
     PostgresDecisionTraceRepository,
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
-    expand_trace_payload,
     load_summary_market_refs,
+    resolve_policy_states,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
@@ -89,7 +89,9 @@ def load_archived_decision_trace(
             row = json.loads(line)
             if row["decision_id"] != decision_id:
                 continue
-            payload = expand_trace_payload(row["trace_payload"])
+            payload = resolve_policy_states(
+                row["trace_payload"], row.get("archived_policy_states", {})
+            )
             if payload.get("evidence_level") == "summary":
                 refs = load_summary_market_refs(payload, decision_id=decision_id)
             else:

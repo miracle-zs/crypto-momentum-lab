@@ -1577,6 +1577,17 @@ class DatasetManifestRow(Base):
     )
 
 
+class DecisionPolicyEvidenceRow(Base):
+    """Content-addressed immutable policy evidence shared by many decisions."""
+
+    __tablename__ = "decision_policy_evidence"
+    state_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state_payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class DecisionTraceRow(Base):
     """Postgres table mapping for DecisionTrace records."""
 
@@ -1601,6 +1612,16 @@ class DecisionTraceRow(Base):
 
     __table_args__ = (
         Index("ix_decision_traces_created", "created_at", "decision_id"),
+        Index(
+            "ix_decision_traces_policy_prior",
+            text("(trace_payload->'policy_state_refs'->>'prior')"),
+            postgresql_where=text("trace_payload ? 'policy_state_refs'"),
+        ),
+        Index(
+            "ix_decision_traces_policy_next",
+            text("(trace_payload->'policy_state_refs'->>'next')"),
+            postgresql_where=text("trace_payload ? 'policy_state_refs'"),
+        ),
         Index(
             "ix_decision_traces_strategy_account_time",
             "strategy_name",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -39,8 +40,10 @@ from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.decision_trace_storage import (
     compact_trace_for_hot_storage,
+    share_policy_states,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    DecisionPolicyEvidenceRow,
     DecisionTraceRow,
     MarketRevisionRefRow,
 )
@@ -156,6 +159,7 @@ class _FakeAsyncSession:
         self.statements: list[Any] = []
         self.trace_rows: dict[str, DecisionTraceRow] = {}
         self.rev_rows: dict[str, MarketRevisionRefRow] = {}
+        self.policy_rows: dict[str, DecisionPolicyEvidenceRow] = {}
 
     def begin(self) -> _AsyncContext:
         return _AsyncContext(self)
@@ -182,6 +186,13 @@ class _FakeAsyncSession:
         if "INSERT INTO market_revision_refs" in compiled_str:
             self._persist_insert(statement, MarketRevisionRefRow, self.rev_rows)
             return _FakeQueryResult()
+        if "INSERT INTO decision_policy_evidence" in compiled_str:
+            self._persist_insert(statement, DecisionPolicyEvidenceRow, self.policy_rows)
+            return _FakeQueryResult()
+        if "FROM decision_policy_evidence" in compiled_str:
+            return _FakeQueryResult(
+                scalars_list=self._matching_rows(statement, self.policy_rows.values())
+            )
 
         if "INSERT INTO decision_traces" in compiled_str:
             self._persist_insert(statement, DecisionTraceRow, self.trace_rows)
@@ -234,6 +245,8 @@ class _FakeAsyncSession:
             identity = (
                 row.decision_id
                 if isinstance(row, DecisionTraceRow)
+                else row.state_digest
+                if isinstance(row, DecisionPolicyEvidenceRow)
                 else row.revision_id
             )
             rows_by_id.setdefault(identity, row)
@@ -470,10 +483,13 @@ async def test_compressed_state_retry_accepts_legacy_encoding_but_rejects_change
         trace_payload=payload,
     )
     await repo.save_decision_trace(trace)
-    assert (
-        "compressed_policy_states"
-        in session.trace_rows[trace.decision_id].trace_payload
-    )
+    assert "policy_state_refs" in session.trace_rows[trace.decision_id].trace_payload
+    for sequence in range(100):
+        await repo.save_decision_trace(replace(trace, decision_id=f"repeat-{sequence}"))
+    assert len(session.policy_rows) == 1
+    assert len(json.dumps(session.trace_rows[trace.decision_id].trace_payload)) < 1000
+    loaded = await repo.load_decision_trace(trace.decision_id)
+    assert loaded.trace_payload == payload
     await repo.save_decision_trace(trace)
     session.trace_rows[trace.decision_id].trace_payload = dict(payload)
     await repo.save_decision_trace(trace)
@@ -773,6 +789,19 @@ async def test_audit_decision_trace_reproducibility(
         lineage={},
     )
     session.trace_rows[trace_id] = trace_row
+    archived_policy_states = {}
+    if sizing_kind == "large-state":
+        trace_row.trace_payload, archived_policy_states = share_policy_states(
+            trace_row.trace_payload
+        )
+        session.policy_rows.update(
+            {
+                digest: DecisionPolicyEvidenceRow(
+                    state_digest=digest, state_payload=state, created_at=t0
+                )
+                for digest, state in archived_policy_states.items()
+            }
+        )
     session.rev_rows[ref.revision_id] = rev_row
     session.rev_rows[ref2.revision_id] = MarketRevisionRefRow(
         revision_id=ref2.revision_id,
@@ -839,6 +868,7 @@ async def test_audit_decision_trace_reproducibility(
         "rejection_reason": real_trace.rejection_reason,
         "evaluated_revision_ids": [ref.revision_id, ref2.revision_id],
         "trace_payload": trace_row.trace_payload,
+        "archived_policy_states": archived_policy_states,
         "archived_market_refs": [
             {
                 "scope": r.scope,

@@ -474,6 +474,21 @@ services:
     mem_limit: 192m
     memswap_limit: 512m
 
+  decision-evidence-maintenance:
+    <<: *app
+    profiles: ["maintenance"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 384m
+    entrypoint: ["python", "-m", "crypto_momentum_lab.tools.share_decision_policy_evidence"]
+    command: ["--collect", "--batch-size", "500", "--max-batches", "20"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   market-revision-archiver:
     <<: *app
     profiles: ["maintenance"]

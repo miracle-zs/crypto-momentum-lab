@@ -1,10 +1,10 @@
 [Unit]
-Description=Daily bounded cleanup of superseded position recovery state
+Description=Hourly bounded cleanup of superseded position recovery state
 
 [Timer]
-OnCalendar=*-*-* 02:15:00 Asia/Shanghai
+OnCalendar=hourly
 Persistent=true
-RandomizedDelaySec=10m
+RandomizedDelaySec=2m
 
 [Install]
 WantedBy=timers.target

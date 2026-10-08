@@ -226,7 +226,12 @@ def export_range(
                 "FROM market_revision_refs WHERE revision_id IN "
                 "(SELECT jsonb_array_elements_text("
                 "decision_traces.evaluated_revision_ids)) "
-                "ORDER BY revision_id) r) AS archived_market_refs"
+                "ORDER BY revision_id) r) AS archived_market_refs, "
+                "(SELECT coalesce(jsonb_object_agg(state_digest,state_payload),'{}'::jsonb) "
+                "FROM decision_policy_evidence WHERE state_digest IN "
+                "(decision_traces.trace_payload->'policy_state_refs'->>'prior', "
+                "decision_traces.trace_payload->'policy_state_refs'->>'next')) "
+                "AS archived_policy_states"
             )
         select = (
             "SELECT row_to_json(t)::text FROM ("
@@ -270,6 +275,50 @@ def export_range(
         raise SystemExit(
             f"zstd failed: {compress_err.decode(errors='replace').strip()}"
         )
+    if table == "decision_traces":
+        verify_decision_archive(destination)
+
+
+def validate_decision_archive_row(row: dict) -> None:
+    payload = row["trace_payload"]
+    refs = payload.get("policy_state_refs", {})
+    states = row.get("archived_policy_states", {})
+    for digest in refs.values():
+        state = states.get(digest)
+        if not isinstance(state, dict):
+            raise ValueError("Cold archive lacks referenced policy state")
+        canonical = json.dumps(
+            state, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+        if hashlib.sha256(canonical).hexdigest() != digest:
+            raise ValueError("Cold archive policy state digest mismatch")
+    if payload.get("evidence_level") != "summary":
+        available = {ref["revision_id"] for ref in row["archived_market_refs"]}
+        if not set(row["evaluated_revision_ids"]).issubset(available):
+            raise ValueError("Cold archive lacks referenced market identities")
+
+
+def verify_decision_archive(path: Path) -> None:
+    """Stream actual archived bytes before any hot evidence can be pruned."""
+    process = subprocess.Popen(
+        ["zstd", "-d", "-q", "-c", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            validate_decision_archive_row(json.loads(line))
+        error = process.stderr.read() if process.stderr else b""
+        if process.wait() != 0:
+            raise ValueError(
+                "Cannot verify compressed decision archive: "
+                + error.decode(errors="replace")
+            )
+    except BaseException:
+        process.terminate()
+        process.wait()
+        raise
 
 
 def sha256_file(path: Path) -> str:
