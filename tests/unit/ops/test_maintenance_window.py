@@ -132,7 +132,7 @@ def test_maintenance_filters_before_notification_and_deadman(monkeypatch, tmp_pa
     monkeypatch.setattr(
         monitor,
         "_disk_usage_alerts",
-        lambda: (
+        lambda *, now: (
             Alert("database_storage_growth", "warning", "real growth"),
             Alert("container_oom_killed", "critical", "real OOM"),
         ),

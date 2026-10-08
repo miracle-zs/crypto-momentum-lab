@@ -204,3 +204,27 @@ def test_stale_capacity_does_not_downgrade_growth(tmp_path):
         footprint(GIB + 100 * MIB), now=24 * HOUR
     )
     assert alerts[0].severity == "critical"
+
+
+def test_capacity_sample_uses_monitor_cycle_time_despite_slow_checks(
+    tmp_path, monkeypatch
+):
+    from deploy.ops.cml_ops_monitor import DiskUsage
+
+    instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
+    instance._config = MonitorConfig(
+        state_path=tmp_path / "monitor.json", storage_path="/"
+    )
+    instance._clock = lambda: 24 * HOUR + 20
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor.read_disk_usage",
+        lambda *args, **kwargs: DiskUsage(
+            "/", "disk", "/", 59 * GIB, 32 * GIB, 26 * GIB
+        ),
+    )
+    instance._disk_usage_alerts(now=24 * HOUR)
+    alerts = instance._database_storage_growth_alerts(
+        footprint(GIB + 100 * MIB), now=24 * HOUR
+    )
+    assert alerts[0].severity == "warning"
+    assert alerts[0].details["available_bytes"] == 26 * GIB

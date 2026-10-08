@@ -2139,7 +2139,7 @@ class OpsMonitor:
             "",
         )
 
-    def _disk_usage_alerts(self) -> tuple[Alert, ...]:
+    def _disk_usage_alerts(self, *, now: float | None = None) -> tuple[Alert, ...]:
         if not self._config.storage_path:
             return ()
         try:
@@ -2149,7 +2149,7 @@ class OpsMonitor:
                 timeout_seconds=self._config.command_timeout_seconds,
             )
             self._state["storage_disk_capacity"] = {
-                "at": self._clock(),
+                "at": self._clock() if now is None else now,
                 "available_bytes": usage.available_bytes,
                 "used_fraction": usage.used_bytes / usage.total_bytes,
             }
@@ -2578,7 +2578,7 @@ SELECT json_build_object(
                 alert_prefix="position_recovery_retention",
             )
         )
-        alerts.extend(self._disk_usage_alerts())
+        alerts.extend(self._disk_usage_alerts(now=now))
         alerts.extend(evaluate_log_signals(combined_signals))
         market_snapshot = next(
             (snapshot for snapshot in containers if snapshot.service == "market-data"),
