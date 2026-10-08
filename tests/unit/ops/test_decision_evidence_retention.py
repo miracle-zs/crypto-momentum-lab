@@ -10,19 +10,25 @@ def test_old_checkpoint_protects_only_its_own_row_and_pending_exits():
         CREATE TABLE durable_policy_states (last_decision_id TEXT);
         CREATE TABLE durable_decision_exits (decision_id TEXT, status TEXT);
         INSERT INTO decision_traces VALUES
-          ('old-head'),('ordinary'),('pending'),('sent');
+          ('old-head'),('ordinary'),('pending'),('sent'),('superseded'),('unknown');
         INSERT INTO durable_policy_states VALUES ('old-head');
         INSERT INTO durable_decision_exits VALUES
-          ('pending','PENDING'),('sent','DISPATCHED');
+          ('pending','PENDING'),('sent','DISPATCHED'),
+          ('superseded','SUPERSEDED'),('unknown','UNKNOWN');
     """)
     query = (
         "SELECT decision_id FROM decision_traces WHERE true"
         + retention_row_predicate("decision_traces")
     )
-    assert {row[0] for row in db.execute(query)} == {"ordinary", "sent"}
+    assert {row[0] for row in db.execute(query)} == {"ordinary", "sent", "superseded"}
     db.execute(
         "UPDATE durable_decision_exits SET status='DISPATCHED' "
         "WHERE decision_id='pending'"
     )
-    assert {row[0] for row in db.execute(query)} == {"ordinary", "sent", "pending"}
+    assert {row[0] for row in db.execute(query)} == {
+        "ordinary",
+        "sent",
+        "pending",
+        "superseded",
+    }
     db.close()

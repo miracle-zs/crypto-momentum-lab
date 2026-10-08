@@ -57,7 +57,8 @@ def retention_row_predicate(table: str, *, alias: str | None = None) -> str:
         " AND NOT EXISTS (SELECT 1 FROM durable_policy_states s "
         f"WHERE s.last_decision_id = {relation}.decision_id) "
         "AND NOT EXISTS (SELECT 1 FROM durable_decision_exits e "
-        f"WHERE e.decision_id = {relation}.decision_id AND e.status <> 'DISPATCHED')"
+        f"WHERE e.decision_id = {relation}.decision_id "
+        "AND e.status NOT IN ('DISPATCHED', 'SUPERSEDED'))"
     )
 
 
