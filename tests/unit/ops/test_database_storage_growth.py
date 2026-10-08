@@ -147,7 +147,7 @@ def test_checking_between_sample_intervals_does_not_duplicate_samples(tmp_path):
     assert len(instance._state["database_storage_samples"]) == 2
 
 
-def test_short_spike_with_quiet_full_day_and_headroom_is_warning(tmp_path):
+def test_short_spike_with_headroom_still_exceeds_critical_growth_budget(tmp_path):
     instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
     instance._state["storage_disk_capacity"] = {
         "at": 24 * HOUR,
@@ -157,7 +157,7 @@ def test_short_spike_with_quiet_full_day_and_headroom_is_warning(tmp_path):
     alerts = instance._database_storage_growth_alerts(
         footprint(GIB + 100 * MIB), now=24 * HOUR
     )
-    assert alerts[0].severity == "warning"
+    assert alerts[0].severity == "critical"
     assert alerts[0].details["estimated_days_to_exhaustion"] > 7
     assert alerts[0].details["growth_classification"] == "recent_acceleration"
     assert any(
@@ -226,7 +226,7 @@ def test_capacity_sample_uses_monitor_cycle_time_despite_slow_checks(
     alerts = instance._database_storage_growth_alerts(
         footprint(GIB + 100 * MIB), now=24 * HOUR
     )
-    assert alerts[0].severity == "warning"
+    assert alerts[0].severity == "critical"
     assert alerts[0].details["available_bytes"] == 26 * GIB
 
 

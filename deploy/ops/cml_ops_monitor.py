@@ -2424,11 +2424,7 @@ SELECT json_build_object(
                     for rate in historical["relation_bytes_per_day"].values()
                 )
             )
-            capacity_urgent = (
-                exhaustion_days is not None
-                and exhaustion_days <= self._config.storage_growth_capacity_horizon_days
-            ) or capacity.get("used_fraction", 0) >= self._config.disk_critical_fraction
-            critical = bool(critical and (sustained_critical or capacity_urgent))
+            # Capacity explains urgency; it must never weaken growth budgets.
             capacity_details = {
                 "available_bytes": available,
                 "estimated_days_to_exhaustion": exhaustion_days,
