@@ -417,6 +417,7 @@ async def observe_evidence_transaction(
                         provenance=evidence.fill_load_provenance,
                         adoption=evidence.stream_checkpoint_adoption,
                         adopting_epoch=adopting_epoch,
+                        force_checkpoint=rebuilt_order,
                     )
                     if rebuilt_order and checkpoint is None:
                         raise AbortObservation(

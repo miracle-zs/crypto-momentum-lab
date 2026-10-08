@@ -36,6 +36,10 @@ from crypto_momentum_lab.domain.execution.recovery_models import (
     StreamCheckpointAdoption,
 )
 
+# Bound the durable suffix independently of poll frequency and process restarts.
+RECOVERY_CHECKPOINT_MAX_AGE_SECONDS = 300
+RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS = 64
+
 
 def rebuild_ordered_scan_journal(
     *,
@@ -115,6 +119,7 @@ def create_verified_recovery_checkpoint(
     provenance: AccountFillLoadProvenance | None,
     adoption: StreamCheckpointAdoption | None,
     adopting_epoch: bool,
+    force_checkpoint: bool = False,
 ) -> PositionRecoveryCheckpoint | None:
     if proof is None or provenance is None:
         return None
@@ -242,6 +247,32 @@ def create_verified_recovery_checkpoint(
     elif (
         checkpoint.projection.total_active_quantity != abs(latest_snapshot.position_amt)
         or not checkpoint.projection.active_batches
+    ):
+        return None
+    # Verification still runs for every complete scan. Only the durable seed
+    # is deferred; fresh snapshots, coverage and scan provenance remain facts.
+    if (
+        not force_checkpoint
+        and not adopting_epoch
+        and adoption is None
+        and previous_checkpoint is not None
+        and provenance.source_anchor_kind == "recovery_checkpoint"
+        and checkpoint.stream_scope == previous_checkpoint.stream_scope
+        and (checkpoint.event_cut - previous_checkpoint.event_cut).total_seconds()
+        < RECOVERY_CHECKPOINT_MAX_AGE_SECONDS
+        and 0
+        < journal.revision - previous_checkpoint.source_revision
+        < RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS
+        and not checkpoint_facts.fills
+        and not checkpoint_facts.exit_boundaries
+        and len(checkpoint_facts.snapshots) < RECOVERY_CHECKPOINT_MAX_INCREMENTAL_EVENTS
+        and not checkpoint_facts.conflicting_fills
+        and not checkpoint_facts.fact_conflicts
+        and not checkpoint_facts.late_fills
+        and replace(checkpoint.projection, event_cut=None, projection_version=None)
+        == replace(
+            previous_checkpoint.projection, event_cut=None, projection_version=None
+        )
     ):
         return None
     return checkpoint

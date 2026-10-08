@@ -337,3 +337,17 @@ Orders, fills, snapshots, coverage and scan provenance are unaffected.
 Recovery uses the checkpoint as its flag baseline, including when prefix history
 is requested; only later state events supersede it. The optimization also avoids
 rehashing the full fact history merely to identify a redundant state event.
+
+
+### Recovery checkpoint cadence
+
+Every complete fill scan still undergoes the existing checkpoint verification.
+For the same stream, a verified scan with no new fills/exit boundaries and an
+unchanged position projection can reuse its durable seed while the suffix is
+below 64 journal revisions/snapshots and the event-cut advance is below 300s.
+The budget is measured against the persisted checkpoint, so process restarts do
+not reset it. The next eligible scan at either limit creates a checkpoint.
+New business facts, stream adoption, first seeds and ordered late-event repair
+retain immediate checkpoint generation. All observation snapshots, coverage and
+scan provenance are committed even when seed creation is deferred. If no scan
+proves complete coverage, no checkpoint is manufactured to satisfy a timer.
