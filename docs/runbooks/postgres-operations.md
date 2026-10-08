@@ -382,3 +382,18 @@ reader when restoring or rolling back application versions. Deleting hot rows
 creates reusable PostgreSQL pages, not immediate filesystem shrinkage. Cold files
 still occupy this server's disk: this stage bounds hot retention, and is not an
 offsite backup or an unlimited cold-storage policy.
+
+
+### Storage growth attribution
+
+The operational monitor samples all public ordinary tables and materialized
+views every five minutes. Partition leaves are summed under their logical root
+name, including indexes and TOAST, so partition rotation does not appear as a
+new unrelated table. Temporary tables are excluded from the business inventory.
+Database growth and per-table thresholds are unchanged. Alerts show the largest
+positive contributors even when each individually remains below its threshold,
+plus the residual database growth not explained by measured table deltas.
+The residual can include temporary relations, system objects and sampling races;
+it is not proof of any single cause. Newly inventoried tables need a baseline
+before their rate is calculated, and alert text reports incomplete coverage
+during this transition. Existing sample history is preserved.

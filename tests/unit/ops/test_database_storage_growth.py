@@ -252,3 +252,54 @@ def test_storage_severity_downgrade_updates_notification_once_inside_cooldown(
     instance._emit(Alert("database_storage_growth", "warning", "growth"), now=120)
     assert [payload["severity"] for payload in delivered] == ["critical", "warning"]
     assert delivered[-1]["details"]["deescalated_from"] == "critical"
+
+
+def test_total_growth_reports_contributors_below_individual_table_threshold(tmp_path):
+    base = {"strategy_runtime_events": GIB, "runtime_market_states_15s": GIB}
+    instance = monitor(
+        tmp_path, [{"at": 0, "database_bytes": 3 * GIB, "relations": base}]
+    )
+    alerts = instance._database_storage_growth_alerts(
+        {
+            "database_bytes": 3 * GIB + 32 * MIB,
+            "relations": {
+                "strategy_runtime_events": GIB + 8 * MIB,
+                "runtime_market_states_15s": GIB + 8 * MIB,
+            },
+        },
+        now=HOUR,
+    )
+    assert len(alerts) == 1
+    details = alerts[0].details
+    assert details["relation_growth_bytes_per_day"] == {}
+    assert details["relation_growth_contributors_bytes_per_day"] == {
+        "strategy_runtime_events": 192 * MIB,
+        "runtime_market_states_15s": 192 * MIB,
+    }
+    assert details["unattributed_growth_bytes_per_day"] == 384 * MIB
+    rendered = "\n".join(
+        _format_alert_human_details("database_storage_growth", details)
+    )
+    assert "strategy_runtime_events" in rendered
+    assert "runtime_market_states_15s" in rendered
+
+
+def test_new_inventory_waits_for_baseline_without_inventing_table_growth(tmp_path):
+    instance = monitor(
+        tmp_path,
+        [{"at": 0, "database_bytes": GIB, "relations": {"decision_traces": MIB}}],
+    )
+    alerts = instance._database_storage_growth_alerts(
+        {
+            "database_bytes": GIB + 32 * MIB,
+            "relations": {"decision_traces": MIB, "newly_tracked": 500 * MIB},
+        },
+        now=HOUR,
+    )
+    details = alerts[0].details
+    assert details["unbaselined_relation_count"] == 1
+    assert "newly_tracked" not in details["relation_growth_contributors_bytes_per_day"]
+    assert details["unattributed_growth_bytes_per_day"] == 768 * MIB
+    assert "缺少窗口基线" in "\n".join(
+        _format_alert_human_details("database_storage_growth", details)
+    )

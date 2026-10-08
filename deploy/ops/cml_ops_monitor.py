@@ -2190,24 +2190,19 @@ class OpsMonitor:
         sql = """
 SELECT json_build_object(
   'database_bytes', pg_database_size(current_database()),
-  'relations', COALESCE(
-    (
-      SELECT json_object_agg(sized.name, sized.total_bytes)
-      FROM (
-        SELECT tracked.name,
-               pg_total_relation_size(to_regclass('public.' || quote_ident(tracked.name)))
-                 AS total_bytes
-        FROM (VALUES
-          ('decision_traces'),
-          ('decision_policy_evidence'),
-          ('market_revision_refs'),
-          ('position_fact_journal_events'),
-          ('position_recovery_checkpoints')
-        ) AS tracked(name)
-        WHERE to_regclass('public.' || quote_ident(tracked.name)) IS NOT NULL
-      ) AS sized
-    ), '{}'::json
-  )
+  'relations', COALESCE((
+    SELECT json_object_agg(sized.name, sized.total_bytes)
+    FROM (
+      SELECT root.relname AS name,
+             sum(pg_total_relation_size(leaf.oid))::bigint AS total_bytes
+      FROM pg_class leaf
+      JOIN pg_namespace n ON n.oid = leaf.relnamespace
+      JOIN pg_class root
+        ON root.oid = coalesce(pg_partition_root(leaf.oid), leaf.oid)
+      WHERE n.nspname = 'public' AND leaf.relkind IN ('r', 'm')
+      GROUP BY root.relname
+    ) sized
+  ), '{}'::json)
 )::text;
 """
         try:
@@ -2340,8 +2335,12 @@ SELECT json_build_object(
             }
             return {
                 "window_seconds": elapsed,
+                "unbaselined_relation_count": len(relations) - len(relation_deltas),
                 "database_delta_bytes": delta,
                 "database_bytes_per_day": int(delta * 86_400 / elapsed),
+                "unattributed_bytes_per_day": int(
+                    (delta - sum(relation_deltas.values())) * 86_400 / elapsed
+                ),
                 "relation_bytes_per_day": {
                     name: int(change * 86_400 / elapsed)
                     for name, change in relation_deltas.items()
@@ -2454,6 +2453,19 @@ SELECT json_build_object(
                     "historical_complete_window": historical["complete_window"],
                     "relation_bytes": relations,
                     "relation_growth_bytes_per_day": fast_relations,
+                    "relation_growth_contributors_bytes_per_day": {
+                        name: rate
+                        for name, rate in sorted(
+                            relation_growth_per_day.items(),
+                            key=lambda item: item[1], reverse=True,
+                        )[:5] if rate > 0
+                    },
+                    "unattributed_growth_bytes_per_day": recent[
+                        "unattributed_bytes_per_day"
+                    ],
+                    "unbaselined_relation_count": recent[
+                        "unbaselined_relation_count"
+                    ],
                     "warning_bytes_per_day": (
                         self._config.storage_growth_warning_bytes_per_day
                     ),
@@ -5554,7 +5566,9 @@ def _format_alert_human_details(
             lines.append(
                 f"- **近期折算日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
             )
-        growths = details.get("relation_growth_bytes_per_day")
+        growths = details.get("relation_growth_contributors_bytes_per_day")
+        if not isinstance(growths, Mapping) or not growths:
+            growths = details.get("relation_growth_bytes_per_day")
         if isinstance(growths, Mapping) and growths:
             ranked = sorted(
                 (
@@ -5568,6 +5582,18 @@ def _format_alert_human_details(
             lines.extend(
                 f"- **重点表增长**：`{name}` 约 {growth / (1024**3):.2f} GiB/天"
                 for name, growth in ranked
+            )
+        unattributed = details.get("unattributed_growth_bytes_per_day")
+        unbaselined = details.get("unbaselined_relation_count")
+        if isinstance(unbaselined, int) and unbaselined > 0:
+            lines.append(
+                f"- **归因覆盖**：{unbaselined} 类表缺少窗口基线，正在积累采样"
+            )
+        if isinstance(unattributed, int) and unattributed > 0:
+            lines.append(
+                "- **未归因净增长**：约 "
+                f"{unattributed / (1024**3):.2f} GiB/天；"
+                "可能包含临时表、系统目录或采样期间的变化，需进一步核对"
             )
         window = details.get("growth_window_seconds")
         if isinstance(window, (int, float)):
