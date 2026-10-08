@@ -1184,6 +1184,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 rest_require_mapping(payload),
                 observed_at=self._now(),
                 entry_leverage=entry_leverage,
+                fill_price_optional=True,
             )
             if snapshot.executed_quantity > Decimal("0") and (
                 snapshot.average_price is None or snapshot.average_price <= Decimal("0")
@@ -1215,6 +1216,16 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 "binance_order_submit_response_parse_error",
                 client_order_id=plan.client_order_id,
                 error=str(parse_exc),
+                avg_price_json_type=_json_value_type(
+                    payload.get("avgPrice", _MISSING)
+                    if isinstance(payload, dict)
+                    else _MISSING
+                ),
+                cumulative_quote_json_type=_json_value_type(
+                    payload.get("cumQuote", _MISSING)
+                    if isinstance(payload, dict)
+                    else _MISSING
+                ),
             )
             raise ExchangeSubmissionTimeoutError(
                 f"Binance order submitted but response parsing failed: {parse_exc}"

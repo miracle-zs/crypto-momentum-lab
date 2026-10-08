@@ -767,6 +767,46 @@ async def test_order_post_unreadable_response_has_unknown_outcome(body: str) -> 
         await client.aclose()
 
 
+async def test_submit_order_queries_price_when_submit_response_omits_price_fields() -> (
+    None
+):
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        payload = {
+            "clientOrderId": _order_plan().client_order_id,
+            "orderId": 12345,
+            "status": "FILLED",
+            "executedQty": "0.003",
+        }
+        if request.method == "GET":
+            assert (
+                request.url.params["origClientOrderId"] == _order_plan().client_order_id
+            )
+            payload.update(avgPrice="30000", cumQuote="90")
+        return httpx.Response(200, json=payload)
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://fapi.binance.com"
+        ),
+        clock=lambda: datetime(2026, 10, 8, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+    assert snapshot.average_price == Decimal("30000")
+    assert snapshot.state is ExchangeOrderState.FILLED
+    assert requests == ["POST", "GET"]
+
+
 async def test_submit_order_reconciles_schema_drift_from_authoritative_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -784,8 +824,7 @@ async def test_submit_order_reconciles_schema_drift_from_authoritative_query(
         requests.append((request.method, request.url.path))
         if request.method == "GET":
             assert (
-                request.url.params["origClientOrderId"]
-                == _order_plan().client_order_id
+                request.url.params["origClientOrderId"] == _order_plan().client_order_id
             )
             return httpx.Response(
                 200,
@@ -1375,8 +1414,9 @@ async def test_trade_client_cancels_one_known_order_without_operator_command() -
     assert snapshot.state is ExchangeOrderState.CANCELED
 
 
-async def test_trade_client_treats_malformed_cancel_response_as_unknown_outcome(
-) -> None:
+async def test_trade_client_treats_malformed_cancel_response_as_unknown_outcome() -> (
+    None
+):
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,

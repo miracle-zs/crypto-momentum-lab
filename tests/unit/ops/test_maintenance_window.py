@@ -5,7 +5,12 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from deploy.ops.cml_ops_monitor import _is_maintenance_noise
+from deploy.ops.cml_ops_monitor import (
+    Alert,
+    MonitorConfig,
+    OpsMonitor,
+    _is_maintenance_noise,
+)
 from deploy.ops.maintenance_window import (
     clear_maintenance_window,
     default_maintenance_path,
@@ -92,6 +97,93 @@ def test_only_lifecycle_alerts_are_silenced() -> None:
     assert not _is_maintenance_noise("container_memory_growth")
     assert not _is_maintenance_noise("container_memory_pressure")
     assert not _is_maintenance_noise("database_connection_pressure")
+    assert not _is_maintenance_noise("container_oom_killed")
+    assert _is_maintenance_noise("live_account_lifecycle_not_ready:primary")
+    assert _is_maintenance_noise("live_market_state_stale")
+
+
+def test_maintenance_filters_before_notification_and_deadman(monkeypatch, tmp_path):
+    now = datetime.now(UTC)
+    marker = tmp_path / "maintenance.json"
+    monkeypatch.setenv("CML_MAINTENANCE_WINDOW_FILE", str(marker))
+    write_maintenance_window(marker, started_at=now, expected_seconds=60)
+    delivered = []
+    heartbeats = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(payload),
+    )
+
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            return ""
+
+    monitor = OpsMonitor(
+        MonitorConfig(
+            services=("live-strategy",),
+            live_accounts=(),
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+        ),
+        runner=Runner(),
+        clock=lambda: now.timestamp(),
+    )
+    monkeypatch.setattr(monitor, "_send_external_heartbeat", heartbeats.append)
+    monkeypatch.setattr(
+        monitor,
+        "_disk_usage_alerts",
+        lambda: (
+            Alert("database_storage_growth", "warning", "real growth"),
+            Alert("container_oom_killed", "critical", "real OOM"),
+        ),
+    )
+    alerts = monitor.run_once()
+    assert {a.name for a in alerts} == {
+        "database_storage_growth",
+        "container_oom_killed",
+    }
+    assert {a["alert_name"] for a in delivered} == {a.name for a in alerts}
+    assert "container_missing" not in monitor._state.get("active_alerts", {})
+    assert "container_missing" not in heartbeats[-1]["critical_alerts"]
+
+    # A pre-existing incident is muted, not falsely declared recovered.
+    monitor._state["active_alerts"]["container_missing"] = now.timestamp() - 300
+    monitor.run_once()
+    assert "container_missing" in monitor._state["active_alerts"]
+    assert not any(a["event"] == "ops_alert_resolved" for a in delivered)
+
+    clear_maintenance_window(marker)
+    monitor.run_once()
+    assert any(a["alert_name"] == "container_missing" for a in delivered)
+
+
+def test_maintenance_does_not_hide_missing_postgres(monkeypatch, tmp_path):
+    now = datetime.now(UTC)
+    marker = tmp_path / "maintenance.json"
+    monkeypatch.setenv("CML_MAINTENANCE_WINDOW_FILE", str(marker))
+    write_maintenance_window(marker, started_at=now, expected_seconds=60)
+    delivered = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(payload),
+    )
+
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            return ""
+
+    monitor = OpsMonitor(
+        MonitorConfig(
+            services=("postgres",),
+            live_accounts=(),
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+        ),
+        runner=Runner(),
+        clock=lambda: now.timestamp(),
+    )
+    assert [a.name for a in monitor.run_once()] == ["container_missing"]
+    assert delivered[0]["details"]["service"] == "postgres"
 
 
 def test_default_path_honours_the_override(monkeypatch) -> None:

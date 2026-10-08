@@ -309,6 +309,22 @@ def test_order_response_uses_cumulative_quote_for_zero_average(
     assert data["avgPrice"] == average
 
 
+@pytest.mark.parametrize("quote", [None, 10, True])
+def test_optional_submit_price_does_not_coerce_present_quote(quote):
+    with pytest.raises(ValueError, match="cumQuote"):
+        order_snapshot_from_response(
+            {
+                "clientOrderId": "entry",
+                "orderId": 42,
+                "status": "FILLED",
+                "executedQty": "2",
+                "cumQuote": quote,
+            },
+            observed_at=datetime(2026, 10, 8, tzinfo=UTC),
+            fill_price_optional=True,
+        )
+
+
 def test_order_response_recovers_missing_average_from_cumulative_quote():
     result = order_snapshot_from_response(
         {

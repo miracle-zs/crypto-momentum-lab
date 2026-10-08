@@ -151,19 +151,28 @@ def order_snapshot_from_response(
     *,
     observed_at: datetime,
     entry_leverage: int | None = None,
+    fill_price_optional: bool = False,
 ) -> ExchangeOrderSnapshot:
     state = exchange_order_state(rest_require_string(data, "status"))
     executed_quantity = decimal_value(rest_require_string(data, "executedQty"))
     average_price_missing = "avgPrice" not in data
+    execution_price_omitted = (
+        fill_price_optional and average_price_missing and "cumQuote" not in data
+    )
     if average_price_missing:
-        # A missing average has no meaning for an order with no executions.
-        # For executed quantity, the cumulative quote below must establish it.
+        # Zero is the existing snapshot sentinel for unresolved fill price,
+        # not a fabricated execution. Only submit responses may omit BOTH
+        # price fields; the trade client then uses its authoritative query.
         average_price = Decimal("0")
     else:
         # A present null or non-string value is schema drift, not a missing
         # field; keep the exchange response type strict.
         average_price = decimal_value(rest_require_string(data, "avgPrice"))
-    if executed_quantity > Decimal("0") and average_price == Decimal("0"):
+    if (
+        executed_quantity > Decimal("0")
+        and average_price == Decimal("0")
+        and not execution_price_omitted
+    ):
         cum_quote = decimal_value(rest_require_string(data, "cumQuote"))
         if cum_quote < Decimal("0"):
             raise ValueError("Binance order response cumQuote must be non-negative")

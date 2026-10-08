@@ -35,13 +35,20 @@ if [[ -d "$crash_log_directory" ]]; then
     -mtime "+$crash_log_retention_days" -delete
 fi
 
-# A running container is an invariant, not a heuristic: retain every image
-# referenced by one, then retain the newest N application image IDs for a fast
+# A container reference is an invariant, even when stopped: retain every image
+# referenced by any container, then the newest N application IDs for a fast
 # rollback.  Image IDs rather than tags avoid deleting a multi-tagged image.
 declare -A keep_image_ids=()
-while IFS= read -r image_id; do
-  [[ -n "$image_id" ]] && keep_image_ids["$image_id"]=1
-done < <(docker ps -q | xargs -r docker inspect --format '{{.Image}}')
+container_ids="$(docker ps -aq)"
+if [[ -n "$container_ids" ]]; then
+  mapfile -t container_id_list <<< "$container_ids"
+  # Capture synchronously: an inventory/inspect failure must stop pruning,
+  # not disappear behind a process substitution and leave an empty keep set.
+  protected_image_ids="$(docker inspect --format '{{.Image}}' "${container_id_list[@]}")"
+  while IFS= read -r image_id; do
+    [[ -n "$image_id" ]] && keep_image_ids["$image_id"]=1
+  done <<< "$protected_image_ids"
+fi
 
 mapfile -t app_image_ids < <(
   docker image ls "$app_repository" --no-trunc --format '{{.ID}}' | awk '!seen[$0]++'

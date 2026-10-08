@@ -1517,10 +1517,14 @@ def _is_within_start_grace(
 _MAINTENANCE_SILENCED_PREFIXES = (
     "container_missing",
     "container_unhealthy",
-    "container_oom_killed",
     "live_heartbeat_stale",
     "live_heartbeat_auto_restarted",
     "live_crash_log_archive_failed",
+    "live_account_lifecycle_not_ready",
+    "live_session_not_ready",
+    "live_market_state_stale",
+    "live_market_state_delay",
+    "market_task_not_alive",
 )
 
 
@@ -2069,15 +2073,7 @@ class OpsMonitor:
     def run_once(self) -> tuple[Alert, ...]:
         """Evaluate one cycle, honouring any declared maintenance window."""
 
-        alerts = self._evaluate_once()
-        window = read_maintenance_window(default_maintenance_path())
-        if window is not None and window.is_active(now=now_utc()):
-            # A deploy declared this churn.  Only lifecycle alerts are noise
-            # during it; memory and database alerts still carry meaning.
-            return tuple(
-                alert for alert in alerts if not _is_maintenance_noise(alert.name)
-            )
-        return alerts
+        return self._evaluate_once()
 
     def _retention_schedule_state(self) -> RetentionScheduleState | None:
         """Observe the cold-data retention schedule, not just its output."""
@@ -2701,7 +2697,23 @@ SELECT json_build_object(
                 ),
             )
         )
+        window = read_maintenance_window(default_maintenance_path())
+        maintenance_active = window is not None and window.is_active(now=now_utc())
+        if maintenance_active:
+            # Filter BEFORE any notification/state/deadman publication, not
+            # after _evaluate_once has already emitted the alerts.
+            alerts = [
+                alert for alert in alerts
+                if alert.details.get("service") == "postgres"
+                or not _is_maintenance_noise(alert.name)
+            ]
         active_keys = {alert.name for alert in alerts}
+        if maintenance_active:
+            # Silence does not prove recovery of an incident predating deploy.
+            active_keys.update(
+                name for name in self._state.get("active_alerts", {})
+                if _is_maintenance_noise(name)
+            )
         for alert in alerts:
             self._emit(alert, now=now)
         self._emit_resolutions(active_keys, now=now)
