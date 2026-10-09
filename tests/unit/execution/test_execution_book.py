@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -697,6 +698,18 @@ async def test_execution_book_act_and_idempotency_workflow() -> None:
     act_repeat = await book.act(req)
     assert isinstance(act_repeat, AlreadyAccepted)
     assert act_repeat.receipt.request_id == "req-exit-1"
+
+    # A retry can be reconstructed with a fresh observation timestamp while
+    # keeping the same durable command identity and trading payload.
+    async def unexpected_prepare(_transaction):
+        pytest.fail("an accepted retry must not prepare a duplicate exchange order")
+
+    retried = await book.act(
+        replace(req, created_at=req.created_at + timedelta(seconds=1)),
+        prepare_submission=unexpected_prepare,
+    )
+    assert isinstance(retried, AlreadyAccepted)
+    assert retried.receipt is act_result.receipt
 
     # Conflicting submission with different requested quantity returns CommandConflict
     req_conflict = ExecutionRequest(

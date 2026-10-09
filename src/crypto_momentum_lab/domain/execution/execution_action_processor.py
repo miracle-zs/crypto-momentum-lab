@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -79,7 +79,7 @@ async def accept_execution_command(
     effective_view_token = view.projection_version
     existing_request = state.requests_by_id.get(request.request_id)
     if existing_request is not None:
-        if existing_request == request:
+        if _same_execution_request_payload(existing_request, request):
             return AlreadyAccepted(state.receipts_by_id[request.request_id])  # type: ignore[arg-type]
         return CommandConflict(
             request_id=request.request_id,
@@ -246,6 +246,15 @@ async def accept_execution_command(
     state.receipts_by_id[request.request_id] = receipt
     dependencies.advance_context_revision()
     return Accepted(receipt)
+
+
+def _same_execution_request_payload(
+    existing: object, retry: ExecutionRequest
+) -> bool:
+    """Treat a retry timestamp as metadata; compare every command field."""
+    return isinstance(existing, ExecutionRequest) and replace(
+        existing, created_at=retry.created_at
+    ) == retry
 
 
 async def _save_new_reservations(
