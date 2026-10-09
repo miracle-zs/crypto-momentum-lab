@@ -29,6 +29,10 @@ The monitor alerts on:
   values in the alert details;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
   maintenance;
+- database storage growth above its configured budget, measured over a
+  six-hour trend window. A warning clears only after the rate stays below 80%
+  of its warning threshold for 30 minutes; persistent incidents repeat at most
+  every six hours, while critical escalation remains immediate;
 - `live_local_fact_inconsistency`: local projection or position repair blocked/failed
   (scoped to specific account and symbol, avoids global halt);
 - `live_exit_evaluation_deferred`: exit evaluation repeatedly deferred or waiting for sync;

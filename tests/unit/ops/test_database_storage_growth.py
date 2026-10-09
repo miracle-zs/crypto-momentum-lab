@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from deploy.ops.cml_ops_monitor import (
+    Alert,
     MonitorConfig,
     OpsMonitor,
     _alert_conclusion,
@@ -12,8 +13,20 @@ GIB = 1024**3
 HOUR = 3600
 
 
-def monitor(tmp_path: Path, samples: list[dict]) -> OpsMonitor:
-    instance = OpsMonitor(MonitorConfig(state_path=tmp_path / "monitor.json"))
+def monitor(
+    tmp_path: Path,
+    samples: list[dict],
+    *,
+    minimum_window: float = HOUR,
+    recovery_seconds: float = 30 * 60,
+) -> OpsMonitor:
+    instance = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "monitor.json",
+            storage_growth_minimum_window_seconds=minimum_window,
+            storage_growth_recovery_seconds=recovery_seconds,
+        )
+    )
     instance._state["database_storage_samples"] = samples
     return instance
 
@@ -86,6 +99,28 @@ def test_startup_waits_for_minimum_window(tmp_path):
     instance = monitor(tmp_path, [sample(0, GIB)])
     assert instance._database_storage_growth_alerts(footprint(2 * GIB), now=300) == ()
     assert instance._state["database_storage_growth_observation"]["recent"] is None
+
+
+def test_default_recent_growth_window_smooths_single_hour_spike(tmp_path):
+    instance = OpsMonitor(MonitorConfig(state_path=tmp_path / "monitor.json"))
+    instance._state["database_storage_samples"] = [
+        sample(0, GIB),
+        sample(HOUR, GIB + 32 * MIB),
+    ]
+
+    assert instance._config.storage_growth_minimum_window_seconds == 6 * HOUR
+    assert (
+        instance._database_storage_growth_alerts(
+            footprint(GIB + 32 * MIB), now=HOUR
+        )
+        == ()
+    )
+    assert (
+        instance._database_storage_growth_alerts(
+            footprint(GIB + 32 * MIB), now=6 * HOUR
+        )
+        == ()
+    )
 
 
 def test_unsorted_samples_use_nearest_eligible_baseline(tmp_path):
@@ -166,6 +201,80 @@ def test_short_spike_with_headroom_still_exceeds_critical_growth_budget(tmp_path
     )
 
 
+def test_historical_over_budget_is_not_mislabeled_as_recent_acceleration(tmp_path):
+    instance = monitor(
+        tmp_path,
+        [sample(0, GIB), sample(23 * HOUR, GIB + 575 * MIB)],
+    )
+
+    alerts = instance._database_storage_growth_alerts(
+        footprint(GIB + 599 * MIB), now=24 * HOUR
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].details["database_growth_bytes_per_day"] < alerts[0].details[
+        "historical_database_bytes_per_day"
+    ]
+    assert alerts[0].details["growth_classification"] == "sustained"
+
+
+def test_active_growth_uses_lower_recovery_threshold_and_stable_period(
+    tmp_path, monkeypatch
+):
+    delivered = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(dict(payload)),
+    )
+    instance = monitor(
+        tmp_path,
+        [
+            sample(at, GIB + int(10 * MIB * at / HOUR))
+            for at in range(0, HOUR + 1, 5 * 60)
+        ],
+        recovery_seconds=30 * 60,
+    )
+    instance._config = MonitorConfig(
+        state_path=tmp_path / "monitor.json",
+        consecutive_alerts_required=1,
+        consecutive_resolutions_required=2,
+        storage_growth_minimum_window_seconds=HOUR,
+        storage_growth_recovery_seconds=30 * 60,
+    )
+    instance._emit(
+        Alert("database_storage_growth", "warning", "growth", {"rate": 600}),
+        now=100,
+    )
+
+    assert (
+        instance._database_storage_growth_alerts(
+            footprint(GIB + 10 * MIB), now=HOUR
+        )
+        == ()
+    )
+    assert instance._state["database_storage_growth_resolution_hold"] is True
+    instance._emit_resolutions(set(), now=HOUR)
+    assert len(delivered) == 1
+
+    assert (
+        instance._database_storage_growth_alerts(
+            footprint(GIB + 10 * MIB), now=HOUR + 30 * 60
+        )
+        == ()
+    )
+    assert instance._state["database_storage_growth_resolution_hold"] is False
+    instance._emit_resolutions(set(), now=HOUR + 30 * 60)
+    assert len(delivered) == 1
+    assert (
+        instance._database_storage_growth_alerts(
+            footprint(GIB + 10 * MIB), now=HOUR + 30 * 60 + 60
+        )
+        == ()
+    )
+    instance._emit_resolutions(set(), now=HOUR + 30 * 60 + 60)
+    assert delivered[-1]["event"] == "ops_alert_resolved"
+
+
 def test_capacity_exhaustion_within_week_escalates_short_growth(tmp_path):
     instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
     instance._state["storage_disk_capacity"] = {
@@ -213,7 +322,9 @@ def test_capacity_sample_uses_monitor_cycle_time_despite_slow_checks(
 
     instance = monitor(tmp_path, [sample(0, GIB), sample(23 * HOUR, GIB)])
     instance._config = MonitorConfig(
-        state_path=tmp_path / "monitor.json", storage_path="/"
+        state_path=tmp_path / "monitor.json",
+        storage_path="/",
+        storage_growth_minimum_window_seconds=HOUR,
     )
     instance._clock = lambda: 24 * HOUR + 20
     monkeypatch.setattr(

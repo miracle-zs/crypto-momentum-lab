@@ -10,6 +10,7 @@ is never required for the trading stack to start.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -68,6 +69,7 @@ _DEFAULT_SWAP_GROWTH_BYTES = 32 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
+_DEFAULT_DATABASE_STORAGE_ALERT_COOLDOWN_SECONDS = 6.0 * 60.0 * 60.0
 _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED = 2
 _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED = 2
 _DEFAULT_FLAPPING_WINDOW_SECONDS = 600.0
@@ -86,7 +88,9 @@ _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY = 512 * 1024 * 1024
 _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY = 1024 * 1024 * 1024
 _DEFAULT_RELATION_GROWTH_WARNING_BYTES_PER_DAY = 256 * 1024 * 1024
 _DEFAULT_RELATION_GROWTH_CRITICAL_BYTES_PER_DAY = 512 * 1024 * 1024
-_DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS = 60.0 * 60.0
+_DEFAULT_STORAGE_GROWTH_MINIMUM_WINDOW_SECONDS = 6.0 * 60.0 * 60.0
+_DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION = 0.8
+_DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS = 30.0 * 60.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 # How long after a container starts lifecycle alerts stay quiet.  Every deploy
@@ -1895,6 +1899,9 @@ class MonitorConfig:
     rss_growth_window_seconds: float = _DEFAULT_RSS_GROWTH_WINDOW_SECONDS
     memory_growth_required_samples: int = _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
+    database_storage_alert_cooldown_seconds: float = (
+        _DEFAULT_DATABASE_STORAGE_ALERT_COOLDOWN_SECONDS
+    )
     consecutive_alerts_required: int = _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED
     consecutive_resolutions_required: int = _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED
     flapping_window_seconds: float = _DEFAULT_FLAPPING_WINDOW_SECONDS
@@ -1931,6 +1938,12 @@ class MonitorConfig:
     )
     storage_growth_warning_bytes_per_day: int = (
         _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY
+    )
+    storage_growth_recovery_fraction: float = (
+        _DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION
+    )
+    storage_growth_recovery_seconds: float = (
+        _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS
     )
     storage_growth_critical_bytes_per_day: int = (
         _DEFAULT_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY
@@ -2042,6 +2055,12 @@ class OpsMonitor:
             raise ValueError("storage sample window must be positive")
         if config.storage_growth_minimum_window_seconds <= 0:
             raise ValueError("storage growth minimum window must be positive")
+        if not 0 < config.storage_growth_recovery_fraction < 1:
+            raise ValueError("storage growth recovery fraction must be between 0 and 1")
+        if config.storage_growth_recovery_seconds <= 0:
+            raise ValueError("storage growth recovery duration must be positive")
+        if config.database_storage_alert_cooldown_seconds <= 0:
+            raise ValueError("database storage alert cooldown must be positive")
         if config.storage_growth_capacity_horizon_days <= 0:
             raise ValueError("storage growth capacity horizon must be positive")
         if (
@@ -2257,6 +2276,13 @@ SELECT json_build_object(
     def _database_storage_growth_alerts(
         self, footprint: Mapping[str, object], *, now: float
     ) -> tuple[Alert, ...]:
+        active_alerts = self._state.get("active_alerts")
+        incident_active = isinstance(active_alerts, Mapping) and (
+            "database_storage_growth" in active_alerts
+        )
+        # Missing samples are not evidence that an active growth incident has
+        # recovered.  Valid observations below may release this hold.
+        self._state["database_storage_growth_resolution_hold"] = incident_active
         database_bytes = footprint.get("database_bytes")
         raw_relations = footprint.get("relations")
         if not isinstance(database_bytes, int) or not isinstance(
@@ -2389,11 +2415,55 @@ SELECT json_build_object(
             for name, growth in relation_growth_per_day.items()
             if growth >= self._config.relation_growth_warning_bytes_per_day
         }
-        if (
-            database_growth_per_day < self._config.storage_growth_warning_bytes_per_day
-            and not fast_relations
-        ):
+        exceeds_warning_budget = (
+            database_growth_per_day
+            >= self._config.storage_growth_warning_bytes_per_day
+            or bool(fast_relations)
+        )
+        if not exceeds_warning_budget:
+            if not incident_active:
+                self._state.pop("database_storage_growth_recovery_since", None)
+                self._state["database_storage_growth_resolution_hold"] = False
+                return ()
+
+            database_recovery_threshold = int(
+                self._config.storage_growth_warning_bytes_per_day
+                * self._config.storage_growth_recovery_fraction
+            )
+            relation_recovery_threshold = int(
+                self._config.relation_growth_warning_bytes_per_day
+                * self._config.storage_growth_recovery_fraction
+            )
+            still_in_hysteresis_band = (
+                database_growth_per_day >= database_recovery_threshold
+                or any(
+                    growth >= relation_recovery_threshold
+                    for growth in relation_growth_per_day.values()
+                )
+            )
+            if still_in_hysteresis_band:
+                self._state.pop("database_storage_growth_recovery_since", None)
+                self._state["database_storage_growth_resolution_hold"] = True
+                return ()
+
+            recovery_since = self._state.get(
+                "database_storage_growth_recovery_since"
+            )
+            if not isinstance(recovery_since, (int, float)) or recovery_since > now:
+                recovery_since = now
+                self._state[
+                    "database_storage_growth_recovery_since"
+                ] = recovery_since
+            if now - recovery_since < self._config.storage_growth_recovery_seconds:
+                self._state["database_storage_growth_resolution_hold"] = True
+                return ()
+            # The generic resolution debounce starts only after growth has
+            # stayed below the lower threshold for the full recovery interval.
+            self._state["database_storage_growth_resolution_hold"] = False
             return ()
+
+        self._state.pop("database_storage_growth_recovery_since", None)
+        self._state["database_storage_growth_resolution_hold"] = False
         critical = (
             database_growth_per_day
             >= self._config.storage_growth_critical_bytes_per_day
@@ -2416,14 +2486,6 @@ SELECT json_build_object(
                 if database_growth_per_day > 0
                 else None
             )
-            historical_rate = max(0, int(historical["database_bytes_per_day"]))
-            sustained_critical = historical["complete_window"] and (
-                historical_rate >= self._config.storage_growth_critical_bytes_per_day
-                or any(
-                    rate >= self._config.relation_growth_critical_bytes_per_day
-                    for rate in historical["relation_bytes_per_day"].values()
-                )
-            )
             # Capacity explains urgency; it must never weaken growth budgets.
             capacity_details = {
                 "available_bytes": available,
@@ -2431,11 +2493,18 @@ SELECT json_build_object(
                 "capacity_horizon_days": (
                     self._config.storage_growth_capacity_horizon_days
                 ),
-                "historical_database_bytes_per_day": historical_rate,
-                "growth_classification": "sustained"
-                if sustained_critical
-                else "recent_acceleration",
             }
+        historical_rate = max(0, int(historical["database_bytes_per_day"]))
+        sustained_over_budget = historical["complete_window"] and (
+            historical_rate >= self._config.storage_growth_warning_bytes_per_day
+            or any(
+                rate >= self._config.relation_growth_warning_bytes_per_day
+                for rate in historical["relation_bytes_per_day"].values()
+            )
+        )
+        growth_classification = (
+            "sustained" if sustained_over_budget else "recent_acceleration"
+        )
         return (
             Alert(
                 "database_storage_growth",
@@ -2445,12 +2514,21 @@ SELECT json_build_object(
                     **capacity_details,
                     "database_bytes": database_bytes,
                     "database_growth_bytes_per_day": int(database_growth_per_day),
+                    "database_growth_recovery_threshold_bytes_per_day": int(
+                        self._config.storage_growth_warning_bytes_per_day
+                        * self._config.storage_growth_recovery_fraction
+                    ),
+                    "growth_recovery_seconds": int(
+                        self._config.storage_growth_recovery_seconds
+                    ),
                     "growth_window_seconds": elapsed,
                     "historical_window_seconds": historical["window_seconds"],
                     "historical_database_delta_bytes": (
                         historical["database_delta_bytes"]
                     ),
                     "historical_complete_window": historical["complete_window"],
+                    "historical_database_bytes_per_day": historical_rate,
+                    "growth_classification": growth_classification,
                     "relation_bytes": relations,
                     "relation_growth_bytes_per_day": fast_relations,
                     "relation_growth_contributors_bytes_per_day": {
@@ -4215,6 +4293,49 @@ LEFT JOIN (
             command.extend(["--profile", profile])
         return command
 
+    @staticmethod
+    def _has_alert_delivery_context(context: object) -> bool:
+        return (
+            isinstance(context, Mapping)
+            and isinstance(context.get("severity"), str)
+            and context.get("severity") in {"info", "warning", "critical"}
+            and isinstance(context.get("summary"), str)
+            and bool(context.get("summary"))
+            and isinstance(context.get("details"), Mapping)
+        )
+
+    def _repair_orphaned_active_alert(self, name: str, *, now: float) -> None:
+        active = self._state.setdefault("active_alerts", {})
+        contexts = self._state.setdefault("active_alert_context", {})
+        for field_name in (
+            "pending_alerts",
+            "pending_resolutions",
+            "alert_occurrences",
+        ):
+            values = self._state.setdefault(field_name, {})
+            if isinstance(values, dict):
+                values.pop(name, None)
+        if isinstance(active, dict):
+            active.pop(name, None)
+        if isinstance(contexts, dict):
+            contexts.pop(name, None)
+        if name == "database_storage_growth":
+            self._state["database_storage_growth_resolution_hold"] = False
+            self._state.pop("database_storage_growth_recovery_since", None)
+        print(
+            json.dumps(
+                {
+                    "event": "ops_alert_state_repaired",
+                    "observed_at": datetime.fromtimestamp(now, UTC).isoformat(),
+                    "alert_name": name,
+                    "reason": "active_alert_had_no_delivery_context",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
     def _emit(self, alert: Alert, *, now: float) -> None:
         active = self._state.setdefault("active_alerts", {})
         cooldowns = self._state.setdefault("alert_cooldowns", {})
@@ -4235,20 +4356,14 @@ LEFT JOIN (
         if current_count < self._config.consecutive_alerts_required:
             return
 
-        if alert.name not in active:
-            active[alert.name] = now
-
-        if isinstance(alert_occurrences, dict):
-            alert_occurrences[alert.name] = (
-                int(alert_occurrences.get(alert.name, 0)) + 1
-            )
-        occurrence_count = (
-            int(alert_occurrences.get(alert.name, 1))
-            if isinstance(alert_occurrences, dict)
-            else 1
-        )
-
         contexts = self._state.setdefault("active_alert_context", {})
+        existing_context = (
+            contexts.get(alert.name) if isinstance(contexts, dict) else None
+        )
+        if alert.name in active and not self._has_alert_delivery_context(
+            existing_context
+        ):
+            self._repair_orphaned_active_alert(alert.name, now=now)
         previous_context = (
             contexts.get(alert.name) if isinstance(contexts, dict) else None
         )
@@ -4273,11 +4388,36 @@ LEFT JOIN (
         previous_emitted = (
             cooldowns.get(alert.name) if isinstance(cooldowns, dict) else None
         )
+        cooldown_seconds = (
+            self._config.database_storage_alert_cooldown_seconds
+            if alert.name == "database_storage_growth"
+            else self._config.alert_cooldown_seconds
+        )
         if not (is_escalation or is_storage_downgrade):
             if isinstance(previous_emitted, (int, float)) and (
-                now - previous_emitted < self._config.alert_cooldown_seconds
+                now - previous_emitted < cooldown_seconds
             ):
+                if alert.name in active and isinstance(alert_occurrences, dict):
+                    alert_occurrences[alert.name] = (
+                        int(alert_occurrences.get(alert.name, 0)) + 1
+                    )
                 return
+
+        # An alert is active only after its notification is emitted.  A
+        # cooldown-suppressed recurrence must not create an orphaned active
+        # record that later looks like a recovery.
+        if alert.name not in active:
+            active[alert.name] = now
+
+        if isinstance(alert_occurrences, dict):
+            alert_occurrences[alert.name] = (
+                int(alert_occurrences.get(alert.name, 0)) + 1
+            )
+        occurrence_count = (
+            int(alert_occurrences.get(alert.name, 1))
+            if isinstance(alert_occurrences, dict)
+            else 1
+        )
 
         last_resolved = (
             resolved_alerts.get(alert.name)
@@ -4360,6 +4500,24 @@ LEFT JOIN (
                     pending_resolutions.pop(name, None)
                 continue
 
+            context = contexts.get(name) if isinstance(contexts, dict) else None
+            if not self._has_alert_delivery_context(context):
+                # Older monitor versions could persist `active` before a
+                # cooldown check suppressed delivery.  Reconcile that legacy
+                # state silently instead of sending a fabricated critical
+                # recovery with empty context.
+                self._repair_orphaned_active_alert(name, now=now)
+                continue
+
+            if (
+                name == "database_storage_growth"
+                and self._state.get("database_storage_growth_resolution_hold")
+                is True
+            ):
+                if isinstance(pending_resolutions, dict):
+                    pending_resolutions.pop(name, None)
+                continue
+
             res_count = 1
             if isinstance(pending_resolutions, dict):
                 res_count = int(pending_resolutions.get(name, 0)) + 1
@@ -4377,8 +4535,6 @@ LEFT JOIN (
             duration_seconds = (
                 round(now - previous, 3) if isinstance(previous, (int, float)) else None
             )
-            context = contexts.get(name) if isinstance(contexts, dict) else None
-            context = context if isinstance(context, Mapping) else {}
             details = dict(context.get("details", {}))
             occurrence_count = (
                 alert_occurrences.pop(name, None)
@@ -4407,6 +4563,9 @@ LEFT JOIN (
                 contexts.pop(name, None)
             if isinstance(resolved_alerts, dict):
                 resolved_alerts[name] = now
+            if name == "database_storage_growth":
+                self._state["database_storage_growth_resolution_hold"] = False
+                self._state.pop("database_storage_growth_recovery_since", None)
 
 
 # structlog's console renderer -- what the containers actually emit -- looks like
@@ -4420,7 +4579,8 @@ _CONSOLE_LOG_HEAD_RE = re.compile(
     r"\[\s*(?P<level>[A-Za-z]+)\s*\]\s+(?P<event>\S+)\s*(?P<fields>.*)$"
 )
 _CONSOLE_LOG_FIELD_RE = re.compile(
-    r'(?P<key>[A-Za-z_][A-Za-z0-9_.]*)=(?P<value>"[^"]*"|\S+)'
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_.]*)="
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\S+)"
 )
 
 
@@ -4454,9 +4614,14 @@ def _parse_console_log_record(line: str) -> dict[str, object] | None:
     }
     for match in _CONSOLE_LOG_FIELD_RE.finditer(head.group("fields")):
         raw = match.group("value")
-        if len(raw) >= 2 and raw[:1] == '"' and raw[-1:] == '"':
-            raw = raw[1:-1]
-        record[match.group("key")] = _coerce_console_value(raw)
+        if len(raw) >= 2 and raw[:1] in {'"', "'"} and raw[-1:] == raw[:1]:
+            try:
+                value = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                value = raw[1:-1]
+            record[match.group("key")] = value
+        else:
+            record[match.group("key")] = _coerce_console_value(raw)
     return record
 
 
@@ -5561,10 +5726,22 @@ def _format_alert_human_details(
             )
         if details.get("growth_classification") == "recent_acceleration":
             lines.append("- **判断**：近期写入加速；尚未确认跨完整清理周期的持续高增长")
+        elif details.get("growth_classification") == "sustained":
+            lines.append("- **判断**：完整历史窗口仍超过增长预算，属于持续超预算")
         total_rate = details.get("database_growth_bytes_per_day")
         if isinstance(total_rate, int):
             lines.append(
                 f"- **近期折算日增长**：约 **{total_rate / (1024**3):.2f} GiB/天**"
+            )
+        recovery_rate = details.get(
+            "database_growth_recovery_threshold_bytes_per_day"
+        )
+        recovery_seconds = details.get("growth_recovery_seconds")
+        if isinstance(recovery_rate, int) and isinstance(recovery_seconds, int):
+            lines.append(
+                "- **恢复判断**：增长低于 "
+                f"{recovery_rate / (1024**2):.0f} MiB/天并持续 "
+                f"{_human_seconds(recovery_seconds)} 后解除"
             )
         growths = details.get("relation_growth_contributors_bytes_per_day")
         if not isinstance(growths, Mapping) or not growths:
@@ -6174,6 +6351,18 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
                 _DEFAULT_STORAGE_GROWTH_WARNING_BYTES_PER_DAY,
             )
         ),
+        storage_growth_recovery_fraction=float(
+            os.environ.get(
+                "CML_STORAGE_GROWTH_RECOVERY_FRACTION",
+                _DEFAULT_STORAGE_GROWTH_RECOVERY_FRACTION,
+            )
+        ),
+        storage_growth_recovery_seconds=float(
+            os.environ.get(
+                "CML_STORAGE_GROWTH_RECOVERY_SECONDS",
+                _DEFAULT_STORAGE_GROWTH_RECOVERY_SECONDS,
+            )
+        ),
         storage_growth_critical_bytes_per_day=int(
             os.environ.get(
                 "CML_STORAGE_GROWTH_CRITICAL_BYTES_PER_DAY",
@@ -6201,6 +6390,12 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES,
         ),
         alert_cooldown_seconds=args.alert_cooldown_seconds,
+        database_storage_alert_cooldown_seconds=float(
+            os.environ.get(
+                "CML_DATABASE_STORAGE_ALERT_COOLDOWN_SECONDS",
+                _DEFAULT_DATABASE_STORAGE_ALERT_COOLDOWN_SECONDS,
+            )
+        ),
         consecutive_alerts_required=int(
             getattr(
                 args,

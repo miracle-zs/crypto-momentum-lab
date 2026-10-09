@@ -263,6 +263,21 @@ def test_console_log_record_parses_like_json() -> None:
     assert record["retry_delay_seconds"] == 60.0
 
 
+def test_console_log_record_keeps_single_quoted_reason_with_spaces() -> None:
+    record = _parse_log_record(
+        "2026-10-09 14:20:00 [warning  ] position_repair_blocked "
+        "reason='repair projection does not match actual account exposure' "
+        "account_label=account-3 symbol=BTWUSDT"
+    )
+
+    assert record["event"] == "position_repair_blocked"
+    assert record["reason"] == (
+        "repair projection does not match actual account exposure"
+    )
+    assert record["account_label"] == "account-3"
+    assert record["symbol"] == "BTWUSDT"
+
+
 def test_console_log_record_parses_docker_timestamp_prefix() -> None:
     """_log_signals reads `docker logs --timestamps`, which prepends its own stamp.
 
@@ -2100,6 +2115,75 @@ def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
     monitor._emit(alert, now=200.0)
     # Must NOT send another ops_alert notification!
     assert len(delivered) == 2
+    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
+        "active_alerts"
+    ]
+    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
+        "active_alert_context"
+    ]
+    assert "live_market_state_delay:live-strategy-account-2" not in monitor._state[
+        "alert_occurrences"
+    ]
+
+
+def test_orphaned_active_alert_is_repaired_without_fake_recovery(
+    monkeypatch, tmp_path
+) -> None:
+    delivered: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(dict(payload)),
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_resolutions_required=1,
+        ),
+    )
+    monitor._state.setdefault("active_alerts", {})[
+        "database_storage_growth"
+    ] = 100.0
+    monitor._state.setdefault("alert_cooldowns", {})[
+        "database_storage_growth"
+    ] = 150.0
+
+    monitor._emit(
+        Alert("database_storage_growth", "warning", "growth"),
+        now=200.0,
+    )
+
+    monitor._emit_resolutions(set(), now=201.0)
+
+    assert delivered == []
+    assert monitor._state["active_alerts"] == {}
+    assert monitor._state["active_alert_context"] == {}
+
+
+def test_database_growth_reminder_uses_six_hour_cooldown(monkeypatch, tmp_path) -> None:
+    delivered: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        lambda _webhook, _sendkey, payload: delivered.append(dict(payload)),
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            alert_cooldown_seconds=900.0,
+            database_storage_alert_cooldown_seconds=6 * 60 * 60,
+        ),
+    )
+    alert = Alert("database_storage_growth", "warning", "growth")
+
+    monitor._emit(alert, now=100.0)
+    monitor._emit(alert, now=100.0 + 6 * 60 * 60 - 1)
+    assert len(delivered) == 1
+
+    monitor._emit(alert, now=100.0 + 6 * 60 * 60)
+
+    assert len(delivered) == 2
+    assert delivered[-1]["event"] == "ops_alert"
+    assert delivered[-1]["details"]["occurrence_count"] == 3
 
 
 def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) -> None:
