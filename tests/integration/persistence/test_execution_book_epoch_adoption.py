@@ -884,8 +884,9 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
         recovered = await restarted.read(scope, stream_id="hub", stream_epoch="new")
         assert recovered.total_quantity == 0
         assert recovered.projection_version == view.projection_version
-        # The next poll must load the newly adopted checkpoint and extend it,
-        # rather than attempting the original zero anchor again.
+        # The next poll must use the adopted checkpoint as its source anchor.
+        # A 30-second observation-only suffix may reuse the seed under the
+        # bounded checkpoint cadence, while coverage still advances.
         later = _snapshot(key, target.observed_at + timedelta(seconds=30), "0", "0")
         continuation = AccountFillLoadScan(
             "live",
@@ -921,7 +922,10 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
                 key, stream_id="hub", stream_epoch="new"
             )
         )
-        assert extended.event_cut == later.observed_at
+        assert extended.event_cut == checkpoint.event_cut
+        latest = await book.read(scope, stream_id="hub", stream_epoch="new")
+        assert latest.coverage.end_at == later.observed_at
+        assert latest.total_quantity == 0
     finally:
         await engine.dispose()
 
@@ -1180,5 +1184,139 @@ async def test_journal_only_flat_anchor_recovers_live_nonzero_position(
         assert (
             await restarted.read(scope, stream_id="hub", stream_epoch="new")
         ).total_quantity == Decimal("26.6")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_equal_live_snapshot_refresh_keeps_exit_token_across_restart(
+    async_database_url,
+):
+    from sqlalchemy import select
+
+    from crypto_momentum_lab.domain.execution.execution_book import (
+        Accepted,
+        ExecutionRequest,
+    )
+    from crypto_momentum_lab.domain.execution.trade_command import TradeCommandType
+    from crypto_momentum_lab.domain.strategy import StrategySide
+    from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models import (
+        ExecutionBookHeadRow,
+    )
+
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = "equal-observation-" + uuid4().hex
+    key = PositionKey("live", account, "ORCAUSDT", FuturesPositionSide.LONG)
+    scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="hub", stream_epoch="epoch"
+    )
+    flat_at = datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=3)
+    open_at = flat_at + timedelta(seconds=1)
+    refresh_at = flat_at + timedelta(seconds=2)
+    flat = _snapshot(key, flat_at, "0", "0")
+    anchor = stable_snapshot_anchor_id(flat)
+    try:
+        book = _book(factory)
+        await book.restore(account_label=account)
+        for sequence, at, snapshot, fill in [
+            (1, flat_at, flat, None),
+            (
+                2,
+                open_at,
+                _snapshot(key, open_at, "2", "100"),
+                _fill(key, "open", "BUY", "2", open_at),
+            ),
+        ]:
+            proof = _coverage(
+                scope,
+                load_id=f"scan-{sequence}",
+                scan_origin=flat_at,
+                anchor_id=anchor,
+                anchor_cut=flat_at,
+                anchor_kind="zero_snapshot",
+                checked_through=at,
+            )
+            assert isinstance(
+                await book.observe(
+                    _evidence(
+                        key,
+                        evidence_id=f"event-{sequence}",
+                        scope=scope,
+                        at=at,
+                        sequence=sequence,
+                        snapshot=snapshot,
+                        fill=fill,
+                        proof=proof,
+                    )
+                ),
+                Applied,
+            )
+        execution_scope = ExecutionScope(
+            "live", account, "ORCAUSDT", FuturesPositionSide.LONG
+        )
+        before = await book.read(execution_scope)
+        assert before.is_ready_for_trade
+        async with factory() as session:
+            old_hash = await session.scalar(
+                select(ExecutionBookHeadRow.state_payload).where(
+                    ExecutionBookHeadRow.account_label == account
+                )
+            )
+        proof = _coverage(
+            scope,
+            load_id="scan-refresh",
+            scan_origin=flat_at,
+            anchor_id=anchor,
+            anchor_cut=flat_at,
+            anchor_kind="zero_snapshot",
+            checked_through=refresh_at,
+        )
+        assert isinstance(
+            await book.observe(
+                _evidence(
+                    key,
+                    evidence_id="refresh",
+                    scope=scope,
+                    at=refresh_at,
+                    sequence=3,
+                    snapshot=_snapshot(key, refresh_at, "2", "100"),
+                    proof=proof,
+                )
+            ),
+            Applied,
+        )
+        after = await book.read(execution_scope)
+        assert after.is_ready_for_trade
+        assert after.input_revision > before.input_revision
+        assert after.projection_version == before.projection_version
+        assert len(after.projection_version) <= 64
+        async with factory() as session:
+            new_hash = await session.scalar(
+                select(ExecutionBookHeadRow.state_payload).where(
+                    ExecutionBookHeadRow.account_label == account
+                )
+            )
+        assert new_hash["facts_hash"] != old_hash["facts_hash"]
+        restarted = _book(factory)
+        await restarted.restore(account_label=account)
+        restored = await restarted.read(execution_scope)
+        assert restored.projection_version == before.projection_version
+        request = ExecutionRequest(
+            request_id="cml_" + uuid4().hex,
+            scope=execution_scope,
+            strategy_name="epoch-adoption-test",
+            run_id="test",
+            decision_ref="bearish-candle",
+            expected_view_token=before.projection_version,
+            action=TradeCommandType.EXIT,
+            requested_quantity=Decimal("2"),
+            side=StrategySide.LONG,
+        )
+        result = await restarted.act(request)
+        assert isinstance(result, Accepted)
+        assert sum(r.reserved_quantity for r in result.receipt.reservations) == Decimal(
+            "2"
+        )
     finally:
         await engine.dispose()

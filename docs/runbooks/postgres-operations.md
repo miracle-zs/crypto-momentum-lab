@@ -397,3 +397,24 @@ The residual can include temporary relations, system objects and sampling races;
 it is not proof of any single cause. Newly inventoried tables need a baseline
 before their rate is calculated, and alert text reports incomplete coverage
 during this transition. Existing sample history is preserved.
+
+
+### Execution projection identity
+
+`PositionView.projection_version` identifies execution-relevant position state.
+Healthy views keep the same token when only observation timestamps, mark price,
+notional or unrealized PnL change. The token includes position and stream identity,
+active episode/batches, quantities, cost basis, fill watermark, exit submission
+boundaries, leverage/margin mode, comparability and coverage/readiness state.
+Unhealthy views retain the complete facts identity to fail closed. Decimal scale
+differences do not produce different healthy execution tokens.
+
+The journal revision, complete facts hash and durable head revision still advance
+and are checked independently. Acceptance still holds the position transaction
+lock and checks current reservation capacity; stable view tokens do not permit
+overbooking. Existing durable opaque tokens are preserved after restart only
+while the execution state remains equivalent. New tokens fit the existing
+64-character column; no schema migration or historical evidence rewrite is needed.
+This prevents an equal snapshot refresh between candle evaluation and acceptance
+from manufacturing a second exit candidate. Real exposure or boundary changes
+continue to require a fresh candidate.
