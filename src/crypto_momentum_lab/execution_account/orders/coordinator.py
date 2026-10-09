@@ -1451,16 +1451,20 @@ class OrderExecutionCoordinator:
                 exchange_order_id=None,
                 plan=plan,
             )
-        result = cast(
+
+        async def cancel_and_project() -> OrderExecutionResult:
+            result = await self._backend.cancel_order(plan)
+            await self._observe_returned_order_result(plan, result)
+            return result
+
+        return cast(
             OrderExecutionResult,
             await self._schedule(
                 plan,
                 priority=self._EXIT_PRIORITY,
-                operation=lambda: self._backend.cancel_order(plan),
+                operation=cancel_and_project,
             ),
         )
-        await self._observe_returned_order_result(plan, result)
-        return result
 
     async def reconcile_order(
         self,

@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +26,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionKey,
     _KeyCommandScheduler,
 )
+from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from tests.fixtures.async_reservations import (
     InMemoryPositionReservationRepository as MemoryReservations,
 )
@@ -651,6 +652,65 @@ async def test_cancel_order_releases_reservation_after_backend_success() -> None
     assert saved.released_quantity == Decimal("1.5")
     assert saved.active_quantity == Decimal("0")
     await coordinator.aclose()
+
+
+async def test_cancel_result_is_projected_when_terminal_event_cancels_expiry_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TerminalDuringCancelBackend(BlockingBackend):
+        lifecycle: LiveLimitOrderLifecycle
+
+        async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+            self.lifecycle.observe(
+                plan,
+                ExchangeOrderEvent(
+                    event_id="cancel-confirmed",
+                    client_order_id=plan.client_order_id,
+                    state=ExchangeOrderState.CANCELED,
+                    occurred_at=NOW,
+                    exchange_order_id="exchange-1",
+                    details={},
+                ),
+            )
+            return _result(plan, ExchangeOrderState.CANCELED)
+
+    backend = TerminalDuringCancelBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        execution_book=ExecutionBook(),
+    )
+    projected: list[tuple[OrderExecutionPlan, OrderExecutionResult]] = []
+    projected_event = asyncio.Event()
+
+    async def record_projection(
+        plan: OrderExecutionPlan, result: OrderExecutionResult
+    ) -> None:
+        projected.append((plan, result))
+        projected_event.set()
+
+    monkeypatch.setattr(
+        coordinator, "_observe_returned_order_result", record_projection
+    )
+    lifecycle = LiveLimitOrderLifecycle(
+        cancel_order=coordinator.cancel_order,
+        clock=lambda: NOW,
+    )
+    backend.lifecycle = lifecycle
+    plan = replace(
+        _plan("BTCUSDT", reduce_only=False),
+        order_type="LIMIT",
+        time_in_force="GTD",
+        expires_at=NOW + timedelta(milliseconds=10),
+    )
+
+    try:
+        await lifecycle.track(plan, _result(plan))
+        await asyncio.wait_for(projected_event.wait(), timeout=1)
+        assert projected == [(plan, _result(plan, ExchangeOrderState.CANCELED))]
+    finally:
+        await lifecycle.stop()
+        await coordinator.aclose()
 
 
 async def test_cancel_order_does_not_release_reservation_if_state_not_canceled() -> (
