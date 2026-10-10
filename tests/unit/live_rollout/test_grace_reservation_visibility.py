@@ -17,6 +17,9 @@ from crypto_momentum_lab.domain.account import AccountFillEvent, AccountPosition
 from crypto_momentum_lab.domain.execution.command_models import ExecutionScope
 from crypto_momentum_lab.domain.execution.evidence_models import ExecutionEvidence
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
+from crypto_momentum_lab.domain.execution.order_read_models import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
@@ -26,9 +29,15 @@ from crypto_momentum_lab.domain.execution.order_state import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
+    PositionEpisode,
+    PositionKey,
+    PositionLedgerBatch,
+    PositionView,
 )
+from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 from crypto_momentum_lab.domain.market.closed_candle import ClosedCandle15m
 from crypto_momentum_lab.domain.strategy.position_exit import PositionExitMode
+from crypto_momentum_lab.domain.trading import TradeSide as StrategySide
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
@@ -220,6 +229,102 @@ async def test_restored_grace_ack_blocks_next_candle_and_keeps_timeout_cancellat
         backend.submit.assert_awaited_once()
     finally:
         await coordinator.aclose()
+
+
+async def test_grace_timeout_cancels_order_reserved_to_closed_prior_batch():
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="LUMIAUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    opened_at = NOW - timedelta(hours=3)
+    exit_started_at = NOW - timedelta(hours=2, minutes=1)
+    batch = PositionLedgerBatch(
+        batch_id="current-batch",
+        episode_id="current-episode",
+        quantity=Decimal("10"),
+        original_quantity=Decimal("10"),
+        entry_price=Decimal("100"),
+        opened_at=opened_at,
+        exit_order_submitted_at=exit_started_at,
+    )
+    episode = PositionEpisode(
+        episode_id="current-episode",
+        position_key=key,
+        side=StrategySide.LONG,
+        opened_at=opened_at,
+        batches=(batch,),
+    )
+    stale_reservation = PositionReservation(
+        reservation_id="stale-reservation",
+        command_id="stale-order",
+        position_key=key,
+        batch_id="closed-batch",
+        reserved_quantity=Decimal("10"),
+        created_at=exit_started_at,
+    )
+    view = PositionView(
+        key=key,
+        projection_version="current-projection",
+        input_revision=1,
+        event_cut=NOW,
+        policy_version="policy-v1",
+        schema_version="schema-v1",
+        coverage=None,
+        active_episode=episode,
+        batches=(batch,),
+        unallocated_quantity=Decimal("0"),
+        reservations=(stale_reservation,),
+    )
+    stale_plan = OrderExecutionPlan(
+        intent_id="stale-intent",
+        run_id="live-run",
+        client_order_id="stale-order",
+        symbol="LUMIAUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("10"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=exit_started_at,
+        position_side=FuturesPositionSide.LONG,
+        time_in_force="GTC",
+        batch_id="closed-batch",
+    )
+    persisted = PersistedExchangeOrder(
+        plan=stale_plan,
+        state=ExchangeOrderState.ACKNOWLEDGED,
+        exchange_order_id="123",
+        updated_at=exit_started_at,
+    )
+
+    positions = managed_live_positions_from_views(
+        (view,), unresolved_orders=(persisted,)
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=8,
+            candle_grace_profit_pct=Decimal("0.0088"),
+            candle_grace_decision_profit_pct=Decimal("0.0088"),
+        )
+    )
+    state = SimpleNamespace(
+        symbol="LUMIAUSDT",
+        last_bid_price=Decimal("99"),
+        mark_price=Decimal("99"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_grace_timeout(
+        now=NOW, state=state, positions=positions
+    )
+
+    assert len(requests) == 1
+    assert isinstance(requests[0], LiveExitCancellationRequest)
+    assert requests[0].cancel_plan.client_order_id == "stale-order"
+    assert requests[0].fallback_quantity == Decimal("10")
 
 
 async def test_startup_reconciliation_does_not_lock_submission_configuration():

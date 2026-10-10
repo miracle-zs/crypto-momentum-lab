@@ -143,6 +143,7 @@ def managed_live_positions_from_views(
             continue
 
         recovery_by_batch: dict[str, PersistedExchangeOrder] = {}
+        stale_batch_orders: list[PersistedExchangeOrder] = []
         reserved_by_order: dict[str, dict[str, Decimal]] = {}
         for reservation in view.reservations:
             if reservation.active_quantity > 0:
@@ -164,25 +165,51 @@ def managed_live_positions_from_views(
             # Match their client ID to the Book's committed reservations;
             # never infer ownership from symbol, quantity or time proximity.
             allocated_ids.update(reserved_by_order.get(plan.client_order_id, {}))
+            matched_active_batch = False
             for batch in active_batches:
                 if batch.batch_id in allocated_ids:
+                    matched_active_batch = True
                     previous = recovery_by_batch.get(batch.batch_id)
                     if previous is None or order.updated_at > previous.updated_at:
                         recovery_by_batch[batch.batch_id] = order
+            if allocated_ids and not matched_active_batch:
+                # A reduce-only order reserved to a closed batch still acts on
+                # the aggregate exchange position. Keep it as a cancellation
+                # prerequisite when one current batch remains; otherwise its
+                # reservation can block that batch's grace-timeout close forever.
+                stale_batch_orders.append(order)
+
+        if len(active_batches) == 1 and stale_batch_orders:
+            batch = active_batches[0]
+            if (
+                batch.exit_order_submitted_at is not None
+                and batch.batch_id not in recovery_by_batch
+            ):
+                recovery_by_batch[batch.batch_id] = max(
+                    stale_batch_orders, key=lambda order: order.updated_at
+                )
 
         managed_batches: list[ManagedLivePositionBatch] = []
         for batch in active_batches:
             recovery = recovery_by_batch.get(batch.batch_id)
-            plan = None if recovery is None else recovery.plan
+            recovery_plan = None if recovery is None else recovery.plan
             remaining = (
                 None
                 if recovery is None
-                else max(Decimal("0"), plan.quantity - recovery.executed_quantity)
-            )
-            if plan is not None and plan.client_order_id in reserved_by_order:
-                remaining = reserved_by_order[plan.client_order_id].get(
-                    batch.batch_id, Decimal("0")
+                else max(
+                    Decimal("0"),
+                    recovery.plan.quantity - recovery.executed_quantity,
                 )
+            )
+            reservation_quantity = (
+                None
+                if recovery_plan is None
+                else reserved_by_order.get(recovery_plan.client_order_id, {}).get(
+                    batch.batch_id
+                )
+            )
+            if reservation_quantity is not None:
+                remaining = reservation_quantity
             managed_batches.append(
                 ManagedLivePositionBatch(
                     batch_id=batch.batch_id,
@@ -192,12 +219,16 @@ def managed_live_positions_from_views(
                     exit_order_submitted_at=(
                         batch.exit_order_submitted_at
                         if batch.exit_order_submitted_at is not None
-                        else (plan.created_at if plan is not None else None)
+                        else (
+                            recovery_plan.created_at
+                            if recovery_plan is not None
+                            else None
+                        )
                     ),
                     recovery_order_client_id=(
-                        None if recovery is None else plan.client_order_id
+                        None if recovery_plan is None else recovery_plan.client_order_id
                     ),
-                    recovery_order_plan=plan,
+                    recovery_order_plan=recovery_plan,
                     recovery_order_remaining_quantity=remaining,
                     closing_order_filled=False,
                     entry_order_count=max(1, len(batch.entry_order_ids)),
