@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, Callable, Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
 
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.live_rollout.exit_channel_ports import ExitChannelProcessor
 from crypto_momentum_lab.live_rollout.exit_failure_policy import (
     ORDER_IDENTITY_CONFLICT_REASON,
@@ -504,52 +506,56 @@ class LiveExitChannelRuntime:
             raise ValueError("interval_seconds must be positive")
         retries = self._grace_retries
         while True:
-            now = datetime.now(tz=UTC)
+            now = self._clock()
             loop_time = asyncio.get_running_loop().time()
             managed_symbols = self._daemon.managed_position_symbols
             for symbol in tuple(retries):
                 if symbol not in managed_symbols:
                     self._clear_retry(symbol, retries)
-            for state in self._latest_market_states.for_symbols(
-                tuple(sorted(managed_symbols))
-            ):
-                if loop_time < retries.get(state.symbol, (0.0, 1.0))[0]:
+            for symbol in sorted(managed_symbols):
+                if loop_time < retries.get(symbol, (0.0, 1.0))[0]:
                     continue
                 quote = next(
-                    iter(self._latest_market_quotes.for_symbols((state.symbol,))),
-                    None,
+                    iter(self._latest_market_quotes.for_symbols((symbol,))), None
                 )
-                generation = self._evaluation_generation(state.symbol)
-                try:
-                    failure = await self._daemon.process_grace_timeout(
-                        state,
-                        now=now,
-                        latest_quote=quote,
-                    )
-                except Exception as error:
-                    if self._is_order_identity_conflict(error):
-                        failure = ORDER_IDENTITY_CONFLICT_REASON
-                        if self._on_order_identity_conflict is not None:
-                            self._on_order_identity_conflict(state.symbol)
-                        self._record_result(
-                            state.symbol, failure, retries, channel="grace"
+                states = self._latest_market_states.for_symbols((symbol,))
+                if not states:
+                    # A recovered/open position can outlive its market-state
+                    # subscription. The wall-clock exit still owns its deadline,
+                    # so give the processor a symbol-scoped execution context.
+                    states = (_grace_timeout_market_state(symbol, now, quote),)
+                for state in states:
+                    generation = self._evaluation_generation(symbol)
+                    try:
+                        failure = await self._daemon.process_grace_timeout(
+                            state,
+                            now=now,
+                            latest_quote=quote,
+                        )
+                    except Exception as error:
+                        if self._is_order_identity_conflict(error):
+                            failure = ORDER_IDENTITY_CONFLICT_REASON
+                            if self._on_order_identity_conflict is not None:
+                                self._on_order_identity_conflict(symbol)
+                            self._record_result(
+                                symbol, failure, retries, channel="grace"
+                            )
+                            continue
+                        if not self._is_transient_error(error):
+                            raise
+                        log.warning(
+                            "live_grace_timeout_processing_degraded",
+                            symbol=symbol,
+                            error_type=type(error).__name__,
                         )
                         continue
-                    if not self._is_transient_error(error):
-                        raise
-                    log.warning(
-                        "live_grace_timeout_processing_degraded",
-                        symbol=state.symbol,
-                        error_type=type(error).__name__,
+                    self._record_result(
+                        symbol,
+                        failure,
+                        retries,
+                        channel="grace",
+                        evaluation_generation=generation,
                     )
-                    continue
-                self._record_result(
-                    state.symbol,
-                    failure,
-                    retries,
-                    channel="grace",
-                    evaluation_generation=generation,
-                )
             sleeping = asyncio.create_task(asyncio.sleep(interval_seconds))
             changed = asyncio.create_task(self._grace_facts_changed.wait())
             try:
@@ -563,6 +569,52 @@ class LiveExitChannelRuntime:
                 sleeping.cancel()
                 changed.cancel()
                 await asyncio.gather(sleeping, changed, return_exceptions=True)
+
+
+def _grace_timeout_market_state(
+    symbol: str,
+    now: datetime,
+    quote: RealtimeMarketQuote | None,
+) -> MarketState15s:
+    bucket_end = now.replace(
+        second=now.second - now.second % 15,
+        microsecond=0,
+    )
+    bid = quote.bid_price if quote is not None else None
+    ask = quote.ask_price if quote is not None else None
+    midpoint = (
+        (bid + ask) / Decimal("2")
+        if bid is not None and ask is not None
+        else None
+    )
+    return MarketState15s(
+        schema_version=1,
+        exchange=quote.exchange if quote is not None else "binance-usdm",
+        environment=quote.environment if quote is not None else "live",
+        symbol=symbol,
+        bucket_start=bucket_end - timedelta(seconds=15),
+        bucket_end=bucket_end,
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=bid,
+        last_ask_price=ask,
+        spread=ask - bid if bid is not None and ask is not None else None,
+        midpoint=midpoint,
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=midpoint,
+        closed_kline_count=0,
+        source_event_count=0,
+        first_received_at=None,
+        last_received_at=None,
+        data_complete=False,
+    )
 
 
 __all__ = [

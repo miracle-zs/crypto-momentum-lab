@@ -56,6 +56,44 @@ async def test_quote_channel_updates_cache_and_reports_success() -> None:
     assert outcomes == [("BTCUSDT", None)]
 
 
+@pytest.mark.asyncio
+async def test_grace_timeout_runs_without_cached_market_state() -> None:
+    now = datetime(2026, 10, 10, 10, 46, 22, tzinfo=UTC)
+    processed: list[tuple[object, datetime, object]] = []
+    attempted = asyncio.Event()
+
+    class Daemon:
+        managed_position_symbols = frozenset({"LUMIAUSDT"})
+
+        async def process_grace_timeout(self, state, *, now, latest_quote):
+            processed.append((state, now, latest_quote))
+            attempted.set()
+            return None
+
+    runtime = LiveExitChannelRuntime(
+        daemon=Daemon(),  # type: ignore[arg-type]
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
+        latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: ()),
+        is_transient_error=lambda _error: False,
+        clock=lambda: now,
+    )
+    task = asyncio.create_task(
+        runtime.run_grace_timeout_channel(interval_seconds=0.001)
+    )
+    try:
+        await asyncio.wait_for(attempted.wait(), 0.1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert len(processed) == 1
+    state, observed_at, quote = processed[0]
+    assert state.symbol == "LUMIAUSDT"
+    assert state.bucket_end == now.replace(second=15)
+    assert observed_at == now
+    assert quote is None
+
+
 async def test_pending_candles_wait_for_facts_without_blocking_other_symbols(monkeypatch):
     events = [SimpleNamespace(candle=SimpleNamespace(
         symbol=symbol, candle_start=datetime(2026, 8, 4, tzinfo=UTC) + timedelta(minutes=15*i)
