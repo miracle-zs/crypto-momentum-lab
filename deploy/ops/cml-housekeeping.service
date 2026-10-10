@@ -1,6 +1,6 @@
 [Unit]
 Description=Crypto Momentum Lab host artefact retention
-Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/server-space-maintenance.md
+Documentation=file:///opt/crypto-momentum-lab/docs/runbooks/server-deployment.md
 After=docker.service
 Requires=docker.service
 

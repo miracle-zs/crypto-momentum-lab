@@ -90,7 +90,7 @@ def test_position_ledger_single_entry() -> None:
 def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch() -> (
     None
 ):
-    """Per CONTEXT.md and Astra critique S1: consecutive adds before exit boundary
+    """Per the execution contract: consecutive adds before exit boundary
 
     belong to the SAME batch with updated anchor and weighted-average entry price.
     """

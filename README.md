@@ -3,8 +3,10 @@
 Research and trading infrastructure for independent short-horizon momentum
 strategies on Binance USD-M perpetual futures.
 
-The current implementation is summarized in [docs/current-state.md](docs/current-state.md).
-See the [documentation index](docs/README.md) for contracts, runbooks, and research designs.
+The [system guide](docs/architecture/overview.md) covers architecture, Hub data
+flow, core terms, and transaction rules. Task-specific operations and research
+guides are linked below.
+
 ## Local Setup
 
 ```bash
@@ -61,13 +63,13 @@ market periods.
 
 The active research workflow lives in `local_optimization/`: parameter search,
 scenario evaluation, high-frequency MTM equity, and Live/replay reconciliation.
-See [the local research runbook](docs/runbooks/local-full-data-optimization.md).
+See the [research and evaluation guide](docs/research/evaluation.md).
 
 The old Research, Replay/Paper, and standalone Shadow CLIs were retired on
 2026-10-03. Historical implementations are available at Git baseline
 `02e6581f3bc71feac0f91f84fa405460ea26730f`; they are no longer installed commands.
 Current execution and retirement boundaries are described in
-[the execution contracts](docs/architecture/execution-contracts.md).
+[the system guide](docs/architecture/overview.md).
 
 ## Server Deployment
 
@@ -79,3 +81,10 @@ adds accounts 2–4.
 
 See [server deployment and updates](docs/runbooks/server-deployment.md)
 and [the Live runbook](docs/runbooks/small-capital-live-session.md) for updates, account isolation, trade configuration, shutdown, and verification.
+
+## Operations and Testing
+
+- [Alerts, incidents, and dashboard](docs/runbooks/operational-alert-monitor.md)
+- [PostgreSQL operations](docs/runbooks/postgres-operations.md)
+- [Behavior tests](docs/testing/behavior-tests.md)
+- [Script index](scripts/README.md)

@@ -1,6 +1,6 @@
-# 告警、Server 酱与只读看板
+# 告警、事故与只读看板
 
-核对日期：2026-10-04。监控不参与交易准入；自动定向重启仅用于已说明的心跳失效策略。
+核对日期：2026-10-09。监控不参与交易准入；自动定向重启仅用于已说明的心跳失效策略。数据库增长预算与恢复条件见[PostgreSQL 运维手册](postgres-operations.md)。
 
 The single-host deployment runs a small host-side monitor instead of adding a
 Prometheus stack to the trading machine. It samples Docker lifecycle/memory
@@ -252,3 +252,21 @@ which reads PostgreSQL. Dashboard write actions remain disabled. The live CLI
 a low-volume RiskControlHub notification. The `cancel-all-open-entries` and
 `request-flatten` CLI paths likewise write `live_rollback_commands` first and
 are executed by the live worker through its existing order/exit lanes.
+
+## 已确认故障与观测边界
+
+整理日期：2026-10-10。下表是历史问题和已固化的处理约束，不表示服务器当前状态。原始导出仍在被 Git 忽略的 `server_exports/` 和 `reports/` 本地目录。
+
+|时间|问题|处理约束|
+|---|---|---|
+|2026-09|批次重建与外部平仓使用不同事实切面|依据成交、订单和当前仓位重建，不猜测数量|
+|2026-09|重启期间旧 stream 与 sequence 接续造成重复恢复|以持久化事实和幂等订单身份恢复|
+|2026-10-01|零仓或覆盖证明缺失、订单回执接线不全|按原订单回执和明确事实核验，不由本地零仓推断完成|
+|2026-10-02|隐藏持有时限覆盖 K 线退出；外部成交与订单身份混淆|退出遵守显式 K 线和宽限规则；按账户、标的、方向隔离恢复|
+|2026-10-02|退出排队期间仓位改变；FILLED 暂无成交价|发送前按最新事实重评数量；保留预留并反查原订单，不用委托价结算|
+|2026-10-03|宽限预留恢复后不可见；旧快照晚落库|按已提交 client-order-id 恢复预留；按事件切点过滤旧快照|
+|2026-10-03|策略装配读取已删除字段，导致 POST 前拒单|运行配置和订单计划使用正式字段，并覆盖发单前回归|
+|2026-10-04|人工定向平仓被误认成自动宽限退出|分别记录人工操作、ACK 和实际成交|
+|2026-10-10|LUMIAUSDT 旧批次的 reduce-only 撤单预留仍作用于聚合仓位，阻塞宽限到期退出|先确认或撤销旧订单责任，再处理剩余数量；回归见 `test_grace_reservation_visibility.py`，修复提交 `b73da9a9`|
+
+局部函数基准不能代表端到端行情延迟或发单 RTT；重启后累计 CPU 也不能直接比较。没有新订单样本的观察，不能证明开仓、宽限平仓或未知订单恢复通过实盘验收。当前镜像、订单、仓位和性能须现场读取；测试与容器健康不替代线上核验。

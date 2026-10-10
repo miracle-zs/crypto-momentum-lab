@@ -1,6 +1,6 @@
 # 服务器部署、更新与回退
 
-核对日期：2026-10-04。步骤对应 [update_server.sh](../../deploy/ops/update_server.sh)、[基础 Compose](../../compose.server.yaml) 与[账户 overlay](../../compose.live.accounts.yaml)。这里是操作说明，本轮未执行部署。
+核对日期：2026-10-10。步骤对应 [update_server.sh](../../deploy/ops/update_server.sh)、[基础 Compose](../../compose.server.yaml) 与[账户 overlay](../../compose.live.accounts.yaml)。这里是操作说明，本轮未执行部署。
 
 ## 首次安装
 
@@ -61,3 +61,26 @@ curl -fsS http://127.0.0.1/momentum/api/health
 ## 回退
 
 选择明确的已验证祖先提交，通过同一脚本部署并带上原来的 profile 参数。先检查 schema 和持久化格式是否兼容；代码回退不自动撤销数据库迁移，也不能把旧版本已删协议当作兼容版本。保留未决订单身份、真实成交与原宽限截止，禁止清库或重复 POST 来恢复服务。
+
+## 主机空间维护
+
+`cml-housekeeping.timer` 每日清理主机运维文件，不删除 PostgreSQL 数据或 `/var/lib/crypto-momentum-lab/table-archive`。默认保留 7 天崩溃日志、当前及最新两个应用镜像、近 7 天使用的构建缓存和 300 MB systemd journal；运行中容器所用镜像始终保留。
+
+更新版本后安装并启用维护单元：
+
+```bash
+install -D -m 0755 deploy/ops/cml_housekeeping.sh /opt/crypto-momentum-lab/deploy/ops/cml_housekeeping.sh
+install -D -m 0644 deploy/ops/cml-housekeeping.service /etc/systemd/system/cml-housekeeping.service
+install -D -m 0644 deploy/ops/cml-housekeeping.timer /etc/systemd/system/cml-housekeeping.timer
+systemctl daemon-reload
+systemctl enable --now cml-housekeeping.timer
+```
+
+手动运行及查看下次计划时间：
+
+```bash
+systemctl start cml-housekeeping.service
+systemctl list-timers cml-housekeeping.timer
+```
+
+保留期可通过 systemd service override 调整，例如 `CML_CRASH_LOG_RETENTION_DAYS=14`。应用镜像保留数量应至少为 3，除非明确接受无法快速回退。
