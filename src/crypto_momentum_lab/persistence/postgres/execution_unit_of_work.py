@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution.evidence_digest import trade_payload_digest
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
     DecisionCommitConflict as _DecisionCommitConflict,
 )
@@ -643,12 +644,66 @@ class AsyncPostgresExecutionUnitOfWork:
             bind = session.get_bind()
             if bind is None or bind.dialect.name != "postgresql":
                 raise RuntimeError("durable position restoration requires PostgreSQL")
-            scopes = await self._journal_store.list_scopes_in_session(
-                session,
-                environment=environment,
-                account_label=account_label,
-                **({"key": key} if key is not None else {}),
-            )
+            heads_by_position: dict[tuple[str, str], ExecutionBookHeadRow] = {}
+            if key is None:
+                head_rows = (
+                    await session.scalars(
+                        select(ExecutionBookHeadRow).where(
+                            ExecutionBookHeadRow.environment == environment,
+                            ExecutionBookHeadRow.account_label == account_label,
+                        )
+                    )
+                ).all()
+                heads_by_position = {
+                    (head.symbol, head.position_side): head for head in head_rows
+                }
+                if heads_by_position:
+                    scopes = tuple(
+                        AccountFactStreamScope.for_position_key(
+                            PositionKey(
+                                environment=environment,
+                                account_label=account_label,
+                                symbol=head.symbol,
+                                position_side=FuturesPositionSide(
+                                    head.position_side
+                                ),
+                            ),
+                            stream_id=head.stream_id,
+                            stream_epoch=head.stream_epoch,
+                        )
+                        for head in heads_by_position.values()
+                    )
+                else:
+                    # Compatibility for accounts written before durable heads
+                    # existed. New fact writes commit their head atomically.
+                    scopes = await self._journal_store.list_scopes_in_session(
+                        session,
+                        environment=environment,
+                        account_label=account_label,
+                    )
+            else:
+                head_row = await session.get(
+                    ExecutionBookHeadRow,
+                    _execution_position_values(key),
+                )
+                if head_row is None:
+                    scopes = await self._journal_store.list_scopes_in_session(
+                        session,
+                        environment=environment,
+                        account_label=account_label,
+                        key=key,
+                    )
+                else:
+                    heads_by_position[(head_row.symbol, head_row.position_side)] = (
+                        head_row
+                    )
+                    scopes = (
+                        AccountFactStreamScope.for_position_key(
+                            key,
+                            stream_id=head_row.stream_id,
+                            stream_epoch=head_row.stream_epoch,
+                        ),
+                    )
             by_position: dict[str, list[AccountFactStreamScope]] = {}
             for scope in scopes:
                 key = PositionKey(
@@ -668,10 +723,7 @@ class AsyncPostgresExecutionUnitOfWork:
                     symbol=first_scope.symbol,
                     position_side=first_scope.position_side,
                 )
-                head_row = await session.get(
-                    ExecutionBookHeadRow,
-                    _execution_position_values(key),
-                )
+                head_row = heads_by_position.get((key.symbol, key.position_side.value))
                 head = (
                     _ExecutionHeadSnapshot(
                         revision=head_row.revision,
