@@ -96,9 +96,8 @@ async def test_incomplete_account_event_marks_persisted_order_uncertain() -> Non
 
 
 @pytest.mark.asyncio
-async def test_account_event_missing_from_local_journal_requests_snapshot_recovery() -> (
-    None
-):
+async def test_account_event_missing_from_local_journal_requests_snapshot_recovery(
+) -> None:
     recovery_reasons: list[str] = []
 
     class Repository:
@@ -223,7 +222,7 @@ async def test_unknown_order_retries_until_resolved_then_worker_sleeps():
     try:
         worker.request_recovery()
         async with asyncio.timeout(1):
-            while repository.load_unresolved_orders.await_count < 2:
+            while repository.load_unresolved_orders.await_count < 2:  # noqa: ASYNC110
                 await asyncio.sleep(0.001)
         await asyncio.sleep(0.03)
         assert repository.load_unresolved_orders.await_count == 2
@@ -392,9 +391,11 @@ async def test_ws_replay_does_not_rollback_durable_order(case):
     else:
         order = replace(
             order,
+            state=ExchangeOrderState.PARTIALLY_FILLED,
             updated_at=event.event_at + timedelta(seconds=2),
-            executed_quantity=Decimal("2"),
+            executed_quantity=Decimal("1"),
         )
+        event.order_update.update(X="PARTIALLY_FILLED", z="1")
 
     class Repository:
         async def load_order(self, _client_order_id):
@@ -632,7 +633,7 @@ async def test_failed_exit_recovery_does_not_kill_existing_worker():
     worker.request_recovery()
     try:
         async with asyncio.timeout(1):
-            while recover.await_count < 2:
+            while recover.await_count < 2:  # noqa: ASYNC110
                 await asyncio.sleep(0.001)
         assert not task.done()
     finally:
@@ -833,3 +834,154 @@ async def test_background_orphan_cancel_rotates_failures_and_never_resubmits():
     assert await repair.reconcile_all()
     assert not await repair.reconcile_all()
     assert calls == ["failed-cancel", "other-cancel", "failed-cancel"]
+
+
+@pytest.mark.asyncio
+async def test_a1a_ws_terminal_with_earlier_timestamp_is_applied_and_not_dropped():
+    from unittest.mock import AsyncMock
+
+    t1 = datetime(2026, 10, 10, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 10, 10, 10, 0, 1, tzinfo=UTC)
+
+    order, event = _ws_order_case()
+    order = replace(
+        order,
+        state=ExchangeOrderState.ACKNOWLEDGED,
+        updated_at=t2,
+        executed_quantity=Decimal("0"),
+    )
+    event.order_update.update(
+        X="CANCELED",
+        z="0",
+        T=int(t1.timestamp() * 1000),  # T = t1 < t2
+    )
+
+    repo = SimpleNamespace(load_order=AsyncMock(return_value=order))
+    machine = SimpleNamespace(apply_observed_snapshot=AsyncMock())
+    recon = LiveOrderReconciliation(repo, machine, "run-1")
+
+    await recon.reconcile_account_event(event)
+    machine.apply_observed_snapshot.assert_awaited_once()
+    called_plan, called_snap = machine.apply_observed_snapshot.await_args.args
+    assert called_plan.client_order_id == "entry-1"
+    assert called_snap.state == ExchangeOrderState.CANCELED
+    assert called_snap.executed_quantity == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_a1b_partially_filled_then_earlier_canceled_preserves_executed_quantity():
+    from unittest.mock import AsyncMock
+
+    t1 = datetime(2026, 10, 10, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 10, 10, 10, 0, 1, tzinfo=UTC)
+
+    order, event = _ws_order_case()
+    order = replace(
+        order,
+        plan=replace(order.plan, quantity=Decimal("10")),
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        updated_at=t2,
+        executed_quantity=Decimal("3"),
+    )
+    event.order_update.update(
+        q="10",
+        X="CANCELED",
+        z="3",
+        T=int(t1.timestamp() * 1000),  # T = t1 < t2
+    )
+
+    repo = SimpleNamespace(load_order=AsyncMock(return_value=order))
+    machine = SimpleNamespace(apply_observed_snapshot=AsyncMock())
+    recon = LiveOrderReconciliation(repo, machine, "run-1")
+
+    await recon.reconcile_account_event(event)
+    machine.apply_observed_snapshot.assert_awaited_once()
+    called_plan, called_snap = machine.apply_observed_snapshot.await_args.args
+    assert called_snap.state == ExchangeOrderState.CANCELED
+    assert called_snap.executed_quantity == Decimal("3")
+
+
+@pytest.mark.asyncio
+async def test_a1c_late_ack_after_terminal_is_ignored_and_lower_quantity_requests_recovery(  # noqa: E501
+) -> None:
+    from unittest.mock import AsyncMock
+
+    t1 = datetime(2026, 10, 10, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 10, 10, 10, 0, 1, tzinfo=UTC)
+
+    order, event = _ws_order_case()
+    terminal_order = replace(
+        order,
+        state=ExchangeOrderState.CANCELED,
+        updated_at=t2,
+        executed_quantity=Decimal("3"),
+    )
+
+    # 1. Late non-terminal ACK (z=0) after terminal is ignored
+    late_ack_event = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ORDER_TRADE_UPDATE",
+        event_id="trade-late",
+        event_at=t1,
+        received_at=t1,
+        client_order_id="entry-1",
+        order_update=dict(
+            event.order_update,
+            X="NEW",
+            z="0",
+            T=int(t1.timestamp() * 1000),
+        ),
+    )
+    repo = SimpleNamespace(load_order=AsyncMock(return_value=terminal_order))
+    machine = SimpleNamespace(apply_observed_snapshot=AsyncMock())
+    recon = LiveOrderReconciliation(repo, machine, "run-1")
+
+    await recon.reconcile_account_event(late_ack_event)
+    machine.apply_observed_snapshot.assert_not_awaited()
+
+    # 2. Lower quantity on active order requests recovery instead of rolling back
+    active_order = replace(
+        order,
+        plan=replace(order.plan, quantity=Decimal("10")),
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        updated_at=t2,
+        executed_quantity=Decimal("5"),
+    )
+    conflict_event = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ORDER_TRADE_UPDATE",
+        event_id="trade-conflict",
+        event_at=t1,
+        received_at=t1,
+        client_order_id="entry-1",
+        order_update=dict(
+            event.order_update,
+            q="10",
+            X="CANCELED",
+            z="3",  # conflict: 3 < 5
+            T=int(t1.timestamp() * 1000),
+        ),
+    )
+    repo.load_order.return_value = active_order
+    await recon.reconcile_account_event(conflict_event)
+    machine.apply_observed_snapshot.assert_not_awaited()
+    assert "orders" in recon._requested_tasks
+
+    # 3. Wrong order identity raises conflict
+    bad_id_event = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ORDER_TRADE_UPDATE",
+        event_id="trade-bad",
+        event_at=t1,
+        received_at=t1,
+        client_order_id="entry-1",
+        order_update=dict(
+            event.order_update,
+            i=999999,  # Mismatched exchange order id
+        ),
+    )
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        await recon.reconcile_account_event(bad_id_event)

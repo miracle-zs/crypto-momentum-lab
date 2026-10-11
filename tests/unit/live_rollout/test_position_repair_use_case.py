@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    AccountPositionSnapshot,
+)
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.ports import (
@@ -16,6 +19,9 @@ from crypto_momentum_lab.domain.execution.ports import (
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFactStreamScope,
+    AccountFillLoadProvenance,
+    FactCoverageInterval,
+    FactCoverageStatus,
     PositionKey,
 )
 from crypto_momentum_lab.domain.execution.position_repair import (
@@ -30,6 +36,9 @@ from crypto_momentum_lab.domain.execution.position_repair_models import (
 from crypto_momentum_lab.domain.execution.recovery_models import (
     AccountFacts,
     DurableJournalCut,
+)
+from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+    stable_snapshot_anchor_id,
 )
 from crypto_momentum_lab.live_rollout.position_self_healing import (
     auto_heal_unmanaged_position,
@@ -147,9 +156,74 @@ def repair_case():
         trade_at=NOW,
         raw_payload={"positionSide": "LONG"},
     )
+    snap_time = NOW - timedelta(hours=1)
+    zero_snap = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        mark_price=Decimal("10"),
+        notional=Decimal("0"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=snap_time,
+        raw_payload={},
+    )
+    current_snap = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("2"),
+        entry_price=Decimal("10"),
+        unrealized_pnl=Decimal("0"),
+        mark_price=Decimal("10"),
+        notional=Decimal("20"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=NOW,
+        raw_payload={},
+    )
+    anchor_id = stable_snapshot_anchor_id(zero_snap)
+    prov = AccountFillLoadProvenance(
+        stream_scope=scope,
+        load_id="scan-1",
+        scan_origin_from_id=None,
+        scan_origin_start_time_ms=1000,
+        request_from_id=None,
+        next_from_id=None,
+        page_count=1,
+        page_exhausted=True,
+        truncated=False,
+        checked_through=NOW,
+        observed_at=NOW,
+        source_anchor_id=anchor_id,
+        source_anchor_event_cut=snap_time,
+        source_anchor_kind="zero_snapshot",
+    )
+    cov = FactCoverageInterval(
+        start_at=snap_time,
+        end_at=NOW,
+        source_cursor="scan-1",
+        status=FactCoverageStatus.CONFIRMED,
+        stream_scope=scope,
+        evidence_observed_at=NOW,
+        load_provenance=prov,
+        page_exhausted=True,
+        not_truncated=True,
+    )
     cut = DurableJournalCut(
         scope=scope,
-        facts=AccountFacts(position_key=key, stream_scope=scope),
+        facts=AccountFacts(
+            position_key=key,
+            stream_scope=scope,
+            coverage=cov,
+            snapshots=(zero_snap, current_snap),
+            fill_load_provenance=prov,
+        ),
         revision=0,
         as_of=NOW,
     )
@@ -287,14 +361,33 @@ async def test_unproven_repair_rolls_back_without_reload(reason):
             loaded, head=ExecutionHeadSnapshot(1, "hub", "old-epoch", "old", {})
         )
     if reason == "wrong_scope":
+        other_scope = replace(request.scope, stream_epoch="other")
+        prov = (
+            replace(
+                loaded.cut.facts.fill_load_provenance, stream_scope=other_scope
+            )
+            if loaded.cut.facts.fill_load_provenance
+            else None
+        )
+        cov = (
+            replace(
+                loaded.cut.facts.coverage,
+                stream_scope=other_scope,
+                load_provenance=prov,
+            )
+            if loaded.cut.facts.coverage
+            else None
+        )
         loaded = replace(
             loaded,
             cut=replace(
                 loaded.cut,
-                scope=replace(request.scope, stream_epoch="other"),
+                scope=other_scope,
                 facts=replace(
                     loaded.cut.facts,
-                    stream_scope=replace(request.scope, stream_epoch="other"),
+                    stream_scope=other_scope,
+                    fill_load_provenance=prov,
+                    coverage=cov,
                 ),
             ),
         )
@@ -390,7 +483,20 @@ def test_unowned_current_entry_cannot_borrow_old_strategy_ownership(mixed):
     if mixed:
         external = replace(external, trade_id="manual-fill", quantity=Decimal("1"))
         request = replace(request, expected_quantity=Decimal("3"))
-        loaded = replace(loaded, account_fills=loaded.account_fills + (external,))
+        cur_snap = replace(
+            loaded.cut.facts.snapshots[1], position_amt=Decimal("3")
+        )
+        loaded = replace(
+            loaded,
+            cut=replace(
+                loaded.cut,
+                facts=replace(
+                    loaded.cut.facts,
+                    snapshots=(loaded.cut.facts.snapshots[0], cur_snap),
+                ),
+            ),
+            account_fills=loaded.account_fills + (external,),
+        )
     else:
         loaded = replace(loaded, account_fills=(external,))
     with pytest.raises(PositionRepairBlocked, match="not owned"):

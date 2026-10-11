@@ -30,6 +30,14 @@ def plan_command_transition(
     external_order_id: str | None = None,
     reason: str = "",
 ) -> CommandTransition:
+    if entry.state in (DispatchState.TERMINAL, DispatchState.REJECTED):
+        if target == DispatchState.DISPATCHING:
+            raise ValueError(
+                f"Cannot dispatch outbox entry in state {entry.state.value}"
+            )
+        # I1: Terminal outbox entries are irreversible and do not repeat release.
+        return CommandTransition(entry)
+
     if target == DispatchState.DISPATCHING:
         if entry.state != DispatchState.PREPARED:
             raise ValueError(
@@ -50,8 +58,6 @@ def plan_command_transition(
             )
         )
     if target == DispatchState.UNKNOWN:
-        if entry.state in (DispatchState.TERMINAL, DispatchState.REJECTED):
-            return CommandTransition(entry)
         return CommandTransition(
             replace(entry, state=target, last_error=reason, updated_at=at),
             requires_reconciliation=True,

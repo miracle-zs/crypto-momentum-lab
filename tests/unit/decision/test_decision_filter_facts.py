@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
+    FactCredibility,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -165,7 +166,10 @@ async def test_filter_rejects_when_frozen_inputs_missing() -> None:
     )
     out = await filt(_decision_with_candidate(), _state())
     assert out.candidates == ()
-    assert out.rejections[0].details["raw_reason"] == "frozen_decision_inputs_unavailable"
+    assert (
+        out.rejections[0].details["raw_reason"]
+        == "frozen_decision_inputs_unavailable"
+    )
     commit.assert_not_awaited()
 
 
@@ -494,7 +498,8 @@ async def test_filter_admits_flat_stream_position_without_coverage() -> None:
         stream_scope=stream_scope,
         diagnostics=("No durable coverage evidence exists for stream scope",),
     )
-    assert view.is_ready_for_trade is True
+    assert view.is_ready_for_trade is False
+    assert view.fact_credibility == FactCredibility.PENDING
 
     frozen = FrozenDecisionInputs(
         position_view=view,

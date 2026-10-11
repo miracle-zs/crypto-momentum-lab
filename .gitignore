@@ -18,3 +18,4 @@ data/
 server_exports/
 runs/
 local_optimization/
+scratch/

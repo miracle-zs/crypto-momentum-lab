@@ -159,9 +159,32 @@ class ReservationRegistry:
         candidate._reservations_by_id = dict(self._reservations_by_id)
         return candidate
 
-    def publish_from(self, candidate: ReservationRegistry) -> None:
+    def publish_from(
+        self,
+        candidate: ReservationRegistry,
+        key: PositionKey | None = None,
+    ) -> None:
         """Take over staged tracking after commit; the candidate is then retired."""
-        self._reservations_by_id = candidate._reservations_by_id
+        if key is None:
+            for res_id, res in candidate._reservations_by_id.items():
+                existing = self._reservations_by_id.get(res_id)
+                if (
+                    existing is not None
+                    and existing.active_quantity < res.active_quantity
+                ):
+                    continue
+                self._reservations_by_id[res_id] = res
+        else:
+            canon = key.canonical_id
+            for res_id, res in candidate._reservations_by_id.items():
+                if res.position_key.canonical_id == canon:
+                    existing = self._reservations_by_id.get(res_id)
+                    if (
+                        existing is not None
+                        and existing.active_quantity < res.active_quantity
+                    ):
+                        continue
+                    self._reservations_by_id[res_id] = res
 
     def clear_reservations(self) -> None:
         """Clear tracked state before authoritative durable restoration."""

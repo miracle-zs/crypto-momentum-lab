@@ -2763,7 +2763,8 @@ async def test_closed_coordinator_rejects_independent_fact():
         )
 
 
-async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_without_rest():
+async def test_incomplete_ws_update_durably_uses_existing_uncertainty_gate_without_rest(
+) -> None:
     from unittest.mock import create_autospec
 
     from crypto_momentum_lab.domain.execution.exchange_contract import (
@@ -2867,7 +2868,7 @@ async def test_caller_cancellation_while_waiting_for_worker_skips_operation() ->
         scheduler.submit(priority=10, operation=queued, client_order_id="queued")
     )
     try:
-        while scheduler.qsize == 0:
+        while scheduler.qsize == 0:  # noqa: ASYNC110
             await asyncio.sleep(0)
         second.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -2908,10 +2909,11 @@ async def test_execution_rejects_missing_projection_without_mutating_plan(
 
 
 @pytest.mark.asyncio
-async def test_queued_order_cancellation_cancels_before_submission_with_zero_posts() -> (
-    None
-):
-    """Cancelling a queued order before it starts issues 0 POSTs and releases reservations."""
+async def test_queued_order_cancellation_cancels_before_submission_with_zero_posts(
+) -> None:
+    """Cancelling a queued order before it starts issues 0 POSTs and releases
+    reservations.
+    """
     from crypto_momentum_lab.domain.execution.command_models import (
         DispatchState,
         ExecutionScope,
@@ -3004,10 +3006,11 @@ async def test_queued_order_cancellation_cancels_before_submission_with_zero_pos
 
 
 @pytest.mark.asyncio
-async def test_in_flight_submission_cancellation_records_unknown_pending_reconciliation() -> (
-    None
-):
-    """If submission is cancelled while in flight, it must record UNKNOWN and require reconciliation."""
+async def test_in_flight_submission_cancellation_records_unknown_pending_reconciliation(
+) -> None:
+    """If submission is cancelled while in flight, it must record UNKNOWN
+    and require reconciliation.
+    """
     from crypto_momentum_lab.domain.execution.command_models import (
         DispatchState,
     )
@@ -3235,3 +3238,195 @@ async def test_one_way_execution_request_uses_explicit_order_direction(
         assert request.strategy_name == "intent-strategy"
     finally:
         await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a6a_order_observation_capacity_bounded_queue_and_overflow_recovery(
+) -> None:
+    from crypto_momentum_lab.domain.execution.order_read_models import (
+        PersistedOrderReceipt,
+    )
+
+    backend = BlockingBackend()
+    recovered_commands: list[str] = []
+
+    def on_recovery(cid: str) -> None:
+        recovered_commands.append(cid)
+
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        execution_book=ExecutionBook(),
+        order_observation_capacity=2,
+        on_projection_recovery_required=on_recovery,
+    )
+
+    block_consumer_event = asyncio.Event()
+    consumer_started = asyncio.Event()
+    original_apply = coordinator._apply_returned_order_result
+
+    async def blocking_apply(plan, res):
+        if plan.client_order_id == "cid-1":
+            consumer_started.set()
+            await block_consumer_event.wait()
+        await original_apply(plan, res)
+
+    coordinator._apply_returned_order_result = blocking_apply
+
+    # Submit plan 1: consumer picks it up and blocks on block_consumer_event
+    plan1 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-1")
+    res1 = await submit_prepared(coordinator, plan1)
+    assert res1.state is ExchangeOrderState.ACKNOWLEDGED
+
+    # Wait for consumer task to start and get plan 1
+    await consumer_started.wait()
+
+    # Submit plan 2: goes into queue (qsize = 1)
+    plan2 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-2")
+    res2 = await submit_prepared(coordinator, plan2)
+    assert res2.state is ExchangeOrderState.ACKNOWLEDGED
+    assert coordinator._order_observations.qsize() == 1
+
+    # Submit plan 3: goes into queue (qsize = 2, full!)
+    plan3 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-3")
+    res3 = await submit_prepared(coordinator, plan3)
+    assert res3.state is ExchangeOrderState.ACKNOWLEDGED
+    assert coordinator._order_observations.qsize() == 2
+
+    # Submit plan 4: queue is full (capacity=2), must overflow immediately
+    plan4 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-4")
+    _register_execution_command_with_reservations(coordinator, plan4, ())
+    res4 = await submit_prepared(coordinator, plan4)
+    # Succeeded POST not turned into failure!
+    assert res4.state is ExchangeOrderState.ACKNOWLEDGED
+    assert coordinator._order_observations.qsize() <= 2  # No unbounded buffering!
+    assert coordinator.execution_book.command_requires_recovery("cid-4")
+    assert "cid-4" in recovered_commands
+
+    # Submit an exit command: proceeds without duplicate POST or waiting on projection
+    exit_plan = replace(_plan("BTCUSDT", reduce_only=True), client_order_id="exit-1")
+    exit_res = await submit_prepared(coordinator, exit_plan)
+    assert exit_res.state is ExchangeOrderState.ACKNOWLEDGED
+
+    # Unblock consumer and wait for queue to drain
+    block_consumer_event.set()
+    await coordinator._order_observations.join()
+
+    # Overflowed command can be recovered from durable receipt
+    assert coordinator.execution_book.command_requires_recovery("cid-4")
+    from crypto_momentum_lab.domain.account.models import AccountFillEvent
+
+    fill4 = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="t-1",
+        order_id="cid-4",
+        side="BUY",
+        price=Decimal("50000"),
+        quantity=Decimal("0.001"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={"positionSide": "BOTH"},
+    )
+    receipt4 = PersistedOrderReceipt(
+        client_order_id="cid-4",
+        state=ExchangeOrderState.FILLED,
+        exchange_order_id="ex-4",
+        executed_quantity=Decimal("0.001"),
+        average_price=Decimal("50000"),
+        account_fills=(fill4,),
+    )
+    await coordinator.observe_recovered_receipt(plan4, receipt4)
+    assert not coordinator.execution_book.command_requires_recovery("cid-4")
+
+    await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a6b_coordinator_queue_error_handling_and_lifecycle() -> None:
+    backend = BlockingBackend()
+
+    # 1. Invalid capacity <= 0
+    with pytest.raises(ValueError, match="order_observation_capacity must be positive"):
+        OrderExecutionCoordinator(
+            backend=backend,
+            account_label="primary",
+            execution_book=ExecutionBook(),
+            order_observation_capacity=0,
+        )
+
+    with pytest.raises(ValueError, match="order_observation_capacity must be positive"):
+        OrderExecutionCoordinator(
+            backend=backend,
+            account_label="primary",
+            execution_book=ExecutionBook(),
+            order_observation_capacity=-5,
+        )
+
+    # 2. Consumer projection failure and callback failure do not alter exchange result
+    callback_called = []
+
+    def failing_callback(cid: str) -> None:
+        callback_called.append(cid)
+        raise RuntimeError("callback explosion")
+
+    coordinator2 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        execution_book=ExecutionBook(),
+        order_observation_capacity=4,
+        on_projection_recovery_required=failing_callback,
+    )
+
+    async def failing_observe(plan, result):
+        raise RuntimeError("projection database disk full")
+
+    coordinator2._observe_order_result_in_execution_book = failing_observe
+
+    plan_err = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-err")
+    res_err = await submit_prepared(coordinator2, plan_err)
+    # Successful exchange result is NOT altered
+    assert res_err.state is ExchangeOrderState.ACKNOWLEDGED
+
+    # Consumer finishes and calls task_done
+    await coordinator2._order_observations.join()
+    assert coordinator2.execution_book.command_requires_recovery("cid-err")
+    assert "cid-err" in callback_called
+    await coordinator2.aclose()
+
+    # 3. aclose with items in queue drains cleanly without hanging (task_done paired)
+    coordinator3 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        execution_book=ExecutionBook(),
+        order_observation_capacity=4,
+    )
+    hang_event = asyncio.Event()
+
+    async def hanging_apply(plan, res):
+        await hang_event.wait()
+
+    coordinator3._apply_returned_order_result = hanging_apply
+
+    plan_h1 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-h1")
+    plan_h2 = replace(_plan("BTCUSDT", reduce_only=False), client_order_id="cid-h2")
+    await submit_prepared(coordinator3, plan_h1)
+    await submit_prepared(coordinator3, plan_h2)
+
+    # aclose cancels hanging task and drains queue; must not hang!
+    await asyncio.wait_for(coordinator3.aclose(), timeout=2.0)
+    assert coordinator3.execution_book.command_requires_recovery("cid-h1")
+    assert coordinator3.execution_book.command_requires_recovery("cid-h2")
+
+    # 4. Calling submit after close is rejected
+    with pytest.raises(RuntimeError, match="closed"):
+        await submit_prepared(
+            coordinator3,
+            replace(
+                _plan("BTCUSDT", reduce_only=False),
+                client_order_id="cid-after-close",
+            ),
+        )

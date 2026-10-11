@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 
 import structlog
 
@@ -58,7 +62,7 @@ class AbortObservation(Exception):
 
 
 async def observe_evidence_transaction(
-    book: object, evidence: ExecutionEvidence
+    book: ExecutionBook, evidence: ExecutionEvidence
 ) -> ExecutionObserveResult:
     """Atomically accept source evidence and publish its projection."""
     if book._execution_unit_of_work is None:
@@ -83,55 +87,73 @@ async def observe_evidence_transaction(
     canon = key.canonical_id
     book.evidence_state.register_active_stream(evidence)
 
-    async with book._mutation_lock(key):
-        if book._persistence_failed and not book._stream_scopes:
-            raise RuntimeError("execution facts require initial durable restoration")
-        # A truly flat position on exchange with no active local exposure,
-        # reservations, or pending commands can adopt or confirm the stream
-        # epoch in memory without cloning the book or opening a database
-        # transaction. This eliminates thousands of redundant staged copies
-        # and transactions on every snapshot cycle.
-        flat_result = apply_flat_snapshot(
-            book.evidence_state,
-            evidence,
-            scope=scope,
-            requires_verified_stream_adoption=book._requires_verified_stream_adoption,
-        )
-        if flat_result is not None:
-            return flat_result
-
-        # A restored non-flat position from an earlier stream cannot be adopted by
-        # an ordinary snapshot. Reject it before cloning its journal or
-        # opening a transaction; account snapshots may contain thousands
-        # of historical symbols on every refresh.
-        terminal_without_fill = is_unfilled_terminal_order(evidence)
-        can_rollover, recovery_proof_required = evaluate_stream_rollover(
-            book.evidence_state,
-            evidence,
-            is_unfilled_terminal_order=terminal_without_fill,
-            requires_verified_stream_adoption=book._requires_verified_stream_adoption,
-        )
-        if recovery_proof_required:
-            return WaitingForEvidence(
-                evidence_id=evidence.evidence_id,
-                reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
+    for obs_attempt in range(3):
+        async with book._mutation_lock(key):
+            if book._persistence_failed and not book._stream_scopes:
+                raise RuntimeError(
+                    "execution facts require initial durable restoration"
+                )
+            # A truly flat position on exchange with no active local exposure,
+            # reservations, or pending commands can adopt or confirm the stream
+            # epoch in memory without cloning the book or opening a database
+            # transaction. This eliminates thousands of redundant staged copies
+            # and transactions on every snapshot cycle.
+            flat_result = apply_flat_snapshot(
+                book.evidence_state,
+                evidence,
+                scope=scope,
+                requires_verified_stream_adoption=book._requires_verified_stream_adoption,
             )
-        candidate = book._staged_copy(key=key)
+            if flat_result is not None:
+                return flat_result
+
+            # A restored non-flat position from an earlier stream cannot be adopted by
+            # an ordinary snapshot. Reject it before cloning its journal or
+            # opening a transaction; account snapshots may contain thousands
+            # of historical symbols on every refresh.
+            terminal_without_fill = is_unfilled_terminal_order(evidence)
+            can_rollover, recovery_proof_required = evaluate_stream_rollover(
+                book.evidence_state,
+                evidence,
+                is_unfilled_terminal_order=terminal_without_fill,
+                requires_verified_stream_adoption=book._requires_verified_stream_adoption,
+            )
+            if recovery_proof_required:
+                return WaitingForEvidence(
+                    evidence_id=evidence.evidence_id,
+                    reason=EvidencePendingReason.STREAM_RECOVERY_PROOF_REQUIRED,
+                )
+            snapshot_head_revision = book._head_revisions.get(canon, 0)
+            candidate = book._staged_copy(key=key)
+
+        # Phase 2: Lock-free durable I/O and CAS commit (I2: no lock across I/O)
         try:
             async with book._execution_unit_of_work.transaction(key) as tx:
                 head = await tx.load_head(key)
                 adopting_epoch = False
                 if head is None:
                     expected_head_revision = 0
-                    if book._head_revisions.get(canon, 0) != 0:
+                    if (
+                        snapshot_head_revision != 0
+                        or book._head_revisions.get(canon, 0) != 0
+                    ):
+                        if obs_attempt < 2:
+                            await book.reload_position(key)
+                            continue
                         raise RuntimeError(
                             "local execution head exists but durable head is missing"
                         )
                 else:
                     expected_head_revision = head.revision
-                    if book._head_revisions.get(canon) != head.revision:
+                    if (
+                        head.revision != snapshot_head_revision
+                        or book._head_revisions.get(canon, 0) != snapshot_head_revision
+                    ):
+                        if obs_attempt < 2:
+                            await book.reload_position(key)
+                            continue
                         raise RuntimeError(
-                            "execution head changed in another process;"
+                            "execution head changed in another transaction or process;"
                             " restore required"
                         )
                     if (
@@ -489,7 +511,7 @@ async def observe_evidence_transaction(
                     facts.compute_facts_hash(),
                     ensure_book=candidate._ensure_book,
                     ensure_journal=candidate._ensure_journal,
-                    active_reservations=candidate.get_active_reservations,
+                    active_reservations=book.get_active_reservations,
                 )
                 candidate._head_revisions[canon] = await tx.persist_head(
                     key=key,
@@ -508,12 +530,33 @@ async def observe_evidence_transaction(
                     ),
                     is_flat_adoption=can_rollover,
                 )
-            candidate._active_transaction = None
-            book._publish_candidate(candidate)
+                candidate._active_transaction = None
+
+            # Phase 3: Short lock for candidate publication & validation
+            needs_retry = False
+            async with book._mutation_lock(key):
+                current_head_rev = book._head_revisions.get(canon, 0)
+                if current_head_rev != snapshot_head_revision:
+                    needs_retry = True
+                else:
+                    book._publish_candidate(candidate, key=key)
+            if needs_retry:
+                if obs_attempt < 2:
+                    await book.reload_position(key)
+                    continue
+                raise RuntimeError(
+                    "execution head changed concurrently; restore required"
+                )
             return result
         except AbortObservation as abort:
             return abort.result
         except Exception as err:
+            if obs_attempt < 2 and (
+                "execution head changed" in str(err)
+                or "restore required" in str(err)
+            ):
+                await book.reload_position(key)
+                continue
             book._persistence_failed = True
             log.error(
                 "atomic_execution_observation_failed",
@@ -524,3 +567,4 @@ async def observe_evidence_transaction(
             raise RuntimeError(
                 f"execution evidence was not durably accepted: {err}"
             ) from err
+    raise RuntimeError("exhausted maximum observation attempts")

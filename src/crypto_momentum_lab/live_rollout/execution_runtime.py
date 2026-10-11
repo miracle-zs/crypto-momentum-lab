@@ -73,6 +73,8 @@ async def build_live_execution_runtime(
     on_exchange_response: ExchangeBoundaryCallback,
     submission_repository: OrderSubmissionRepository,
     submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    order_observation_capacity: int = 256,
+    on_projection_recovery_required: Callable[[str], None] | None = None,
 ) -> LiveExecutionRuntime:
     backend = OrderExecutionStateMachine(
         exchange=exchange,
@@ -83,6 +85,7 @@ async def build_live_execution_runtime(
         on_before_submit=on_before_submit,
         on_exchange_request=on_exchange_request,
         on_exchange_response=on_exchange_response,
+        retry_lookup_on_submit_timeout=False,
     )
     reservations = AsyncPostgresPositionReservationRepository(
         sessions,
@@ -111,6 +114,8 @@ async def build_live_execution_runtime(
         execution_book=book,
         submission_repository=submission_repository,
         submission_clock=submission_clock,
+        order_observation_capacity=order_observation_capacity,
+        on_projection_recovery_required=on_projection_recovery_required,
     )
     return LiveExecutionRuntime(book=book, coordinator=coordinator)
 

@@ -25,8 +25,10 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.live_rollout.pending_entries import TerminalOrderBarrier
 
 log = structlog.get_logger()
+
 
 class EntryOrderProgress(Protocol):
     @property
@@ -48,11 +50,39 @@ class LiveLimitOrderLifecycle:
         *,
         cancel_order: CancelOrder,
         clock: Clock = lambda: datetime.now(UTC),
+        terminal_capacity: int = 1024,
+        terminal_barrier: TerminalOrderBarrier | None = None,
+        durable_checker: Callable[[str], bool] | None = None,
     ) -> None:
         self._cancel_order = cancel_order
         self._clock = clock
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stopped = False
+        if terminal_barrier is not None:
+            self._terminal_barrier = terminal_barrier
+            if (
+                self._terminal_barrier._durable_checker is None
+                and durable_checker is not None
+            ):
+                self._terminal_barrier._durable_checker = durable_checker
+        else:
+            self._terminal_barrier = TerminalOrderBarrier(
+                capacity=terminal_capacity,
+                durable_checker=durable_checker,
+            )
+
+    @property
+    def terminal_barrier(self) -> TerminalOrderBarrier:
+        return self._terminal_barrier
+
+    def is_terminal(self, client_order_id: str) -> bool:
+        """Check whether this order identity has reached terminal state."""
+        return self._terminal_barrier.is_terminal(client_order_id)
+
+    def _record_terminal(
+        self, client_order_id: str, executed: Decimal = Decimal("0")
+    ) -> None:
+        self._terminal_barrier.record_terminal(client_order_id, executed)
 
     async def restore(self, orders: Iterable[PersistedExchangeOrder]) -> None:
         """Start expiry timers for unresolved GTD entry orders."""
@@ -72,9 +102,12 @@ class LiveLimitOrderLifecycle:
             or plan.reduce_only
             or plan.order_type.upper() != "LIMIT"
             or plan.expires_at is None
+            or self.is_terminal(plan.client_order_id)
             or result.state.terminal
             or result.executed_quantity >= plan.quantity
         ):
+            if result.state.terminal or result.executed_quantity >= plan.quantity:
+                self._record_terminal(plan.client_order_id, result.executed_quantity)
             return
         previous = self._tasks.pop(plan.client_order_id, None)
         if previous is not None:
@@ -94,6 +127,19 @@ class LiveLimitOrderLifecycle:
         """Stop a timer as soon as an account/order event confirms completion."""
 
         if not plan.reduce_only and event.state.terminal:
+            raw_executed = (
+                event.details.get("executed_quantity")
+                if event.details is not None
+                else None
+            )
+            executed = (
+                Decimal(raw_executed)
+                if raw_executed is not None
+                else plan.quantity
+                if event.state is ExchangeOrderState.FILLED
+                else Decimal(0)
+            )
+            self._record_terminal(plan.client_order_id, executed)
             task = self._tasks.pop(plan.client_order_id, None)
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
@@ -133,6 +179,7 @@ class LiveLimitOrderLifecycle:
                 state=result.state.value,
             )
         else:
+            self._record_terminal(plan.client_order_id, result.executed_quantity)
             log.info(
                 "live_entry_limit_expired",
                 symbol=plan.symbol,

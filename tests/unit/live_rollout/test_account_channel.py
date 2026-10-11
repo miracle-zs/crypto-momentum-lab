@@ -41,7 +41,9 @@ async def test_telemetry_outage_cannot_discard_account_trade_facts():
         latest_market_states=Cache(),
         latest_market_quotes=Cache(),
         telemetry=Telemetry(),
-        on_account_snapshot=AsyncMock(side_effect=lambda event: ordering.append("durable-facts")),
+        on_account_snapshot=AsyncMock(
+            side_effect=lambda event: ordering.append("durable-facts")
+        ),
         is_transient_error=lambda error: isinstance(error, ConnectionError),
     )
     await runtime._process_event(event)
@@ -194,7 +196,9 @@ async def test_runtime_reconciles_order_before_publishing_snapshot() -> None:
         latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
         order_reconciliation=Reconciliation(),  # type: ignore[arg-type]
         is_transient_error=lambda _error: False,
-        on_account_snapshot=AsyncMock(side_effect=lambda _event: ordering.append("snapshot")),
+        on_account_snapshot=AsyncMock(
+            side_effect=lambda _event: ordering.append("snapshot")
+        ),
     )
 
     await runtime.run(Source())  # type: ignore[arg-type]
@@ -263,7 +267,9 @@ async def test_pending_position_does_not_delay_next_account_snapshot(
         run_id="run-1",
         is_transient_error=lambda _error: False,
         on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
-        on_account_snapshot=AsyncMock(side_effect=lambda _event: snapshots.append(len(snapshots))),
+        on_account_snapshot=AsyncMock(
+            side_effect=lambda _event: snapshots.append(len(snapshots))
+        ),
     )
 
     await runtime.run(Source())  # type: ignore[arg-type]
@@ -488,3 +494,155 @@ async def test_blocked_exit_repair_does_not_block_account_publication():
         worker.cancel()
         with pytest.raises(asyncio.CancelledError):
             await worker
+
+
+@pytest.mark.asyncio
+async def test_a4c_account_runtime_hedge_close_and_fill_processing():
+    """A4c: Real account runtime processes A4a order update and trade facts,
+    then zero position arrives; no identity conflict recovery, fills recorded.
+    """
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.order_state import (
+        ExchangeOrderState,
+        FuturesPositionSide,
+        OrderExecutionPlan,
+    )
+    from crypto_momentum_lab.execution_account.binance.user_data_parser import (
+        order_snapshot_from_update,
+    )
+    from crypto_momentum_lab.execution_account.hub import AccountEvent
+    from crypto_momentum_lab.live_rollout.order_identity_errors import (
+        is_runtime_order_identity_conflict,
+    )
+
+    plan = OrderExecutionPlan(
+        intent_id="exit-long-1",
+        run_id="run-1",
+        client_order_id="exit-long-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=NOW,
+    )
+
+    reconciled_snapshots = []
+
+    class Reconciler:
+        run_id = "run-1"
+
+        async def reconcile_account_event(self, event: AccountEvent) -> None:
+            if event.order_update is not None:
+                snapshot = order_snapshot_from_update(event.order_update, plan)
+                reconciled_snapshots.append(snapshot)
+
+    telemetry_fills = []
+
+    class TelemetrySink:
+        async def account_fill(self, fill_event, *, occurred_at):
+            telemetry_fills.append(fill_event)
+
+    recovery_reasons = []
+    exit_failures = []
+    snapshots_received = []
+
+    class Cache:
+        def for_symbols(self, symbols):
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        run_id="run-1",
+        daemon=object(),
+        latest_market_states=Cache(),
+        latest_market_quotes=Cache(),
+        order_reconciliation=Reconciler(),
+        telemetry=TelemetrySink(),
+        is_transient_error=lambda err: False,
+        is_order_identity_conflict=is_runtime_order_identity_conflict,
+        on_exit_failure=lambda sym, fail: exit_failures.append((sym, fail)),
+        on_account_snapshot=AsyncMock(
+            side_effect=lambda ev: snapshots_received.append(ev)
+        ),
+        on_account_snapshot_recovery=recovery_reasons.append,
+    )
+
+    ws_order = {
+        "c": "exit-long-1",
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": False,
+        "ps": "LONG",
+        "i": 2001,
+        "X": "FILLED",
+        "z": "0.002",
+        "ap": "50000",
+        "T": int(NOW.timestamp() * 1000),
+    }
+    fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="trade-999",
+        order_id="2001",
+        side="SELL",
+        price=Decimal("50000"),
+        quantity=Decimal("0.002"),
+        realized_pnl=Decimal("10.0"),
+        fee=Decimal("0.05"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={},
+    )
+    order_trade_event = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ORDER_TRADE_UPDATE",
+        event_id="event-1",
+        event_at=NOW,
+        received_at=NOW,
+        symbols=("BTCUSDT",),
+        symbol="BTCUSDT",
+        client_order_id="exit-long-1",
+        has_fill=True,
+        trade_id="trade-999",
+        fills=(fill,),
+        order_update=ws_order,
+    )
+
+    # 1. Process order trade update
+    await runtime._process_event(order_trade_event)
+
+    assert len(reconciled_snapshots) == 1
+    assert reconciled_snapshots[0].state is ExchangeOrderState.FILLED
+    assert len(telemetry_fills) == 1
+    assert telemetry_fills[0].trade_id == "trade-999"
+    assert recovery_reasons == []
+    assert exit_failures == []
+
+    # 2. Replay the same trade ID -> deduplicated, not recorded again
+    await runtime._process_event(order_trade_event)
+    assert len(telemetry_fills) == 1
+
+    # 3. Subsequent ACCOUNT_UPDATE with position reduced to zero
+    zero_pos_event = AccountEvent(
+        environment="live",
+        account_label="primary",
+        event_type="ACCOUNT_UPDATE",
+        event_id="event-2",
+        event_at=NOW,
+        received_at=NOW,
+        symbols=("BTCUSDT",),
+        has_fill=False,
+    )
+    await runtime._process_event(zero_pos_event)
+    assert recovery_reasons == []
+    assert exit_failures == []
+    assert len(snapshots_received) == 3

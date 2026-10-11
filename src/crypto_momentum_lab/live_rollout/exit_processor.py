@@ -149,20 +149,20 @@ class LiveExitProcessor:
         quote: RealtimeMarketQuote | None = None,
         now: datetime | None = None,
     ) -> ExitLaneOutcome:
+        if self._telemetry is not None and trigger in ("state", "closed_candle"):
+            await self._telemetry.market_state_received(
+                state,
+                occurred_at=event.received_at
+                if event is not None
+                else self._clock(),
+                lane=LIVE_LANE_EXIT,
+            )
         async with self._position_locks.hold(
             live_symbol_position_key(self._account_label, state.symbol)
         ):
             manager = self._exit_manager
             if manager is None or not self._is_exit_enabled():
                 return ExitLaneOutcome()
-            if self._telemetry is not None and trigger in ("state", "closed_candle"):
-                await self._telemetry.market_state_received(
-                    state,
-                    occurred_at=event.received_at
-                    if event is not None
-                    else self._clock(),
-                    lane=LIVE_LANE_EXIT,
-                )
             self._schedule_pending_exit_recoveries(state=state, context=context)
             if trigger == "state":
                 if not manager.uses_market_state_exit:
@@ -190,27 +190,29 @@ class LiveExitProcessor:
                 )
             else:
                 raise ValueError(f"invalid exit trigger: {trigger}")
-            try:
-                approved, submitted, failure = await self._execute_requests(
-                    requests,
-                    state=state,
-                    context=context,
-                    invalidate_context=trigger != "closed_candle",
-                )
-            except Exception as error:
-                if (
-                    trigger == "grace_timeout"
-                    and order_identity_errors.is_durable_order_identity_conflict(error)
-                ):
-                    manager.note_order_identity_conflict(state.symbol)
-                raise
-            if event is not None and failure == "candidate_expired":
-                failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
-            return ExitLaneOutcome(
-                approved_intent_count=approved,
-                submitted_order_count=submitted,
-                failure=failure,
+
+        try:
+            approved, submitted, failure = await self._execute_requests(
+                requests,
+                state=state,
+                context=context,
+                invalidate_context=trigger != "closed_candle",
             )
+        except Exception as error:
+            if (
+                trigger == "grace_timeout"
+                and order_identity_errors.is_durable_order_identity_conflict(error)
+            ):
+                if self._exit_manager is not None:
+                    self._exit_manager.note_order_identity_conflict(state.symbol)
+            raise
+        if event is not None and failure == "candidate_expired":
+            failure = f"closed_candle_evaluation_expired:{event.candle.symbol}"
+        return ExitLaneOutcome(
+            approved_intent_count=approved,
+            submitted_order_count=submitted,
+            failure=failure,
+        )
 
     def _schedule_pending_exit_recoveries(
         self,
@@ -287,7 +289,9 @@ class LiveExitProcessor:
     async def recover_requested_exits(
         self, *, limit: int = 5
     ) -> tuple[tuple[str, ExitLaneOutcome], ...]:
-        """Run in the existing repair worker; remote inspection never owns a decision lock."""
+        """Run in the existing repair worker; remote inspection never owns a
+        decision lock.
+        """
         outcomes = []
         for root in tuple(self._requested_recoveries)[:limit]:
             work = self._requested_recoveries[root]
@@ -395,20 +399,21 @@ class LiveExitProcessor:
             latest = self._requested_recoveries.get(root)
             if latest is not None and latest.plan != plan:
                 return None
-            return await self._apply_exit_recovery_observation(
-                plan=plan,
-                known_executed_quantity=known_executed_quantity,
-                state=state,
-                context=fresh_context,
-                observation=observation,
-                source_candidate=source_candidate,
-                reference_price=reference_price,
-                recovery_entry_type=recovery_entry_type,
-                recovery_limit_price=recovery_limit_price,
-                root=root,
-                current_attempt=current_attempt,
-                now=now,
-            )
+
+        return await self._apply_exit_recovery_observation(
+            plan=plan,
+            known_executed_quantity=known_executed_quantity,
+            state=state,
+            context=fresh_context,
+            observation=observation,
+            source_candidate=source_candidate,
+            reference_price=reference_price,
+            recovery_entry_type=recovery_entry_type,
+            recovery_limit_price=recovery_limit_price,
+            root=root,
+            current_attempt=current_attempt,
+            now=now,
+        )
 
     async def _apply_exit_recovery_observation(
         self,

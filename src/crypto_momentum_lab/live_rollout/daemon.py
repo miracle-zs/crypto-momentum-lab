@@ -8,7 +8,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -63,6 +63,7 @@ from crypto_momentum_lab.live_rollout.context_prefetch import (
 )
 from crypto_momentum_lab.live_rollout.entry_control import (
     LiveEntryControlGate,
+    TradingGateState,
 )
 from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryExecutionLane,
@@ -201,6 +202,7 @@ class LiveStrategyDaemon:
             clock=self._clock,
             is_symbol_warmed=is_symbol_warmed,
             on_unwarmed_symbol=on_unwarmed_symbol,
+            is_exit_enabled=lambda: self._exit_enabled,
         )
         self._context_provider = context_provider
         self._config = config
@@ -226,14 +228,28 @@ class LiveStrategyDaemon:
         self._fetch_exchange_positions = fetch_exchange_positions
         self._run_active = False
         self._exit_enabled = True
+        terminal_barrier = (
+            entry_order_lifecycle.terminal_barrier
+            if entry_order_lifecycle is not None
+            and hasattr(entry_order_lifecycle, "terminal_barrier")
+            else None
+        )
         self._position_locks = PositionLifecycleLocks()
-        self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
+        self._pending_entries = LivePendingEntryRegistry(
+            clock=self._clock,
+            terminal_barrier=terminal_barrier,
+        )
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
             strategy=strategy,
             pending_entry_symbols=self._pending_entries.pending_symbols,
             volume_metrics_provider=(
-                (lambda: self._signal_recorder.volume_metrics)
+                (
+                    lambda: cast(
+                        dict[str, object],
+                        getattr(self._signal_recorder, "volume_metrics", {}),
+                    )
+                )
                 if self._signal_recorder is not None
                 else None
             ),
@@ -343,6 +359,8 @@ class LiveStrategyDaemon:
             invalidate_context=self._context_runtime.invalidate,
             telemetry=self._telemetry,
             signal_recorder=self._signal_recorder,
+            trading_gate_state=lambda: self.trading_gate_state,
+            is_symbol_entry_allowed=self.is_symbol_entry_allowed,
         )
         self._market_loop = LiveMarketLoop(
             run_id=config.run_id,
@@ -375,6 +393,10 @@ class LiveStrategyDaemon:
     @property
     def entry_enabled_reason(self) -> str:
         return self._entry_control.entry_enabled_reason
+
+    @property
+    def trading_gate_state(self) -> TradingGateState:
+        return self._entry_control.trading_gate_state
 
     def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
         return self._entry_control.is_symbol_entry_allowed(symbol)
@@ -445,6 +467,13 @@ class LiveStrategyDaemon:
             raise TypeError("enabled must be a bool")
         if self._exit_enabled != enabled:
             self._exit_enabled = enabled
+            if hasattr(self, "_entry_control"):
+                if not enabled:
+                    self._entry_control.set_halted(
+                        True, reason=f"exit_disabled:{reason}"
+                    )
+                else:
+                    self._entry_control.set_halted(False, reason="exit_enabled")
             log.warning(
                 "live_exit_lane_state_changed",
                 enabled=enabled,

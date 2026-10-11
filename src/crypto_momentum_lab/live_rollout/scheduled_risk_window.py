@@ -22,6 +22,7 @@ class _ScheduledRiskWindowOverrides(TypedDict, total=False):
 
 class ScheduledRiskWindowPhase(StrEnum):
     PRE_WINDOW = "pre_window"
+    ENTRY_BLOCKED = "entry_blocked"
     FLATTENING = "flattening"
     DEADLINE = "deadline"
     VERIFYING = "verifying"
@@ -126,6 +127,8 @@ class ScheduledRiskWindowConfig:
         current_time = local_value.time().replace(tzinfo=None)
         if current_time < self.entry_stop_at:
             return ScheduledRiskWindowPhase.PRE_WINDOW
+        if current_time < self.flatten_start_at:
+            return ScheduledRiskWindowPhase.ENTRY_BLOCKED
         if current_time < self.flatten_deadline_at:
             return ScheduledRiskWindowPhase.FLATTENING
         if current_time < self.verify_at:

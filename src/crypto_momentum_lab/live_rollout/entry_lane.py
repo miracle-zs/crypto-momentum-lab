@@ -35,6 +35,7 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveDaemonRuntimeContext,
     LiveEntryFilterContext,
 )
+from crypto_momentum_lab.live_rollout.entry_control import TradingGateState
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveSignalRecorderPort,
 )
@@ -140,6 +141,8 @@ class EntryExecutionLane:
         invalidate_context: Callable[[], None],
         telemetry: LiveTelemetrySink | None = None,
         signal_recorder: LiveSignalRecorderPort | None = None,
+        trading_gate_state: Callable[[], TradingGateState] | None = None,
+        is_symbol_entry_allowed: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
@@ -149,6 +152,8 @@ class EntryExecutionLane:
         self._invalidate_context = invalidate_context
         self._telemetry = telemetry
         self._signal_recorder = signal_recorder
+        self._trading_gate_state = trading_gate_state
+        self._is_symbol_entry_allowed = is_symbol_entry_allowed
         self._entry_symbols: frozenset[str] | None = None
         self._entry_symbols_loaded_at: datetime | None = None
 
@@ -318,8 +323,23 @@ class EntryExecutionLane:
         gate_reasons: tuple[str, ...] = (),
         recorded_at: datetime,
     ) -> EntryLaneOutcome:
-        has_entry_candidates = self._entry_enabled() and any(
-            not candidate.reduce_only for candidate in decision.candidates
+        gate_active = (
+            self._trading_gate_state() == TradingGateState.ACTIVE
+            if self._trading_gate_state is not None
+            else True
+        )
+        effective_gate_reasons = tuple(gate_reasons)
+        if self._trading_gate_state is not None:
+            gate_state = self._trading_gate_state()
+            if gate_state != TradingGateState.ACTIVE:
+                reason = self._entry_enabled_reason() or str(gate_state.value)
+                if reason not in effective_gate_reasons:
+                    effective_gate_reasons = (*effective_gate_reasons, reason)
+
+        has_entry_candidates = (
+            gate_active
+            and self._entry_enabled()
+            and any(not candidate.reduce_only for candidate in decision.candidates)
         )
         if has_entry_candidates and self._config.entry_symbol_loader is not None:
             if (
@@ -389,7 +409,7 @@ class EntryExecutionLane:
             state=state,
             recorded_at=recorded_at,
             context=context,
-            gate_reasons=gate_reasons,
+            gate_reasons=effective_gate_reasons,
             entry_symbols=self._entry_symbols,
             entry_filter_context=entry_filter_context,
             filter_context={
@@ -402,7 +422,7 @@ class EntryExecutionLane:
             state=state,
             recorded_at=recorded_at,
             context=context,
-            gate_reasons=gate_reasons,
+            gate_reasons=effective_gate_reasons,
             entry_symbols=self._entry_symbols,
             entry_filter_context=entry_filter_context,
             policy_evaluation=policy_evaluation,
@@ -418,6 +438,39 @@ class EntryExecutionLane:
         pending_reconciliation = False
         for candidate in decision.candidates:
             if not candidate.reduce_only:
+                if not gate_active:
+                    continue
+                pending_symbols: frozenset[str] = getattr(
+                    context, "pending_position_symbols", frozenset()
+                )
+                unmanaged_symbols: frozenset[str] = getattr(
+                    context, "unmanaged_position_symbols", frozenset()
+                )
+                if (
+                    candidate.symbol in pending_symbols
+                    or candidate.symbol in unmanaged_symbols
+                ):
+                    log.info(
+                        "entry_candidate_rejected_by_position_state",
+                        run_id=self._config.run_id,
+                        symbol=candidate.symbol,
+                        candidate_id=candidate.candidate_id,
+                        reason="position_facts_not_ready",
+                    )
+                    continue
+                if self._is_symbol_entry_allowed is not None:
+                    allowed, reason = self._is_symbol_entry_allowed(
+                        candidate.symbol
+                    )
+                    if not allowed:
+                        log.info(
+                            "entry_candidate_rejected_by_symbol_gate",
+                            run_id=self._config.run_id,
+                            symbol=candidate.symbol,
+                            candidate_id=candidate.candidate_id,
+                            reason=reason,
+                        )
+                        continue
                 evaluation = policy_evaluation.decision_for(candidate.candidate_id)
                 if (
                     policy_evaluation.skip_reason is not None
@@ -491,16 +544,43 @@ class EntryExecutionLane:
         )
         ema5 = None if entry_filter_context is None else entry_filter_context.ema5
         ema10 = None if entry_filter_context is None else entry_filter_context.ema10
+        gate_active = (
+            self._trading_gate_state() == TradingGateState.ACTIVE
+            if self._trading_gate_state is not None
+            else True
+        )
+        effective_entry_enabled = gate_active and self._entry_enabled()
         source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
         decisions: list[CandidatePolicyDecision] = []
         for candidate in decision.candidates:
             if candidate.reduce_only:
                 continue
+            candidate_gate_reasons = tuple(gate_reasons)
+            pending_symbols: frozenset[str] = getattr(
+                context, "pending_position_symbols", frozenset()
+            )
+            unmanaged_symbols: frozenset[str] = getattr(
+                context, "unmanaged_position_symbols", frozenset()
+            )
+            if (
+                candidate.symbol in pending_symbols
+                or candidate.symbol in unmanaged_symbols
+            ):
+                candidate_gate_reasons = (
+                    *candidate_gate_reasons,
+                    f"symbol_fact_pending:{candidate.symbol}",
+                )
+            if self._is_symbol_entry_allowed is not None:
+                allowed, symbol_reason = self._is_symbol_entry_allowed(
+                    candidate.symbol
+                )
+                if not allowed and symbol_reason not in candidate_gate_reasons:
+                    candidate_gate_reasons = (*candidate_gate_reasons, symbol_reason)
             evaluation = evaluate_entry_candidate(
                 candidate=candidate,
                 source_trace_id=source_trace,
-                gate_reasons=gate_reasons,
-                entry_enabled=self._entry_enabled(),
+                gate_reasons=candidate_gate_reasons,
+                entry_enabled=effective_entry_enabled,
                 entry_long_only=self._config.entry_long_only,
                 entry_symbols=entry_symbols,
                 universe_snapshot=universe_snapshot,

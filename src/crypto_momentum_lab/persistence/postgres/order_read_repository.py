@@ -255,6 +255,53 @@ class PostgresOrderReadRepository:
                     )
             return replace(order, terminal_receipt=receipt)
 
+    async def load_terminal_orders(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 2048,
+    ) -> dict[str, Decimal]:
+        terminal_states = tuple(
+            state.value for state in ExchangeOrderState if state.terminal
+        )
+        async with self._session_factory() as session:
+            query = (
+                select(
+                    ExchangeOrderRow.client_order_id,
+                    ExchangeOrderRow.executed_quantity,
+                )
+                .where(ExchangeOrderRow.state.in_(terminal_states))
+            )
+            if run_id is not None:
+                query = query.where(ExchangeOrderRow.run_id == run_id)
+            query = query.order_by(
+                ExchangeOrderRow.updated_at.desc(),
+                ExchangeOrderRow.client_order_id,
+            ).limit(limit)
+            rows = (await session.execute(query)).all()
+            return {
+                client_order_id: Decimal(str(executed_qty or 0))
+                for client_order_id, executed_qty in rows
+            }
+
+    async def is_order_terminal(
+        self, client_order_id: str
+    ) -> tuple[bool, Decimal] | None:
+        terminal_states = tuple(
+            state.value for state in ExchangeOrderState if state.terminal
+        )
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(ExchangeOrderRow).where(
+                    ExchangeOrderRow.client_order_id == client_order_id
+                )
+            )
+            if row is None:
+                return None
+            if row.state in terminal_states:
+                return True, Decimal(str(row.executed_quantity or 0))
+            return False, Decimal(str(row.executed_quantity or 0))
+
 
 async def _load_plan_details(
     session: AsyncSession, order_ids: list[str]

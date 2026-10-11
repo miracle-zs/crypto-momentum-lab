@@ -435,6 +435,8 @@ class OrderExecutionCoordinator:
         execution_book: ExecutionBook,
         submission_repository: OrderSubmissionRepository | None = None,
         submission_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        order_observation_capacity: int = 256,
+        on_projection_recovery_required: Callable[[str], None] | None = None,
     ) -> None:
         if not environment.strip():
             raise ValueError("environment must not be empty")
@@ -446,6 +448,8 @@ class OrderExecutionCoordinator:
             raise ValueError(
                 "exit_headroom must be non-negative and less than max_queue_depth"
             )
+        if order_observation_capacity <= 0:
+            raise ValueError("order_observation_capacity must be positive")
         self._submission_repository = submission_repository
         self._submission_configuration_locked = False
         self._submission_clock = submission_clock
@@ -457,12 +461,14 @@ class OrderExecutionCoordinator:
         self._max_queue_wait_seconds = max_queue_wait_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
         self._execution_book = execution_book
+        self._order_observation_capacity = order_observation_capacity
+        self._on_projection_recovery_required = on_projection_recovery_required
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
         self._order_observations: asyncio.Queue[
             tuple[OrderExecutionPlan, OrderExecutionResult]
-        ] = asyncio.Queue()
+        ] = asyncio.Queue(maxsize=order_observation_capacity)
         self._order_observer_task: asyncio.Task[None] | None = None
         self._entry_submissions_blocked = False
         self._active_entry_submissions = 0
@@ -864,7 +870,8 @@ class OrderExecutionCoordinator:
             batch_quantities = {str(plan.batch_id): plan.quantity}
         else:
             raise OrderPreSubmissionError(
-                f"Exit order {plan.client_order_id} has no allocated batches or batch_id"
+                f"Exit order {plan.client_order_id} has no allocated "
+                "batches or batch_id"
             )
         return ExecutionRequest(
             request_id=plan.client_order_id,
@@ -1013,7 +1020,8 @@ class OrderExecutionCoordinator:
                 err
             ):
                 raise OrderPreSubmissionError(
-                    f"Failed to create position reservation for {plan.client_order_id}: {err}"
+                    f"Failed to create position reservation for "
+                    f"{plan.client_order_id}: {err}"
                 ) from err
             raise
         except Exception as err:
@@ -1223,7 +1231,8 @@ class OrderExecutionCoordinator:
             await self._execution_book.mark_dispatching(plan.client_order_id)
         elif entry.state in (DispatchState.REJECTED, DispatchState.TERMINAL):
             raise OrderPreSubmissionError(
-                f"execution command {plan.client_order_id} is in non-dispatchable state {entry.state.value}"
+                f"execution command {plan.client_order_id} is in "
+                f"non-dispatchable state {entry.state.value}"
             )
 
     async def _observe_returned_order_result(
@@ -1240,11 +1249,36 @@ class OrderExecutionCoordinator:
             return
         await self._apply_returned_order_result(plan, result)
 
+    def _handle_projection_overflow(self, client_order_id: str) -> None:
+        self._execution_book.require_command_recovery(client_order_id)
+        log.warning(
+            "order_observation_queue_overflow_recovery_required",
+            account_label=self._account_label,
+            client_order_id=client_order_id,
+        )
+        if self._on_projection_recovery_required is not None:
+            try:
+                self._on_projection_recovery_required(client_order_id)
+            except Exception as error:
+                log.error(
+                    "order_observation_recovery_callback_failed",
+                    account_label=self._account_label,
+                    client_order_id=client_order_id,
+                    error=str(error),
+                )
+
     def _defer_order_projection(
         self, plan: OrderExecutionPlan, result: OrderExecutionResult
     ) -> None:
-        self._order_observations.put_nowait((plan, result))
-        if self._order_observer_task is None:
+        if self._closed:
+            self._handle_projection_overflow(result.client_order_id)
+            return
+        try:
+            self._order_observations.put_nowait((plan, result))
+        except asyncio.QueueFull:
+            self._handle_projection_overflow(result.client_order_id)
+            return
+        if self._order_observer_task is None or self._order_observer_task.done():
             self._order_observer_task = asyncio.create_task(
                 self._consume_order_observations()
             )
@@ -1252,9 +1286,21 @@ class OrderExecutionCoordinator:
     async def _consume_order_observations(self) -> None:
         try:
             while not self._order_observations.empty():
-                plan, result = self._order_observations.get_nowait()
+                try:
+                    plan, result = self._order_observations.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
                 try:
                     await self._apply_returned_order_result(plan, result)
+                except asyncio.CancelledError:
+                    self._handle_projection_overflow(result.client_order_id)
+                    raise
+                except Exception as error:
+                    log.error(
+                        "order_observation_consumer_unhandled_error",
+                        account_label=self._account_label,
+                        error=str(error),
+                    )
                 finally:
                     self._order_observations.task_done()
         finally:
@@ -1278,6 +1324,16 @@ class OrderExecutionCoordinator:
                 exchange_state=result.state.value,
                 error=str(error),
             )
+            if self._on_projection_recovery_required is not None:
+                try:
+                    self._on_projection_recovery_required(result.client_order_id)
+                except Exception as cb_err:
+                    log.error(
+                        "order_observation_recovery_callback_failed",
+                        account_label=self._account_label,
+                        client_order_id=result.client_order_id,
+                        error=str(cb_err),
+                    )
 
     async def observe_recovered_receipt(
         self,
@@ -1366,8 +1422,8 @@ class OrderExecutionCoordinator:
         Repository preparation runs after dequeue.
         A durable ``SUBMITTING`` row must not become visible to reconciliation
         while the corresponding exchange POST is still waiting to enter the
-        coordinator. Preparation is immediately followed by backend submit, so reconcile and
-        cancel operations for this key cannot interleave the two steps.
+        coordinator. Preparation is immediately followed by backend submit, so
+        reconcile and cancel operations for this key cannot interleave the two steps.
         """
 
         self._submission_configuration_locked = True
@@ -1535,9 +1591,25 @@ class OrderExecutionCoordinator:
             self._schedulers.clear()
         if schedulers:
             await asyncio.gather(*(scheduler.close() for scheduler in schedulers))
+        if (
+            self._order_observer_task is not None
+            and not self._order_observer_task.done()
+        ):
+            self._order_observer_task.cancel()
+            try:
+                await self._order_observer_task
+            except asyncio.CancelledError:
+                pass
+        while not self._order_observations.empty():
+            try:
+                plan, result = self._order_observations.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                self._handle_projection_overflow(result.client_order_id)
+            finally:
+                self._order_observations.task_done()
         await self._order_observations.join()
-        if self._order_observer_task is not None:
-            await self._order_observer_task
 
     def _remove_idle_scheduler(self, key: OrderExecutionKey) -> None:
         self._schedulers.pop(key, None)

@@ -114,7 +114,9 @@ async def test_list_position_views_narrows_the_read_to_requested_symbols():
 @pytest.mark.asyncio
 async def test_flat_position_adopts_active_stream_epoch_on_read():
     book = ExecutionBook()
-    active_scope = ExecutionScope(environment="live", account_label="reader", symbol="BTCUSDT")
+    active_scope = ExecutionScope(
+        environment="live", account_label="reader", symbol="BTCUSDT"
+    )
     start = datetime(2026, 9, 28, tzinfo=UTC)
     fill = AccountFillEvent(
         environment=active_scope.environment,
@@ -143,15 +145,19 @@ async def test_flat_position_adopts_active_stream_epoch_on_read():
         )
     )
 
-    flat_scope = ExecutionScope(environment="live", account_label="reader", symbol="ALGOUSDT")
+    flat_scope = ExecutionScope(
+        environment="live", account_label="reader", symbol="ALGOUSDT"
+    )
     view = await book.read(flat_scope, stream_id="trades", stream_epoch="epoch-active")
-    assert view.is_ready_for_trade
+    assert not view.is_ready_for_trade
     assert view.stream_scope is not None
     assert view.stream_scope.stream_epoch == "epoch-active"
     assert view.total_quantity == Decimal("0")
 
     # 2. A symbol with old epoch that is flat adopts the active stream on read
-    old_scope = ExecutionScope(environment="live", account_label="reader", symbol="SOLUSDT")
+    old_scope = ExecutionScope(
+        environment="live", account_label="reader", symbol="SOLUSDT"
+    )
     await book.observe(
         ExecutionEvidence(
             evidence_id="evidence-old-buy",
@@ -202,8 +208,10 @@ async def test_flat_position_adopts_active_stream_epoch_on_read():
             sequence=2,
         )
     )
-    sol_view = await book.read(old_scope, stream_id="trades", stream_epoch="epoch-active")
-    assert sol_view.is_ready_for_trade
+    sol_view = await book.read(
+        old_scope, stream_id="trades", stream_epoch="epoch-active"
+    )
+    assert not sol_view.is_ready_for_trade
     assert sol_view.stream_scope is not None
     assert sol_view.stream_scope.stream_epoch == "epoch-active"
     assert sol_view.total_quantity == Decimal("0")
@@ -223,9 +231,13 @@ async def test_flat_position_adopts_registered_active_stream_without_prior_posit
         stream_id="trades",
         stream_epoch="epoch-startup",
     )
-    flat_scope = ExecutionScope(environment="live", account_label="reader", symbol="MONUSDT")
-    view = await book.read(flat_scope, stream_id="trades", stream_epoch="epoch-startup")
-    assert view.is_ready_for_trade
+    flat_scope = ExecutionScope(
+        environment="live", account_label="reader", symbol="MONUSDT"
+    )
+    view = await book.read(
+        flat_scope, stream_id="trades", stream_epoch="epoch-startup"
+    )
+    assert not view.is_ready_for_trade
     assert view.stream_scope is not None
     assert view.stream_scope.stream_epoch == "epoch-startup"
     assert view.total_quantity == Decimal("0")

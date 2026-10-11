@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
@@ -20,6 +21,14 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 
+class TradingGateState(StrEnum):
+    """Canonical 3-state trading gate dimension according to REFACTOR_SPEC §3."""
+
+    ACTIVE = "active"
+    EXIT_ONLY = "exit_only"
+    HALTED = "halted"
+
+
 class LiveEntryControlGate:
     """Own entry prerequisites, manual controls, and scheduled limits."""
 
@@ -32,6 +41,8 @@ class LiveEntryControlGate:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         is_symbol_warmed: Callable[[str], bool] | None = None,
         on_unwarmed_symbol: Callable[[str], None] | None = None,
+        is_exit_enabled: Callable[[], bool] | None = None,
+        is_symbol_fact_ready: Callable[[str], bool] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -41,6 +52,8 @@ class LiveEntryControlGate:
         self._clock = clock
         self._is_symbol_warmed = is_symbol_warmed
         self._on_unwarmed_symbol = on_unwarmed_symbol
+        self._is_exit_enabled = is_exit_enabled
+        self._is_symbol_fact_ready = is_symbol_fact_ready
         self._entry_enabled = True
         self._entry_enabled_reason = "initializing"
         self._risk_control_entry_blocked = False
@@ -48,11 +61,41 @@ class LiveEntryControlGate:
         self._scheduled_entry_blocked = False
         self._scheduled_entry_block_reason = "outside_scheduled_risk_window"
         self._entry_filter_cache_ready = True
+        self._halted = False
+        self._halt_reason: str | None = None
+
+    def set_halted(self, halted: bool, *, reason: str = "halted") -> None:
+        self._halted = halted
+        self._halt_reason = reason if halted else None
+
+    @property
+    def trading_gate_state(self) -> TradingGateState:
+        exit_allowed = (
+            self._is_exit_enabled() if self._is_exit_enabled is not None else True
+        )
+        if (
+            self._halted
+            or not exit_allowed
+            or self.entry_enabled_reason in {
+                "session_halted",
+                "emergency_stop",
+                "halted",
+            }
+        ):
+            return TradingGateState.HALTED
+        if self.entry_enabled:
+            return TradingGateState.ACTIVE
+        return TradingGateState.EXIT_ONLY
 
     @property
     def entry_enabled(self) -> bool:
+        exit_allowed = (
+            self._is_exit_enabled() if self._is_exit_enabled is not None else True
+        )
         return (
-            self._entry_enabled
+            not self._halted
+            and exit_allowed
+            and self._entry_enabled
             and not self._risk_control_entry_blocked
             and not self._scheduled_entry_blocked
             and self._outside_scheduled_window()
@@ -60,6 +103,13 @@ class LiveEntryControlGate:
 
     @property
     def entry_enabled_reason(self) -> str:
+        exit_allowed = (
+            self._is_exit_enabled() if self._is_exit_enabled is not None else True
+        )
+        if not exit_allowed:
+            return "exit_disabled"
+        if self._halted and self._halt_reason:
+            return self._halt_reason
         if self._risk_control_entry_blocked:
             return self._risk_control_entry_block_reason
         if self._scheduled_entry_blocked:
@@ -70,8 +120,12 @@ class LiveEntryControlGate:
 
     def is_symbol_entry_allowed(self, symbol: str) -> tuple[bool, str]:
         """Check whether entry is allowed for a specific symbol."""
-        if not self.entry_enabled:
+        if self.trading_gate_state != TradingGateState.ACTIVE:
             return False, self.entry_enabled_reason
+        if self._is_symbol_fact_ready is not None and not self._is_symbol_fact_ready(
+            symbol
+        ):
+            return False, f"symbol_fact_pending:{symbol}"
         if self._is_symbol_warmed is not None and not self._is_symbol_warmed(symbol):
             if self._on_unwarmed_symbol is not None:
                 self._on_unwarmed_symbol(symbol)
@@ -215,4 +269,7 @@ class LiveEntryControlGate:
             self._state_machine.unblock_entry_submissions()
 
 
-__all__ = ["LiveEntryControlGate"]
+__all__ = [
+    "LiveEntryControlGate",
+    "TradingGateState",
+]

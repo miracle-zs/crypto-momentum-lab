@@ -106,7 +106,9 @@ async def test_read_failure_is_not_reported_as_empty_order_set():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bulk", [False, True])
 @pytest.mark.parametrize("prepared_price", [None, "105"])
-async def test_market_order_uses_prepared_price_before_legacy_exposure_claim(bulk, prepared_price):
+async def test_market_order_uses_prepared_price_before_legacy_exposure_claim(
+    bulk, prepared_price
+):
     repository, session = database()
     order = row()
     order.price = None
@@ -151,3 +153,13 @@ async def test_reference_price_lookup_failure_is_not_missing_evidence(bulk):
 
     with pytest.raises(RuntimeError, match="reference price query unavailable"):
         await operation
+
+
+@pytest.mark.asyncio
+async def test_load_terminal_orders_loads_client_order_ids_and_quantities():
+    repository, session = database()
+    session.execute.return_value = Mock(
+        all=Mock(return_value=[("order-1", Decimal("1.5")), ("order-2", None)])
+    )
+    result = await repository.load_terminal_orders(run_id="run-1")
+    assert result == {"order-1": Decimal("1.5"), "order-2": Decimal("0")}

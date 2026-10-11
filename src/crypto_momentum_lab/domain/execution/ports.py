@@ -261,3 +261,10 @@ class OrderReadRepository(Protocol):
         self,
         client_order_id: str,
     ) -> PersistedExchangeOrder | None: ...
+
+    async def load_terminal_orders(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 2048,
+    ) -> dict[str, Decimal]: ...

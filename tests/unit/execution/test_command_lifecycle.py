@@ -162,3 +162,45 @@ def test_release_preserves_consumed_quantity_and_releases_only_remaining(entry):
     assert updated.released_quantity == Decimal("4")
     assert updated.active_quantity == 0
     assert original.active_quantity == Decimal("3")
+
+
+def test_a2d_terminal_outbox_barrier_blocks_late_events_and_duplicate_release(entry):
+    terminal_entry = replace(entry, state=DispatchState.TERMINAL)
+
+    # 1. Late mark-ack on terminal entry does not resurrect it to ACKNOWLEDGED
+    plan_ack = plan_command_transition(
+        terminal_entry, DispatchState.ACKNOWLEDGED, at=NOW, external_order_id="ex-1"
+    )
+    assert plan_ack.updated.state == DispatchState.TERMINAL
+    assert plan_ack.release_reason is None
+
+    # 2. Late mark-unknown on terminal entry does not alter state or trigger recovery
+    plan_unknown = plan_command_transition(
+        terminal_entry, DispatchState.UNKNOWN, at=NOW, reason="late timeout"
+    )
+    assert plan_unknown.updated.state == DispatchState.TERMINAL
+    assert not plan_unknown.requires_reconciliation
+    assert plan_unknown.release_reason is None
+
+    # 3. Duplicate terminal callback does not produce a secondary release reason
+    plan_terminal = plan_command_transition(
+        terminal_entry, DispatchState.TERMINAL, at=NOW, reason="replayed terminal"
+    )
+    assert plan_terminal.updated.state == DispatchState.TERMINAL
+    assert plan_terminal.release_reason is None
+
+    # 4. Late rejected callback on terminal entry does not change state or release
+    plan_rejected = plan_command_transition(
+        terminal_entry, DispatchState.REJECTED, at=NOW, reason="late reject"
+    )
+    assert plan_rejected.updated.state == DispatchState.TERMINAL
+    assert plan_rejected.release_reason is None
+
+    # 5. Outbox in REJECTED is also irreversible
+    rejected_entry = replace(entry, state=DispatchState.REJECTED)
+    assert (
+        plan_command_transition(
+            rejected_entry, DispatchState.ACKNOWLEDGED, at=NOW
+        ).updated.state
+        == DispatchState.REJECTED
+    )

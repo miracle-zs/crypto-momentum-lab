@@ -2172,6 +2172,67 @@ async def test_context_reads_request_repair_without_database_or_book_writes():
 
 
 @pytest.mark.asyncio
+async def test_zero_exposure_position_with_pending_credibility_classified_as_pending(
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        PositionHealthStatus,
+        PositionKey,
+        PositionView,
+    )
+
+    provider = PostgresLiveContextProvider(
+        session_factory=lambda: None,
+        account_label="primary",
+        run_id="test-run",
+        strategy_name="test-strategy",
+        strategy_config_hash="test-config",
+    )
+    provider._execution_book = SimpleNamespace(
+        context_revision=0,
+        list_position_views=AsyncMock(
+            return_value=(
+                PositionView(
+                    key=PositionKey(
+                        environment="live",
+                        account_label="primary",
+                        symbol="BTCUSDT",
+                        position_side=FuturesPositionSide.BOTH,
+                    ),
+                    projection_version="pv_zero",
+                    input_revision=1,
+                    event_cut=None,
+                    policy_version="1",
+                    schema_version="1",
+                    coverage=None,
+                    active_episode=None,
+                    batches=(),
+                    unallocated_quantity=Decimal("0"),
+                    zero_position_snapshot_confirmed=False,
+                    health_status=PositionHealthStatus.CATCHING_UP,
+                    is_comparable=True,
+                ),
+            )
+        ),
+        observe=AsyncMock(),
+        act=AsyncMock(),
+        reload_position=AsyncMock(),
+    )
+    provider._observe_book_drift = AsyncMock()
+    flat_position = replace(_position(), position_amt=0.0)
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset(),
+        account_snapshot=SimpleNamespace(positions=(flat_position,)),
+    )
+    result = await provider._with_execution_book(
+        context, SimpleNamespace(bucket_end=NOW)
+    )
+    assert "BTCUSDT" in result.pending_position_symbols
+
+
+@pytest.mark.asyncio
 async def test_warm_symbol_rules_and_is_warmed(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = PostgresLiveContextProvider(
         session_factory=lambda: None,

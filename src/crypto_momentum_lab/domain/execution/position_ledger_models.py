@@ -204,6 +204,21 @@ class PositionHealthStatus(StrEnum):
     CONFLICT = "CONFLICT"
 
 
+class PositionState(StrEnum):
+    """Canonical 2-state position dimension according to REFACTOR_SPEC §3."""
+
+    FLAT = "flat"
+    OPEN = "open"
+
+
+class FactCredibility(StrEnum):
+    """Canonical 3-state fact credibility dimension according to REFACTOR_SPEC §3."""
+
+    READY = "ready"
+    PENDING = "pending"
+    CONFLICT = "conflict"
+
+
 class DiscrepancyKind(StrEnum):
     """Classification of divergences across models, observations, and fact journals."""
 
@@ -737,7 +752,16 @@ class PositionView:
         return sum((b.quantity for b in self.batches), start=Decimal("0"))
 
     @property
-    def is_ready_for_trade(self) -> bool:
+    def position_state(self) -> PositionState:
+        return PositionState.OPEN if self.total_quantity > 0 else PositionState.FLAT
+
+    @property
+    def fact_credibility(self) -> FactCredibility:
+        if (
+            self.health_status == PositionHealthStatus.CONFLICT
+            or self.discrepancy is not None
+        ):
+            return FactCredibility.CONFLICT
         has_confirmed_coverage = (
             self.coverage is not None
             and self.coverage.is_authoritative
@@ -751,32 +775,23 @@ class PositionView:
                 or self.coverage.evidence_observed_at is not None
             )
         )
-        is_ready_health = (
-            self.health_status == PositionHealthStatus.READY and self.is_comparable
-        )
-        is_clean_stream_no_coverage = (
-            self.stream_scope is not None
-            and self.discrepancy is None
-            and self.health_status == PositionHealthStatus.CATCHING_UP
-            and self.coverage is None
-            and bool(self.diagnostics)
-            and all(
-                d == "No durable coverage evidence exists for stream scope"
-                for d in self.diagnostics
-            )
-        )
-        return (
-            not self.pending_command_ids
-            and (is_ready_health or is_clean_stream_no_coverage)
+        has_clean_non_live = self.coverage is None and self.key.environment != "live"
+        has_zero_snapshot = self.zero_position_snapshot_confirmed
+        if (
+            self.health_status == PositionHealthStatus.READY
+            and self.is_comparable
+            and (has_confirmed_coverage or has_clean_non_live or has_zero_snapshot)
             and (
                 self.reconciliation_gap is None
                 or self.reconciliation_gap == Decimal("0")
             )
             and self.unallocated_quantity == Decimal("0")
-            and (
-                has_confirmed_coverage
-                or (self.coverage is None and self.key.environment != "live")
-                or self.zero_position_snapshot_confirmed
-                or is_clean_stream_no_coverage
-            )
-        )
+        ):
+            return FactCredibility.READY
+        return FactCredibility.PENDING
+
+    @property
+    def is_ready_for_trade(self) -> bool:
+        if self.pending_command_ids:
+            return False
+        return self.fact_credibility == FactCredibility.READY

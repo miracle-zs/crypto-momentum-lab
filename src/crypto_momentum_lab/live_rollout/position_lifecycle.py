@@ -46,6 +46,10 @@ class PositionLifecycleLocks:
             if self._active == 0:
                 self._idle.set()
 
+    def is_locked(self, key: PositionKey) -> bool:
+        lock = self._locks.get(key)
+        return lock is not None and lock.locked()
+
     async def close(self) -> None:
         self._closed = True
         await self._idle.wait()

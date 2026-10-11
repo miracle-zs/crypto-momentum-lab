@@ -33,6 +33,7 @@ from crypto_momentum_lab.domain.execution.position_context_ports import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     CoverageEvidence,
+    FactCredibility,
     PositionHealthStatus,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -295,7 +296,15 @@ class PostgresLiveContextProvider(LiveContextReader):
         if context.open_position_symbols is None:
             # Unknown account exposure cannot authorize exits or position repair.
             return replace(context, managed_positions=())
-        if context.open_position_symbols == frozenset():
+        has_snapshot_positions = (
+            context.account_snapshot is not None
+            and bool(context.account_snapshot.positions)
+        )
+        if (
+            context.open_position_symbols == frozenset()
+            and not has_snapshot_positions
+            and not context.unresolved_orders
+        ):
             # A confirmed flat account has no lots to allocate or exit. Reading
             # every historical Book scope at each market cut can replay hundreds
             # of journals even though none can represent current exposure.
@@ -327,14 +336,17 @@ class PostgresLiveContextProvider(LiveContextReader):
         # in the current snapshot and falsely triggers repeated self-healing.
         # LiveDecisionFactSource still reads its exact market cut separately.
         book_revision = book.context_revision
+        query_symbols: frozenset[str] | None = None
+        if context.account_snapshot is not None:
+            symbols_set = set(context.open_position_symbols)
+            symbols_set.update(p.symbol for p in context.account_snapshot.positions)
+            if hasattr(state, "symbol") and state.symbol:
+                symbols_set.add(state.symbol)
+            query_symbols = frozenset(symbols_set)
         views = await book.list_position_views(
             environment="live",
             account_label=self._account_label,
-            symbols=(
-                context.open_position_symbols
-                if context.account_snapshot is not None
-                else None
-            ),
+            symbols=query_symbols,
         )
         managed = managed_live_positions_from_views(
             views,
@@ -404,6 +416,22 @@ class PostgresLiveContextProvider(LiveContextReader):
                     or not view.is_ready_for_trade
                 ):
                     unmanaged_keys.add(key)
+            for view in views:
+                v_key = (view.key.symbol, view.key.position_side.value)
+                if v_key in unmanaged_keys or v_key in pending_keys:
+                    continue
+                if (
+                    view.health_status == PositionHealthStatus.CONFLICT
+                    or view.fact_credibility == FactCredibility.CONFLICT
+                ):
+                    unmanaged_keys.add(v_key)
+                elif (
+                    not view.is_ready_for_trade
+                    or view.fact_credibility != FactCredibility.READY
+                    or view.pending_command_ids
+                    or view.active_entry_command_ids
+                ):
+                    pending_keys.add(v_key)
         else:
             # Without a scoped exposure observation, never infer new ownership.
             active_symbols = frozenset(position.symbol for position in managed)

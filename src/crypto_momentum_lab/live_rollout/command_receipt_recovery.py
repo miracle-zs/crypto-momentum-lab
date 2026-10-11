@@ -1,5 +1,7 @@
 """Reconcile restored commands even when the order read model is terminal."""
 
+from decimal import Decimal
+
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
     OutboxEntry,
@@ -8,7 +10,11 @@ from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.order_execution_port import (
     CoordinatedOrderExecutionPort,
 )
-from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.execution.ports import (
     OrderReadRepository,
 )
@@ -56,6 +62,22 @@ async def recover_restored_commands(
             if persisted.terminal_receipt is not None:
                 await coordinator.observe_recovered_receipt(
                     persisted.plan, persisted.terminal_receipt
+                )
+            elif (
+                requires_recovery
+                and persisted.state is ExchangeOrderState.ACKNOWLEDGED
+                and persisted.executed_quantity == Decimal("0")
+            ):
+                await coordinator.apply_observed_snapshot(
+                    persisted.plan,
+                    ExchangeOrderSnapshot(
+                        client_order_id=persisted.plan.client_order_id,
+                        exchange_order_id=persisted.exchange_order_id,
+                        state=ExchangeOrderState.ACKNOWLEDGED,
+                        executed_quantity=persisted.executed_quantity,
+                        cumulative_quote_quantity=Decimal("0"),
+                        observed_at=persisted.updated_at,
+                    ),
                 )
             elif persisted.state.terminal or requires_recovery:
                 # Missing priced facts require exchange lookup, never a new submit.

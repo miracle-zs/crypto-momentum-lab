@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
@@ -198,11 +199,20 @@ def order_snapshot_from_update(
         or str(order["S"]) != plan.side
         or str(order["o"]).upper() != plan.order_type.upper()
         or str(order["ps"]) != plan.position_side.value
-        or order["R"] != plan.reduce_only
         or quantity != plan.quantity
         or (plan.price is not None and price != plan.price)
     ):
         raise ValueError("WS order update conflicts with its durable identity")
+    if plan.position_side == FuturesPositionSide.BOTH:
+        if order["R"] != plan.reduce_only:
+            raise ValueError("WS order update conflicts with its durable identity")
+    else:
+        is_closing = (
+            (plan.side == "SELL" and plan.position_side == FuturesPositionSide.LONG)
+            or (plan.side == "BUY" and plan.position_side == FuturesPositionSide.SHORT)
+        )
+        if plan.reduce_only != is_closing:
+            raise ValueError("WS order update conflicts with its durable identity")
     if (
         state is ExchangeOrderState.FILLED
         and executed != quantity

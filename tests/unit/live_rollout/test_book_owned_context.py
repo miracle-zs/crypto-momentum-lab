@@ -1,6 +1,6 @@
 """The restored Book owns batches; account reads supply exposure only."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -88,11 +88,17 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
     from crypto_momentum_lab.domain.execution.position_book import PositionBook
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
+        AccountFillLoadProvenance,
+        FactCoverageInterval,
+        FactCoverageStatus,
         PositionKey,
     )
     from crypto_momentum_lab.domain.execution.recovery_models import (
         AccountFacts,
         DurableJournalCut,
+    )
+    from crypto_momentum_lab.domain.execution.snapshot_encoding import (
+        stable_snapshot_anchor_id,
     )
     from tests.unit.live_rollout.test_postgres_runtime import _runtime_context
 
@@ -115,6 +121,65 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
         NOW,
         {"positionSide": "LONG"},
     )
+    snap_time = NOW - timedelta(hours=1)
+    zero_snap = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("0"),
+        entry_price=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        mark_price=Decimal("100"),
+        notional=Decimal("0"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=snap_time,
+        raw_payload={},
+    )
+    current_snap = AccountPositionSnapshot(
+        environment=key.environment,
+        account_label=key.account_label,
+        symbol=key.symbol,
+        position_side=key.position_side.value,
+        position_amt=Decimal("0.5") if owned else Decimal("0"),
+        entry_price=Decimal("100") if owned else Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        mark_price=Decimal("100"),
+        notional=Decimal("50") if owned else Decimal("0"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=NOW,
+        raw_payload={},
+    )
+    anchor_id = stable_snapshot_anchor_id(zero_snap)
+    prov = AccountFillLoadProvenance(
+        stream_scope=scope,
+        load_id="scan-1",
+        scan_origin_from_id=None,
+        scan_origin_start_time_ms=1000,
+        request_from_id=None,
+        next_from_id=None,
+        page_count=1,
+        page_exhausted=True,
+        truncated=False,
+        checked_through=NOW,
+        observed_at=NOW,
+        source_anchor_id=anchor_id,
+        source_anchor_event_cut=snap_time,
+        source_anchor_kind="zero_snapshot",
+    )
+    cov = FactCoverageInterval(
+        start_at=snap_time,
+        end_at=NOW,
+        source_cursor="scan-1",
+        status=FactCoverageStatus.CONFIRMED,
+        stream_scope=scope,
+        evidence_observed_at=NOW,
+        load_provenance=prov,
+        page_exhausted=True,
+        not_truncated=True,
+    )
     journal = AccountJournal.from_durable_cut(
         DurableJournalCut(
             scope=scope,
@@ -122,6 +187,9 @@ async def test_book_readiness_controls_cache_and_unowned_exposure_stays_blocked(
                 position_key=key,
                 stream_scope=scope,
                 fills=(opening,) if owned else (),
+                coverage=cov,
+                snapshots=(zero_snap, current_snap),
+                fill_load_provenance=prov,
             ),
             revision=1,
             as_of=NOW,

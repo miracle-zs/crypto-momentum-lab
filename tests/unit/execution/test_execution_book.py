@@ -291,11 +291,13 @@ async def test_flat_position_act_live_without_coverage_succeeds() -> None:
     book._stream_scopes[key.canonical_id] = stream_scope
     book._ensure_journal(key)
 
-    # In live trading, a clean flat position has stream scope but NO coverage.
+    # In live trading, a clean flat position has stream scope but NO coverage
+    # (credibility is PENDING).
     view = await book.read(
         scope, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
     )
-    assert view.is_ready_for_trade is True
+    assert view.is_ready_for_trade is False
+    assert view.fact_credibility.value == "pending"
 
     req = ExecutionRequest(
         request_id="entry-algo-1",
@@ -396,7 +398,8 @@ async def test_open_position_act_live_without_coverage_succeeds() -> None:
     view = await book.read(
         scope, stream_id="account_event_hub", stream_epoch="live-epoch-20260928"
     )
-    assert view.is_ready_for_trade is True
+    assert view.is_ready_for_trade is False
+    assert view.fact_credibility.value == "pending"
     assert view.total_quantity == Decimal("100.0")
     assert len(view.batches) == 1
     uow.tx = FakeTx(projection_version=view.projection_version)

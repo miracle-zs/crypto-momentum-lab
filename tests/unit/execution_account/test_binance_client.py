@@ -793,6 +793,7 @@ async def test_submit_order_queries_price_when_submit_response_omits_price_field
         environment="live",
         account_label="primary",
         live_submit_enabled=True,
+        resolve_fill_price_on_submit=True,
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url="https://fapi.binance.com"
         ),
@@ -856,6 +857,7 @@ async def test_submit_order_reconciles_schema_drift_from_authoritative_query(
         environment="live",
         account_label="primary",
         live_submit_enabled=True,
+        resolve_fill_price_on_submit=True,
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             base_url="https://fapi.binance.com",
@@ -915,6 +917,7 @@ async def test_submit_order_keeps_unknown_outcome_when_schema_drift_cannot_query
         environment="live",
         account_label="primary",
         live_submit_enabled=True,
+        resolve_fill_price_on_submit=True,
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             base_url="https://fapi.binance.com",
@@ -1372,6 +1375,52 @@ async def test_trade_client_uses_position_side_for_hedge_mode_close() -> None:
         await client.aclose()
 
     assert "positionSide=LONG" in captured_body
+    assert "reduceOnly=" not in captured_body
+
+
+async def test_a4a_binance_client_submits_hedge_short_close_no_reduce_only() -> None:
+    captured_body = ""
+    plan = replace(
+        _order_plan(),
+        side="BUY",
+        reduce_only=True,
+        position_side=FuturesPositionSide.SHORT,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_body
+        captured_body = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 12346,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        await client.submit_order(plan)
+    finally:
+        await client.aclose()
+
+    assert "positionSide=SHORT" in captured_body
     assert "reduceOnly=" not in captured_body
 
 
@@ -2259,6 +2308,7 @@ async def test_submit_order_resolves_zero_avg_price_via_query_retry() -> None:
         environment="live",
         account_label="primary",
         live_submit_enabled=True,
+        resolve_fill_price_on_submit=True,
         base_url="https://fapi.binance.com",
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
@@ -2309,6 +2359,46 @@ async def test_submit_order_retains_missing_price_when_query_remains_zero() -> N
     try:
         snapshot = await client.submit_order(plan)
         assert snapshot.executed_quantity == Decimal("10")
+        assert snapshot.average_price == Decimal("0")
+    finally:
+        await client.aclose()
+
+
+async def test_submit_order_default_does_not_block_on_missing_price() -> None:
+    plan = _order_plan()
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 99905,
+                "status": "FILLED",
+                "executedQty": "500",
+                "avgPrice": "0",
+                "cumQuote": "0",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    try:
+        snapshot = await client.submit_order(plan)
+        assert requests == ["POST"]
+        assert snapshot.executed_quantity == Decimal("500")
         assert snapshot.average_price == Decimal("0")
     finally:
         await client.aclose()

@@ -73,7 +73,7 @@ async def test_equal_nonflat_quantity_cannot_prove_epoch_continuity() -> None:
         scope, stream_id="account_event_hub", stream_epoch="epoch-1"
     )
     assert view_epoch_1.total_quantity == Decimal("137.6")
-    assert view_epoch_1.is_ready_for_trade
+    assert not view_epoch_1.is_ready_for_trade
 
     # 2. Register new stream epoch (simulating execution-account container restart)
     book.register_active_stream(

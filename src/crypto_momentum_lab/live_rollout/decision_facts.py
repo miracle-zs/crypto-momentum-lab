@@ -401,8 +401,10 @@ class LiveDecisionFactSource:
                 dependencies=dependencies,
                 accepted_exit=result.exit_command,
             )
-            receipt = await self._decision_uow.commit_decision(commit)
 
+        receipt = await self._decision_uow.commit_decision(commit)
+
+        async with self._commit_lock:
             if receipt.is_replay:
                 # UoW returns the original durable receipt for an exact retry.
                 # Its trace may still contain an entry candidate or an exit
@@ -447,16 +449,16 @@ class LiveDecisionFactSource:
             self._policy_revision = receipt.policy_revision
             self._policy_digest = receipt.next_state_digest
 
-            if result.exit_command is not None:
-                try:
-                    await self._dispatch_exit(
-                        receipt.decision_id,
-                        result.exit_command,
-                    )
-                finally:
-                    self._request_exit_recovery()
-            del decision_input
-            return receipt
+        if result.exit_command is not None:
+            try:
+                await self._dispatch_exit(
+                    receipt.decision_id,
+                    result.exit_command,
+                )
+            finally:
+                self._request_exit_recovery()
+        del decision_input
+        return receipt
 
     async def recover_pending_exits(self, *, limit: int | None = None) -> bool:
         if self._decision_uow is None:

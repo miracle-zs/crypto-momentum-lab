@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from crypto_momentum_lab.domain.execution.command_models import (
     DispatchState,
@@ -17,8 +18,8 @@ from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 class ExecutionActionState:
     """Mutable command/request state owned by action acceptance."""
 
-    requests_by_id: dict[str, object]
-    receipts_by_id: dict[str, object]
+    requests_by_id: dict[str, Any]
+    receipts_by_id: dict[str, Any]
     outbox_by_command_id: dict[str, OutboxEntry]
     command_reservations: dict[str, list[str]]
     recovery_required_commands: set[str]

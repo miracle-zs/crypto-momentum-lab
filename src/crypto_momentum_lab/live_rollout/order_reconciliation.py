@@ -186,6 +186,22 @@ class LiveOrderReconciliation:
                 )
                 self._requested_runs.add(persisted.plan.run_id)
                 self.request_order_recovery()
+            elif snapshot.state.terminal and not persisted.state.terminal:
+                # Valid terminal observation takes priority over non-terminal
+                # local state, even if exchange timestamp is earlier than local
+                # REST reception time (P1-1).
+                if snapshot.executed_quantity < persisted.executed_quantity:
+                    # Quantity conflict: preserve existing watermark and repair.
+                    self._requested_runs.add(persisted.plan.run_id)
+                    self.request_order_recovery()
+                    return
+                await self.state_machine.apply_observed_snapshot(
+                    persisted.plan, snapshot
+                )
+            elif persisted.state.terminal and not snapshot.state.terminal:
+                # I1: Terminal state is irreversible. Late non-terminal observation
+                # cannot revive it.
+                return
             elif snapshot.executed_quantity < persisted.executed_quantity or (
                 snapshot.executed_quantity == persisted.executed_quantity
                 and snapshot.observed_at < persisted.updated_at
@@ -247,10 +263,20 @@ class LiveOrderReconciliation:
                 plans.update((plan.client_order_id, plan) for plan in command_plans)
             for run_id in sorted(runs):
                 for order in await self.order_repository.load_unresolved_orders(run_id):
-                    if not include_confirmed and order.state in {
-                        ExchangeOrderState.ACKNOWLEDGED,
-                        ExchangeOrderState.PARTIALLY_FILLED,
-                    }:
+                    requires_recovery = (
+                        self.execution_book is not None
+                        and self.execution_book.command_requires_recovery(
+                            order.plan.client_order_id
+                        )
+                    )
+                    if (
+                        not include_confirmed
+                        and not requires_recovery
+                        and order.state in {
+                            ExchangeOrderState.ACKNOWLEDGED,
+                            ExchangeOrderState.PARTIALLY_FILLED,
+                        }
+                    ):
                         continue
                     if (
                         self.request_unknown_exit is not None

@@ -20,6 +20,51 @@ class DispatchState(StrEnum):
     TERMINAL = "terminal"
 
 
+class CommandExecutionState(StrEnum):
+    """Canonical 5-state execution dimension according to REFACTOR_SPEC §3."""
+
+    PREPARED = "prepared"
+    SENDING = "sending"
+    WORKING = "working"
+    UNKNOWN = "unknown"
+    TERMINAL = "terminal"
+
+
+def to_command_execution_state(
+    state: DispatchState | CommandExecutionState | str,
+) -> CommandExecutionState:
+    """Map operational dispatch or wire state to canonical CommandExecutionState."""
+    if isinstance(state, CommandExecutionState):
+        return state
+    raw = state.value if hasattr(state, "value") else str(state)
+    raw_lower = raw.lower()
+    if raw_lower in ("prepared", "intent_approved", "planned", "claimed"):
+        return CommandExecutionState.PREPARED
+    if raw_lower in ("dispatching", "sending", "submitting"):
+        return CommandExecutionState.SENDING
+    if raw_lower in (
+        "acknowledged",
+        "working",
+        "submitted",
+        "partially_filled",
+        "canceling",
+    ):
+        return CommandExecutionState.WORKING
+    if raw_lower in ("unknown", "unknown_pending_reconciliation"):
+        return CommandExecutionState.UNKNOWN
+    if raw_lower in (
+        "rejected",
+        "terminal",
+        "filled",
+        "canceled",
+        "expired",
+        "absent_reconciled",
+        "suppressed",
+    ):
+        return CommandExecutionState.TERMINAL
+    raise ValueError(f"Unknown state for CommandExecutionState mapping: {state}")
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionScope:
     environment: str
@@ -50,3 +95,7 @@ class OutboxEntry:
     last_error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def execution_state(self) -> CommandExecutionState:
+        return to_command_execution_state(self.state)

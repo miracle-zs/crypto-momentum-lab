@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from crypto_momentum_lab.domain.execution.command_models import OutboxEntry
 from crypto_momentum_lab.domain.execution.execution_action_models import (
@@ -47,7 +48,7 @@ from crypto_momentum_lab.domain.trading import OrderType as EntryType
 class ExecutionActionDependencies:
     """Services owned by the composition root, supplied to command acceptance."""
 
-    book_for_key: Callable[[object], PositionBook]
+    book_for_key: Callable[[Any], PositionBook]
     coordinator: ReservationRegistry
     reservation_repository: ReservationRepository | None
     persistence_failed: Callable[[], bool]

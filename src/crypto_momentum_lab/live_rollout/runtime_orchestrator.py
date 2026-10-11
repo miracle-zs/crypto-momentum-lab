@@ -127,6 +127,7 @@ from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventR
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
+from crypto_momentum_lab.live_rollout.pending_entries import TerminalOrderBarrier
 from crypto_momentum_lab.live_rollout.position_self_healing import (
     LiveUnmanagedPositionRepair,
 )
@@ -530,6 +531,12 @@ async def run_live_daemon(
             strategy_name=strategy_name,
         )
 
+        order_reconciliation: LiveOrderReconciliation | None = None
+
+        def _on_projection_recovery_required(client_order_id: str) -> None:
+            if order_reconciliation is not None:
+                order_reconciliation.request_order_recovery()
+
         execution_runtime = await build_live_execution_runtime(
             sessions=execution_factory,
             exchange=client,
@@ -541,6 +548,7 @@ async def run_live_daemon(
             on_exchange_request=telemetry.exchange_request_started,
             on_exchange_response=telemetry.exchange_response_received,
             submission_repository=submission_repository,
+            on_projection_recovery_required=_on_projection_recovery_required,
         )
         execution_book = execution_runtime.book
         execution_coordinator = execution_runtime.coordinator
@@ -679,8 +687,50 @@ async def run_live_daemon(
         if not draining:
             await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
         unresolved = await order_read_repository.load_unresolved_orders(session_id)
+        durable_terminal_orders: dict[str, Decimal] = {}
+        if hasattr(order_read_repository, "load_terminal_orders"):
+            try:
+                durable_terminal_orders = (
+                    await order_read_repository.load_terminal_orders(
+                        session_id, limit=2048
+                    )
+                )
+            except Exception as err:
+                log.warning("load_terminal_orders_failed", error=str(err))
+
+        durable_terminal_tombstones: set[str] = set(durable_terminal_orders)
+
+        def _on_terminal_recorded(cid: str, executed: Decimal) -> None:
+            durable_terminal_tombstones.add(cid)
+            prev = durable_terminal_orders.get(cid, Decimal("0"))
+            new_exec = max(prev, executed)
+            if cid in durable_terminal_orders:
+                durable_terminal_orders.pop(cid)
+            elif len(durable_terminal_orders) >= 2048:
+                oldest = next(iter(durable_terminal_orders))
+                durable_terminal_orders.pop(oldest, None)
+            durable_terminal_orders[cid] = new_exec
+
+        terminal_barrier = TerminalOrderBarrier(
+            capacity=2048,
+            durable_checker=(
+                lambda cid: cid in durable_terminal_tombstones
+                or cid in durable_terminal_orders
+            ),
+            durable_reader=lambda cid: (
+                (True, durable_terminal_orders[cid])
+                if cid in durable_terminal_orders
+                else (
+                    (True, Decimal("0"))
+                    if cid in durable_terminal_tombstones
+                    else None
+                )
+            ),
+            on_terminal=_on_terminal_recorded,
+        )
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
+            terminal_barrier=terminal_barrier,
         )
         ownership_registry.register("entry_order_lifecycle", entry_order_lifecycle.stop)
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)

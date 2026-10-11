@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
 import structlog
 
@@ -54,7 +55,7 @@ from crypto_momentum_lab.domain.execution.execution_book_recovery import (
     ExecutionRecoveryState,
     RecoveryDependencies,
     ReloadDependencies,
-    reload_execution_position,
+    apply_loaded_execution_position,
     restore_execution_state,
 )
 from crypto_momentum_lab.domain.execution.execution_checkpoint_reader import (
@@ -88,6 +89,7 @@ from crypto_momentum_lab.domain.execution.order_submission import (
 from crypto_momentum_lab.domain.execution.ports import (
     CommandRepository,
     DecisionCommitConflict,
+    DurableExecutionPositionState,
     ExecutionTransactionPort,
     ExecutionUnitOfWorkPort,
     ReservationRepository,
@@ -198,6 +200,7 @@ class ExecutionBook:
         self._last_sequences: dict[str, int] = {}
         self._recovery_adoption_scope: AccountFactStreamScope | None = None
         self._process_mutation_lock = asyncio.Lock()
+        self._mutation_locks: dict[str, asyncio.Lock] = {}
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
         self._seen_evidence_ids: set[str] = set()
@@ -210,6 +213,12 @@ class ExecutionBook:
         self._recovery_required_commands: set[str] = set()
         self._external_recovery_positions: dict[str, PositionKey] = {}
         self._dispatch_reconciliation_required_commands: set[str] = set()
+        self._transaction_journal_keys: tuple[str, ...] = ()
+        self._initial_latest_active_streams: dict[tuple[str, str], tuple[str, str]] = {}
+        self._initial_recovery_adoption_scope: AccountFactStreamScope | None = None
+        self._staged_recovery_required_commands: set[str] = set()
+        self._staged_dispatch_reconciliation_required_commands: set[str] = set()
+        self._staged_external_recovery_positions: dict[str, PositionKey] = {}
         self._context_revision = 0
         self._action_state = ExecutionActionState(
             requests_by_id=self._requests_by_id,
@@ -333,42 +342,64 @@ class ExecutionBook:
         Every writer takes the Book lock before the database lock. No observer
         can see a committed repair head against the old in-memory projection.
         """
-        async with self._mutation_lock(request.key):
-            for attempt in range(3):
-                try:
-                    async with uow.transaction(request.key) as tx:
-                        loaded = await tx.load_repair_facts(request)
-                        if is_current is not None and not is_current():
-                            raise PositionRepairBlocked(
-                                "repair context advanced during fact load"
-                            )
-                        repair = build_position_repair(request, loaded)
-                        receipt = await tx.persist_repair(repair)
-                    break
-                except DecisionCommitConflict:
-                    if attempt == 2:
-                        raise
+        for attempt in range(3):
             try:
-                view = await self._reload_position(
+                async with uow.transaction(request.key) as tx:
+                    loaded = await tx.load_repair_facts(request)
+                    if is_current is not None and not is_current():
+                        raise PositionRepairBlocked(
+                            "repair context advanced during fact load"
+                        )
+                    repair = build_position_repair(request, loaded)
+                    receipt = await tx.persist_repair(repair)
+                break
+            except DecisionCommitConflict:
+                if attempt == 2:
+                    raise
+
+        try:
+            view = await self.reload_position(
+                request.key,
+                expected_scope=request.scope,
+                expected_quantity=request.expected_quantity,
+            )
+            if (
+                view is None
+                or view.stream_scope != receipt.scope
+                or view.total_quantity != request.expected_quantity
+                or not view.is_ready_for_trade
+            ):
+                raise PositionRepairBlocked(
+                    "durable repair committed but Book reload is not ready"
+                )
+        except PositionRepairBlocked as err:
+            target_state = await self._load_position_durable(request.key)
+            target_rev = (
+                target_state.head.revision
+                if target_state is not None and target_state.head is not None
+                else 0
+            )
+            if target_rev > receipt.head_revision:
+                view = await self.reload_position(
                     request.key,
                     expected_scope=request.scope,
-                    expected_quantity=request.expected_quantity,
+                    expected_quantity=None,
                 )
-                if (
-                    view is None
-                    or view.stream_scope != receipt.scope
-                    or view.total_quantity != request.expected_quantity
-                    or not view.is_ready_for_trade
-                ):
+                if view is None or not view.is_ready_for_trade:
+                    self._persistence_failed = True
                     raise PositionRepairBlocked(
-                        "durable repair committed but Book reload is not ready"
-                    )
-            except Exception:
-                # Commit succeeded; admission must remain sealed until restore
-                # if the committed projection cannot be published.
+                        "durable repair committed but subsequent Book reload "
+                        "is not ready"
+                    ) from err
+            else:
                 self._persistence_failed = True
                 raise
-            return PublishedPositionRepair(receipt, view, repair.new_facts)
+        except Exception:
+            # Commit succeeded; admission must remain sealed until restore
+            # if the committed projection cannot be published.
+            self._persistence_failed = True
+            raise
+        return PublishedPositionRepair(receipt, view, repair.new_facts)
 
     async def reconcile_reservation_divergence(
         self,
@@ -383,29 +414,45 @@ class ExecutionBook:
         Otherwise, reloads durable storage to verify whether active reservations
         now match the head expectation.
         """
-        async with self._mutation_lock(key):
-            canon = key.canonical_id
-            divergence_identity = f"reservation_divergence:{canon}"
-            if divergence_identity not in self._recovery_required_commands:
-                return True
-            if force:
+        canon = key.canonical_id
+        divergence_identity = f"reservation_divergence:{canon}"
+        if divergence_identity not in self._recovery_required_commands:
+            return True
+        if force:
+            async with self._mutation_lock(key):
                 self._recovery_required_commands.discard(divergence_identity)
                 self._external_recovery_positions.pop(divergence_identity, None)
                 self._head_expected_reservation_ids.pop(canon, None)
                 return True
-            view = await self._reload_position(key, as_of=as_of)
-            if view is None:
+        for attempt in range(3):
+            target_state = await self._load_position_durable(key, as_of=as_of)
+            async with self._mutation_lock(key):
+                current_rev = self._head_revisions.get(canon, 0)
+                target_rev = (
+                    target_state.head.revision
+                    if target_state is not None and target_state.head is not None
+                    else 0
+                )
+                if target_state is not None and target_rev < current_rev:
+                    if attempt < 2:
+                        continue
+                    return False
+                view = self._apply_loaded_position(key, target_state)
+                if view is None:
+                    return False
+                expected_ids = self._head_expected_reservation_ids.get(canon)
+                if expected_ids is None:
+                    return False
+                actual_ids = {
+                    r.reservation_id for r in self.get_active_reservations(key)
+                }
+                if actual_ids == expected_ids:
+                    self._recovery_required_commands.discard(divergence_identity)
+                    self._external_recovery_positions.pop(divergence_identity, None)
+                    self._head_expected_reservation_ids.pop(canon, None)
+                    return True
                 return False
-            expected_ids = self._head_expected_reservation_ids.get(canon)
-            if expected_ids is None:
-                return False
-            actual_ids = {r.reservation_id for r in self.get_active_reservations(key)}
-            if actual_ids == expected_ids:
-                self._recovery_required_commands.discard(divergence_identity)
-                self._external_recovery_positions.pop(divergence_identity, None)
-                self._head_expected_reservation_ids.pop(canon, None)
-                return True
-            return False
+        return False
 
     async def reload_position(
         self,
@@ -415,40 +462,75 @@ class ExecutionBook:
         expected_scope: AccountFactStreamScope | None = None,
         expected_quantity: Decimal | None = None,
     ) -> PositionView | None:
-        async with self._mutation_lock(key):
-            return await self._reload_position(
-                key,
-                as_of=as_of,
-                expected_scope=expected_scope,
-                expected_quantity=expected_quantity,
-            )
+        canon = key.canonical_id
+        for attempt in range(3):
+            target_state = await self._load_position_durable(key, as_of=as_of)
+            async with self._mutation_lock(key):
+                current_rev = self._head_revisions.get(canon, 0)
+                target_rev = (
+                    target_state.head.revision
+                    if target_state is not None and target_state.head is not None
+                    else 0
+                )
+                if target_state is not None and target_rev < current_rev:
+                    if attempt < 2:
+                        continue
+                    existing_book = self._books.get(canon)
+                    return (
+                        existing_book.get_view()
+                        if existing_book is not None
+                        else None
+                    )
+                return self._apply_loaded_position(
+                    key,
+                    target_state,
+                    expected_scope=expected_scope,
+                    expected_quantity=expected_quantity,
+                )
+        return None
 
-    async def _reload_position(
+    _reload_position = reload_position
+
+    async def _load_position_durable(
         self,
         key: PositionKey,
         *,
         as_of: datetime | None = None,
+    ) -> DurableExecutionPositionState | None:
+        load_fn = getattr(self._execution_unit_of_work, "load_position", None)
+        if load_fn is None:
+            return None
+        as_of = as_of or datetime.now(UTC)
+        result = await load_fn(key, as_of=as_of)
+        return cast(DurableExecutionPositionState | None, result)
+
+    def _apply_loaded_position(
+        self,
+        key: PositionKey,
+        target_state: DurableExecutionPositionState | None,
+        *,
         expected_scope: AccountFactStreamScope | None = None,
         expected_quantity: Decimal | None = None,
     ) -> PositionView | None:
-        return await reload_execution_position(
-            self._recovery_state,
-            ReloadDependencies(
-                load_position=(
-                    self._execution_unit_of_work.load_position
-                    if self._execution_unit_of_work is not None
-                    else None
+        return cast(
+            PositionView | None,
+            apply_loaded_execution_position(
+                self._recovery_state,
+                ReloadDependencies(
+                    load_position=getattr(
+                        self._execution_unit_of_work, "load_position", None
+                    ),
+                    active_reservations=self.get_active_reservations,
+                    order_watermark_key=self._order_watermark_key,
+                    advance_context_revision=lambda: setattr(
+                        self, "_context_revision", self._context_revision + 1
+                    ),
                 ),
-                active_reservations=self.get_active_reservations,
-                order_watermark_key=self._order_watermark_key,
-                advance_context_revision=lambda: setattr(
-                    self, "_context_revision", self._context_revision + 1
-                ),
+                key,
+                target_state,
+                expected_scope=expected_scope,
+                expected_quantity=expected_quantity,
             ),
-            key,
-            as_of=as_of,
-            expected_scope=expected_scope,
-            expected_quantity=expected_quantity,
         )
 
     @property
@@ -468,16 +550,19 @@ class ExecutionBook:
         """Whether mutations require the durable PostgreSQL commit path."""
         return self._execution_unit_of_work is not None
 
-    def _mutation_lock(self, key: PositionKey) -> asyncio.Lock:
+    def _mutation_lock(self, key: PositionKey | None = None) -> asyncio.Lock:
         """Process-local mutation lock for this ExecutionBook instance.
 
-        Each live account runs in its own dedicated strategy process; this
-        asyncio lock serializes concurrent coroutines within this account's
-        process. Cross-process concurrency is safely coordinated via PostgreSQL
-        advisory locks in the ExecutionUnitOfWork.
+        Each position key is isolated with its own asyncio.Lock to avoid
+        cross-symbol lock contention during lock-free I/O.
+        If key is None, falls back to the instance-level process lock.
         """
-        del key
-        return self._process_mutation_lock
+        if key is None:
+            return self._process_mutation_lock
+        canon = key.canonical_id
+        if canon not in self._mutation_locks:
+            self._mutation_locks[canon] = asyncio.Lock()
+        return self._mutation_locks[canon]
 
     def _staged_copy(self, key: PositionKey | None = None) -> ExecutionBook:
         """Copy published domain state before entering a durable transaction."""
@@ -527,9 +612,23 @@ class ExecutionBook:
         candidate._active_streams = set(self._active_streams)
         candidate._latest_active_streams = dict(self._latest_active_streams)
         candidate._head_revisions = dict(self._head_revisions)
+        candidate._head_expected_reservation_ids = dict(
+            self._head_expected_reservation_ids
+        )
         candidate._journal_revisions = dict(self._journal_revisions)
         candidate._last_sequences = dict(self._last_sequences)
         candidate._recovery_adoption_scope = self._recovery_adoption_scope
+        candidate._initial_latest_active_streams = dict(self._latest_active_streams)
+        candidate._initial_recovery_adoption_scope = self._recovery_adoption_scope
+        candidate._staged_recovery_required_commands = set(
+            self._recovery_required_commands
+        )
+        candidate._staged_dispatch_reconciliation_required_commands = set(
+            self._dispatch_reconciliation_required_commands
+        )
+        candidate._staged_external_recovery_positions = dict(
+            self._external_recovery_positions
+        )
         candidate._coordinator = self._coordinator.copy_for_transaction()
         candidate._command_state = CommandLifecycleState(
             outbox_by_command_id=candidate._outbox_by_command_id,
@@ -544,34 +643,223 @@ class ExecutionBook:
         candidate._command_repo = None
         candidate._active_transaction = None
         candidate._process_mutation_lock = self._process_mutation_lock
+        candidate._mutation_locks = self._mutation_locks
         return candidate
 
-    def _publish_candidate(self, candidate: ExecutionBook) -> None:
+    def _publish_candidate(
+        self,
+        candidate: ExecutionBook,
+        key: PositionKey | None = None,
+    ) -> None:
         """Publish a candidate only after its Postgres transaction committed."""
-        for name in (
-            "_books",
-            "_journals",
-            "_requests_by_id",
-            "_receipts_by_id",
-            "_seen_evidence_ids",
-            "_seen_trade_ids",
-            "_outbox_by_command_id",
-            "_command_reservations",
-            "_order_cumulative_fills",
-            "_order_cumulative_quotes",
-            "_recovery_required_commands",
-            "_external_recovery_positions",
-            "_dispatch_reconciliation_required_commands",
-            "_stream_scopes",
-            "_active_streams",
-            "_latest_active_streams",
-            "_head_revisions",
-            "_journal_revisions",
-            "_last_sequences",
-            "_recovery_adoption_scope",
-        ):
-            setattr(self, name, getattr(candidate, name))
-        self._coordinator.publish_from(candidate._coordinator)
+        canons: tuple[str, ...]
+        if key is not None:
+            canons = (key.canonical_id,)
+        else:
+            canons = candidate._transaction_journal_keys or tuple(candidate._journals)
+
+        for canon in canons:
+            current_head = self._head_revisions.get(canon, 0)
+            cand_head = candidate._head_revisions.get(canon, 0)
+            if cand_head < current_head:
+                continue
+            if canon in candidate._books:
+                self._books[canon] = candidate._books[canon]
+            current_journal = self._journal_revisions.get(canon, 0)
+            cand_journal = candidate._journal_revisions.get(canon, 0)
+            if cand_journal >= current_journal and canon in candidate._journals:
+                self._journals[canon] = candidate._journals[canon]
+            if canon in candidate._stream_scopes:
+                self._stream_scopes[canon] = candidate._stream_scopes[canon]
+            if canon in candidate._head_revisions:
+                self._head_revisions[canon] = candidate._head_revisions[canon]
+            if (
+                cand_journal >= current_journal
+                and canon in candidate._journal_revisions
+            ):
+                self._journal_revisions[canon] = candidate._journal_revisions[canon]
+            if canon in candidate._last_sequences:
+                self._last_sequences[canon] = candidate._last_sequences[canon]
+            else:
+                self._last_sequences.pop(canon, None)
+            if canon in candidate._head_expected_reservation_ids:
+                self._head_expected_reservation_ids[canon] = (
+                    candidate._head_expected_reservation_ids[canon]
+                )
+            else:
+                self._head_expected_reservation_ids.pop(canon, None)
+
+        self._requests_by_id.update(candidate._requests_by_id)
+        self._receipts_by_id.update(candidate._receipts_by_id)
+        self._seen_evidence_ids.update(candidate._seen_evidence_ids)
+        self._seen_trade_ids.update(candidate._seen_trade_ids)
+        self._active_streams.update(candidate._active_streams)
+        initial_streams = getattr(candidate, "_initial_latest_active_streams", {})
+        for acc_k, stream_val in candidate._latest_active_streams.items():
+            if stream_val != initial_streams.get(acc_k):
+                if key is None or acc_k == (key.environment, key.account_label):
+                    self._latest_active_streams[acc_k] = stream_val
+        initial_scope = getattr(candidate, "_initial_recovery_adoption_scope", None)
+        if candidate._recovery_adoption_scope != initial_scope:
+            if key is None or (
+                candidate._recovery_adoption_scope is not None
+                and candidate._recovery_adoption_scope.symbol == key.symbol
+                and (
+                    candidate._recovery_adoption_scope.position_side
+                    == key.position_side
+                )
+                and candidate._recovery_adoption_scope.environment == key.environment
+                and (
+                    candidate._recovery_adoption_scope.account_label
+                    == key.account_label
+                )
+            ):
+                self._recovery_adoption_scope = candidate._recovery_adoption_scope
+        if key is not None:
+            canon = key.canonical_id
+            prefix = f"{canon}\x1f"
+            for k, v in candidate._order_cumulative_fills.items():
+                if k.startswith(prefix):
+                    self._order_cumulative_fills[k] = max(
+                        self._order_cumulative_fills.get(k, Decimal("0")), v
+                    )
+            for k, v in candidate._order_cumulative_quotes.items():
+                if k.startswith(prefix):
+                    self._order_cumulative_quotes[k] = max(
+                        self._order_cumulative_quotes.get(k, Decimal("0")), v
+                    )
+            for cmd_id, entry in candidate._outbox_by_command_id.items():
+                if entry.command.position_key.canonical_id == canon:
+                    existing = self._outbox_by_command_id.get(cmd_id)
+                    if (
+                        existing is not None
+                        and existing.state
+                        in (DispatchState.TERMINAL, DispatchState.REJECTED)
+                        and entry.state
+                        not in (DispatchState.TERMINAL, DispatchState.REJECTED)
+                    ):
+                        continue
+                    self._outbox_by_command_id[cmd_id] = entry
+            for cmd_id, res_list in candidate._command_reservations.items():
+                cand_res_entry = candidate._outbox_by_command_id.get(cmd_id)
+                if (
+                    cand_res_entry is not None
+                    and cand_res_entry.command.position_key.canonical_id == canon
+                ):
+                    existing = self._outbox_by_command_id.get(cmd_id)
+                    if (
+                        existing is not None
+                        and existing.state
+                        in (DispatchState.TERMINAL, DispatchState.REJECTED)
+                        and cand_res_entry.state
+                        not in (DispatchState.TERMINAL, DispatchState.REJECTED)
+                    ):
+                        continue
+                    self._command_reservations[cmd_id] = res_list
+            divergence_identity = f"reservation_divergence:{canon}"
+            staged_recovery: set[str] = getattr(
+                candidate, "_staged_recovery_required_commands", set()
+            )
+            if divergence_identity in candidate._recovery_required_commands:
+                self._recovery_required_commands.add(divergence_identity)
+            elif divergence_identity in staged_recovery:
+                self._recovery_required_commands.discard(divergence_identity)
+            for identity, pkey in candidate._external_recovery_positions.items():
+                if pkey.canonical_id == canon:
+                    self._external_recovery_positions[identity] = pkey
+            staged_ext: dict[str, PositionKey] = getattr(
+                candidate, "_staged_external_recovery_positions", {}
+            )
+            for identity, pkey in list(self._external_recovery_positions.items()):
+                if (
+                    pkey.canonical_id == canon
+                    and identity in staged_ext
+                    and identity not in candidate._external_recovery_positions
+                ):
+                    self._external_recovery_positions.pop(identity, None)
+            for cmd_id in candidate._recovery_required_commands:
+                cand_rec_entry = candidate._outbox_by_command_id.get(cmd_id)
+                if (
+                    cand_rec_entry is not None
+                    and cand_rec_entry.command.position_key.canonical_id == canon
+                ):
+                    self._recovery_required_commands.add(cmd_id)
+            for cmd_id in list(self._recovery_required_commands):
+                self_rec_entry = self._outbox_by_command_id.get(cmd_id)
+                if (
+                    self_rec_entry is not None
+                    and self_rec_entry.command.position_key.canonical_id == canon
+                ):
+                    if (
+                        cmd_id in staged_recovery
+                        and cmd_id not in candidate._recovery_required_commands
+                    ):
+                        self._recovery_required_commands.discard(cmd_id)
+            for cmd_id in candidate._dispatch_reconciliation_required_commands:
+                cand_disp_entry = candidate._outbox_by_command_id.get(cmd_id)
+                if (
+                    cand_disp_entry is not None
+                    and cand_disp_entry.command.position_key.canonical_id == canon
+                ):
+                    self._dispatch_reconciliation_required_commands.add(cmd_id)
+            staged_reconciliation: set[str] = getattr(
+                candidate, "_staged_dispatch_reconciliation_required_commands", set()
+            )
+            for cmd_id in list(self._dispatch_reconciliation_required_commands):
+                self_disp_entry = self._outbox_by_command_id.get(cmd_id)
+                if (
+                    self_disp_entry is not None
+                    and self_disp_entry.command.position_key.canonical_id == canon
+                ):
+                    if (
+                        cmd_id in staged_reconciliation
+                        and cmd_id
+                        not in candidate._dispatch_reconciliation_required_commands
+                    ):
+                        self._dispatch_reconciliation_required_commands.discard(
+                            cmd_id
+                        )
+        else:
+            for k, v in candidate._order_cumulative_fills.items():
+                self._order_cumulative_fills[k] = max(
+                    self._order_cumulative_fills.get(k, Decimal("0")), v
+                )
+            for k, v in candidate._order_cumulative_quotes.items():
+                self._order_cumulative_quotes[k] = max(
+                    self._order_cumulative_quotes.get(k, Decimal("0")), v
+                )
+            self._outbox_by_command_id = dict(candidate._outbox_by_command_id)
+            self._command_reservations = dict(candidate._command_reservations)
+            staged_recovery = getattr(
+                candidate, "_staged_recovery_required_commands", set()
+            )
+            self._recovery_required_commands = (
+                (self._recovery_required_commands - staged_recovery)
+                | candidate._recovery_required_commands
+            )
+            staged_ext = getattr(
+                candidate, "_staged_external_recovery_positions", {}
+            )
+            self._external_recovery_positions = {
+                k: v
+                for k, v in self._external_recovery_positions.items()
+                if k not in staged_ext or k in candidate._external_recovery_positions
+            }
+            self._external_recovery_positions.update(
+                candidate._external_recovery_positions
+            )
+            staged_reconciliation = getattr(
+                candidate, "_staged_dispatch_reconciliation_required_commands", set()
+            )
+            self._dispatch_reconciliation_required_commands = (
+                (
+                    self._dispatch_reconciliation_required_commands
+                    - staged_reconciliation
+                )
+                | candidate._dispatch_reconciliation_required_commands
+            )
+
+        self._coordinator.publish_from(candidate._coordinator, key=key)
         self._command_state = CommandLifecycleState(
             outbox_by_command_id=self._outbox_by_command_id,
             dispatch_reconciliation_required_commands=(
@@ -580,12 +868,13 @@ class ExecutionBook:
             recovery_required_commands=self._recovery_required_commands,
         )
         self._refresh_action_state()
+
         self._refresh_evidence_state()
         self._context_revision += 1
         # The candidate's append-only delta is now durable, so it must not be
         # re-sent by the next observation. A candidate that rolled back is
         # never published, which keeps its pending events queued for retry.
-        for canon in candidate._transaction_journal_keys:
+        for canon in canons:
             journal = self._journals.get(canon)
             if journal is not None:
                 journal.mark_facts_persisted()
@@ -773,14 +1062,14 @@ class ExecutionBook:
 
     def _find_active_reservations_for_command(
         self, command_id: str
-    ) -> list[PositionReservation]:
+    ) -> tuple[PositionReservation, ...]:
         res_ids = self._command_reservations.get(command_id, [])
         active: list[PositionReservation] = []
         for r_id in res_ids:
             r = self._coordinator.get_reservation(r_id)
             if r is not None and r.active_quantity > Decimal("0"):
                 active.append(r)
-        return active
+        return tuple(active)
 
     def _command_order_id(self, key: PositionKey, order_id: str) -> str:
         matches = [
@@ -1106,58 +1395,68 @@ class ExecutionBook:
             if stream_scope is None:
                 raise RuntimeError("Execution command has no durable stream scope")
             candidate = self._staged_copy(key=key)
-            try:
-                async with unit_of_work.transaction(key) as tx:
-                    head = await tx.load_head(key)
-                    # Legacy journals can exist before the first Book head.
-                    # Revision zero is valid only after that journal was restored;
-                    # persist_head still performs the first-writer CAS in this tx.
-                    expected_head_revision = head.revision if head is not None else 0
-                    if self._head_revisions.get(canon, 0) != expected_head_revision:
-                        raise RuntimeError(
-                            "durable execution head changed; restore is required"
-                        )
-                    if head is not None and (
-                        head.stream_id != stream_scope.stream_id
-                        or head.stream_epoch != stream_scope.stream_epoch
-                    ):
-                        raise RuntimeError(
-                            "durable execution stream changed; restore is required"
-                        )
-                    candidate._active_transaction = tx
-                    result = await candidate._apply_command_transition(
-                        command_id,
-                        target,
-                        at=at,
-                        external_order_id=external_order_id,
-                        reason=reason,
+            base_head_revision = self._head_revisions.get(canon, 0)
+
+        # Phase 2: Lock-free durable I/O and CAS commit (I2)
+        try:
+            async with unit_of_work.transaction(key) as tx:
+                head = await tx.load_head(key)
+                # Legacy journals can exist before the first Book head.
+                # Revision zero is valid only after that journal was restored;
+                # persist_head still performs the first-writer CAS in this tx.
+                expected_head_revision = head.revision if head is not None else 0
+                if base_head_revision != expected_head_revision:
+                    raise RuntimeError(
+                        "durable execution head changed; restore is required"
                     )
-                    facts = candidate._ensure_journal(key).read_cut()
-                    head_payload = build_execution_head_payload(
-                        candidate.evidence_state,
-                        key,
-                        facts.compute_facts_hash(),
-                        ensure_book=candidate._ensure_book,
-                        ensure_journal=candidate._ensure_journal,
-                        active_reservations=candidate.get_active_reservations,
+                if head is not None and (
+                    head.stream_id != stream_scope.stream_id
+                    or head.stream_epoch != stream_scope.stream_epoch
+                ):
+                    raise RuntimeError(
+                        "durable execution stream changed; restore is required"
                     )
-                    candidate._head_revisions[canon] = await tx.persist_head(
-                        key=key,
-                        stream_id=stream_scope.stream_id,
-                        stream_epoch=stream_scope.stream_epoch,
-                        expected_revision=expected_head_revision,
-                        projection_version=candidate._ensure_book(key)
-                        .get_view()
-                        .projection_version,
-                        state_payload=head_payload,
-                        updated_at=datetime.now(UTC),
+                candidate._active_transaction = tx
+                result = await candidate._apply_command_transition(
+                    command_id,
+                    target,
+                    at=at,
+                    external_order_id=external_order_id,
+                    reason=reason,
+                )
+                facts = candidate._ensure_journal(key).read_cut()
+                head_payload = build_execution_head_payload(
+                    candidate.evidence_state,
+                    key,
+                    facts.compute_facts_hash(),
+                    ensure_book=candidate._ensure_book,
+                    ensure_journal=candidate._ensure_journal,
+                    active_reservations=candidate.get_active_reservations,
+                )
+                candidate._head_revisions[canon] = await tx.persist_head(
+                    key=key,
+                    stream_id=stream_scope.stream_id,
+                    stream_epoch=stream_scope.stream_epoch,
+                    expected_revision=expected_head_revision,
+                    projection_version=candidate._ensure_book(key)
+                    .get_view()
+                    .projection_version,
+                    state_payload=head_payload,
+                    updated_at=datetime.now(UTC),
+                )
+            candidate._active_transaction = None
+
+            # Phase 3: Short lock for candidate publication & validation
+            async with self._mutation_lock(key):
+                if self._head_revisions.get(canon, 0) != base_head_revision:
+                    raise RuntimeError(
+                        "durable execution head changed concurrently; restore required"
                     )
-                candidate._active_transaction = None
-                self._publish_candidate(candidate)
-                return result
-            except Exception:
-                self._persistence_failed = True
-                raise
+                self._publish_candidate(candidate, key=key)
+            return result
+        except Exception:
+            self._persistence_failed = True
+            raise
 
     async def mark_dispatching(
         self, command_id: str, dispatched_at: datetime | None = None

@@ -1,12 +1,16 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from crypto_momentum_lab.domain.account import AccountPositionSnapshot
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
     ScheduledRiskWindowControllerConfig,
@@ -271,3 +275,117 @@ async def test_entry_drain_uses_explicit_waiter_before_plan_reads(mode: str) -> 
     assert result == (
         "scheduled_entry_submission_drain_failed:OSError" if mode == "failure" else None
     )
+
+
+@pytest.mark.asyncio
+async def test_a5_scheduled_controller_separates_entry_stop_and_flatten() -> None:
+    schedule = ScheduledRiskWindowConfig(
+        timezone="Asia/Shanghai",
+        entry_stop_at=time(7, 45),
+        flatten_start_at=time(7, 50),
+        flatten_deadline_at=time(7, 55),
+        verify_at=time(7, 58),
+        reopen_at=time(9, 0),
+    )
+    blocked_calls: list[tuple[bool, str]] = []
+
+    def set_entry_blocked(blocked: bool, *, reason: str = "") -> None:
+        blocked_calls.append((blocked, reason))
+
+    flatten_calls: list[datetime] = []
+
+    class MockExitManager:
+        async def requests_for_scheduled_flatten(
+            self, positions, *, now, symbol=None, reference_prices=None, attempt=1
+        ):
+            flatten_calls.append(now)
+            return ()
+
+    positions_to_return: tuple[AccountPositionSnapshot, ...] = ()
+
+    async def fetch_positions() -> tuple[AccountPositionSnapshot, ...]:
+        return positions_to_return
+
+    cancelled_entry_orders: list[object] = []
+
+    async def cancel_entries(plans) -> int:
+        cancelled_entry_orders.extend(plans)
+        return len(plans)
+
+    dummy_context = Mock()
+    dummy_context.unresolved_orders = ()
+    dummy_context.account_snapshot = None
+    dummy_context.managed_positions = ()
+    dummy_context.pending_position_symbols = ()
+    dummy_context.unmanaged_position_symbols = ()
+
+    now = datetime(2026, 7, 3, 23, 46, 0, tzinfo=UTC)  # 07:46 Shanghai
+    controller = ScheduledRiskWindowController(
+        config=ScheduledRiskWindowControllerConfig(
+            run_id="test-run",
+            scheduled_risk_window=schedule,
+        ),
+        exit_manager=cast(object, MockExitManager()),
+        state_machine=None,
+        context_provider=AsyncMock(return_value=dummy_context),
+        apply_context=lambda ctx: None,
+        invalidate_context_cache=lambda: None,
+        process_exit_requests=AsyncMock(return_value=(0, 0, None)),
+        set_entry_blocked=set_entry_blocked,
+        pending_entry_plans=lambda: (),
+        cancel_unfilled_entry_orders=cancel_entries,
+        fetch_exchange_positions=fetch_positions,
+        clock=lambda: now,
+        wait_for_entry_submissions_idle=AsyncMock(),
+    )
+
+    active_pos = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("0.5"),
+        entry_price=Decimal("50000"),
+        mark_price=Decimal("50100"),
+        unrealized_pnl=Decimal("50"),
+        notional=Decimal("25000"),
+        leverage=10,
+        margin_type="cross",
+        observed_at=now,
+        raw_payload={},
+    )
+    managed_pos = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.5"),
+        entry_price=Decimal("50000"),
+        opened_at=now,
+    )
+
+    # 1. At 07:46 local: ENTRY_BLOCKED
+    # In ENTRY_BLOCKED: entries blocked, cancels unfilled entry orders, flatten POST = 0
+    res = await controller.process(now=now)
+    assert res is None
+    assert (True, "scheduled_risk_window") in blocked_calls
+    assert len(flatten_calls) == 0  # Flattening was NOT submitted at 07:46!
+    assert controller._scheduled_entry_orders_cancelled is True
+
+    # 2. At 07:50 local (23:50 UTC): FLATTENING
+    now = datetime(2026, 7, 3, 23, 50, 0, tzinfo=UTC)
+    positions_to_return = (active_pos,)
+    dummy_context.managed_positions = (managed_pos,)
+    res = await controller.process(now=now)
+    assert res is None
+    assert len(flatten_calls) == 1  # Flattening IS submitted at 07:50!
+
+    # 3. At 09:00 local (01:00 UTC): REOPENED with unverified / residual position
+    now = datetime(2026, 7, 4, 1, 0, 0, tzinfo=UTC)
+    positions_to_return = (active_pos,)
+    dummy_context.managed_positions = (managed_pos,)
+    blocked_calls.clear()
+    res = await controller.process(now=now)
+    # Verification sees residual position, so _scheduled_positions_verified is False
+    assert controller._scheduled_positions_verified is False
+    # set_entry_blocked(False) was NOT called!
+    assert not any(b is False for b, r in blocked_calls)

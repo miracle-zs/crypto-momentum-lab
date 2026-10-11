@@ -176,6 +176,11 @@ class LiveContextRuntime:
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
         self._managed_position_symbols: frozenset[str] = frozenset()
+        self._current_context: LiveDaemonRuntimeContext | None = None
+
+    @property
+    def current_context(self) -> LiveDaemonRuntimeContext | None:
+        return self._current_context
 
     async def prepare(
         self,
@@ -246,6 +251,7 @@ class LiveContextRuntime:
         context: LiveDaemonRuntimeContext,
     ) -> None:
         """Apply current facts and the local subscription target without yielding."""
+        self._current_context = context
         if not self.is_current(context):
             _log.info(
                 "live_managed_position_symbols_stale_context_ignored",

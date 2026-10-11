@@ -82,6 +82,7 @@ class OrderExecutionStateMachine:
             8.0,
         ),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        retry_lookup_on_submit_timeout: bool = True,
     ) -> None:
         if any(delay < 0 for delay in reconciliation_retry_delays):
             raise ValueError("reconciliation retry delays must not be negative")
@@ -95,6 +96,7 @@ class OrderExecutionStateMachine:
         self._on_exchange_response = on_exchange_response
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
         self._sleep = sleep
+        self._retry_lookup_on_submit_timeout = retry_lookup_on_submit_timeout
         self._observation_lock = asyncio.Lock()
         self._exchange.set_exchange_boundary_callbacks(
             on_request=on_exchange_request,
@@ -160,6 +162,21 @@ class OrderExecutionStateMachine:
                 plan=plan,
             )
         except ExchangeSubmissionTimeoutError as exc:
+            if not self._retry_lookup_on_submit_timeout:
+                await self._append_event(
+                    plan,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    details={
+                        "reason": str(exc) or "submit_timeout_order_not_found",
+                        "reconciliation_attempts": 0,
+                    },
+                )
+                return OrderExecutionResult(
+                    plan.client_order_id,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    None,
+                    plan=plan,
+                )
             query_result = await self._query_order_with_retry(
                 plan,
                 not_found_reason=str(exc) or "submit_timeout_order_not_found",

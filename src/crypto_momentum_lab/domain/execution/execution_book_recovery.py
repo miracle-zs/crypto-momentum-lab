@@ -332,10 +332,13 @@ async def restore_durable_positions(
                 log.warning(event, **values)
         state.head_revisions[canon] = recovered.head_revision
         if durable_state.head is not None:
-            state.recovery_required_commands.update(
-                durable_state.head.state_payload["recovery_command_ids"]
+            recovery_ids = (
+                durable_state.head.state_payload.get("recovery_command_ids") or ()
             )
-            for identity in durable_state.head.state_payload["external_recovery_ids"]:
+            state.recovery_required_commands.update(recovery_ids)
+            for identity in (
+                durable_state.head.state_payload.get("external_recovery_ids") or ()
+            ):
                 state.external_recovery_positions[identity] = key
                 state.recovery_required_commands.add(identity)
             state.head_expected_reservation_ids[canon] = set(recovered.reservation_ids)
@@ -370,25 +373,33 @@ class ReloadDependencies:
     advance_context_revision: Callable[[], None]
 
 
-async def reload_execution_position(
+def apply_loaded_execution_position(
     state: ExecutionRecoveryState,
     dependencies: ReloadDependencies,
     key: PositionKey,
+    target_state: object | None,
     *,
-    as_of: datetime | None = None,
     expected_scope: AccountFactStreamScope | None = None,
     expected_quantity: Decimal | None = None,
 ) -> object | None:
-    if dependencies.load_position is None:
-        return None
-    as_of = as_of or datetime.now(UTC)
-    canon = key.canonical_id
-    target_state = await dependencies.load_position(
-        key,
-        as_of=as_of,
-    )
     if target_state is None:
         return None
+    canon = key.canonical_id
+    current_head_rev = state.head_revisions.get(canon, 0)
+    target_head_rev = (
+        target_state.head.revision
+        if target_state.head is not None
+        else 0
+    )
+    if target_head_rev < current_head_rev:
+        log.warning(
+            "ignoring_stale_loaded_position_regression",
+            canonical_id=canon,
+            current_revision=current_head_rev,
+            stale_loaded_revision=target_head_rev,
+        )
+        existing = state.books.get(canon)
+        return existing.get_view() if existing is not None else None
     journal = AccountJournal.from_durable_cut(target_state.cut)
     book = PositionBook(journal)
     if expected_scope is not None:
@@ -457,3 +468,29 @@ async def reload_execution_position(
         state.order_cumulative_fills[watermark_key] = watermark.cumulative_quantity
         state.order_cumulative_quotes[watermark_key] = watermark.cumulative_quote
     return book.get_view()
+
+
+async def reload_execution_position(
+    state: ExecutionRecoveryState,
+    dependencies: ReloadDependencies,
+    key: PositionKey,
+    *,
+    as_of: datetime | None = None,
+    expected_scope: AccountFactStreamScope | None = None,
+    expected_quantity: Decimal | None = None,
+) -> object | None:
+    if dependencies.load_position is None:
+        return None
+    as_of = as_of or datetime.now(UTC)
+    target_state = await dependencies.load_position(
+        key,
+        as_of=as_of,
+    )
+    return apply_loaded_execution_position(
+        state,
+        dependencies,
+        key,
+        target_state,
+        expected_scope=expected_scope,
+        expected_quantity=expected_quantity,
+    )

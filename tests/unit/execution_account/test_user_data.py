@@ -14,7 +14,11 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.account.snapshot_models import (
     AccountSnapshot,
 )
-from crypto_momentum_lab.domain.execution.order_state import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.execution_account.binance.user_data_parser import (
     BinancePayloadError,
     order_snapshot_from_update,
@@ -877,3 +881,162 @@ def _order_plan() -> OrderExecutionPlan:
         reduce_only=False,
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )
+
+
+def test_a4a_hedge_close_plan_accepts_r_false() -> None:
+    # A4a: Close plan SELL+LONG+reduce_only=True, WS R=false returns FILLED snapshot
+    long_close_plan = OrderExecutionPlan(
+        intent_id="exit-long-1",
+        run_id="run-1",
+        client_order_id="exit-long-order",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    long_ws_order = {
+        "c": "exit-long-order",
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": False,
+        "ps": "LONG",
+        "i": 2001,
+        "X": "FILLED",
+        "z": "0.002",
+        "ap": "50000",
+        "T": 1783123202000,
+    }
+    snapshot_long = order_snapshot_from_update(long_ws_order, long_close_plan)
+    assert snapshot_long is not None
+    assert snapshot_long.state is ExchangeOrderState.FILLED
+    assert snapshot_long.executed_quantity == Decimal("0.002")
+
+    # Symmetric: Close plan BUY+SHORT+reduce_only=True,
+    # WS R=false returns FILLED snapshot
+    short_close_plan = OrderExecutionPlan(
+        intent_id="exit-short-1",
+        run_id="run-1",
+        client_order_id="exit-short-order",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.SHORT,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    short_ws_order = {
+        "c": "exit-short-order",
+        "s": "BTCUSDT",
+        "S": "BUY",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": False,
+        "ps": "SHORT",
+        "i": 2002,
+        "X": "FILLED",
+        "z": "0.002",
+        "ap": "50000",
+        "T": 1783123203000,
+    }
+    snapshot_short = order_snapshot_from_update(short_ws_order, short_close_plan)
+    assert snapshot_short is not None
+    assert snapshot_short.state is ExchangeOrderState.FILLED
+    assert snapshot_short.executed_quantity == Decimal("0.002")
+
+
+def test_a4b_both_and_hedge_direction_validation() -> None:
+    # BOTH close plan: True passes, False raises ValueError
+    both_close_plan = OrderExecutionPlan(
+        intent_id="exit-both-1",
+        run_id="run-1",
+        client_order_id="exit-both-order",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    both_ws_true = {
+        "c": "exit-both-order",
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": True,
+        "ps": "BOTH",
+        "i": 3001,
+        "X": "FILLED",
+        "z": "0.002",
+        "ap": "50000",
+        "T": 1783123204000,
+    }
+    assert order_snapshot_from_update(both_ws_true, both_close_plan) is not None
+
+    both_ws_false = dict(both_ws_true, R=False)
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        order_snapshot_from_update(both_ws_false, both_close_plan)
+
+    # Hedge close plan: wrong side raises ValueError
+    hedge_close_plan = OrderExecutionPlan(
+        intent_id="exit-hedge-1",
+        run_id="run-1",
+        client_order_id="exit-hedge-order",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.002"),
+        price=Decimal("50000"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    base_ws = {
+        "c": "exit-hedge-order",
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "q": "0.002",
+        "p": "50000",
+        "R": False,
+        "ps": "LONG",
+        "i": 4001,
+        "X": "FILLED",
+        "z": "0.002",
+        "ap": "50000",
+        "T": 1783123205000,
+    }
+
+    # Wrong side
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        order_snapshot_from_update(dict(base_ws, S="BUY"), hedge_close_plan)
+
+    # Wrong positionSide
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        order_snapshot_from_update(dict(base_ws, ps="SHORT"), hedge_close_plan)
+
+    # Wrong symbol
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        order_snapshot_from_update(dict(base_ws, s="ETHUSDT"), hedge_close_plan)
+
+    # Wrong client ID
+    with pytest.raises(ValueError, match="conflicts with its durable identity"):
+        order_snapshot_from_update(dict(base_ws, c="wrong-order"), hedge_close_plan)
+
+    # Invalid non-bool R -> returns None (illegal format rejected by type check)
+    invalid_r_order = dict(base_ws, R="false")
+    assert order_snapshot_from_update(invalid_r_order, hedge_close_plan) is None
+    assert order_snapshot_from_update(dict(base_ws, R=0), hedge_close_plan) is None

@@ -526,6 +526,8 @@ class FakeOrderRepository:
 def _machine(
     exchange: FakeExchange,
     repository: FakeOrderRepository,
+    *,
+    retry_lookup_on_submit_timeout: bool = True,
 ) -> OrderExecutionStateMachine:
     return OrderExecutionStateMachine(
         exchange=exchange,
@@ -533,6 +535,7 @@ def _machine(
         live_submit_enabled=True,
         clock=lambda: NOW,
         reconciliation_retry_delays=(0.0, 0.0, 0.0, 0.0),
+        retry_lookup_on_submit_timeout=retry_lookup_on_submit_timeout,
     )
 
 
@@ -690,3 +693,22 @@ async def test_state_machine_timeout_with_halt_remains_unknown_and_no_resend() -
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert exchange.calls == ["submit", "query", "query", "query", "query", "query"]
+
+
+async def test_state_machine_timeout_without_retry_records_unknown_immediately(
+) -> None:
+    exchange = FakeExchange(
+        submit_result=ExchangeSubmissionTimeoutError("timed out waiting for POST"),
+        query_result=None,
+    )
+    repository = FakeOrderRepository()
+
+    machine = _machine(exchange, repository, retry_lookup_on_submit_timeout=False)
+    result = await submit_prepared(machine, _plan())
+
+    assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert exchange.calls == ["submit"]
+    assert repository.events[-1].details == {
+        "reason": "timed out waiting for POST",
+        "reconciliation_attempts": 0,
+    }

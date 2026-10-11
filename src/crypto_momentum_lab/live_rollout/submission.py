@@ -320,23 +320,8 @@ class LiveCandidateSubmission:
                     recorded_at=self._clock(),
                     context=context,
                 )
-            if self._telemetry is not None:
-                await self._telemetry.candidate_accepted(
-                    executable_candidate,
-                    state=state,
-                    occurred_at=self._clock(),
-                    lane=lane,
-                )
             if evaluation.decision is not RiskDecision.APPROVED:
                 return None
-            if self._telemetry is not None:
-                await self._telemetry.risk_approved(
-                    executable_candidate,
-                    state=state,
-                    occurred_at=self._clock(),
-                    lane=lane,
-                    evaluation_id=evaluation.evaluation_id,
-                )
             rules = context.trading_rules.get(candidate.symbol)
             execution_reference_price, ref_time, ref_source = (
                 resolve_authoritative_reference_price(
@@ -428,87 +413,104 @@ class LiveCandidateSubmission:
                     time_in_force="GTD",
                     expires_at=executable_candidate.expires_at,
                 )
-            result = await self._state_machine.prepare_and_execute(
-                plan,
-                preparation=OrderSubmissionPreparation(
-                    intent=executable_candidate,
-                    evaluation=evaluation,
-                    environment="live",
-                    account_label=context.gate_context.account_label,
-                    strategy_name=context.gate_context.strategy_name,
-                    max_open_positions=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_open_positions
-                    ),
-                    max_daily_loss=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_daily_loss
-                    ),
-                    max_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_gross_exposure
-                    ),
-                    current_daily_pnl=(
-                        None
-                        if (
-                            executable_candidate.reduce_only
-                            or context.realized_pnl is None
-                            or context.unrealized_pnl is None
-                        )
-                        else context.realized_pnl + context.unrealized_pnl
-                    ),
-                    current_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else context.gross_exposure
-                    ),
-                    open_position_symbols=(
-                        None
-                        if executable_candidate.reduce_only
-                        else risk_open_position_symbols
-                    ),
-                    exposure_notional=(
-                        None if executable_candidate.reduce_only else risk_notional
-                    ),
-                    baseline_observed_at=context.account_observed_at,
+            preparation = OrderSubmissionPreparation(
+                intent=executable_candidate,
+                evaluation=evaluation,
+                environment="live",
+                account_label=context.gate_context.account_label,
+                strategy_name=context.gate_context.strategy_name,
+                max_open_positions=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_open_positions
                 ),
+                max_daily_loss=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_daily_loss
+                ),
+                max_gross_exposure=(
+                    None
+                    if executable_candidate.reduce_only
+                    else self._limits.max_gross_exposure
+                ),
+                current_daily_pnl=(
+                    None
+                    if (
+                        executable_candidate.reduce_only
+                        or context.realized_pnl is None
+                        or context.unrealized_pnl is None
+                    )
+                    else context.realized_pnl + context.unrealized_pnl
+                ),
+                current_gross_exposure=(
+                    None
+                    if executable_candidate.reduce_only
+                    else context.gross_exposure
+                ),
+                open_position_symbols=(
+                    None
+                    if executable_candidate.reduce_only
+                    else risk_open_position_symbols
+                ),
+                exposure_notional=(
+                    None if executable_candidate.reduce_only else risk_notional
+                ),
+                baseline_observed_at=context.account_observed_at,
             )
-            if result is None:
-                log.info(
-                    "live_submission_suppressed",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                )
-                return None
-            if self._telemetry is not None:
-                await self._telemetry.intent_saved(
-                    executable_candidate,
-                    state=state,
-                    occurred_at=result.prepared_at or self._clock(),
-                    lane=lane,
-                )
-            if not plan.reduce_only:
-                self._remember_pending_entry(plan, result)
-                lifecycle = self._entry_order_lifecycle
-                if lifecycle is not None:
-                    try:
-                        await lifecycle.track(plan, result)
-                    except Exception as error:
-                        # Expiry bookkeeping is safety/observability support. It
-                        # must never turn a successful exchange submission into a
-                        # failed live command.
-                        log.warning(
-                            "live_entry_limit_lifecycle_track_failed",
-                            run_id=self._config.run_id,
-                            symbol=plan.symbol,
-                            client_order_id=plan.client_order_id,
-                            error_type=type(error).__name__,
-                        )
-            return result
+
+        # I/O, telemetry, and execution run outside the application lifecycle lock.
+        if self._telemetry is not None:
+            await self._telemetry.candidate_accepted(
+                executable_candidate,
+                state=state,
+                occurred_at=self._clock(),
+                lane=lane,
+            )
+            await self._telemetry.risk_approved(
+                executable_candidate,
+                state=state,
+                occurred_at=self._clock(),
+                lane=lane,
+                evaluation_id=evaluation.evaluation_id,
+            )
+        result = await self._state_machine.prepare_and_execute(
+            plan,
+            preparation=preparation,
+        )
+        if result is None:
+            log.info(
+                "live_submission_suppressed",
+                run_id=self._config.run_id,
+                symbol=plan.symbol,
+                client_order_id=plan.client_order_id,
+            )
+            return None
+        if self._telemetry is not None:
+            await self._telemetry.intent_saved(
+                executable_candidate,
+                state=state,
+                occurred_at=result.prepared_at or self._clock(),
+                lane=lane,
+            )
+        if not plan.reduce_only:
+            self._remember_pending_entry(plan, result)
+            lifecycle = self._entry_order_lifecycle
+            if lifecycle is not None:
+                try:
+                    await lifecycle.track(plan, result)
+                except Exception as error:
+                    # Expiry bookkeeping is safety/observability support. It
+                    # must never turn a successful exchange submission into a
+                    # failed live command.
+                    log.warning(
+                        "live_entry_limit_lifecycle_track_failed",
+                        run_id=self._config.run_id,
+                        symbol=plan.symbol,
+                        client_order_id=plan.client_order_id,
+                        error_type=type(error).__name__,
+                    )
+        return result
 
     def _build_trade_command(
         self,

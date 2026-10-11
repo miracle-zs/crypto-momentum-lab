@@ -254,9 +254,15 @@ class ScheduledRiskWindowController:
                 failure = await self._cancel_scheduled_entry_orders()
                 if failure is None:
                     self._scheduled_entry_orders_cancelled = True
-                    if phase is not ScheduledRiskWindowPhase.FLATTENING:
+                    if phase not in (
+                        ScheduledRiskWindowPhase.ENTRY_BLOCKED,
+                        ScheduledRiskWindowPhase.FLATTENING,
+                    ):
                         self._scheduled_deadline_entry_orders_cancelled = True
                 return failure
+
+            if phase is ScheduledRiskWindowPhase.ENTRY_BLOCKED:
+                return await cancel_pending_entries()
 
             if phase in (
                 ScheduledRiskWindowPhase.FLATTENING,

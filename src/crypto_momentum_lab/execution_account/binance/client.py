@@ -944,6 +944,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
         entry_leverage: int | None = None,
         margin_type: str | None = None,
+        resolve_fill_price_on_submit: bool = False,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
     ) -> None:
@@ -972,6 +973,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
         self._entry_margin_type = normalized_margin_type
+        self._resolve_fill_price_on_submit = resolve_fill_price_on_submit
         self._configured_leverage_by_symbol: dict[str, int] = {}
         self._configured_margin_type_by_symbol: dict[str, str] = {}
         self._margin_type_lock = asyncio.Lock()
@@ -1186,8 +1188,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 entry_leverage=entry_leverage,
                 fill_price_optional=True,
             )
-            if snapshot.executed_quantity > Decimal("0") and (
-                snapshot.average_price is None or snapshot.average_price <= Decimal("0")
+            if (
+                self._resolve_fill_price_on_submit
+                and snapshot.executed_quantity > Decimal("0")
+                and (
+                    snapshot.average_price is None
+                    or snapshot.average_price <= Decimal("0")
+                )
             ):
                 snapshot = await self._resolve_filled_order_snapshot_with_retry(
                     plan=plan,
@@ -1196,7 +1203,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 )
             return snapshot
         except (ValueError, TypeError, KeyError) as parse_exc:
-            if schema_drift := _avg_price_schema_drift_fields(payload):
+            if self._resolve_fill_price_on_submit and (
+                schema_drift := _avg_price_schema_drift_fields(payload)
+            ):
                 log.warning(
                     "binance_order_submit_avg_price_schema_drift",
                     endpoint="/fapi/v1/order",
@@ -1388,45 +1397,48 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             configured = self._configured_margin_type_by_symbol.get(normalized_symbol)
             if configured is not None:
                 return configured
-            try:
-                current = await self.fetch_symbol_margin_type(normalized_symbol)
-                if current == desired_margin_type:
+
+        try:
+            current = await self.fetch_symbol_margin_type(normalized_symbol)
+            if current == desired_margin_type:
+                async with self._margin_type_lock:
                     self._configured_margin_type_by_symbol[normalized_symbol] = current
-                    return current
-                try:
-                    await self._signed_post(
-                        "/fapi/v1/marginType",
-                        {
-                            "symbol": normalized_symbol,
-                            "marginType": desired_margin_type,
-                        },
-                        priority=_COMMAND_ENTRY_PRIORITY,
-                    )
-                except httpx.HTTPStatusError as exc:
-                    # Binance reports an already-selected mode as an error.
-                    # Treat it as a successful confirmation; another read-back
-                    # here only adds latency and can observe a stale projection.
-                    if exchange_error_code(exc) != -4046:
-                        raise
-                # The successful write (or -4046 "already selected") is the
-                # exchange acknowledgement. Do not perform a second
-                # symbolConfig read on the order-critical path: that
-                # projection can lag and would leave the symbol uncached,
-                # causing the next order to repeat the margin-type write.
+                return current
+            try:
+                await self._signed_post(
+                    "/fapi/v1/marginType",
+                    {
+                        "symbol": normalized_symbol,
+                        "marginType": desired_margin_type,
+                    },
+                    priority=_COMMAND_ENTRY_PRIORITY,
+                )
+            except httpx.HTTPStatusError as exc:
+                # Binance reports an already-selected mode as an error.
+                # Treat it as a successful confirmation; another read-back
+                # here only adds latency and can observe a stale projection.
+                if exchange_error_code(exc) != -4046:
+                    raise
+            # The successful write (or -4046 "already selected") is the
+            # exchange acknowledgement. Do not perform a second
+            # symbolConfig read on the order-critical path: that
+            # projection can lag and would leave the symbol uncached,
+            # causing the next order to repeat the margin-type write.
+            async with self._margin_type_lock:
                 self._configured_margin_type_by_symbol[normalized_symbol] = (
                     desired_margin_type
                 )
-                return desired_margin_type
-            except httpx.TimeoutException as exc:
-                raise ExchangeOrderRejectedError(
-                    "Binance entry margin type was not confirmed; order was not sent"
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
-            except (httpx.HTTPError, ValueError, TypeError) as exc:
-                raise ExchangeOrderRejectedError(
-                    "Binance entry margin type was not confirmed; order was not sent"
-                ) from exc
+            return desired_margin_type
+        except httpx.TimeoutException as exc:
+            raise ExchangeOrderRejectedError(
+                "Binance entry margin type was not confirmed; order was not sent"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ExchangeOrderRejectedError(exchange_error_message(exc)) from exc
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise ExchangeOrderRejectedError(
+                "Binance entry margin type was not confirmed; order was not sent"
+            ) from exc
 
     async def _ensure_entry_leverage(self, symbol: str) -> int | None:
         if self._entry_leverage is None:
