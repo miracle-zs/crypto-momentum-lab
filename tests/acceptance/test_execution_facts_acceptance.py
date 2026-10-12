@@ -1114,9 +1114,15 @@ async def test_expired_unsent_candidate_posts_nothing_and_starts_no_recovery() -
         await coordinator.aclose()
 
 
-async def test_unsent_command_settles_its_reservation_once_across_normal_change() -> (
-    None
-):
+async def test_engine_rejection_settles_an_unsent_reservation_exactly_once() -> None:
+    """Scope: the engine's rejection path, not an entry-point auto-cleanup.
+
+    The prepared-but-unsent command is rejected through the real engine, after a
+    normal projection change. This proves the rejection is idempotent and fully
+    settles the reservation. No production entry point is known to reject a
+    prepared command before submission, so automatic settlement at an entry
+    point is reported as not executable rather than simulated here.
+    """
     book, key, reservation = _book_with_unsent_entry(quantity=Decimal("10"))
     scope = _scope()
     command_id = "entry-1"

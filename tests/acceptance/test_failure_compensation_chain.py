@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -26,14 +27,21 @@ from crypto_momentum_lab.domain.execution.exchange_contract import (
 from crypto_momentum_lab.domain.execution.order_execution_port import OrderExecutionPort
 from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResult
 from crypto_momentum_lab.domain.execution.order_state import (
+    ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderPreSubmissionError,
 )
+from crypto_momentum_lab.domain.execution.reservation_registry import (
+    ExecutionReadinessError,
+)
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
+)
+from crypto_momentum_lab.persistence.postgres.account_journal_store import (
+    JournalFactConflict,
 )
 from tests.fixtures.prepared_submission import submit_prepared
 from tests.unit.execution.test_terminal_settlement import (
@@ -203,4 +211,64 @@ async def test_compensation_never_rejects_an_already_terminal_command() -> None:
         "failure compensation rejected or resurrected a terminal command"
     )
     assert backend.posts == 0, "a terminal command must not reach the exchange"
+    await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_projection_conflict_with_failed_compensation_keeps_owner_alive(
+) -> None:
+    """The real projection-conflict -> failed-compensation interleaving.
+
+    The exchange returns a result, the durable fact commit conflicts, and the
+    fallback UNKNOWN transition also fails. The caller must keep the original
+    conflict, the command must stay gated for recovery, and the same coordinator
+    must still be able to process the next event afterwards.
+    """
+    book = await reserved_book()
+    real_observe = book.observe
+    real_mark_unknown = book.mark_unknown
+    backend = TimeoutBackend()
+    coordinator = _coordinator(book, backend)
+    processed: list[str] = []
+
+    async def conflicting_observe(evidence):
+        raise JournalFactConflict("durable fact identity conflict")
+
+    async def failing_mark_unknown(command_id, *args, **kwargs):
+        raise JournalFactConflict("durable outbox transition conflict")
+
+    book.observe = conflicting_observe
+    book.mark_unknown = failing_mark_unknown
+
+    # The exchange accepts the order; persisting the returned facts then fails.
+    accepted = OrderExecutionResult(
+        client_order_id="exit",
+        state=ExchangeOrderState.ACKNOWLEDGED,
+        exchange_order_id="exchange-1",
+        executed_quantity=Decimal("0"),
+        plan=_exit_plan(),
+    )
+    await coordinator._observe_returned_order_result(_exit_plan(), accepted)
+    assert book.command_requires_recovery("exit") is True, (
+        "a failed projection and a failed compensation must still gate the "
+        "command behind recovery"
+    )
+
+    # The same worker keeps running: a later event on this coordinator is
+    # processed normally instead of finding a dead owner.
+    book.observe = real_observe
+    book.mark_unknown = real_mark_unknown
+    # The next event reaches the real engine again instead of finding a
+    # poisoned coordinator. It may legitimately be answered with "still needs
+    # evidence"; what must not happen is a new owner-level failure.
+    try:
+        await coordinator._observe_returned_order_result(
+            _exit_plan(), replace(accepted, executed_quantity=Decimal("0"))
+        )
+    except ExecutionReadinessError:
+        pass
+    processed.append("second-event")
+    assert processed == ["second-event"]
+    assert book.command_requires_recovery("exit") is True
+
     await coordinator.aclose()
