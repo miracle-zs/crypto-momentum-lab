@@ -150,6 +150,7 @@ def terminal_settlement_is_confirmed(
     account_fills: tuple[AccountFillEvent, ...],
     cumulative_quantity: Decimal,
     reservations: tuple[PositionReservation | None, ...],
+    allow_active_reservations: bool = False,
 ) -> bool:
     """Prove a terminal command's trade and reservation quantities agree."""
     if outbox.state is not DispatchState.TERMINAL:
@@ -159,24 +160,24 @@ def terminal_settlement_is_confirmed(
          if fill.order_id in (outbox.command_id, outbox.external_order_id)),
         Decimal("0"),
     )
-    if (
-        confirmed != outbox.command.requested_quantity
-        or confirmed != cumulative_quantity
-    ):
+    if confirmed != cumulative_quantity:
         return False
     if not outbox.command.reduce_only:
-        return True
+        return confirmed == outbox.command.requested_quantity
+    if not Decimal("0") < confirmed <= outbox.command.requested_quantity:
+        return False
     if not reservations or any(reservation is None for reservation in reservations):
         return False
     consumed = Decimal("0")
+    reserved = Decimal("0")
     for reservation in reservations:
         assert reservation is not None
         if (
             reservation.command_id != outbox.command_id
             or reservation.position_key != outbox.scope.to_position_key()
-            or reservation.active_quantity != 0
-            or reservation.released_quantity != 0
+            or (not allow_active_reservations and reservation.active_quantity != 0)
         ):
             return False
         consumed += reservation.consumed_quantity
-    return consumed == confirmed
+        reserved += reservation.reserved_quantity
+    return consumed == confirmed and reserved == outbox.command.requested_quantity

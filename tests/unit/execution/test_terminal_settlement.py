@@ -586,3 +586,51 @@ async def test_entry_report_waits_for_account_trades_without_exit_reservations()
     await book.observe(evidence("opening", fill=trade))
     assert not book.command_requires_recovery("exit")
     assert (await book.read(SCOPE)).total_quantity == Decimal("2")
+
+
+@pytest.mark.parametrize("report_first", [True, False])
+async def test_filled_reduce_only_smaller_than_requested_releases_unused_capacity(
+    report_first,
+):
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+
+    book = await reserved_book()
+    report = terminal_report("1")
+    trades = evidence("closing-reduced", fill=fill("closing-reduced", "1"))
+    first, second = (report, trades) if report_first else (trades, report)
+    await book.observe(first)
+    if report_first:
+        assert book.command_requires_recovery("exit")
+        assert book.coordinator.get_reservation(
+            "reservation"
+        ).active_quantity == Decimal("1")
+        assert (await book.read(SCOPE)).total_quantity == Decimal("5")
+    await book.observe(second)
+    reservation = book.coordinator.get_reservation("reservation")
+    assert reservation.consumed_quantity == Decimal("1")
+    assert reservation.released_quantity == Decimal("1")
+    assert reservation.active_quantity == 0
+    assert not book.command_requires_recovery("exit")
+    assert (await book.read(SCOPE)).total_quantity == Decimal("4")
+    assert book.get_outbox("exit").state == DispatchState.TERMINAL
+
+
+async def test_historical_short_terminal_releases_without_replaying_position():
+    book = await reserved_book()
+    await book.observe(terminal_report("1"))
+    replay = replace(
+        terminal_report("1"),
+        evidence_id="historical-settlement",
+        observed_at=NOW + timedelta(seconds=2),
+        settlement_fills=(fill("historical-close", "1"),),
+    )
+    result = await book.observe(replay)
+    assert isinstance(result, Applied)
+    assert result.released_quantity == Decimal("1")
+    assert not book.command_requires_recovery("exit")
+    assert (await book.read(SCOPE)).total_quantity == Decimal("5")
+    repeated = await book.observe(replace(replay, evidence_id="historical-again"))
+    assert repeated.released_quantity == 0
+    assert book.coordinator.get_reservation("reservation").released_quantity == Decimal(
+        "1"
+    )

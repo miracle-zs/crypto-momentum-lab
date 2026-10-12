@@ -471,17 +471,26 @@ async def mutate_evidence(
         pending = state.outbox_by_command_id.get(command_id)
         if pending is None or pending.scope.to_position_key() != key:
             continue
+        reservations = tuple(
+            state.coordinator.get_reservation(reservation_id)
+            for reservation_id in state.command_reservations.get(command_id, ())
+        )
         if terminal_settlement_is_confirmed(
             pending,
             account_fills=settlement_facts,
             cumulative_quantity=state.order_cumulative_fills.get(
                 dependencies.order_watermark_key(key, command_id), Decimal("0")
             ),
-            reservations=tuple(
-                state.coordinator.get_reservation(reservation_id)
-                for reservation_id in state.command_reservations.get(command_id, ())
-            ),
+            reservations=reservations,
+            allow_active_reservations=True,
         ):
+            # A terminal reduce-only order can execute less than its original
+            # request. Release only after real trades prove the final watermark
+            # and every linked reservation's consumed quantity agrees.
+            if any(r is not None and r.active_quantity > 0 for r in reservations):
+                released_qty += await dependencies.release_command_reservations(
+                    command_id, reason="terminal_quantity_confirmed"
+                )
             state.recovery_required_commands.discard(command_id)
             if pending.external_order_id is not None:
                 state.recovery_required_commands.discard(pending.external_order_id)
