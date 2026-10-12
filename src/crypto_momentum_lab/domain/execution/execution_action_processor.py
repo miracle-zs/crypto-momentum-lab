@@ -81,14 +81,18 @@ async def accept_execution_command(
     existing_request = state.requests_by_id.get(request.request_id)
     if existing_request is not None:
         if _same_execution_request_payload(existing_request, request):
-            return AlreadyAccepted(state.receipts_by_id[request.request_id])  # type: ignore[arg-type]
+            receipt = state.receipts_by_id[request.request_id]
+            return AlreadyAccepted(receipt)  # type: ignore[arg-type]
         return CommandConflict(
             request_id=request.request_id,
             reason="Conflicting payload for identical request_id",
         )
     restored_entry = state.outbox_by_command_id.get(request.request_id)
     if restored_entry is not None:
-        return Blocked(
+        # A previous attempt already owns this identity. This is a recovery
+        # condition, not a pre-submission failure: the caller must neither post
+        # again nor reject the existing command or release its reservation.
+        return ExecutionRecoveryPending(
             reason="Execution command already exists and requires reconciliation",
             diagnostics=(restored_entry.state.value,),
         )
@@ -218,6 +222,7 @@ async def accept_execution_command(
         command=command,
         created_at=committed_at,
         reservation_ids=tuple(item.reservation_id for item in reservations),
+        intent_id=request.intent_id,
     )
     try:
         await dependencies.persist_outbox(outbox)

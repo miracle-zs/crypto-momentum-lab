@@ -186,16 +186,34 @@ async def accept_action_transaction(
                 is_flat_adoption=adopting_epoch,
             )
             candidate._head_revisions[canon] = next_revision
-        candidate._active_transaction = None
-
-        # Phase 3: Short lock for candidate publication & validation
-        async with book._mutation_lock(key):
             current_head_revision = book._head_revisions.get(canon, 0)
             if current_head_revision != base_head_revision:
                 raise RuntimeError(
-                    "durable execution head changed concurrently; restore required"
+                    "durable execution head changed concurrently; aborting transaction"
                 )
+        candidate._active_transaction = None
+
+        # Phase 3: Short lock for candidate publication & validation
+        conflict = False
+        async with book._mutation_lock(key):
+            current_head_revision = book._head_revisions.get(canon, 0)
+            conflict = current_head_revision != base_head_revision
+            # Always publish candidate into book so outbox and reservations
+            # are tracked.
+            # _publish_candidate guards against regressing newer position facts
+            # if cand_head < current_head.
             book._publish_candidate(candidate, key=key)
+
+        if conflict:
+            book._persistence_failed = True
+            await book.mark_rejected(
+                request.request_id,
+                reason="durable execution head changed concurrently; action aborted",
+                intent_id=request.intent_id,
+            )
+            return Blocked(
+                reason="durable execution head changed concurrently; restore required"
+            )
         return result
     except (OrderPreSubmissionError, OrderProjectionConflictError):
         raise

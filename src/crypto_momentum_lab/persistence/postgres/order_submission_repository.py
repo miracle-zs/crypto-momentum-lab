@@ -32,6 +32,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveExposureClaimRow,
     OrderIntentExecutionRow,
 )
+from crypto_momentum_lab.persistence.postgres.order_rejection import (
+    execute_order_rejection_cascade,
+)
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 from crypto_momentum_lab.persistence.postgres.submission_identity import (
     _same_order_identity,
@@ -460,6 +463,24 @@ class PostgresOrderSubmissionRepository:
             plan=plan,
             submitting_event=submitting_event,
         )
+
+    async def mark_submission_rejected(
+        self,
+        client_order_id: str,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        intent_id: str | None = None,
+    ) -> bool:
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await execute_order_rejection_cascade(
+                    session,
+                    client_order_id,
+                    reason=reason,
+                    occurred_at=occurred_at,
+                    intent_id=intent_id,
+                )
 
 
 def _exit_episode_key(intent: OrderIntentCandidate) -> str | None:

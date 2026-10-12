@@ -164,6 +164,9 @@ class LiveContextRuntime:
         sync_pending_entry_plans: Callable[[LiveDaemonRuntimeContext], None],
         update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
         on_managed_position_symbols: (Callable[[frozenset[str]], None] | None) = None,
+        refresh_pending_entry_facts: (
+            Callable[[LiveDaemonRuntimeContext], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -173,6 +176,7 @@ class LiveContextRuntime:
         self._run_id = run_id
         self._reader = context_provider
         self._sync_pending_entry_plans = sync_pending_entry_plans
+        self._refresh_pending_entry_facts = refresh_pending_entry_facts
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
         self._managed_position_symbols: frozenset[str] = frozenset()
@@ -204,6 +208,15 @@ class LiveContextRuntime:
                 error=error,
             )
 
+        if self._refresh_pending_entry_facts is not None:
+            try:
+                await self._refresh_pending_entry_facts(context)
+            except Exception as error:
+                _log.warning(
+                    "live_context_pending_entry_refresh_failed",
+                    run_id=self._run_id,
+                    error_type=type(error).__name__,
+                )
         self.apply_context(context)
         if self._telemetry is not None:
             await self._telemetry.context_ready(

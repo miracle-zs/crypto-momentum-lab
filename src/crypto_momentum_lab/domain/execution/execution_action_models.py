@@ -41,6 +41,7 @@ class ExecutionRequest:
     batch_quantities: Mapping[str, Decimal] | None = None
     exit_policy_mode: ExitPolicyMode = ExitPolicyMode.TARGET_BATCHES_ONLY
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    intent_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id.strip():

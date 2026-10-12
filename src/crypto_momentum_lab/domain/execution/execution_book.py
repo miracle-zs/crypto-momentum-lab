@@ -84,6 +84,7 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderRejectionRefusedError,
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.domain.execution.ports import (
@@ -1384,6 +1385,7 @@ class ExecutionBook:
         at: datetime | None = None,
         external_order_id: str | None = None,
         reason: str = "",
+        intent_id: str | None = None,
     ) -> OutboxEntry:
         entry = self._outbox_by_command_id.get(command_id)
         if entry is None:
@@ -1424,6 +1426,25 @@ class ExecutionBook:
                     external_order_id=external_order_id,
                     reason=reason,
                 )
+                if target == DispatchState.REJECTED and hasattr(
+                    tx, "mark_order_rejected"
+                ):
+                    rejected = await tx.mark_order_rejected(
+                        command_id,
+                        reason=reason,
+                        occurred_at=at,
+                        intent_id=intent_id or entry.intent_id,
+                    )
+                    if rejected is False:
+                        # The order ledger already holds a terminal (or absent)
+                        # order for this identity. Publishing a rejected command
+                        # would contradict it and release exposure that may be
+                        # live, so refuse the transition and let the caller keep
+                        # the command unresolved for recovery.
+                        raise OrderRejectionRefusedError(
+                            f"durable order {command_id} is already terminal; "
+                            "command rejection refused"
+                        )
                 facts = candidate._ensure_journal(key).read_cut()
                 head_payload = build_execution_head_payload(
                     candidate.evidence_state,
@@ -1496,12 +1517,14 @@ class ExecutionBook:
         command_id: str,
         reason: str,
         rejected_at: datetime | None = None,
+        intent_id: str | None = None,
     ) -> OutboxEntry:
         return await self._transition_command(
             command_id,
             DispatchState.REJECTED,
             reason=reason,
             at=rejected_at,
+            intent_id=intent_id,
         )
 
     async def mark_terminal(
@@ -1525,6 +1548,7 @@ class ExecutionBook:
         at: datetime | None = None,
         external_order_id: str | None = None,
         reason: str = "",
+        intent_id: str | None = None,
     ) -> OutboxEntry:
         if self._execution_unit_of_work is not None:
             return await self._durable_command_mutation(
@@ -1534,6 +1558,7 @@ class ExecutionBook:
                 at=at,
                 external_order_id=external_order_id,
                 reason=reason,
+                intent_id=intent_id,
             )
         return await self._apply_command_transition(
             command_id,

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
@@ -30,6 +30,23 @@ class OrderProjectionConflictError(OrderPreSubmissionError):
     """The unaccepted plan must be rebuilt from current position facts."""
 
 
+class OrderCommandConflictError(OrderPreSubmissionError):
+    """A different payload reused an already accepted request identity.
+
+    The retry is refused as-is; the command that already owns the identity must
+    never be rejected or have its reservation released.
+    """
+
+
+class OrderRejectionRefusedError(RuntimeError):
+    """Durable order evidence refuses a local rejection.
+
+    The order ledger already holds a terminal (or missing) order for this
+    identity, so publishing a rejected command would contradict it. Callers
+    must treat the command as unresolved instead of releasing its exposure.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedOrderSubmission:
     """Durable write-ahead journal returned by an atomic order preparation."""
@@ -47,7 +64,7 @@ class PreparedOrderSubmission:
 class OrderSubmissionRepository(Protocol):
     async def prepare_submission_in_session(
         self,
-        session: object,
+        session: Any,
         *,
         intent: OrderIntentCandidate,
         evaluation: RiskEvaluation,
@@ -65,6 +82,15 @@ class OrderSubmissionRepository(Protocol):
         exposure_notional: Decimal | None = None,
         baseline_observed_at: datetime | None = None,
     ) -> PreparedOrderSubmission | None: ...
+
+    async def mark_submission_rejected(
+        self,
+        client_order_id: str,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        intent_id: str | None = None,
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -68,6 +68,9 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.domain.strategy.entry_candidate import prepare_entry_candidate
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.gates import has_entry_order_conflict
+from crypto_momentum_lab.live_rollout.pending_entries import (
+    TerminalOrderBarrier,
+)
 from crypto_momentum_lab.live_rollout.position_lifecycle import (
     PositionLifecycleLocks,
     live_symbol_position_key,
@@ -86,6 +89,8 @@ class LiveEntryOrderLifecycle(Protocol):
         self,
         plan: OrderExecutionPlan,
         result: OrderExecutionResult,
+        *,
+        terminal_checked: bool = False,
     ) -> None: ...
 
 
@@ -178,6 +183,10 @@ class LiveCandidateSubmission:
         telemetry: LiveTelemetrySink | None = None,
         entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
         position_locks: PositionLifecycleLocks,
+        terminal_barrier: TerminalOrderBarrier | None = None,
+        mark_uncertain_entry: (
+            Callable[[OrderExecutionPlan, Decimal], None] | None
+        ) = None,
     ) -> None:
         self._risk_gateway = risk_gateway
         limits = risk_gateway.limits
@@ -191,10 +200,12 @@ class LiveCandidateSubmission:
         self._pending_entry_plans = pending_entry_plans
         self._pending_entry_uncertainty = pending_entry_uncertainty
         self._remember_pending_entry = remember_pending_entry
+        self._mark_uncertain_entry = mark_uncertain_entry
         self._record_signal_candidate = record_signal_candidate
         self._telemetry = telemetry
         self._entry_order_lifecycle = entry_order_lifecycle
         self._position_locks = position_locks
+        self._terminal_barrier = terminal_barrier
 
     async def execute(
         self,
@@ -494,22 +505,68 @@ class LiveCandidateSubmission:
                 lane=lane,
             )
         if not plan.reduce_only:
-            self._remember_pending_entry(plan, result)
-            lifecycle = self._entry_order_lifecycle
-            if lifecycle is not None:
+            barrier = self._terminal_barrier or (
+                getattr(self._entry_order_lifecycle, "terminal_barrier", None)
+                if self._entry_order_lifecycle is not None
+                else None
+            )
+            is_terminal = False
+            check_failed = False
+            if (
+                barrier is not None
+                and not barrier.is_terminal(plan.client_order_id)
+            ):
                 try:
-                    await lifecycle.track(plan, result)
+                    # This identity just went to the exchange: read through the
+                    # negative cache so an earlier "not terminal" verdict cannot
+                    # mask a terminal transition recorded since.
+                    term_res = await barrier.check_durable_terminal(
+                        plan.client_order_id, fresh=True
+                    )
+                    is_terminal = term_res is not None and term_res[0]
                 except Exception as error:
-                    # Expiry bookkeeping is safety/observability support. It
-                    # must never turn a successful exchange submission into a
-                    # failed live command.
+                    check_failed = True
                     log.warning(
-                        "live_entry_limit_lifecycle_track_failed",
+                        "submission_terminal_check_failed",
                         run_id=self._config.run_id,
                         symbol=plan.symbol,
                         client_order_id=plan.client_order_id,
                         error_type=type(error).__name__,
                     )
+            elif barrier is not None:
+                is_terminal = barrier.is_terminal(plan.client_order_id)
+
+            if is_terminal:
+                # I1: the identity stays terminal, and no pending entry or TTL
+                # task is rebuilt. The result still merges through this entry
+                # point because ``remember`` refines the executed watermark for
+                # an already terminal order -- a WS fact carrying a lower
+                # cumulative quantity must not hide a higher REST one.
+                self._remember_pending_entry(plan, result)
+            elif check_failed:
+                if self._mark_uncertain_entry is not None:
+                    self._mark_uncertain_entry(plan, result.executed_quantity)
+                else:
+                    self._remember_pending_entry(plan, result)
+            else:
+                self._remember_pending_entry(plan, result)
+                lifecycle = self._entry_order_lifecycle
+                if lifecycle is not None:
+                    try:
+                        await lifecycle.track(
+                            plan, result, terminal_checked=True
+                        )
+                    except Exception as error:
+                        # Expiry bookkeeping is safety/observability support. It
+                        # must never turn a successful exchange submission into a
+                        # failed live command.
+                        log.warning(
+                            "live_entry_limit_lifecycle_track_failed",
+                            run_id=self._config.run_id,
+                            symbol=plan.symbol,
+                            client_order_id=plan.client_order_id,
+                            error_type=type(error).__name__,
+                        )
         return result
 
     def _build_trade_command(

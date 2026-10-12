@@ -7,11 +7,12 @@ module owns the runtime assembly and lifecycle of one live daemon.
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -29,6 +30,7 @@ from crypto_momentum_lab.domain.execution.order_result import OrderExecutionResu
 from crypto_momentum_lab.domain.execution.order_rules import SymbolTradingRules
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
+    ExitAllocation,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
@@ -42,6 +44,7 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.runtime_state_models import RuntimeStateCursor
 from crypto_momentum_lab.domain.operational.runtime_metadata import (
     RuntimeMetadataSnapshot,
+    TradingRuleHashInput,
     compute_trading_rules_hash,
 )
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation, RiskGateway
@@ -428,10 +431,12 @@ async def run_live_daemon(
             ),
             clock=lambda: datetime.now(tz=UTC),
         )
-        loaded_trading_rules: dict[str, SymbolTradingRules] = {}
+        loaded_trading_rules: Mapping[str, SymbolTradingRules] = {}
         try:
             loaded_trading_rules = await _load_trading_rules(market_factory, None)
-            trading_rules_hash = compute_trading_rules_hash(loaded_trading_rules)
+            trading_rules_hash = compute_trading_rules_hash(
+                cast(Mapping[str, TradingRuleHashInput], loaded_trading_rules)
+            )
         except Exception as rules_err:
             log.warning("trading_rules_hash_load_failed", error=str(rules_err))
             trading_rules_hash = compute_trading_rules_hash({})
@@ -531,8 +536,6 @@ async def run_live_daemon(
             strategy_name=strategy_name,
         )
 
-        order_reconciliation: LiveOrderReconciliation | None = None
-
         def _on_projection_recovery_required(client_order_id: str) -> None:
             if order_reconciliation is not None:
                 order_reconciliation.request_order_recovery()
@@ -561,7 +564,7 @@ async def run_live_daemon(
         )
 
         async def _handle_decision_exit(cmd: TradeCommand) -> OrderExecutionResult:
-            allocs = ()
+            allocs: tuple[ExitAllocation, ...] = ()
             if cmd.allocation_plan:
                 allocs = cmd.allocation_plan.allocations
             exit_client_order_id = cmd.client_order_id(session_id)
@@ -698,41 +701,30 @@ async def run_live_daemon(
             except Exception as err:
                 log.warning("load_terminal_orders_failed", error=str(err))
 
-        durable_terminal_tombstones: set[str] = set(durable_terminal_orders)
-
-        def _on_terminal_recorded(cid: str, executed: Decimal) -> None:
-            durable_terminal_tombstones.add(cid)
-            prev = durable_terminal_orders.get(cid, Decimal("0"))
-            new_exec = max(prev, executed)
-            if cid in durable_terminal_orders:
-                durable_terminal_orders.pop(cid)
-            elif len(durable_terminal_orders) >= 2048:
-                oldest = next(iter(durable_terminal_orders))
-                durable_terminal_orders.pop(oldest, None)
-            durable_terminal_orders[cid] = new_exec
-
         terminal_barrier = TerminalOrderBarrier(
             capacity=2048,
-            durable_checker=(
-                lambda cid: cid in durable_terminal_tombstones
-                or cid in durable_terminal_orders
-            ),
+            # One durable source answers both "is it terminal" and "how much
+            # executed": a separate checker would re-query the same snapshot.
             durable_reader=lambda cid: (
                 (True, durable_terminal_orders[cid])
                 if cid in durable_terminal_orders
-                else (
-                    (True, Decimal("0"))
-                    if cid in durable_terminal_tombstones
-                    else None
-                )
+                else None
             ),
-            on_terminal=_on_terminal_recorded,
+            durable_async_checker=getattr(
+                order_read_repository, "is_order_terminal", None
+            ),
         )
+        for cid, exec_qty in durable_terminal_orders.items():
+            terminal_barrier.record_terminal(cid, exec_qty)
+
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
             terminal_barrier=terminal_barrier,
         )
-        ownership_registry.register("entry_order_lifecycle", entry_order_lifecycle.stop)
+        ownership_registry.register(
+            "entry_order_lifecycle", entry_order_lifecycle.stop
+        )
+        order_event_runtime.set_terminal_barrier(terminal_barrier)
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
         strategy_config = _live_strategy_config(profile)
@@ -1222,7 +1214,9 @@ async def run_live_daemon(
             latest_market_quotes=latest_market_quotes,
             latest_market_states=latest_market_states,
             is_transient_error=runtime_errors.is_transient_runtime_error,
-            is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
+            is_order_identity_conflict=(
+                order_identity_errors.is_runtime_order_identity_conflict
+            ),
             on_exit_failure=on_exit_failure,
             on_order_identity_conflict=daemon.note_order_identity_conflict,
         )
@@ -1268,7 +1262,9 @@ async def run_live_daemon(
             run_id=session_id,
             telemetry=telemetry,
             is_transient_error=runtime_errors.is_transient_runtime_error,
-            is_order_identity_conflict=order_identity_errors.is_runtime_order_identity_conflict,
+            is_order_identity_conflict=(
+                order_identity_errors.is_runtime_order_identity_conflict
+            ),
             on_exit_failure=on_exit_failure,
             on_account_snapshot=_on_account_snapshot_combined,
             on_account_snapshot_recovery=(

@@ -260,6 +260,9 @@ class LiveStrategyDaemon:
             run_id=config.run_id,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
+            refresh_pending_entry_facts=(
+                self._pending_entries.refresh_durable_facts
+            ),
             update_managed_symbols=(
                 lambda position_symbols, order_symbols: (
                     self._runtime_cache.update_managed_symbols(
@@ -293,12 +296,16 @@ class LiveStrategyDaemon:
             clock=self._clock,
             pending_entry_reservation=self._pending_entries.reservation,
             pending_entry_plans=self._pending_entries.admission_snapshot,
-            pending_entry_uncertainty=self._pending_entries.has_uncertain_entry,
+            pending_entry_uncertainty=(
+                self._pending_entries.entry_admission_blocked
+            ),
             remember_pending_entry=self._pending_entries.remember,
             record_signal_candidate=self._record_signal_candidate,
             telemetry=self._telemetry,
             entry_order_lifecycle=self._entry_order_lifecycle,
             position_locks=self._position_locks,
+            terminal_barrier=terminal_barrier,
+            mark_uncertain_entry=self._pending_entries.mark_uncertain,
         )
         self._exit_processor = LiveExitProcessor(
             config=ExitProcessorConfig(run_id=config.run_id),

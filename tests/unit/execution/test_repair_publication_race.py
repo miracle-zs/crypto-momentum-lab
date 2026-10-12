@@ -265,3 +265,227 @@ async def test_action_transaction_blocked_when_head_revision_advances_during_io(
     assert isinstance(result, Blocked)
     assert book._persistence_failed is True
     assert book._head_revisions[canon] == 5
+
+
+@pytest.mark.asyncio
+async def test_action_transaction_outbox_converges_to_rejected_on_post_commit_race():
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+    from crypto_momentum_lab.domain.execution.execution_action_models import (
+        Blocked,
+        ExecutionRequest,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.strategy.models import StrategySide
+
+    class PostCommitAdvanceTx:
+        def __init__(self, book_ref, key_ref):
+            self._book_ref = book_ref
+            self._key_ref = key_ref
+            self.saved_outbox = []
+            self.marked_rejected_orders: list[tuple[str, str]] = []
+
+        async def load_head(self, key):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                revision=self._book_ref._head_revisions.get(
+                    self._key_ref.canonical_id, 0
+                ),
+                stream_id="account_event_hub",
+                stream_epoch="epoch-1",
+                projection_version=self._book_ref._ensure_book(
+                    self._key_ref
+                ).get_view().projection_version,
+                state_payload={},
+            )
+
+        async def save_reservations(self, reservations, **kwargs):
+            pass
+
+        async def persist_head(self, **kwargs):
+            return 1
+
+        async def upsert_outbox(self, **kwargs):
+            self.saved_outbox.append(kwargs)
+
+        async def mark_order_rejected(
+            self,
+            client_order_id,
+            *,
+            reason="",
+            occurred_at=None,
+            intent_id=None,
+        ):
+            self.marked_rejected_orders.append((client_order_id, reason))
+            return True
+
+    class PostCommitAdvanceUow:
+        def __init__(self, book_ref, key_ref):
+            self.tx = PostCommitAdvanceTx(book_ref, key_ref)
+            self._book_ref = book_ref
+            self._key_ref = key_ref
+
+        @asynccontextmanager
+        async def transaction(self, key, account_scope=None):
+            yield self.tx
+            # Advance memory revision 0 -> 5 immediately after tx context commits
+            self._book_ref._head_revisions[self._key_ref.canonical_id] = 5
+
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    key = scope.to_position_key()
+    canon = key.canonical_id
+
+    book = ExecutionBook()
+    book._persistence_failed = False
+    uow = PostCommitAdvanceUow(book, key)
+    book._execution_unit_of_work = uow
+    stream_scope = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    book._stream_scopes[canon] = stream_scope
+    book._ensure_journal(key)
+    book._head_revisions[canon] = 0
+
+    view = await book.read(
+        scope, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+
+    req = ExecutionRequest(
+        request_id="entry-race-post-commit",
+        scope=scope,
+        strategy_name="trend_v1",
+        run_id="run-1",
+        decision_ref="dec-1",
+        expected_view_token=view.projection_version,
+        action=TradeCommandType.ENTRY,
+        requested_quantity=Decimal("1.0"),
+        side=StrategySide.LONG,
+    )
+
+    result = await book.act(req)
+
+    assert isinstance(result, Blocked)
+    assert book._persistence_failed is True
+    # Invariant: Head revision must remain 5, not regressed to 1
+    assert book._head_revisions[canon] == 5
+    # Invariant: Outbox must track the command and converge to REJECTED, not dangling
+    outbox_entry = book.get_outbox("entry-race-post-commit")
+    assert outbox_entry is not None
+    assert outbox_entry.state == DispatchState.REJECTED
+    # Invariant: Durable order record in database is marked REJECTED
+    assert any(
+        cid == "entry-race-post-commit"
+        for cid, _ in uow.tx.marked_rejected_orders
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejection_refused_when_durable_order_is_already_terminal():
+    """A refused durable rejection must not publish a rejected command.
+
+    ``mark_order_rejected`` returns False when the order ledger already holds a
+    terminal (or missing) order. Publishing REJECTED locally would contradict
+    that record and release exposure that may still be live.
+    """
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+    )
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderRejectionRefusedError,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+    class RefusingTx:
+        def __init__(self) -> None:
+            self.rejected_orders: list[str] = []
+
+        async def load_head(self, key):
+            return SimpleNamespace(
+                revision=0,
+                stream_id="account_event_hub",
+                stream_epoch="epoch-1",
+                projection_version="pv_initial",
+                state_payload={},
+            )
+
+        async def save_reservations(self, reservations, **kwargs):
+            pass
+
+        async def persist_head(self, **kwargs):
+            return 1
+
+        async def upsert_outbox(self, **kwargs):
+            pass
+
+        async def mark_order_rejected(self, client_order_id, **kwargs) -> bool:
+            self.rejected_orders.append(client_order_id)
+            # The order row is already terminal: the cascade refuses.
+            return False
+
+    class RefusingUow:
+        def __init__(self) -> None:
+            self.tx = RefusingTx()
+
+        @asynccontextmanager
+        async def transaction(self, key, account_scope=None):
+            yield self.tx
+
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    key = scope.to_position_key()
+    canon = key.canonical_id
+    book = ExecutionBook()
+    book._persistence_failed = False
+    uow = RefusingUow()
+    book._execution_unit_of_work = uow
+    book._stream_scopes[canon] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    book._ensure_journal(key)
+    book._head_revisions[canon] = 0
+    command = TradeCommand(
+        "order-terminal-refusal",
+        key,
+        TradeCommandType.ENTRY,
+        StrategySide.LONG,
+        EntryType.MARKET,
+        Decimal("1.0"),
+        created_at=NOW,
+    )
+    book.register_prepared_command(command, scope)
+
+    with pytest.raises(OrderRejectionRefusedError):
+        await book.mark_rejected(command.command_id, reason="pre-submission failure")
+
+    # The refusal is durable-first: nothing is published as rejected.
+    assert uow.tx.rejected_orders == [command.command_id]
+    outbox = book.get_outbox(command.command_id)
+    assert outbox is not None
+    assert outbox.state == DispatchState.PREPARED

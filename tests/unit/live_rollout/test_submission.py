@@ -28,7 +28,9 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
 )
-from crypto_momentum_lab.live_rollout.pending_entries import LivePendingEntryRegistry
+from crypto_momentum_lab.live_rollout.pending_entries import (
+    LivePendingEntryRegistry,
+)
 from crypto_momentum_lab.live_rollout.position_lifecycle import PositionLifecycleLocks
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
@@ -100,6 +102,9 @@ def _submission(
     state_machine,
     limits: FixedLiveLimits | None = None,
     pending: LivePendingEntryRegistry | None = None,
+    entry_order_lifecycle: Any = None,
+    terminal_barrier: Any = None,
+    mark_uncertain_entry: Any = None,
 ) -> LiveCandidateSubmission:
     state_machine.configure_submission(
         repository,
@@ -137,9 +142,16 @@ def _submission(
         ),
         pending_entry_plans=(pending.admission_snapshot if pending else lambda: ()),
         pending_entry_uncertainty=(
-            pending.has_uncertain_entry if pending else lambda symbol: False
+            pending.entry_admission_blocked if pending else lambda symbol: False
+        ),
+        mark_uncertain_entry=(
+            mark_uncertain_entry
+            if mark_uncertain_entry is not None
+            else (pending.mark_uncertain if pending else None)
         ),
         record_signal_candidate=lambda **kwargs: None,
+        entry_order_lifecycle=entry_order_lifecycle,
+        terminal_barrier=terminal_barrier,
     )
 
 
@@ -925,3 +937,241 @@ async def test_exit_submission_bypasses_entry_pause_through_real_coordinator():
         assert len(repository.prepare_calls) == 1
     finally:
         await coordinator.aclose()
+
+
+async def test_submission_quarantines_entry_on_terminal_check_failure() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    pending = LivePendingEntryRegistry(clock=lambda: NOW)
+
+    class FailingBarrier:
+        def is_terminal(self, client_order_id: str) -> bool:
+            return False
+
+        async def check_durable_terminal(
+            self, client_order_id: str, *, fresh: bool = False
+        ):
+            raise ConnectionError("DB unavailable")
+
+    class TrackingLifecycle:
+        def __init__(self) -> None:
+            self.tracked: list[Any] = []
+
+        async def track(
+            self, plan, result, *, terminal_checked: bool = False
+        ):
+            self.tracked.append((plan, result))
+
+    lifecycle = TrackingLifecycle()
+    barrier = FailingBarrier()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        pending=pending,
+        terminal_barrier=barrier,
+        entry_order_lifecycle=lifecycle,
+    )
+    result = await submission.execute(
+        _intent(),
+        requested_quantity=Decimal("0.001"),
+        state=_state(),
+        context=_runtime_context(),
+        reference_price=Decimal("10000"),
+    )
+    assert result is not None
+    assert pending.has_uncertain_entry(result.plan.symbol)
+    assert len(lifecycle.tracked) == 0
+
+
+async def test_submission_reads_through_stale_non_terminal_cache() -> None:
+    """A cached non-terminal verdict must not resurrect a terminal entry."""
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    pending = LivePendingEntryRegistry(clock=lambda: NOW)
+    durable: dict[str, tuple[bool, Decimal]] = {}
+
+    async def checker(client_order_id: str):
+        return durable.get(client_order_id)
+
+    # Production shares one barrier between the ledger and the submission.
+    barrier = pending.terminal_barrier
+    barrier._durable_async_checker = checker
+    barrier._negative_cache_ttl = 5.0
+    original_prepare = coordinator.prepare_and_execute
+
+    async def prepare(plan, *, preparation):
+        # An earlier observation caches "not terminal", then the order becomes
+        # terminal in durable storage before the submission returns.
+        assert await barrier.check_durable_terminal(plan.client_order_id) is None
+        durable[plan.client_order_id] = (True, plan.quantity)
+        return await original_prepare(plan, preparation=preparation)
+
+    coordinator.prepare_and_execute = prepare
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        pending=pending,
+        terminal_barrier=barrier,
+    )
+    result = await submission.execute(
+        _intent(),
+        requested_quantity=Decimal("0.001"),
+        state=_state(),
+        context=_runtime_context(),
+        reference_price=Decimal("10000"),
+    )
+
+    assert result is not None
+    assert pending.snapshot() == ()
+    assert pending.admission_snapshot() == ()
+    assert pending.reservation(()) == (Decimal("0"), frozenset())
+
+
+async def test_settlement_pressure_blocks_entries_until_the_view_catches_up() -> None:
+    """An over-capacity settlement ledger must gate entries, then reopen.
+
+    Keeping every unaccounted fill is what makes the ledger correct, so its
+    bound is enforced by refusing new entry risk until the position view counts
+    those fills -- the acceptance path must see the block and its recovery.
+    """
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    pending = LivePendingEntryRegistry(clock=lambda: NOW, terminal_capacity=1)
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        pending=pending,
+    )
+    # Two synchronous fills with room for one: the ledger is over capacity.
+    filled = {}
+    for index, cid in enumerate(("order-a", "order-b")):
+        plan = OrderExecutionPlan(
+            intent_id=f"intent-{cid}",
+            run_id="run-1",
+            client_order_id=cid,
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("0.0005"),
+            price=None,
+            reduce_only=False,
+            position_side=FuturesPositionSide.BOTH,
+            created_at=NOW + timedelta(seconds=index),
+            quantized=True,
+            reference_price=Decimal("10000"),
+        )
+        filled[cid] = plan
+        pending.remember(
+            plan,
+            OrderExecutionResult(
+                client_order_id=cid,
+                state=ExchangeOrderState.FILLED,
+                exchange_order_id=f"ex-{cid}",
+                executed_quantity=plan.quantity,
+                plan=plan,
+            ),
+        )
+    assert pending.settlement_pressure
+
+    context = _runtime_context()
+    blocked = await submission.execute(
+        _intent(),
+        requested_quantity=Decimal("0.001"),
+        state=_state(),
+        context=context,
+        reference_price=Decimal("10000"),
+    )
+    assert blocked is None
+    assert repository.prepare_calls == []
+
+    # The view now counts both fills; the ledger drains and admission reopens.
+    positions = SimpleNamespace(
+        unresolved_orders=(),
+        managed_positions=(
+            SimpleNamespace(
+                symbol="BTCUSDT",
+                batches=(
+                    SimpleNamespace(
+                        quantity=Decimal("2") * filled["order-a"].quantity,
+                        entry_client_order_ids=("order-a", "order-b"),
+                        entry_exchange_order_ids=(),
+                    ),
+                ),
+            ),
+        ),
+    )
+    pending.sync(positions)
+    assert pending.settlement_pressure is False
+
+    admitted = await submission.execute(
+        _intent(),
+        requested_quantity=Decimal("0.001"),
+        state=_state(),
+        context=context,
+        reference_price=Decimal("10000"),
+    )
+    assert admitted is not None
+    assert len(repository.prepare_calls) == 1
+
+
+async def test_terminal_ws_fact_merges_higher_rest_executed_quantity() -> None:
+    """A higher REST quantity must merge into an already terminal identity.
+
+    The WS order event can record the terminal state with a lower cumulative
+    quantity first. The REST result that follows must refine the watermark --
+    without rebuilding a pending entry or an expiry task -- or the settlement
+    ledger keeps under-reserving the position.
+    """
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    pending = LivePendingEntryRegistry(clock=lambda: NOW)
+    barrier = pending.terminal_barrier
+
+    class TrackingLifecycle:
+        def __init__(self) -> None:
+            self.tracked: list[Any] = []
+
+        async def track(self, plan, result, *, terminal_checked: bool = False):
+            self.tracked.append((plan, result))
+
+    lifecycle = TrackingLifecycle()
+    captured: dict[str, Any] = {}
+    original_prepare = coordinator.prepare_and_execute
+
+    async def prepare(plan, *, preparation):
+        result = await original_prepare(plan, preparation=preparation)
+        captured["plan"] = plan
+        # WS fact first: terminal with a lower cumulative quantity.
+        barrier.record_terminal(plan.client_order_id, Decimal("0.0004"))
+        # REST then reports more executed quantity for the same identity.
+        return replace(
+            result,
+            state=ExchangeOrderState.FILLED,
+            executed_quantity=Decimal("0.0009"),
+        )
+
+    coordinator.prepare_and_execute = prepare
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        pending=pending,
+        terminal_barrier=barrier,
+        entry_order_lifecycle=lifecycle,
+    )
+    result = await submission.execute(
+        _intent(),
+        requested_quantity=Decimal("0.001"),
+        state=_state(),
+        context=_runtime_context(),
+        reference_price=Decimal("10000"),
+    )
+
+    assert result is not None
+    client_order_id = captured["plan"].client_order_id
+    # The higher REST quantity is merged, not dropped.
+    assert pending.get_executed_quantity(client_order_id) == Decimal("0.0009")
+    assert pending._settled[client_order_id][1] == Decimal("0.0009")
+    assert pending.reservation(()) == (Decimal("9.0"), frozenset({"BTCUSDT"}))
+    # Terminal stays terminal: no pending entry and no expiry task.
+    assert pending.snapshot() == ()
+    assert lifecycle.tracked == []

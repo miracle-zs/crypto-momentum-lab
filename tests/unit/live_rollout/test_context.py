@@ -5,12 +5,14 @@ from typing import cast
 
 import pytest
 
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
     LiveContextReader,
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
+    PrefetchedContext,
 )
 from tests.fixtures.live_context_reader import context_reader
 
@@ -231,3 +233,76 @@ def test_provider_invalidation_directly_advances_prefetch_generation():
     assert runtime.generation == provider.generation == 1
     runtime.invalidate()
     assert runtime.generation == provider.generation == 2
+
+
+def _pending_entry_context() -> LiveDaemonRuntimeContext:
+    return cast(
+        LiveDaemonRuntimeContext,
+        SimpleNamespace(
+            open_position_symbols=frozenset(),
+            unmanaged_position_symbols=frozenset(),
+            pending_position_symbols=frozenset(),
+            unresolved_orders=(),
+        ),
+    )
+
+
+def _prefetched(
+    runtime: LiveContextRuntime,
+    context: LiveDaemonRuntimeContext | None = None,
+) -> PrefetchedContext:
+    return PrefetchedContext(
+        state=cast(MarketState15s, SimpleNamespace()),
+        generation=runtime.generation,
+        received_at=datetime.now(tz=UTC),
+        context=context if context is not None else _pending_entry_context(),
+        error=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_prepare_refreshes_pending_entry_facts_before_sync() -> None:
+    provider = _Provider()
+    order: list[str] = []
+    context = _pending_entry_context()
+
+    async def refresh(refreshed: LiveDaemonRuntimeContext) -> None:
+        assert refreshed is context
+        order.append("refresh")
+
+    runtime = LiveContextRuntime(
+        run_id="run-1",
+        context_provider=context_reader(provider),
+        sync_pending_entry_plans=lambda refreshed: order.append("sync"),
+        refresh_pending_entry_facts=refresh,
+        update_managed_symbols=lambda positions, orders: None,
+    )
+
+    result = await runtime.prepare(_prefetched(runtime, context))
+
+    assert result.error is None
+    # Durable terminal facts are recovered before the attribution pass runs.
+    assert order == ["refresh", "sync"]
+
+
+@pytest.mark.asyncio
+async def test_context_prepare_survives_pending_entry_refresh_failure() -> None:
+    provider = _Provider()
+    order: list[str] = []
+
+    async def refresh(refreshed: LiveDaemonRuntimeContext) -> None:
+        order.append("refresh")
+        raise ConnectionError("durable store unavailable")
+
+    runtime = LiveContextRuntime(
+        run_id="run-1",
+        context_provider=context_reader(provider),
+        sync_pending_entry_plans=lambda refreshed: order.append("sync"),
+        refresh_pending_entry_facts=refresh,
+        update_managed_symbols=lambda positions, orders: None,
+    )
+
+    result = await runtime.prepare(_prefetched(runtime))
+
+    assert result.error is None
+    assert order == ["refresh", "sync"]

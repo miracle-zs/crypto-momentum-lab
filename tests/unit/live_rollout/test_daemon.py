@@ -1882,6 +1882,16 @@ class FakeLiveRepository:
             ),
         )
 
+    async def mark_submission_rejected(
+        self,
+        client_order_id: str,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        intent_id: str | None = None,
+    ) -> bool:
+        return True
+
     async def save_checkpoint(
         self,
         run_id: str,

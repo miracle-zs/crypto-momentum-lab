@@ -95,6 +95,7 @@ class OutboxEntry:
     last_error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    intent_id: str | None = None
 
     @property
     def execution_state(self) -> CommandExecutionState:

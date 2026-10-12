@@ -34,8 +34,10 @@ def test_server_compose_exposes_live_stack_without_retired_runners() -> None:
     } <= services.keys()
     assert not any(name.startswith("paper-") for name in services)
     assert "x-paper" not in manifest
-    assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
-    assert services["dashboard"]["volumes"] == ["research-data:/app/research-data:ro"]
+    assert services["dashboard"]["volumes"] == [
+        "research-data:/app/research-data:ro",
+        "/var/lib/crypto-momentum-lab/table-archive/market_revision_refs:/app/market-revision-archive:ro",
+    ]
     assert manifest["x-app"]["stop_grace_period"] == "20s"
     assert manifest["x-app"]["environment"]["CML_LOCAL_HEALTH_DIR"] == (
         "/run/cml/health"

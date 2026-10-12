@@ -12,6 +12,9 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.live_rollout.pending_entries import (
+    TerminalOrderBarrier,
+)
 from crypto_momentum_lab.live_rollout.telemetry_ports import OrderEventSink
 
 log = structlog.get_logger()
@@ -29,19 +32,31 @@ class LiveOrderEventRuntime:
         *,
         telemetry: OrderEventSink,
         request_recovery: Callable[[], None],
+        terminal_barrier: TerminalOrderBarrier | None = None,
     ) -> None:
         self._telemetry = telemetry
         self._request_recovery = request_recovery
+        self._terminal_barrier = terminal_barrier
         self._entry_order_lifecycle: EntryOrderLifecycleObserver | None = None
         self._observe_entry: (
             Callable[[OrderExecutionPlan, ExchangeOrderEvent], None] | None
         ) = None
+
+    def set_terminal_barrier(
+        self,
+        barrier: TerminalOrderBarrier,
+    ) -> None:
+        self._terminal_barrier = barrier
 
     def set_entry_order_lifecycle(
         self,
         lifecycle: EntryOrderLifecycleObserver,
     ) -> None:
         self._entry_order_lifecycle = lifecycle
+        if self._terminal_barrier is None:
+            self._terminal_barrier = getattr(
+                lifecycle, "terminal_barrier", None
+            )
 
     def set_entry_observer(
         self, observer: Callable[[OrderExecutionPlan, ExchangeOrderEvent], None]
@@ -53,6 +68,21 @@ class LiveOrderEventRuntime:
         plan: OrderExecutionPlan,
         event: ExchangeOrderEvent,
     ) -> None:
+        if (
+            self._terminal_barrier is not None
+            and not self._terminal_barrier.is_terminal(plan.client_order_id)
+        ):
+            try:
+                await self._terminal_barrier.check_durable_terminal(
+                    plan.client_order_id
+                )
+            except Exception as error:
+                log.warning(
+                    "live_order_durable_terminal_check_failed",
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                    error_type=type(error).__name__,
+                )
         try:
             await self._telemetry.order_event(plan, event)
         except Exception as error:

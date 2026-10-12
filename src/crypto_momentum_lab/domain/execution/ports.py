@@ -131,6 +131,15 @@ class ExecutionTransactionPort(Protocol):
         details: dict[str, JsonValue],
     ) -> None: ...
 
+    async def mark_order_rejected(
+        self,
+        client_order_id: str,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        intent_id: str | None = None,
+    ) -> bool: ...
+
     async def record_evidence(
         self,
         *,

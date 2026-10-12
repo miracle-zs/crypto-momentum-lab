@@ -32,6 +32,7 @@ def build_prepared_outbox(
     scope: ExecutionScope,
     command: TradeCommand,
     created_at: datetime,
+    intent_id: str | None = None,
 ) -> OutboxEntry:
     """Create the sole prepared outbox record for an accepted command."""
     return OutboxEntry(
@@ -42,6 +43,7 @@ def build_prepared_outbox(
         state=DispatchState.PREPARED,
         created_at=created_at,
         updated_at=created_at,
+        intent_id=intent_id,
     )
 
 
@@ -53,6 +55,7 @@ def register_prepared_outbox(
     command: TradeCommand,
     created_at: datetime,
     reservation_ids: tuple[str, ...] = (),
+    intent_id: str | None = None,
 ) -> OutboxEntry:
     """Register one prepared command and its optional reservation linkage."""
     entry = build_prepared_outbox(
@@ -60,6 +63,7 @@ def register_prepared_outbox(
         scope=scope,
         command=command,
         created_at=created_at,
+        intent_id=intent_id,
     )
     state.outbox_by_command_id[command.command_id] = entry
     if reservation_ids:

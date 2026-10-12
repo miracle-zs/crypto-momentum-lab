@@ -60,6 +60,9 @@ from crypto_momentum_lab.persistence.postgres.execution_unit_of_work_models impo
 from crypto_momentum_lab.persistence.postgres.journal_store_ports import (
     ExecutionJournalStore,
 )
+from crypto_momentum_lab.persistence.postgres.order_rejection import (
+    execute_order_rejection_cascade,
+)
 from crypto_momentum_lab.persistence.postgres.position_fact_journal_models import (
     PositionFactJournalEventRow,
     PositionRecoveryCheckpointRow,
@@ -188,6 +191,22 @@ class ExecutionTransaction:
             status=status,
             requested_at=requested_at,
             details=details,
+        )
+
+    async def mark_order_rejected(
+        self,
+        client_order_id: str,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        intent_id: str | None = None,
+    ) -> bool:
+        return await execute_order_rejection_cascade(
+            self.session,
+            client_order_id,
+            reason=reason,
+            occurred_at=occurred_at,
+            intent_id=intent_id,
         )
 
     async def record_evidence(
@@ -848,7 +867,7 @@ class AsyncPostgresExecutionUnitOfWork:
                 )
 
 
-from crypto_momentum_lab.persistence.postgres.decision_unit_of_work import (
+from .decision_unit_of_work import (  # noqa: E402
     AsyncPostgresDecisionUnitOfWork,
 )
 

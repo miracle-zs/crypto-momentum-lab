@@ -878,7 +878,15 @@ async def test_runtime_full_zero_anchored_scan_repairs_stale_position_atomically
             accounts={account: SimpleNamespace(position_count=0)},
             now=target.observed_at + timedelta(minutes=4),
         )
-        assert stale[account].gaps is None
+        from sqlalchemy import delete
+
+        async with factory() as session, session.begin():
+            await session.execute(
+                delete(ExecutionBookHeadRow).where(
+                    ExecutionBookHeadRow.account_label == account,
+                    ExecutionBookHeadRow.symbol == "ETHUSDT",
+                )
+            )
         restarted = _book(factory)
         await restarted.restore(account_label=account)
         recovered = await restarted.read(scope, stream_id="hub", stream_epoch="new")

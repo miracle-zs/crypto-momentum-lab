@@ -75,6 +75,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
     OrderAlreadyPreparedError,
+    OrderCommandConflictError,
     OrderPreSubmissionError,
     OrderProjectionConflictError,
     OrderRecoveryPendingError,
@@ -858,6 +859,7 @@ class OrderExecutionCoordinator:
                 order_type=plan.order_type,
                 limit_price=plan.price,
                 created_at=plan.created_at,
+                intent_id=plan.intent_id,
             )
         allocations = plan.allocations
         if allocations:
@@ -890,6 +892,7 @@ class OrderExecutionCoordinator:
             batch_quantities=batch_quantities,
             exit_policy_mode=ExitPolicyMode.TARGET_BATCHES_ONLY,
             created_at=plan.created_at,
+            intent_id=plan.intent_id,
         )
 
     @staticmethod
@@ -902,15 +905,15 @@ class OrderExecutionCoordinator:
                 if isinstance(result, (PositionNotReady, ExecutionRecoveryPending))
                 else None
             )
-            error_type = (
-                OrderRecoveryPendingError
-                if isinstance(result, ExecutionRecoveryPending) and not plan.reduce_only
-                else (
-                    OrderProjectionConflictError
-                    if "ReservationConflictError" in result.diagnostics
-                    else OrderPreSubmissionError
-                )
-            )
+            error_type: type[OrderPreSubmissionError]
+            if isinstance(result, ExecutionRecoveryPending):
+                # The identity is already owned by a durable command: neither
+                # entries nor exits may treat that as a pre-submission failure.
+                error_type = OrderRecoveryPendingError
+            elif "ReservationConflictError" in result.diagnostics:
+                error_type = OrderProjectionConflictError
+            else:
+                error_type = OrderPreSubmissionError
             raise error_type(
                 "Failed to create position reservation for "
                 f"{plan.client_order_id}: {result.reason}"
@@ -926,7 +929,9 @@ class OrderExecutionCoordinator:
                 f"{plan.client_order_id}: {result.reason}"
             )
         if isinstance(result, CommandConflict):
-            raise OrderPreSubmissionError(
+            # The identity already belongs to a different accepted payload. Only
+            # this retry is refused; the owning command keeps its state.
+            raise OrderCommandConflictError(
                 "Failed to create position reservation (command conflict) for "
                 f"{plan.client_order_id}: {result.reason}"
             )
@@ -1193,7 +1198,45 @@ class OrderExecutionCoordinator:
         *,
         before_exchange_post: bool,
     ) -> None:
+        def _is_identity_collision(err: BaseException | None) -> bool:
+            if err is None:
+                return False
+            if isinstance(err, (OrderAlreadyPreparedError, OrderCommandConflictError)):
+                return True
+            if "client order ID is already bound" in str(err):
+                return True
+            cause = getattr(err, "__cause__", None)
+            return bool(cause and _is_identity_collision(cause))
+
+        if _is_identity_collision(error):
+            # A concurrent or previous worker owns this order or it is already
+            # active/prepared. Preserving identity requires NEVER rejecting
+            # an already prepared order.
+            return
         if self._execution_book.get_outbox(plan.client_order_id) is None:
+            if hasattr(self._execution_book, "has_command_repository") and (
+                self._execution_book.has_command_repository
+                or self._execution_book.has_reservation_repository
+            ):
+                try:
+                    await self._execution_book.mark_rejected(
+                        plan.client_order_id,
+                        reason=str(error),
+                        intent_id=plan.intent_id,
+                    )
+                except Exception:
+                    pass
+            if before_exchange_post and self._submission_repository is not None:
+                if hasattr(self._submission_repository, "mark_submission_rejected"):
+                    try:
+                        await self._submission_repository.mark_submission_rejected(
+                            plan.client_order_id,
+                            reason=str(error),
+                            occurred_at=self._submission_clock(),
+                            intent_id=plan.intent_id,
+                        )
+                    except Exception:
+                        pass
             return
         if before_exchange_post or isinstance(
             error,
@@ -1207,7 +1250,19 @@ class OrderExecutionCoordinator:
             await self._execution_book.mark_rejected(
                 plan.client_order_id,
                 reason=str(error),
+                intent_id=plan.intent_id,
             )
+            if before_exchange_post and self._submission_repository is not None:
+                if hasattr(self._submission_repository, "mark_submission_rejected"):
+                    try:
+                        await self._submission_repository.mark_submission_rejected(
+                            plan.client_order_id,
+                            reason=str(error),
+                            occurred_at=self._submission_clock(),
+                            intent_id=plan.intent_id,
+                        )
+                    except Exception:
+                        pass
             return
         await self._execution_book.mark_unknown(
             plan.client_order_id,
@@ -1500,6 +1555,7 @@ class OrderExecutionCoordinator:
                 await self._execution_book.mark_rejected(
                     plan.client_order_id,
                     reason="cancelled_before_submission",
+                    intent_id=plan.intent_id,
                 )
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,

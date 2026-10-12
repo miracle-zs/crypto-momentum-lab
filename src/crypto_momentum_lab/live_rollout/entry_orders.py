@@ -94,9 +94,27 @@ class LiveLimitOrderLifecycle:
         self,
         plan: OrderExecutionPlan,
         result: EntryOrderProgress,
+        *,
+        terminal_checked: bool = False,
     ) -> None:
         """Track one newly submitted/restored order if it can still rest."""
 
+        if (
+            not terminal_checked
+            and not self.is_terminal(plan.client_order_id)
+            and self._terminal_barrier is not None
+        ):
+            try:
+                await self._terminal_barrier.check_durable_terminal(
+                    plan.client_order_id
+                )
+            except Exception as error:
+                log.warning(
+                    "entry_orders_durable_terminal_check_failed",
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                    error_type=type(error).__name__,
+                )
         if (
             self._stopped
             or plan.reduce_only
@@ -133,8 +151,8 @@ class LiveLimitOrderLifecycle:
                 else None
             )
             executed = (
-                Decimal(raw_executed)
-                if raw_executed is not None
+                Decimal(str(raw_executed))
+                if isinstance(raw_executed, (str, int, float))
                 else plan.quantity
                 if event.state is ExchangeOrderState.FILLED
                 else Decimal(0)
