@@ -393,9 +393,11 @@ async def test_action_transaction_preserves_acceptance_on_post_commit_race():
 async def test_rejection_refused_when_durable_order_is_already_terminal():
     """A refused durable rejection must not publish a rejected command.
 
-    ``mark_order_rejected`` returns False when the order ledger already holds a
-    terminal (or missing) order. Publishing REJECTED locally would contradict
-    that record and release exposure that may still be live.
+    A committed terminal order must not be rewritten by a late rejection.
+    Publishing REJECTED locally would contradict that record, release exposure
+    that may still be live, and (before this contract) abort the caller with a
+    fatal error. The command instead stays terminal-unresolved and is gated
+    behind recovery, durably and in memory.
     """
     from decimal import Decimal
 
@@ -404,7 +406,7 @@ async def test_rejection_refused_when_durable_order_is_already_terminal():
         FuturesPositionSide,
     )
     from crypto_momentum_lab.domain.execution.order_submission import (
-        OrderRejectionRefusedError,
+        OrderRejectionOutcome,
     )
     from crypto_momentum_lab.domain.execution.position_ledger_models import (
         AccountFactStreamScope,
@@ -418,6 +420,7 @@ async def test_rejection_refused_when_durable_order_is_already_terminal():
     class RefusingTx:
         def __init__(self) -> None:
             self.rejected_orders: list[str] = []
+            self.persisted_payload: dict[str, object] | None = None
 
         async def load_head(self, key):
             return SimpleNamespace(
@@ -432,15 +435,18 @@ async def test_rejection_refused_when_durable_order_is_already_terminal():
             pass
 
         async def persist_head(self, **kwargs):
+            self.persisted_payload = kwargs["state_payload"]
             return 1
 
         async def upsert_outbox(self, **kwargs):
             pass
 
-        async def mark_order_rejected(self, client_order_id, **kwargs) -> bool:
+        async def mark_order_rejected(
+            self, client_order_id, **kwargs
+        ) -> OrderRejectionOutcome:
             self.rejected_orders.append(client_order_id)
             # The order row is already terminal: the cascade refuses.
-            return False
+            return OrderRejectionOutcome.TERMINAL
 
     class RefusingUow:
         def __init__(self) -> None:
@@ -478,11 +484,115 @@ async def test_rejection_refused_when_durable_order_is_already_terminal():
     )
     book.register_prepared_command(command, scope)
 
-    with pytest.raises(OrderRejectionRefusedError):
-        await book.mark_rejected(command.command_id, reason="pre-submission failure")
+    # No exception escapes: the caller keeps its own failure classification.
+    entry = await book.mark_rejected(command.command_id, reason="pre-submission failure")
 
-    # The refusal is durable-first: nothing is published as rejected.
+    # Nothing is published as rejected; committed order facts win.
     assert uow.tx.rejected_orders == [command.command_id]
+    assert entry.state == DispatchState.PREPARED
     outbox = book.get_outbox(command.command_id)
     assert outbox is not None
     assert outbox.state == DispatchState.PREPARED
+    # The command is gated behind recovery, in memory and in the durable head.
+    assert book.command_requires_recovery(command.command_id)
+    assert uow.tx.persisted_payload is not None
+    assert command.command_id in uow.tx.persisted_payload["recovery_command_ids"]
+    # A later submission attempt for this identity is recovery-blocked.
+    assert book.command_requires_recovery(command.command_id)
+
+
+@pytest.mark.asyncio
+async def test_rejection_applies_when_no_durable_order_exists():
+    """A prepared-but-never-dispatched command must still be rejectable.
+
+    ``ABSENT`` means no exchange order row exists (queued cancel before the
+    POST, or a restored command that was never dispatched). Nothing can be
+    contradicted, so the local rejection and its reservation release stand.
+    """
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.execution.command_models import DispatchState
+    from crypto_momentum_lab.domain.execution.order_state import (
+        FuturesPositionSide,
+    )
+    from crypto_momentum_lab.domain.execution.order_submission import (
+        OrderRejectionOutcome,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        AccountFactStreamScope,
+    )
+    from crypto_momentum_lab.domain.execution.trade_command import (
+        TradeCommand,
+        TradeCommandType,
+    )
+    from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+    class AbsentOrderTx:
+        def __init__(self) -> None:
+            self.upserted: list[str] = []
+
+        async def load_head(self, key):
+            return SimpleNamespace(
+                revision=0,
+                stream_id="account_event_hub",
+                stream_epoch="epoch-1",
+                projection_version="pv_initial",
+                state_payload={},
+            )
+
+        async def save_reservations(self, reservations, **kwargs):
+            pass
+
+        async def persist_head(self, **kwargs):
+            return 1
+
+        async def upsert_outbox(self, **kwargs):
+            self.upserted.append(kwargs["status"])
+
+        async def mark_order_rejected(self, client_order_id, **kwargs):
+            return OrderRejectionOutcome.ABSENT
+
+    class AbsentOrderUow:
+        def __init__(self) -> None:
+            self.tx = AbsentOrderTx()
+
+        @asynccontextmanager
+        async def transaction(self, key, account_scope=None):
+            yield self.tx
+
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    key = scope.to_position_key()
+    canon = key.canonical_id
+    book = ExecutionBook()
+    book._persistence_failed = False
+    uow = AbsentOrderUow()
+    book._execution_unit_of_work = uow
+    book._stream_scopes[canon] = AccountFactStreamScope.for_position_key(
+        key, stream_id="account_event_hub", stream_epoch="epoch-1"
+    )
+    book._ensure_journal(key)
+    book._head_revisions[canon] = 0
+    command = TradeCommand(
+        "order-never-sent",
+        key,
+        TradeCommandType.ENTRY,
+        StrategySide.LONG,
+        EntryType.MARKET,
+        Decimal("1.0"),
+        created_at=NOW,
+    )
+    book.register_prepared_command(command, scope)
+
+    entry = await book.mark_rejected(
+        command.command_id, reason="prepared_unsubmitted_before_restart"
+    )
+
+    assert entry.state == DispatchState.REJECTED
+    assert book.get_outbox(command.command_id).state == DispatchState.REJECTED
+    assert book.command_requires_recovery(command.command_id) is False
+    assert "rejected" in uow.tx.upserted

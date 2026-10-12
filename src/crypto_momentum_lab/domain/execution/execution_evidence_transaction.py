@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -540,18 +541,28 @@ async def observe_evidence_transaction(
                 candidate._active_transaction = None
 
             # The evidence is already committed; publication must not replay it.
-            async with book._mutation_lock(key):
-                book._publish_candidate(candidate, key=key)
+            def _read_published_view(
+                previous: ExecutionObserveResult,
+            ) -> ExecutionObserveResult:
                 token = (
                     book._ensure_book(key)
                     .get_view(now=evidence.observed_at)
                     .projection_version
                 )
-                if isinstance(result, Applied):
-                    result = replace(result, updated_view_token=token)
-                elif isinstance(result, Duplicate):
-                    result = replace(result, view_token=token)
-            return result
+                if isinstance(previous, Applied):
+                    return replace(previous, updated_view_token=token)
+                if isinstance(previous, Duplicate):
+                    return replace(previous, view_token=token)
+                return previous
+
+            published_result = await book._publish_committed_candidate(
+                candidate,
+                key=key,
+                after=partial(_read_published_view, result),
+            )
+            if published_result is None:
+                raise RuntimeError("published evidence result vanished")
+            return published_result
         except AbortObservation as abort:
             return abort.result
         except Exception as err:

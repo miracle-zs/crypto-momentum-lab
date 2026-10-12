@@ -196,11 +196,10 @@ async def accept_action_transaction(
                 )
         candidate._active_transaction = None
 
-        # Phase 3: Short lock for candidate publication & validation
-        async with book._mutation_lock(key):
-            # A committed acceptance owns its identity and reservations. A
-            # later publication cannot retroactively turn it into a rejection.
-            book._publish_candidate(candidate, key=key)
+        # Phase 3: Short lock for candidate publication & validation.
+        # A committed acceptance owns its identity and reservations. A later
+        # publication cannot retroactively turn it into a rejection.
+        await book._publish_committed_candidate(candidate, key=key)
         return result
     except (OrderPreSubmissionError, OrderProjectionConflictError):
         raise

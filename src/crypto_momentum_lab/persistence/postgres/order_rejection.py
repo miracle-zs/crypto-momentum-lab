@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderState,
 )
+from crypto_momentum_lab.domain.execution.order_submission import (
+    OrderRejectionOutcome,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderEventRow,
     ExchangeOrderRow,
@@ -28,24 +31,23 @@ async def execute_order_rejection_cascade(
     reason: str,
     occurred_at: datetime | None = None,
     intent_id: str | None = None,
-) -> bool:
+) -> OrderRejectionOutcome:
     """Durably reject an exchange order and release its claims and reservations."""
     at = occurred_at or datetime.now(UTC)
     terminal_states = tuple(
         state.value for state in ExchangeOrderState if state.terminal
     )
-    conditions = [
-        ExchangeOrderRow.client_order_id == client_order_id,
-        ExchangeOrderRow.state.not_in(terminal_states),
-    ]
-    if intent_id is not None:
-        conditions.append(ExchangeOrderRow.intent_id == intent_id)
-
     order_row = await session.scalar(
-        select(ExchangeOrderRow).where(*conditions).with_for_update()
+        select(ExchangeOrderRow)
+        .where(ExchangeOrderRow.client_order_id == client_order_id)
+        .with_for_update()
     )
     if order_row is None:
-        return False
+        return OrderRejectionOutcome.ABSENT
+    if order_row.state in terminal_states:
+        return OrderRejectionOutcome.TERMINAL
+    if intent_id is not None and order_row.intent_id != intent_id:
+        return OrderRejectionOutcome.INTENT_MISMATCH
 
     order_row.state = ExchangeOrderState.REJECTED.value
     order_row.updated_at = at
@@ -92,4 +94,4 @@ async def execute_order_rejection_cascade(
                 updated_at=at,
             )
         )
-    return True
+    return OrderRejectionOutcome.REJECTED

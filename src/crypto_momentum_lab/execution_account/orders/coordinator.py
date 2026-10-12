@@ -406,6 +406,24 @@ class _KeyCommandScheduler:
                 self._queue.task_done()
 
 
+@dataclass(frozen=True, slots=True)
+class OrderObservationMetrics:
+    """Bounded observation-queue health for one account.
+
+    ``oldest_pending_age_seconds`` is how long the result waiting longest has
+    been queued, and ``overflow_count`` counts results that could not be
+    deferred: those are routed to command recovery instead of being dropped.
+    """
+
+    capacity: int
+    depth: int
+    high_watermark: int
+    overflow_count: int
+    enqueued_count: int
+    dequeued_count: int
+    oldest_pending_age_seconds: float | None
+
+
 class OrderExecutionCoordinator:
     """Coordinate live submit, cancel, and reconcile commands.
 
@@ -471,6 +489,11 @@ class OrderExecutionCoordinator:
             tuple[OrderExecutionPlan, OrderExecutionResult]
         ] = asyncio.Queue(maxsize=order_observation_capacity)
         self._order_observer_task: asyncio.Task[None] | None = None
+        self._observation_high_watermark = 0
+        self._observation_overflow_count = 0
+        self._observation_enqueued_count = 0
+        self._observation_dequeued_count = 0
+        self._observation_oldest_enqueued_at: float | None = None
         self._entry_submissions_blocked = False
         self._active_entry_submissions = 0
         self._entry_submissions_idle = asyncio.Event()
@@ -1186,6 +1209,45 @@ class OrderExecutionCoordinator:
                 diagnostics=result.diagnostics,
             )
 
+    async def _compensate_submission_failure(
+        self,
+        plan: OrderExecutionPlan,
+        error: BaseException,
+        *,
+        before_exchange_post: bool,
+    ) -> None:
+        """Run failure cleanup without ever masking or amplifying the failure.
+
+        Cleanup can itself fail (the durable order may already be terminal, or
+        persistence may be unavailable). A recoverable cleanup condition must
+        never replace the original submission outcome, and it must leave the
+        command gated behind recovery instead of dispatchable.
+        """
+        try:
+            await self._record_submission_failure(
+                plan,
+                error,
+                before_exchange_post=before_exchange_post,
+            )
+        except Exception as compensation_error:
+            log.error(
+                "order_submission_failure_compensation_failed",
+                account_label=self._account_label,
+                client_order_id=plan.client_order_id,
+                symbol=plan.symbol,
+                original_error_type=type(error).__name__,
+                compensation_error_type=type(compensation_error).__name__,
+                compensation_error=str(compensation_error),
+            )
+            try:
+                self._execution_book.require_command_recovery(
+                    plan.client_order_id
+                )
+            except Exception:
+                # Keeping the command recoverable is best effort here; the
+                # original failure must still reach the caller unchanged.
+                pass
+
     async def _record_submission_failure(
         self,
         plan: OrderExecutionPlan,
@@ -1300,6 +1362,7 @@ class OrderExecutionCoordinator:
         await self._apply_returned_order_result(plan, result)
 
     def _handle_projection_overflow(self, client_order_id: str) -> None:
+        self._observation_overflow_count += 1
         self._execution_book.require_command_recovery(client_order_id)
         log.warning(
             "order_observation_queue_overflow_recovery_required",
@@ -1317,6 +1380,22 @@ class OrderExecutionCoordinator:
                     error=str(error),
                 )
 
+    @property
+    def order_observation_metrics(self) -> OrderObservationMetrics:
+        """Observation queue depth, overflow and oldest pending age."""
+        oldest = self._observation_oldest_enqueued_at
+        return OrderObservationMetrics(
+            capacity=self._order_observation_capacity,
+            depth=self._order_observations.qsize(),
+            high_watermark=self._observation_high_watermark,
+            overflow_count=self._observation_overflow_count,
+            enqueued_count=self._observation_enqueued_count,
+            dequeued_count=self._observation_dequeued_count,
+            oldest_pending_age_seconds=(
+                None if oldest is None else max(0.0, time.monotonic() - oldest)
+            ),
+        )
+
     def _defer_order_projection(
         self, plan: OrderExecutionPlan, result: OrderExecutionResult
     ) -> None:
@@ -1328,6 +1407,12 @@ class OrderExecutionCoordinator:
         except asyncio.QueueFull:
             self._handle_projection_overflow(result.client_order_id)
             return
+        if self._observation_oldest_enqueued_at is None:
+            self._observation_oldest_enqueued_at = time.monotonic()
+        self._observation_enqueued_count += 1
+        self._observation_high_watermark = max(
+            self._observation_high_watermark, self._order_observations.qsize()
+        )
         if self._order_observer_task is None or self._order_observer_task.done():
             self._order_observer_task = asyncio.create_task(
                 self._consume_order_observations()
@@ -1340,6 +1425,9 @@ class OrderExecutionCoordinator:
                     plan, result = self._order_observations.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                self._observation_dequeued_count += 1
+                if self._order_observations.empty():
+                    self._observation_oldest_enqueued_at = None
                 try:
                     await self._apply_returned_order_result(plan, result)
                 except asyncio.CancelledError:
@@ -1427,7 +1515,7 @@ class OrderExecutionCoordinator:
                         prepared_submission=prepared_submission,
                     )
                 except BaseException as sub_err:
-                    await self._record_submission_failure(
+                    await self._compensate_submission_failure(
                         plan,
                         sub_err,
                         before_exchange_post=isinstance(
@@ -1497,7 +1585,7 @@ class OrderExecutionCoordinator:
             try:
                 prepared = await self._atomic_prepare_submission(plan, preparation)
             except Exception as prepare_err:
-                await self._record_submission_failure(
+                await self._compensate_submission_failure(
                     plan,
                     prepare_err,
                     before_exchange_post=True,
@@ -1511,7 +1599,7 @@ class OrderExecutionCoordinator:
                     prepared_submission=prepared,
                 )
             except BaseException as sub_err:
-                await self._record_submission_failure(
+                await self._compensate_submission_failure(
                     plan,
                     sub_err,
                     before_exchange_post=isinstance(

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import cast
+from typing import TypeVar, cast
 
 import structlog
 
@@ -84,8 +84,8 @@ from crypto_momentum_lab.domain.execution.observation_models import (
     WaitingForEvidence,
 )
 from crypto_momentum_lab.domain.execution.order_submission import (
-    OrderRejectionRefusedError,
     PreparedOrderSubmission,
+    blocks_local_rejection,
 )
 from crypto_momentum_lab.domain.execution.ports import (
     CommandRepository,
@@ -128,39 +128,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 
 log = structlog.get_logger(__name__)
 
-
-class _AbortObservation(Exception):
-    def __init__(self, result: ExecutionObserveResult) -> None:
-        self.result = result
-
-
-def _is_unfilled_terminal_order(evidence: ExecutionEvidence) -> bool:
-    return (
-        evidence.order_event is not None
-        and evidence.order_event.state.terminal
-        and not evidence.settlement_fills
-        and not evidence.fills
-        and evidence.fill is None
-        and (
-            evidence.cumulative_order is None
-            or evidence.cumulative_order.cumulative_quantity == Decimal("0")
-        )
-    )
-
-
-def _reservations_held_by_terminal_order(
-    evidence: ExecutionEvidence,
-    reservations: tuple[PositionReservation, ...],
-) -> bool:
-    event = evidence.order_event
-    return (
-        _is_unfilled_terminal_order(evidence)
-        and event is not None
-        and all(
-            reservation.command_id == event.client_order_id
-            for reservation in reservations
-        )
-    )
+T = TypeVar("T")
 
 
 class ExecutionBook:
@@ -646,6 +614,25 @@ class ExecutionBook:
         candidate._mutation_locks = self._mutation_locks
         return candidate
 
+    async def _publish_committed_candidate(
+        self,
+        candidate: ExecutionBook,
+        *,
+        key: PositionKey,
+        after: Callable[[], T] | None = None,
+    ) -> T | None:
+        """Publish one committed candidate under the short per-key lock.
+
+        Every durable transaction flow (command mutation, acceptance, evidence)
+        publishes through this single owner so the monotonic merge and the
+        terminal-winner rule cannot drift between callers. ``after`` runs inside
+        the same critical section for callers that must read back what they
+        just published.
+        """
+        async with self._mutation_lock(key):
+            self._publish_candidate(candidate, key=key)
+            return None if after is None else after()
+
     def _publish_candidate(
         self,
         candidate: ExecutionBook,
@@ -1001,7 +988,12 @@ class ExecutionBook:
         environment: str = "live",
         as_of: datetime | None = None,
     ) -> None:
-        """Restore durable execution state before accepting live mutations."""
+        """Restore durable execution state before accepting live mutations.
+
+        A durable unit of work is required: an in-memory book has no durable
+        facts to restore, and a silent in-memory fallback would let a
+        misconfigured process trade without its recovery evidence.
+        """
         await restore_execution_state(
             self.recovery_state,
             RecoveryDependencies(
@@ -1393,6 +1385,7 @@ class ExecutionBook:
             raise KeyError(f"Outbox entry {command_id} not found")
         key = entry.scope.to_position_key()
         canon = key.canonical_id
+        result: OutboxEntry = entry
         async with self._mutation_lock(key):
             stream_scope = self._stream_scopes.get(canon)
             if stream_scope is None:
@@ -1420,32 +1413,38 @@ class ExecutionBook:
                         "durable execution stream changed; restore is required"
                     )
                 candidate._active_transaction = tx
-                result = await candidate._apply_command_transition(
-                    command_id,
-                    target,
-                    at=at,
-                    external_order_id=external_order_id,
-                    reason=reason,
-                )
+                rejection_refused = False
                 if target == DispatchState.REJECTED and hasattr(
                     tx, "mark_order_rejected"
                 ):
-                    rejected = await tx.mark_order_rejected(
+                    # Ask the durable order ledger first: a committed terminal
+                    # order (or one bound to another intent) must not be
+                    # contradicted by a local rejection, and the mutation must
+                    # not blow up the caller for that recoverable condition.
+                    outcome = await tx.mark_order_rejected(
                         command_id,
                         reason=reason,
                         occurred_at=at,
                         intent_id=intent_id or entry.intent_id,
                     )
-                    if rejected is False:
-                        # The order ledger already holds a terminal (or absent)
-                        # order for this identity. Publishing a rejected command
-                        # would contradict it and release exposure that may be
-                        # live, so refuse the transition and let the caller keep
-                        # the command unresolved for recovery.
-                        raise OrderRejectionRefusedError(
-                            f"durable order {command_id} is already terminal; "
-                            "command rejection refused"
+                    if blocks_local_rejection(outcome):
+                        rejection_refused = True
+                        candidate.require_command_recovery(command_id)
+                        log.warning(
+                            "order_rejection_refused_keep_recovery",
+                            command_id=command_id,
+                            position_key=key.canonical_id,
+                            outcome=outcome.value,
+                            reason=reason,
                         )
+                if not rejection_refused:
+                    result = await candidate._apply_command_transition(
+                        command_id,
+                        target,
+                        at=at,
+                        external_order_id=external_order_id,
+                        reason=reason,
+                    )
                 facts = candidate._ensure_journal(key).read_cut()
                 head_payload = build_execution_head_payload(
                     candidate.evidence_state,
@@ -1468,12 +1467,19 @@ class ExecutionBook:
                 )
             candidate._active_transaction = None
 
-            # Phase 3: Short lock for candidate publication & validation
-            async with self._mutation_lock(key):
-                # The transaction has committed. A newer publication is not a
-                # rollback: merge monotonically and preserve any terminal winner.
-                self._publish_candidate(candidate, key=key)
-                return self._outbox_by_command_id.get(command_id, result)
+            # Phase 3: Short lock for candidate publication & validation.
+            # The transaction has committed. A newer publication is not a
+            # rollback: merge monotonically and preserve any terminal winner.
+            return cast(
+                OutboxEntry,
+                await self._publish_committed_candidate(
+                    candidate,
+                    key=key,
+                    after=lambda: self._outbox_by_command_id.get(
+                        command_id, result
+                    ),
+                ),
+            )
         except Exception:
             self._persistence_failed = True
             raise

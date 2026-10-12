@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Protocol
 
 from crypto_momentum_lab.domain.execution.order_state import (
@@ -38,13 +39,28 @@ class OrderCommandConflictError(OrderPreSubmissionError):
     """
 
 
-class OrderRejectionRefusedError(RuntimeError):
-    """Durable order evidence refuses a local rejection.
+class OrderRejectionOutcome(StrEnum):
+    """Why a durable order rejection was or was not applied.
 
-    The order ledger already holds a terminal (or missing) order for this
-    identity, so publishing a rejected command would contradict it. Callers
-    must treat the command as unresolved instead of releasing its exposure.
+    Callers must distinguish "this attempt was never submitted" from "a durable
+    order already owns this identity": only the former may be terminated
+    locally. ``ABSENT`` means no order row exists at all (a prepared but never
+    dispatched command), while ``TERMINAL``/``INTENT_MISMATCH`` mean committed
+    order facts take precedence and the local command must stay unresolved.
     """
+
+    REJECTED = "rejected"
+    ABSENT = "absent"
+    TERMINAL = "terminal"
+    INTENT_MISMATCH = "intent_mismatch"
+
+
+def blocks_local_rejection(outcome: OrderRejectionOutcome) -> bool:
+    """Whether committed order facts forbid rejecting the local command."""
+    return outcome in (
+        OrderRejectionOutcome.TERMINAL,
+        OrderRejectionOutcome.INTENT_MISMATCH,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +106,7 @@ class OrderSubmissionRepository(Protocol):
         reason: str,
         occurred_at: datetime | None = None,
         intent_id: str | None = None,
-    ) -> bool: ...
+    ) -> OrderRejectionOutcome: ...
 
 
 @dataclass(frozen=True, slots=True)
