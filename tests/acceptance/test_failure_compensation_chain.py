@@ -4,17 +4,17 @@
 完整链不因可恢复补偿退出；真正数据库故障仍可见" and T1 "补偿不拒绝已终态命令、
 原失败不被二次异常覆盖".
 
-Observed facts are asserted end to end: the real ``ExecutionBook`` and its command
-lifecycle, the real ``OrderExecutionCoordinator`` submit path, the production
-submit caller, and a real ``LiveRuntimeSupervisor``. The supervisor is fail-fast
-by design (section 3/6: a critical task stopping is a worker failure), so the
-contract asserted here is that the *original* failure stays visible through the
-supervisor instead of being replaced by the secondary compensation error.
+Observed facts are asserted through the real ``ExecutionBook`` and its command
+lifecycle and the real ``OrderExecutionCoordinator`` submit path. The full chain
+row (real PostgreSQL, a continuously consuming production caller, and a real
+``LiveRuntimeSupervisor`` proving a recoverable compensation does not end the
+worker) is NOT covered here; see SYSTEM.md 8.1. Registering a one-shot function
+as the long-lived account task would make the supervisor report an unrelated
+"critical task stopped" message, which is not evidence about compensation.
 """
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -40,10 +40,6 @@ from crypto_momentum_lab.domain.execution.reservation_registry import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
-)
-from crypto_momentum_lab.live_rollout.runtime_supervisor import (
-    LiveRuntimeSupervisor,
-    LiveRuntimeTasks,
 )
 from crypto_momentum_lab.persistence.postgres.account_journal_store import (
     JournalFactConflict,
@@ -250,89 +246,6 @@ async def test_projection_conflict_with_failed_unknown_transition_is_visible() -
     except ExecutionReadinessError:
         pass
     assert book.command_requires_recovery("exit") is True
-    await coordinator.aclose()
-
-
-@pytest.mark.asyncio
-async def test_supervised_worker_does_not_lose_the_original_failure() -> None:
-    """The worker must not end "clean" while the original failure is unreadable.
-
-    The production chain is the entry lane awaiting the submit path. The
-    exchange accepts, the fact commit conflicts, and the UNKNOWN compensation
-    conflicts too. The supervisor is fail-fast, so whatever it reports must be
-    traceable to the original conflict rather than only a generic stopped-task
-    message.
-    """
-    book = await reserved_book()
-    observed: list[str] = []
-
-    async def conflicting_observe(evidence):
-        observed.append("observe")
-        raise JournalFactConflict("durable fact identity conflict")
-
-    async def conflicting_unknown(command_id, *args, **kwargs):
-        observed.append("mark_unknown")
-        raise JournalFactConflict("durable outbox transition conflict")
-
-    book.observe = conflicting_observe
-    book.mark_unknown = conflicting_unknown
-    coordinator = _coordinator(book, AcceptedBackend())
-
-    async def entry_lane_worker() -> None:
-        await submit_prepared(coordinator, _exit_plan())
-
-    market_stop = asyncio.Event()
-
-    async def market_worker():
-        from crypto_momentum_lab.live_rollout.market_runtime_contracts import (
-            LiveDaemonResult,
-        )
-
-        await market_stop.wait()
-        return LiveDaemonResult(0, 0, 0, "stopped", None)
-
-    account_task = asyncio.create_task(entry_lane_worker(), name="live-account")
-    market_task = asyncio.create_task(market_worker(), name="live-market")
-    supervisor = LiveRuntimeSupervisor(
-        tasks=LiveRuntimeTasks(
-            market=market_task,
-            account=account_task,
-            reconcile=asyncio.create_task(asyncio.sleep(0), name="live-reconcile"),
-        ),
-        block_entry_submissions=coordinator.block_entry_submissions,
-        stop_sources=lambda: None,
-        close_risk_control=lambda: asyncio.sleep(0),
-        stop_entry_caches=lambda: asyncio.sleep(0),
-        run_id="run-1",
-        shutdown_timeout_seconds=2.0,
-    )
-
-    reported: list[BaseException] = []
-    try:
-        await asyncio.wait_for(supervisor.run(), timeout=5.0)
-    except BaseException as error:  # noqa: BLE001 - the operator sees this
-        reported.append(error)
-
-    # The real chain ran both halves of the compensation.
-    assert observed == ["observe", "mark_unknown"]
-    assert book.command_requires_recovery("exit") is True, (
-        "a failed projection plus a failed compensation must gate the command"
-    )
-    # The failure must stay traceable from what the supervisor reports, instead
-    # of ending as an unrelated "task stopped" message.
-    assert reported, "the supervisor must not swallow a stopped critical worker"
-    chain = [repr(error) for error in reported]
-    cause = reported[0].__cause__
-    while cause is not None:
-        chain.append(repr(cause))
-        cause = cause.__cause__
-    assert any("durable fact identity conflict" in item for item in chain), (
-        "the original projection conflict is not traceable from the supervisor "
-        f"report: {chain}"
-    )
-
-    market_stop.set()
-    await supervisor.stop()
     await coordinator.aclose()
 
 

@@ -138,13 +138,13 @@ flowchart LR
 
 ### 8.1 验收对应关系
 
-`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（56 项；当前 50 通过、6 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
+`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（55 项；当前 50 通过、5 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
 
 |场景|代表性验收|状态|
 |---|---|---|
 |行为不变（信号/准入/批次/退出）|`tests/fixtures/b2_anonymized_timeline.py`＋`tests/unit/execution/test_b2_timeline_contract.py`、`test_position_batches.py`、`tests/e2e/test_golden_path_lifecycle.py`|既有，通过|
 |WS 终态先于 ACK、重复、低累计量、错误身份|`test_execution_facts_acceptance.py`（混合时钟终态、重复终态、低累计量不回退转查证、错误身份拒绝）|新增，通过|
-|终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（补偿不拒绝终态命令、原失败不被二次异常覆盖、命令被门控以便重驱动）。完整链（真实 PostgreSQL＋生产调用方＋supervisor 的“可恢复补偿不导致退出”）见未覆盖；现有 supervisor 用例为预期失败|部分通过，完整链未覆盖|
+|终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（补偿不拒绝终态命令、原失败不被二次异常覆盖、命令被门控以便重驱动）；真实事务见 `tests/integration/persistence/test_authority_book_transactions.py`。完整链见未覆盖|部分通过，完整链未覆盖|
 |部分成交撤单、终态后迟到成交|`test_execution_facts_acceptance.py`（含真实 PostgreSQL 重启后 3 已成交/7 才释放）；`tests/unit/execution/test_terminal_settlement.py`|新增，通过|
 |POST超时/取消、GET挂起、查不到、同key退出|`test_execution_facts_acceptance.py`；`tests/e2e/test_order_execution_fake_exchange.py`、`tests/unit/live_rollout/test_lock_free_execution.py`|新增，通过|
 |同证据连续事件、退避|`test_backoff_deadline.py`：`test_no_repair_attempt_before_the_recorded_deadline`、`test_deadline_expiry_allows_exactly_one_more_attempt`|新增，预期失败（未在执行前复核截止；未测“预算耗尽转低频”，见未覆盖）|
@@ -166,7 +166,7 @@ flowchart LR
 - **目标单进程装配与精简持久化增长**：四账户每账户单一进程、唯一有效派发者、必要证据可恢复且无意义观察不无界增长，尚无验收。
 - **入口自动结清未发送责任**：现无生产入口在提交前拒绝已准备命令，只能验证引擎拒绝路径的幂等结清。
 - **队列最老等待时间**：无法在不替换共享 `time.monotonic` 的前提下隔离被测组件时钟；替换会同时驱动 asyncio 超时，冻结时钟后 `wait_for` 无法按真实时间退出。目前未找到既正确又有界的失败断言，T1 的队列年龄缺陷尚无有效验收。
-- **完整补偿链（可恢复补偿不导致退出）**：需真实 PostgreSQL＋生产调用方＋supervisor，并验证终态交错后 worker 的实际接续；现有用例只验证内存账本上的补偿路径与门控，以及 supervisor 报告可否回溯原始失败（当前预期失败：supervisor 只给出“任务停止”消息，原始冲突不可回溯）。
+- **完整补偿链（可恢复补偿不导致退出）**：需真实 PostgreSQL＋持续消费的生产调用方＋真实 supervisor，并验证可恢复异常后 worker 继续处理下一事件。现有用例只覆盖补偿路径、门控与原失败不被覆盖；未设 supervisor 用例，因为把一次性函数注册为常驻账户任务只会让 supervisor 正确报告“关键任务意外停止”，不构成补偿证据。
 
 不可执行与桥接需求（交 Codex 审核）：切换/回退缺少每账户单一有效写入者与有序切换的控制面。最小契约：输入 `{environment, account_label, desired_writer_id, schema/format_version}`，输出 `{allowed, blockers[]}`，blockers 枚举未平仓位、活动/未解决订单、未知提交、未完成预留与结算；并需在首次写入前获取持久派发所有权令牌。所有权或格式不兼容失败时中止切换且不改动既有持久状态。现有接口只能表达停入场（`LiveEntryControlGate`/`DRAINING`）和单仓位不兼容格式拒绝（`restore`），无法观测两个写入者是否同时生效。
 

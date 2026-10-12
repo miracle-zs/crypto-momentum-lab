@@ -87,19 +87,20 @@ async def _join_observer(coordinator: OrderExecutionCoordinator) -> None:
 async def test_overflow_is_counted_and_routed_to_recovery() -> None:
     """A full queue must never drop a fact silently."""
     coordinator = _coordinator(capacity=1)
-    coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-    coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
+    try:
+        coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
+        coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
 
-    metrics = coordinator.order_observation_metrics
-    assert metrics.capacity == 1
-    assert metrics.depth == 1
-    assert metrics.overflow_count == 1
-    coordinator._execution_book.require_command_recovery.assert_called_once_with(
-        "order-2"
-    )
-
-    coordinator._apply_returned_order_result = AsyncMock()
-    await _join_observer(coordinator)
+        metrics = coordinator.order_observation_metrics
+        assert metrics.capacity == 1
+        assert metrics.depth == 1
+        assert metrics.overflow_count == 1
+        coordinator._execution_book.require_command_recovery.assert_called_once_with(
+            "order-2"
+        )
+    finally:
+        coordinator._apply_returned_order_result = AsyncMock()
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -110,15 +111,28 @@ async def test_queue_close_is_bounded_and_keeps_every_pending_fact() -> None:
     coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
     coordinator._defer_order_projection(_plan("order-2"), _result("order-2"))
 
-    await asyncio.wait_for(coordinator.aclose(), timeout=2.0)
+    try:
+        await asyncio.wait_for(coordinator.aclose(), timeout=2.0)
 
-    coordinator._execution_book.require_command_recovery.assert_called()
-    routed = {
-        call.args[0]
-        for call in coordinator._execution_book.require_command_recovery.call_args_list
-    }
-    assert routed <= {"order-1", "order-2"}
-    assert coordinator.order_observation_metrics.depth == 0
+        # Both pending facts must be either committed or routed to recovery:
+        # neither may be dropped just because the queue was closing.
+        routed = {
+            call.args[0]
+            for call in (
+                coordinator._execution_book.require_command_recovery.call_args_list
+            )
+        }
+        applied = {
+            call.args[1].client_order_id
+            for call in coordinator._apply_returned_order_result.await_args_list
+        }
+        assert routed | applied == {"order-1", "order-2"}, (
+            f"closing lost a pending fact: routed={routed} applied={applied}"
+        )
+        assert coordinator.order_observation_metrics.depth == 0
+    finally:
+        coordinator._apply_returned_order_result = AsyncMock()
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -127,11 +141,14 @@ async def test_draining_the_queue_clears_the_oldest_age() -> None:
     coordinator = _coordinator(capacity=8)
     apply_result = AsyncMock()
     coordinator._apply_returned_order_result = apply_result
-    coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
-    await _join_observer(coordinator)
+    try:
+        coordinator._defer_order_projection(_plan("order-1"), _result("order-1"))
+        await _join_observer(coordinator)
 
-    metrics = coordinator.order_observation_metrics
-    assert metrics.dequeued_count == 1
-    assert metrics.depth == 0
-    assert metrics.oldest_pending_age_seconds is None
-    apply_result.assert_awaited_once()
+        metrics = coordinator.order_observation_metrics
+        assert metrics.dequeued_count == 1
+        assert metrics.depth == 0
+        assert metrics.oldest_pending_age_seconds is None
+        apply_result.assert_awaited_once()
+    finally:
+        await coordinator.aclose()
