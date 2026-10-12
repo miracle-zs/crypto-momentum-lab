@@ -138,7 +138,7 @@ flowchart LR
 
 ### 8.1 验收对应关系
 
-`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（55 项；当前 50 通过、5 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
+`tests/acceptance/` 为本次新增的目标架构验收，`pytest tests/acceptance -q` 运行（67 项；当前 60 通过、7 预期失败）；其余为既有回归，命令见第9节。新增验收按业务接口断言，允许在旧实现上失败；未覆盖与不可执行项在 Codex 审核前不得记为通过。“通过”只表示该用例声明的契约片段已满足，不等于整行验收完成。
 
 |场景|代表性验收|状态|
 |---|---|---|
@@ -147,26 +147,25 @@ flowchart LR
 |终态后投影冲突及失败补偿|`test_failure_compensation_chain.py`（补偿不拒绝终态命令、原失败不被二次异常覆盖、命令被门控以便重驱动）；真实事务见 `tests/integration/persistence/test_authority_book_transactions.py`。完整链见未覆盖|部分通过，完整链未覆盖|
 |部分成交撤单、终态后迟到成交|`test_execution_facts_acceptance.py`（含真实 PostgreSQL 重启后 3 已成交/7 才释放）；`tests/unit/execution/test_terminal_settlement.py`|新增，通过|
 |POST超时/取消、GET挂起、查不到、同key退出|`test_execution_facts_acceptance.py`；`tests/e2e/test_order_execution_fake_exchange.py`、`tests/unit/live_rollout/test_lock_free_execution.py`|新增，通过|
-|同证据连续事件、退避|`test_backoff_deadline.py`：`test_no_repair_attempt_before_the_recorded_deadline`、`test_deadline_expiry_allows_exactly_one_more_attempt`|新增，预期失败（未在执行前复核截止；未测“预算耗尽转低频”，见未覆盖）|
+|同证据连续事件、退避、预算耗尽转低频|`test_backoff_deadline.py`（同证据不新增尝试、到期恰好一次）；`test_recovery_budget_low_frequency.py`（预算耗尽保留责任、worker 在低频截止前不重复花费、无差异核验不重查已确认订单）|退避预期失败；预算与无差异核验通过|
 |候选过期/未发送版本变化|`test_execution_facts_acceptance.py`（过期候选零 POST、引擎拒绝路径的预留结清幂等）；`tests/unit/live_rollout/test_entry_control.py`。入口自动结清：不可执行|新增，通过＋部分不可执行|
 |同数量退出竞争、CAS/commit失败、跨key隔离|`test_execution_facts_acceptance.py`（含真实 PostgreSQL commit 失败不发布、版本单调）；`tests/unit/execution_account/orders/test_reservation_integrity.py`|新增，通过|
-|带仓重启：批次、成本、原宽限截止|`test_exit_and_safety_acceptance.py::test_restart_with_open_position_keeps_batches_and_grace_deadline`（真实 PostgreSQL）；`tests/integration/persistence/test_execution_book_epoch_adoption.py`、`tests/unit/execution/test_headless_command_recovery.py`|新增，通过。逐步进程崩溃（准备后/发送后/提交后）见未覆盖|
+|带仓重启与逐步真实进程崩溃|`test_process_crash_recovery.py`（真实子进程 `os._exit` 于准备后/发送后/事实提交后/发布前，父进程仅按 PostgreSQL 恢复：未发送 vs 未知、预留、批次、加权成本、去重、不合成、不重发）；`test_exit_and_safety_acceptance.py::test_restart_with_open_position_keeps_batches_and_grace_deadline`；`tests/integration/persistence/test_execution_book_epoch_adoption.py`、`tests/unit/execution/test_headless_command_recovery.py`|新增，通过|
 |旧checkpoint＋完整后缀＋最新合法覆盖|`test_suffix_coverage_proof.py::test_newer_legal_coverage_proves_an_old_checkpoint_with_complete_suffix`（真实 PostgreSQL；缺覆盖对照仍未知）|新增，预期失败|
 |Hedge/BOTH 协议负例|`test_exit_and_safety_acceptance.py`（R=false 合法关闭、请求不带 reduceOnly、身份与数量负例）；`test_hedge_reduce_only_plan_that_would_increase_exposure_is_refused`|新增，预期失败（自相矛盾的 reduce_only 计划仍被 POST）|
 |队列溢出/关闭、最老时间|`test_exit_and_safety_acceptance.py`（溢出计数并转恢复、关闭不挂死）；`test_observation_queue_age.py`（溢出计数转恢复、关闭有界不丢事实、排空清零）。最老时间见未覆盖|部分通过，最老时间未覆盖|
 |行情/私有断线不凭重连准入|`test_exit_and_safety_acceptance.py`（重连不足以恢复准入、私有缺口不因重连清除）|新增，通过|
 |停入场→退出→无遗留→切换与回退|`test_exit_and_safety_acceptance.py`（停入场/定时平仓/恢复准入互相独立、单次零仓不证明责任结束、不兼容状态停止恢复而非清库）；切换与回退的“不双跑/有序切换”尚无接口|部分不可执行|
-|四账户隔离、read/trade 角色、显式实盘开关、冻结参数|`tests/smoke/test_server_deployment_manifest.py`|既有，通过。目标单进程装配（每账户同步+执行合一、唯一派发者）见未覆盖|
+|四账户隔离、唯一有效写入者、单进程装配、冻结参数|`tests/smoke/test_server_deployment_manifest.py`（read/trade 隔离、显式实盘开关、冻结参数）；`test_topology_and_persistence.py`（每账户至多一个有效写入者租约＝通过；每账户单进程同时持有同步与执行角色＝预期失败，当前每账户 2 进程）|部分通过，单进程装配预期失败|
 
 未覆盖（本轮无有效可执行验收，不得记为通过）：
 
-- **逐步进程崩溃**：准备后/发送后/事实提交后/发布前逐点崩溃与真实进程重启未验收；`restore` 新建 Book 只覆盖带仓重启，不代表进程崩溃。需真实子进程退出与重启的接线。
-- **未知查询预算耗尽转低频**：快速预算耗尽后的低频任务、隔离与相关新证据提前唤醒未验收。
-- **无差异核验不重建**：正常轻量核验不触发无差异全量重建未验收。
-- **目标单进程装配与精简持久化增长**：四账户每账户单一进程、唯一有效派发者、必要证据可恢复且无意义观察不无界增长，尚无验收。
+- **执行器级补偿原子性**：exchange 结果已返回但事实提交失败时，引擎会记录原始投影冲突并门控恢复；但经公开入口复现时失败的 UNKNOWN 转换不在同一事务内记录自身失败（`OutboxEntry.last_error` 为空），无法证明“失败补偿在同一事务内记录”。需在持久层暴露事务内的补偿失败记录或返回可读结论。
 - **入口自动结清未发送责任**：现无生产入口在提交前拒绝已准备命令，只能验证引擎拒绝路径的幂等结清。
-- **队列最老等待时间**：无法在不替换共享 `time.monotonic` 的前提下隔离被测组件时钟；替换会同时驱动 asyncio 超时，冻结时钟后 `wait_for` 无法按真实时间退出。目前未找到既正确又有界的失败断言，T1 的队列年龄缺陷尚无有效验收。
+- **队列最老等待时间**：无法在不替换共享 `time.monotonic` 的前提下隔离被测组件时钟；替换会同时驱动 asyncio 超时，冻结时钟后 `wait_for` 无法按真实时间退出。需要被测组件可注入单调时钟（构造参数或模块级已注入的 `time` 代理）后才能写出有界且正确的验收。
 - **完整补偿链（可恢复补偿不导致退出）**：需真实 PostgreSQL＋持续消费的生产调用方＋真实 supervisor，并验证可恢复异常后 worker 继续处理下一事件。现有用例只覆盖补偿路径、门控与原失败不被覆盖；未设 supervisor 用例，因为把一次性函数注册为常驻账户任务只会让 supervisor 正确报告“关键任务意外停止”，不构成补偿证据。
+
+已闭环（本轮新增）：逐步真实进程崩溃恢复（`test_process_crash_recovery.py`，真实子进程 `os._exit`）；未知查询预算耗尽转低频与无差异核验不重建（`test_recovery_budget_low_frequency.py`）；四账户唯一有效写入者租约与必要证据重启可恢复（`test_topology_and_persistence.py`）。
 
 不可执行与桥接需求（交 Codex 审核）：切换/回退缺少每账户单一有效写入者与有序切换的控制面。最小契约：输入 `{environment, account_label, desired_writer_id, schema/format_version}`，输出 `{allowed, blockers[]}`，blockers 枚举未平仓位、活动/未解决订单、未知提交、未完成预留与结算；并需在首次写入前获取持久派发所有权令牌。所有权或格式不兼容失败时中止切换且不改动既有持久状态。现有接口只能表达停入场（`LiveEntryControlGate`/`DRAINING`）和单仓位不兼容格式拒绝（`restore`），无法观测两个写入者是否同时生效。
 
