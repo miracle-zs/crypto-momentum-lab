@@ -4,11 +4,21 @@
 时处理，其他key公平运行" and Q9 "快速查证预算耗尽后告警、保持隔离与责任，转低频
 查询".
 
-The existing unit suite already covers per-pass lookup rotation, family fairness and
-"new facts resume pending work". What was uncovered, and is asserted here, is the
-exhaustion outcome itself: after a pass spends its whole lookup budget the recovery
-worker keeps the responsibility, publishes a positive next-attempt delay, and the
-running worker waits for that deadline instead of immediately spending again.
+Scope and limits of what is proven here:
+
+* The worker's own ``time_source`` is injected, so the deadline is exact and no
+  real sleeping or polling is used.
+* Covered: a pass spends only its budget, the responsibility is retained, and the
+  deadline itself (before it, at it, and the next pass) drives exactly one more
+  low-frequency pass rather than an immediate retry.
+* Covered: ordinary account-fact notifications with the same evidence do not
+  start another spending pass before the deadline.
+* Covered: a difference-free verification pass does not spend a lookup on an
+  already-confirmed resting order.
+* NOT covered here: proof that a real UNKNOWN order command keeps its reservation
+  and isolation through the coordinator (see test_execution_facts_acceptance.py),
+  and any real-exchange evidence about not re-sending (see
+  test_process_crash_recovery.py and the compensation-chain limits in SYSTEM.md 8.1).
 """
 
 from __future__ import annotations
@@ -28,6 +38,19 @@ from crypto_momentum_lab.live_rollout.order_reconciliation import (
 pytestmark = pytest.mark.contract
 
 
+class _Clock:
+    """The worker's injectable time source."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def _unresolved(count: int) -> tuple[SimpleNamespace, ...]:
     return tuple(
         SimpleNamespace(
@@ -38,22 +61,37 @@ def _unresolved(count: int) -> tuple[SimpleNamespace, ...]:
     )
 
 
-def _worker(orders, *, budget: int, interval: float) -> LiveOrderReconciliation:
+def _worker(
+    orders,
+    *,
+    budget: int,
+    interval: float,
+    clock: _Clock,
+    reconciled: asyncio.Event | None = None,
+) -> LiveOrderReconciliation:
+    async def reconcile_order(plan):
+        if reconciled is not None:
+            reconciled.set()
+
+    state_machine = SimpleNamespace(
+        reconcile_order=AsyncMock(side_effect=reconcile_order)
+    )
     return LiveOrderReconciliation(
         order_repository=SimpleNamespace(
             load_unresolved_orders=AsyncMock(return_value=orders)
         ),
-        state_machine=SimpleNamespace(reconcile_order=AsyncMock()),
+        state_machine=state_machine,
         run_id="run-1",
         max_order_lookups_per_pass=budget,
         interval_seconds=interval,
+        time_source=clock,
     )
 
 
 @pytest.mark.asyncio
 async def test_an_exhausted_pass_keeps_the_responsibility() -> None:
     """One pass spends exactly its budget and reports the work as unfinished."""
-    worker = _worker(_unresolved(4), budget=2, interval=30.0)
+    worker = _worker(_unresolved(4), budget=2, interval=30.0, clock=_Clock())
 
     pending = await worker.reconcile_all()
 
@@ -68,35 +106,66 @@ async def test_an_exhausted_pass_keeps_the_responsibility() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_worker_waits_for_the_low_frequency_deadline() -> None:
-    """The running worker must not immediately re-spend an exhausted budget."""
-    worker = _worker(_unresolved(4), budget=2, interval=3600.0)
+async def test_ordinary_account_events_do_not_re_spend_an_exhausted_budget() -> None:
+    """Same-evidence account events must not bypass the low-frequency retry.
+
+    The worker's clock is frozen, so the low-frequency deadline is far in the
+    future and no correct implementation may start another lookup pass.
+    """
+    clock = _Clock()
+    reconciled = asyncio.Event()
+    worker = _worker(
+        _unresolved(4),
+        budget=2,
+        interval=3600.0,
+        clock=clock,
+        reconciled=reconciled,
+    )
     worker.request_recovery()
     task = asyncio.create_task(worker.run_requested())
     try:
-        # Wait (bounded) until the first pass has published its deadline.
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-            entry = {row["family"]: row for row in worker.recovery_status()}["orders"]
-            if entry["retry_in_seconds"] is not None:
-                break
-        else:
-            pytest.fail("the worker never published a low-frequency deadline")
-
+        await asyncio.wait_for(reconciled.wait(), timeout=1.0)
+        for _ in range(5):
+            await asyncio.sleep(0)
         spent = worker.state_machine.reconcile_order.await_count
         assert spent == 2
 
-        # Within the one-hour deadline the worker must stay parked, even though
-        # the repository keeps reporting the same unresolved orders.
-        await asyncio.sleep(0.2)
+        for _ in range(5):
+            worker.notify_account_facts_changed()
+            await asyncio.sleep(0)
+
         assert worker.state_machine.reconcile_order.await_count == spent, (
-            "the worker re-spent the budget before its low-frequency deadline: "
-            f"{worker.state_machine.reconcile_order.await_count} lookups"
+            "ordinary account events bypassed the low-frequency retry and spent "
+            f"the lookup budget again ({spent} -> "
+            f"{worker.state_machine.reconcile_order.await_count})"
         )
         assert not task.done()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_same_evidence_notification_adds_no_lookup_by_itself() -> None:
+    """Notifying unchanged facts must not start a lookup pass of its own.
+
+    Without a running worker loop there is nothing to spend, so this pins the
+    narrower fact that the notification alone is not a lookup trigger; the
+    running-loop case is covered by the case above.
+    """
+    worker = _worker(_unresolved(4), budget=2, interval=3600.0, clock=_Clock())
+
+    pending = await worker.reconcile_all()
+    spent = worker.state_machine.reconcile_order.await_count
+    assert pending is True
+    assert spent == 2
+
+    worker.notify_account_facts_changed()
+    await asyncio.sleep(0.05)
+
+    assert worker.state_machine.reconcile_order.await_count == spent, (
+        "a same-evidence notification started another lookup pass"
+    )
 
 
 @pytest.mark.asyncio
